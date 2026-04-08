@@ -1,0 +1,126 @@
+turbo.service.ws.internal.isTransientTargetError :
+  Text
+  -> Boolean
+turbo.service.ws.internal.isTransientTargetError err =
+  turbo.service.contacts.internal.textEqual
+    err
+    "target user has no connected receiving device in this channel"
+    ||
+    turbo.service.contacts.internal.textEqual
+      err
+      "signaling users are not both channel members"
+
+test> turbo.service.ws.internal.isTransientTargetError.tests.examples = test.verify do
+  labeled "matches the connected-target propagation error" do
+    test.ensure
+      (turbo.service.ws.internal.isTransientTargetError
+        "target user has no connected receiving device in this channel")
+  labeled "matches the membership propagation error" do
+    test.ensure
+      (turbo.service.ws.internal.isTransientTargetError
+        "signaling users are not both channel members")
+  labeled "rejects non-propagation websocket errors" do
+    test.ensure
+      (Boolean.not
+        (turbo.service.ws.internal.isTransientTargetError
+          "signaling sender does not match authenticated socket"))
+
+turbo.service.dev.runtimeInspection :
+  Database
+  -> '{Route, Exception, Http, Storage, Remote, Random} ()
+turbo.service.dev.runtimeInspection db = do
+  use Parser s /
+  (channelIdText, deviceIdText) =
+    route GET
+      (s "v1" / s "dev" / s "runtime" / Parser.text / Parser.text => Tuple.pair)
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (turbo.domain.User.User userId _ _ _ _) = currentUser
+        userId
+      channelId = turbo.domain.ChannelId.fromText channelIdText
+      deviceId = turbo.domain.DeviceId.fromText deviceIdText
+      match OrderedTable.tryRead (turbo.store.channels.tables.byId db) channelId with
+        None ->
+          notFound.json (Json.object.empty |> Json.object.addText "error" "channel not found")
+        Some (turbo.domain.DirectChannel.DirectChannel _ lowUserId highUserId _) ->
+          peerUserId =
+            if turbo.service.contacts.internal.textEqual
+              (turbo.domain.UserId.toText lowUserId)
+              (turbo.domain.UserId.toText currentUserId) then
+              highUserId
+            else
+              lowUserId
+          selfPresence = turbo.store.presence.get db deviceId ()
+          selfSession = turbo.store.sessions.get db deviceId ()
+          selfSocketVisible = turbo.store.sockets.isConnected db deviceId ()
+          selfMembership = turbo.store.memberships.exists db channelId currentUserId ()
+          peerPresence = turbo.store.presence.getForUser db peerUserId ()
+          peerMembership = turbo.store.memberships.exists db channelId peerUserId ()
+          peerJoinedPresence = turbo.store.presence.getForUserInChannel db peerUserId channelId ()
+          peerConnectedPresence = turbo.store.presence.getConnectedForUserInChannel db peerUserId channelId ()
+          activeTransmit = turbo.store.runtime.currentTransmit db channelId ()
+          selfPresenceChannelId =
+            match selfPresence with
+              Some
+                (turbo.domain.DevicePresence.DevicePresence
+                  _
+                  _
+                  _
+                  currentChannelId
+                  _) ->
+                    Optional.map turbo.domain.ChannelId.toText currentChannelId
+              None -> None
+          selfSessionTimes =
+            match selfSession with
+              Some (turbo.domain.DeviceSession.DeviceSession _ _ connectedAt lastSeenAt) ->
+                (Some (Instant.toText connectedAt), Some (Instant.toText lastSeenAt))
+              None ->
+                (None, None)
+          (selfConnectedAtText, selfLastSeenAtText) = selfSessionTimes
+          peerConnectedDeviceId =
+            match peerConnectedPresence with
+              Some (turbo.domain.DevicePresence.DevicePresence connectedDeviceId _ _ _ _) ->
+                Some (turbo.domain.DeviceId.toText connectedDeviceId)
+              None ->
+                None
+          activeTransmitJson =
+            match activeTransmit with
+              None -> Json.Null
+              Some
+                (turbo.domain.TransmitState.TransmitState
+                  _
+                  fromUserId
+                  fromDeviceId
+                  toUserId
+                  toDeviceId
+                  startedAt
+                  expiresAt) ->
+                    Json.object.empty
+                      |> Json.object.addText "fromUserId" (turbo.domain.UserId.toText fromUserId)
+                      |> Json.object.addText "fromDeviceId" (turbo.domain.DeviceId.toText fromDeviceId)
+                      |> Json.object.addText "toUserId" (turbo.domain.UserId.toText toUserId)
+                      |> Json.object.addText "toDeviceId" (turbo.domain.DeviceId.toText toDeviceId)
+                      |> Json.object.addText "startedAt" (Instant.toText startedAt)
+                      |> Json.object.addText "expiresAt" (Instant.toText expiresAt)
+          ok.json
+            (Json.object.empty
+              |> Json.object.addText "channelId" channelIdText
+              |> Json.object.addText "currentUserId" (turbo.domain.UserId.toText currentUserId)
+              |> Json.object.addText "peerUserId" (turbo.domain.UserId.toText peerUserId)
+              |> Json.object.addText "deviceId" deviceIdText
+              |> Json.object.addBoolean "selfPresenceFound" (Optional.isSome selfPresence)
+              |> Json.object.addOptionalText "selfPresenceChannelId" selfPresenceChannelId
+              |> Json.object.addBoolean "selfSessionConnected" (Optional.isSome selfSession)
+              |> Json.object.addOptionalText "selfSessionConnectedAt" selfConnectedAtText
+              |> Json.object.addOptionalText "selfSessionLastSeenAt" selfLastSeenAtText
+              |> Json.object.addBoolean "selfSocketVisible" selfSocketVisible
+              |> Json.object.addBoolean "selfMembership" selfMembership
+              |> Json.object.addBoolean "peerPresenceFound" (Optional.isSome peerPresence)
+              |> Json.object.addBoolean "peerMembership" peerMembership
+              |> Json.object.addBoolean "peerJoinedPresenceFound" (Optional.isSome peerJoinedPresence)
+              |> Json.object.addBoolean "peerConnectedPresenceFound" (Optional.isSome peerConnectedPresence)
+              |> Json.object.addOptionalText "peerConnectedDeviceId" peerConnectedDeviceId
+              |> Json.object.add "activeTransmit" activeTransmitJson)

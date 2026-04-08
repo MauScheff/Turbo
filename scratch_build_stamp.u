@@ -1,0 +1,1575 @@
+turbo.auth.devHandle.doc : base.Doc
+turbo.auth.devHandle.doc =
+  use base.syntax docCode docGroup docJoin docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 0 do devHandle }} resolves the temporary dev
+  identity from the current request.
+  
+  It first checks `x-turbo-user-handle`, then falls back to
+  `Authorization: Bearer <handle>`.
+  
+  **Also see:** {{
+  base.syntax.docLink (base.syntax.docEmbedTermLink do requireUser) }}
+  }}
+
+turbo.auth.requireUser :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote} base.Either base.Text User
+turbo.auth.requireUser db = do match devHandle() with
+  base.Optional.None            -> base.Either.Left "missing dev auth"
+  base.Optional.Some userHandle ->
+    match getByHandle db userHandle () with
+      base.Optional.None      -> base.Either.Left "unknown dev user handle"
+      base.Optional.Some user -> base.Either.Right user
+
+turbo.auth.requireUser.doc : base.Doc
+turbo.auth.requireUser.doc =
+  use base.syntax docCode docEmbedTermLink docGroup docJoin docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> requireUser db }} resolves the current
+  dev user from the request headers.
+  
+  It accepts either `x-turbo-user-handle` or `Authorization: Bearer <handle>`.
+  
+  Missing or unknown auth returns a descriptive error instead of failing the
+  route.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do devHandle) }},
+  {{ docLink (docEmbedTermLink do getByHandle) }}, {{
+  docLink (docEmbedTermLink do users.create) }}
+  }}
+
+turbo.service.auth.session :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote} ()
+turbo.service.auth.session db =
+  do
+    use Parser /
+    use base.Function |>
+    use unison_json_1_3_5.core.Json.object addText empty
+    Route.noCapture
+      base.IO.net.URI.Method.POST (s "v1" / s "auth" / s "session")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right user ->
+        userJson = cases
+          User.User userId handleText displayName _ _ ->
+            empty
+              |> addText "userId" (UserId.toText userId)
+              |> addText "handle" handleText
+              |> addText "displayName" displayName
+        ok.json (userJson user)
+
+turbo.service.auth.session.doc : base.Doc
+turbo.service.auth.session.doc =
+  use base.syntax docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> session db }} serves the dev auth
+  session endpoint.
+  
+  It resolves the current user from the request header and returns a small
+  identity payload.
+  
+  **Also see:** {{
+  base.syntax.docLink (base.syntax.docEmbedTermLink do requireUser) }}
+  }}
+
+turbo.service.channels.beginTransmit :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.channels.beginTransmit db =
+  do
+    use Parser /
+    use base.Either Left Right
+    use base.Function |>
+    use base.time Instant.toText
+    use unison_json_1_3_5.core.Json.object addText empty
+    channelIdText =
+      route
+        base.IO.net.URI.Method.POST
+        (s "v1" / s "channels" / Parser.text / s "begin-transmit")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        fields =
+          decodeJson
+            (unison_json_1_3_5.Decoder.object unison_json_1_3_5.Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if base.Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match base.data.Map.get "deviceId" fields with
+            base.Optional.Some deviceIdText ->
+              resolvedTarget =
+                resolveTransmitTarget db channelId currentUserId ()
+              match resolvedTarget with
+                Left err -> badRequest.json (empty |> addText "error" err)
+                Right (targetUserId, targetDeviceId) ->
+                  result =
+                    runtime.beginTransmit
+                      db
+                      channelId
+                      currentUserId
+                      (DeviceId.fromText deviceIdText)
+                      targetUserId
+                      targetDeviceId
+                      ()
+                  match result with
+                    Left err -> badRequest.json (empty |> addText "error" err)
+                    Right state ->
+                      (startedAt, expiresAt) =
+                        (TransmitState _ _ _ _ _ startedAt expiresAt) = state
+                        (Instant.toText startedAt, Instant.toText expiresAt)
+                      ok.json
+                        (empty
+                          |> addText "channelId" channelIdText
+                          |> addText "status" "transmitting"
+                          |> addText "startedAt" startedAt
+                          |> addText "expiresAt" expiresAt
+                          |> addText
+                               "targetUserId" (UserId.toText targetUserId)
+                          |> addText
+                               "targetDeviceId"
+                               (DeviceId.toText targetDeviceId))
+            base.Optional.None ->
+              badRequest.json (empty |> addText "error" "missing deviceId")
+
+turbo.service.channels.direct :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.channels.direct db =
+  do
+    use Parser /
+    use User User
+    use base.Function |>
+    use base.Optional None Some
+    use base.data.Map get
+    use unison_json_1_3_5.core.Json.object addText empty
+    Route.noCapture
+      base.IO.net.URI.Method.POST (s "v1" / s "channels" / s "direct")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        fields =
+          decodeJson
+            (unison_json_1_3_5.Decoder.object unison_json_1_3_5.Decoder.text)
+        channelJson = cases
+          DirectChannel channelId lowUserId highUserId createdAt ->
+            empty
+              |> addText "channelId" (ChannelId.toText channelId)
+              |> addText "lowUserId" (UserId.toText lowUserId)
+              |> addText "highUserId" (UserId.toText highUserId)
+              |> addText "createdAt" (base.time.Instant.toText createdAt)
+        resolvedOther = match get "otherUserId" fields with
+          Some otherUserIdText -> Some (UserId.fromText otherUserIdText)
+          None                 ->
+            match get "otherHandle" fields with
+              None             -> None
+              Some otherHandle ->
+                match getByHandle db otherHandle () with
+                  None           -> None
+                  Some otherUser ->
+                    (User otherUserId _ _ _ _) = otherUser
+                    Some otherUserId
+        match resolvedOther with
+          None ->
+            badRequest.json
+              (empty |> addText "error" "missing otherUserId or otherHandle")
+          Some otherUserId ->
+            channel = getOrCreateDirect db currentUserId otherUserId ()
+            ok.json (channelJson channel)
+
+turbo.service.channels.direct.doc : base.Doc
+turbo.service.channels.direct.doc =
+  use base.syntax docCode docEmbedTermLink docGroup docJoin docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> channels.direct db }} serves stable
+  direct channel lookup and creation.
+  
+  The request body may identify the remote user by `otherUserId` or
+  `otherHandle`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do getOrCreateDirect) }}, {{
+  docLink (docEmbedTermLink do requireUser) }}
+  }}
+
+turbo.service.channels.endTransmit :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.channels.endTransmit db =
+  do
+    use Parser /
+    use base.Function |>
+    use base.Optional None Some
+    use unison_json_1_3_5.core.Json.object addText empty
+    channelIdText =
+      route
+        base.IO.net.URI.Method.POST
+        (s "v1" / s "channels" / Parser.text / s "end-transmit")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        fields =
+          decodeJson
+            (unison_json_1_3_5.Decoder.object unison_json_1_3_5.Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if base.Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match base.data.Map.get "deviceId" fields with
+            None ->
+              badRequest.json (empty |> addText "error" "missing deviceId")
+            Some deviceIdText ->
+              match runtime.endTransmit
+                db channelId currentUserId (DeviceId.fromText deviceIdText) () with
+                None ->
+                  badRequest.json
+                    (empty
+                      |> addText "error" "no active transmit state for sender")
+                Some _ ->
+                  ok.json
+                    (empty
+                      |> addText "channelId" channelIdText
+                      |> addText "status" "idle")
+
+turbo.service.channels.ephemeralToken :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.channels.ephemeralToken db =
+  do
+    use Parser /
+    use base.Function |>
+    use base.Optional Some
+    use base.data.Map get
+    use unison_json_1_3_5.core.Json.object addText empty
+    channelIdText =
+      route
+        base.IO.net.URI.Method.POST
+        (s "v1" / s "channels" / Parser.text / s "ephemeral-token")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        fields =
+          decodeJson
+            (unison_json_1_3_5.Decoder.object unison_json_1_3_5.Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        tokenJson record =
+          tokenText =
+            (EphemeralToken _ _ _ token _) = record
+            token
+          empty
+            |> addText "channelId" channelIdText
+            |> addText "token" tokenText
+            |> addText "status" "stored"
+        isMember = memberships.exists db channelId currentUserId ()
+        if base.Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match (get "deviceId" fields, get "token" fields) with
+            (Some deviceIdText, Some tokenText) ->
+              record =
+                tokens.upsert
+                  db
+                  channelId
+                  currentUserId
+                  (DeviceId.fromText deviceIdText)
+                  tokenText
+                  ()
+              ok.json (tokenJson record)
+            _ ->
+              badRequest.json
+                (empty |> addText "error" "missing deviceId or token")
+
+turbo.service.channels.join :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.channels.join db =
+  do
+    use Parser /
+    use base.Function |>
+    use base.Optional None Some
+    use base.Text ==
+    use memberships add
+    use unison_json_1_3_5.core.Json.object addText empty
+    channelIdText =
+      route
+        base.IO.net.URI.Method.POST
+        (s "v1" / s "channels" / Parser.text / s "join")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        fields =
+          decodeJson
+            (unison_json_1_3_5.Decoder.object unison_json_1_3_5.Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        joinedJson membership presence =
+          membershipUserId =
+            (ChannelMembership _ userId _) = membership
+            userId
+          presenceDeviceId =
+            (DevicePresence deviceId _ _ _ _) = presence
+            deviceId
+          empty
+            |> addText "channelId" channelIdText
+            |> addText "userId" (UserId.toText membershipUserId)
+            |> addText "deviceId" (DeviceId.toText presenceDeviceId)
+            |> addText "status" "joined"
+        channelOpt =
+          unison_cloud_27_3_0.durable.OrderedTable.tryRead
+            (channels.tables.byId db) channelId
+        match channelOpt with
+          None -> notFound.json (empty |> addText "error" "channel not found")
+          Some channel ->
+            use UserId toText
+            otherUserId =
+              (DirectChannel _ lowUserId highUserId _) = channel
+              if toText lowUserId == toText currentUserId then highUserId
+              else lowUserId
+            match base.data.Map.get "deviceId" fields with
+              None ->
+                badRequest.json (empty |> addText "error" "missing deviceId")
+              Some deviceIdText ->
+                _ = add db channelId currentUserId ()
+                _ = add db channelId otherUserId ()
+                presence =
+                  presence.upsert
+                    db
+                    (DeviceId.fromText deviceIdText)
+                    currentUserId
+                    Online
+                    (Some channelId)
+                    ()
+                _ =
+                  match getForUserInChannel db otherUserId channelId () with
+                    Some _ ->
+                      markConnectedForChannel
+                        db currentUserId otherUserId channelId ()
+                    None -> None
+                membership = add db channelId currentUserId ()
+                ok.json (joinedJson membership presence)
+
+turbo.service.channels.leave :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.channels.leave db =
+  do
+    use Parser /
+    use base.Function |>
+    use unison_json_1_3_5.core.Json.object addText empty
+    channelIdText =
+      route
+        base.IO.net.URI.Method.POST
+        (s "v1" / s "channels" / Parser.text / s "leave")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        fields =
+          decodeJson
+            (unison_json_1_3_5.Decoder.object unison_json_1_3_5.Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        match base.data.Map.get "deviceId" fields with
+          base.Optional.None ->
+            badRequest.json (empty |> addText "error" "missing deviceId")
+          base.Optional.Some deviceIdText ->
+            deviceId = DeviceId.fromText deviceIdText
+            _ = runtime.endTransmit db channelId currentUserId deviceId ()
+            _ = clearActiveChannel db deviceId currentUserId ()
+            ok.json
+              (empty
+                |> addText "channelId" channelIdText
+                |> addText "deviceId" deviceIdText
+                |> addText "status" "left")
+
+turbo.service.channels.leave.doc : base.Doc
+turbo.service.channels.leave.doc =
+  use base.syntax docEmbedTermLink docGroup docJoin docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> leave db }} clears the caller's active
+  device-channel binding for `channelId`.
+  
+  This is the control-plane leave operation used when a device exits a
+  conversation.
+  
+  **Also see:** {clearActiveChannel}, {{
+  docLink (docEmbedTermLink do channels.join) }}
+  }}
+
+turbo.service.channels.readiness :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.channels.readiness db =
+  do
+    use Parser / text
+    use base.Boolean not
+    use base.Function |>
+    use base.Optional None Some map
+    use base.Text ==
+    use unison_json_1_3_5.core.Json.object addBoolean addOptionalText addText empty
+    (channelIdText, deviceIdText) =
+      route
+        base.IO.net.URI.Method.GET
+        (s "v1" / s "channels" / text / s "readiness" / text
+          => base.data.Tuple.pair)
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          channelOpt =
+            unison_cloud_27_3_0.durable.OrderedTable.tryRead
+              (channels.tables.byId db) channelId
+          match channelOpt with
+            None ->
+              notFound.json (empty |> addText "error" "channel not found")
+            Some channel ->
+              peerUserId =
+                (DirectChannel _ lowUserId highUserId _) = channel
+                if UserId.toText lowUserId == UserId.toText currentUserId then
+                  highUserId
+                else lowUserId
+              selfPresence =
+                presence.get db (DeviceId.fromText deviceIdText) ()
+              selfHasActiveDevice = match selfPresence with
+                Some (DevicePresence _ _ status currentChannelId _) ->
+                  match (status, currentChannelId) with
+                    (Online, Some activeChannelId) ->
+                      use ChannelId toText
+                      _ = (activeChannelId, channelId)
+                      toText activeChannelId == toText channelId
+                    _                              -> false
+                None                                                -> false
+              peerPresence = getForUserInChannel db peerUserId channelId ()
+              peerHasActiveDevice = base.Optional.isSome peerPresence
+              activeTransmit = currentTransmit db channelId ()
+              activeTransmitterUserId =
+                map
+                  (cases TransmitState _ activeUserId _ _ _ _ _ -> activeUserId)
+                  activeTransmit
+              activeTransmitExpiresAt =
+                map
+                  (cases
+                    TransmitState _ _ _ _ _ _ expiresAt ->
+                      base.time.Instant.toText expiresAt)
+                  activeTransmit
+              status =
+                match activeTransmitterUserId with
+                  Some activeUserId ->
+                    if
+                      UserId.toText activeUserId == UserId.toText currentUserId then
+                      "self-transmitting"
+                    else "peer-transmitting"
+                  None ->
+                    if not selfHasActiveDevice then "waiting-for-self"
+                    else
+                      if not peerHasActiveDevice then "waiting-for-peer"
+                      else "ready"
+              ok.json
+                (empty
+                  |> addText "channelId" channelIdText
+                  |> addText "peerUserId" (UserId.toText peerUserId)
+                  |> addBoolean "selfHasActiveDevice" selfHasActiveDevice
+                  |> addBoolean "peerHasActiveDevice" peerHasActiveDevice
+                  |> addOptionalText
+                       "activeTransmitterUserId"
+                       (map UserId.toText activeTransmitterUserId)
+                  |> addOptionalText
+                       "activeTransmitExpiresAt" activeTransmitExpiresAt
+                  |> addText "status" status)
+
+turbo.service.channels.renewTransmit :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.channels.renewTransmit db =
+  do
+    use Parser /
+    use base.Either Left Right
+    use base.Function |>
+    use base.time.Instant toText
+    use unison_json_1_3_5.core.Json.object addText empty
+    channelIdText =
+      route
+        base.IO.net.URI.Method.POST
+        (s "v1" / s "channels" / Parser.text / s "renew-transmit")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        fields =
+          decodeJson
+            (unison_json_1_3_5.Decoder.object unison_json_1_3_5.Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if base.Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match base.data.Map.get "deviceId" fields with
+            base.Optional.None ->
+              badRequest.json (empty |> addText "error" "missing deviceId")
+            base.Optional.Some deviceIdText ->
+              match runtime.renewTransmit
+                db channelId currentUserId (DeviceId.fromText deviceIdText) () with
+                Left err -> badRequest.json (empty |> addText "error" err)
+                Right state ->
+                  (startedAt, expiresAt) =
+                    (TransmitState _ _ _ _ _ startedAt expiresAt) = state
+                    (toText startedAt, toText expiresAt)
+                  ok.json
+                    (empty
+                      |> addText "channelId" channelIdText
+                      |> addText "status" "transmitting"
+                      |> addText "startedAt" startedAt
+                      |> addText "expiresAt" expiresAt)
+
+turbo.service.channels.renewTransmit.doc : base.Doc
+turbo.service.channels.renewTransmit.doc =
+  use base.syntax docEmbedTermLink docGroup docJoin docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> channels.renewTransmit db }} extends the
+  caller's active transmit lease for a direct channel.
+  
+  The request body only needs the sender `deviceId`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do channels.beginTransmit) }}, {{
+  docLink (docEmbedTermLink do channels.endTransmit) }}
+  }}
+
+turbo.service.channels.state :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.channels.state db =
+  do
+    use Parser / text
+    use base.Function |>
+    use base.Optional None Some isSome map
+    use base.Text ==
+    use unison_json_1_3_5.core.Json.object addBoolean addOptionalText addText empty
+    (channelIdText, deviceIdText) =
+      route
+        base.IO.net.URI.Method.GET
+        (s "v1" / s "channels" / text / s "state" / text
+          => base.data.Tuple.pair)
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        channelId = ChannelId.fromText channelIdText
+        deviceId = DeviceId.fromText deviceIdText
+        match unison_cloud_27_3_0.durable.OrderedTable.tryRead
+          (channels.tables.byId db) channelId with
+          None -> notFound.json (empty |> addText "error" "channel not found")
+          Some (DirectChannel _ lowUserId highUserId _) ->
+            peerUserId =
+              if UserId.toText lowUserId == UserId.toText currentUserId then
+                highUserId
+              else lowUserId
+            selfPresence = presence.get db deviceId ()
+            selfOnline =
+              match selfPresence with
+                Some (DevicePresence _ presenceUserId Online _ _) ->
+                  UserId.toText presenceUserId == UserId.toText currentUserId
+                _ -> false
+            selfJoined =
+              match selfPresence with
+                Some
+                  (DevicePresence
+                    _ presenceUserId Online (Some activeChannelId) _) ->
+                  UserId.toText presenceUserId == UserId.toText currentUserId
+                    && ChannelId.toText activeChannelId
+                      == ChannelId.toText channelId
+                _ -> false
+            peerPresence = getForUser db peerUserId ()
+            peerOnline = isSome peerPresence
+            peerJoined =
+              isSome (getForUserInChannel db peerUserId channelId ())
+            activeTransmit = currentTransmit db channelId ()
+            activeTransmitterUserId =
+              map
+                (cases TransmitState _ activeUserId _ _ _ _ _ -> activeUserId)
+                activeTransmit
+            activeTransmitExpiresAt =
+              map
+                (cases
+                  TransmitState _ _ _ _ _ _ expiresAt ->
+                    base.time.Instant.toText expiresAt)
+                activeTransmit
+            pendingInvite =
+              pendingBetween db currentUserId peerUserId channelId ()
+            pendingInviteId =
+              map
+                (cases
+                  Invite inviteId _ _ _ _ _ _ _ -> InviteId.toText inviteId)
+                pendingInvite
+            pendingDirection = map (directionText currentUserId) pendingInvite
+            status =
+              match activeTransmitterUserId with
+                Some activeUserId ->
+                  if UserId.toText activeUserId == UserId.toText currentUserId then
+                    "self-transmitting"
+                  else "peer-transmitting"
+                None ->
+                  if selfJoined
+                    && peerJoined then "ready"
+                  else
+                    match pendingDirection with
+                      Some "incoming" -> "incoming-request"
+                      Some "outgoing" -> "requested"
+                      _ -> if selfJoined then "waiting-for-peer" else "idle"
+            _ =
+              if selfJoined && peerJoined then
+                markConnectedForChannel
+                  db currentUserId peerUserId channelId ()
+              else None
+            ok.json
+              (empty
+                |> addText "channelId" channelIdText
+                |> addText "selfUserId" (UserId.toText currentUserId)
+                |> addText "peerUserId" (UserId.toText peerUserId)
+                |> addBoolean "selfOnline" selfOnline
+                |> addBoolean "peerOnline" peerOnline
+                |> addBoolean "selfJoined" selfJoined
+                |> addBoolean "peerJoined" peerJoined
+                |> addOptionalText "pendingInviteId" pendingInviteId
+                |> addOptionalText "pendingDirection" pendingDirection
+                |> addOptionalText
+                     "activeTransmitterUserId"
+                     (map UserId.toText activeTransmitterUserId)
+                |> addOptionalText
+                     "activeTransmitExpiresAt" activeTransmitExpiresAt
+                |> addText "status" status)
+
+turbo.service.channels.state.doc : base.Doc
+turbo.service.channels.state.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> channels.state db }} returns the
+  authoritative control-plane snapshot for a direct channel and device.
+  
+  The snapshot drives contact pills and conversation state in the client
+  without relying on local ad hoc booleans.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do invites.create) }}, {{
+  docLink (docEmbedTermLink do readiness) }}
+  }}
+
+turbo.service.config.doc : base.Doc
+turbo.service.config.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docTransclude docWord
+  {{
+  {{
+  base.syntax.docExample 2 do
+    mode supportsWebSocket -> service.config mode supportsWebSocket }} serves
+  backend runtime capabilities for the client.
+  
+  Clients can use this route to discover whether the current backend supports
+  websocket signaling and which runtime mode is active.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do httpWithConfig) }}, {{
+  docLink (docEmbedTermLink do web) }}
+  }}
+
+turbo.service.dev.resetState.doc : base.Doc
+turbo.service.dev.resetState.doc =
+  use base.syntax docParagraph docWord
+  {{
+  `` resetState db `` clears Turbo's local dev runtime state.
+  
+  This deletes durable state that can get wedged during local iteration,
+  including presence, pending or connected invites, transient transmit locks,
+  and stored ephemeral tokens. It deliberately keeps seeded users, devices, and
+  channels.
+  
+  **Also see:** {seed}
+  }}
+
+turbo.service.dev.seed :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.dev.seed db =
+  do
+    use Parser /
+    use base.Function |>
+    use base.data.List map
+    use unison_json_1_3_5.core.Json.object addText empty
+    Route.noCapture base.IO.net.URI.Method.POST (s "v1" / s "dev" / s "seed")
+    seeded =
+      map
+        (cases
+          (userHandle, displayName) ->
+            users.create db userHandle displayName ())
+        defaultUsers
+    usersJson =
+      unison_json_1_3_5.core.Json.array
+        (map
+          (cases
+            User.User userId handleText displayName _ _ ->
+              empty
+                |> addText "userId" (UserId.toText userId)
+                |> addText "handle" handleText
+                |> addText "displayName" displayName)
+          seeded)
+    ok.json
+      (empty
+        |> addText "status" "seeded"
+        |> unison_json_1_3_5.core.Json.object.add "users" usersJson)
+
+turbo.service.dev.seed.doc : base.Doc
+turbo.service.dev.seed.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docWord
+  {{
+  `` seed db `` seeds Turbo's local dev users.
+  
+  This route is intended only for development. It upserts a fixed list of test
+  users and returns them as JSON.
+  
+  **Also see:** {defaultUsers}, {users.create}
+  }}
+
+turbo.service.dev.seed.internal.defaultUsers.doc : base.Doc
+turbo.service.dev.seed.internal.defaultUsers.doc =
+  use base.syntax docParagraph docWord
+  {{
+  `` defaultUsers `` is the canonical list of dev users seeded into the Turbo
+  backend for local development.
+  
+  **Also see:** {seed}
+  }}
+
+turbo.service.devices.register :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.devices.register db =
+  do
+    use Parser /
+    use base.Function |>
+    use base.data.Map get
+    use unison_json_1_3_5.core.Json.object addText empty
+    Route.noCapture
+      base.IO.net.URI.Method.POST (s "v1" / s "devices" / s "register")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right user ->
+        fields =
+          decodeJson
+            (unison_json_1_3_5.Decoder.object unison_json_1_3_5.Decoder.text)
+        deviceJson = cases
+          Device deviceId userId platform deviceLabel _ lastSeenAt ->
+            platformText =
+              IOS = platform
+              "ios"
+            empty
+              |> addText "deviceId" (DeviceId.toText deviceId)
+              |> addText "userId" (UserId.toText userId)
+              |> addText "platform" platformText
+              |> unison_json_1_3_5.core.Json.object.addOptionalText
+                   "deviceLabel" deviceLabel
+              |> addText "lastSeenAt" (base.time.Instant.toText lastSeenAt)
+        match get "deviceId" fields with
+          base.Optional.Some deviceIdText ->
+            deviceLabel = get "deviceLabel" fields
+            device =
+              store.devices.register
+                db
+                (match user with User.User userId _ _ _ _ -> userId)
+                (DeviceId.fromText deviceIdText)
+                DevicePlatform.IOS
+                deviceLabel
+                ()
+            ok.json (deviceJson device)
+          base.Optional.None ->
+            badRequest.json (empty |> addText "error" "missing deviceId")
+
+turbo.service.devices.register.doc : base.Doc
+turbo.service.devices.register.doc =
+  use base.syntax docCode docEmbedTermLink docGroup docJoin docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> service.devices.register db }} serves
+  the device registration endpoint for the current dev user.
+  
+  The request body must contain a JSON object with a `deviceId` field and may
+  include `deviceLabel`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do store.devices.register) }}, {{
+  docLink (docEmbedTermLink do requireUser) }}
+  }}
+
+turbo.service.invites.accept :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote} ()
+turbo.service.invites.accept db =
+  do
+    use Parser /
+    use UserId toText
+    use base.Function |>
+    use base.Text ==
+    use unison_json_1_3_5.core.Json.object addBoolean addText empty
+    inviteIdText =
+      route
+        base.IO.net.URI.Method.POST
+        (s "v1" / s "invites" / Parser.text / s "accept")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        inviteId = InviteId.fromText inviteIdText
+        match invites.getById db inviteId () with
+          base.Optional.None ->
+            notFound.json (empty |> addText "error" "invite not found")
+          base.Optional.Some invite ->
+            (Invite _ _ toUserId _ status _ _ _) = invite
+            if base.Boolean.not (toText toUserId == toText currentUserId) then
+              unauthorized.json
+                (empty |> addText "error" "not invite recipient")
+            else
+              inviteJson = internal.inviteJson db currentUserId invite ()
+              ok.json
+                (inviteJson
+                  |> addBoolean "accepted" true
+                  |> (addBoolean "pendingJoin" match status with
+                       InviteStatus.Pending -> true
+                       _                    -> false))
+
+turbo.service.invites.accept.doc : base.Doc
+turbo.service.invites.accept.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> invites.accept db }} acknowledges an
+  incoming invite for the current user.
+  
+  The invite remains pending until both peers have actually joined the channel;
+  the join step is still authoritative for transitioning to connected state.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do channels.join) }},
+  {invites.getById}
+  }}
+
+turbo.service.invites.cancel :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.invites.cancel db =
+  do
+    use Parser /
+    use UserId toText
+    use base.Function |>
+    use base.Optional None Some
+    use base.Text ==
+    use unison_json_1_3_5.core.Json.object addText empty
+    inviteIdText =
+      route
+        base.IO.net.URI.Method.POST
+        (s "v1" / s "invites" / Parser.text / s "cancel")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        inviteId = InviteId.fromText inviteIdText
+        match invites.getById db inviteId () with
+          None -> notFound.json (empty |> addText "error" "invite not found")
+          Some invite ->
+            (Invite _ fromUserId _ _ _ _ _ _) = invite
+            if base.Boolean.not (toText fromUserId == toText currentUserId) then
+              unauthorized.json (empty |> addText "error" "not invite sender")
+            else
+              match markCancelled db inviteId () with
+                None ->
+                  notFound.json (empty |> addText "error" "invite not found")
+                Some updated ->
+                  ok.json (inviteJson db currentUserId updated ())
+
+turbo.service.invites.cancel.doc : base.Doc
+turbo.service.invites.cancel.doc =
+  use base.syntax docParagraph docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> invites.cancel db }} cancels an outgoing
+  pending invite for the current user.
+  
+  **Also see:** {markCancelled}
+  }}
+
+turbo.service.invites.create :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.invites.create db =
+  do
+    use Parser /
+    use User User
+    use UserId toText
+    use base.Function |>
+    use base.Optional None Some
+    use base.Text ==
+    use base.data.Map get
+    use unison_json_1_3_5.core.Json.object addText empty
+    Route.noCapture base.IO.net.URI.Method.POST (s "v1" / s "invites")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        fields =
+          decodeJson
+            (unison_json_1_3_5.Decoder.object unison_json_1_3_5.Decoder.text)
+        resolvedOther = match get "otherUserId" fields with
+          Some otherUserIdText -> Some (UserId.fromText otherUserIdText)
+          None                 ->
+            match get "otherHandle" fields with
+              None             -> None
+              Some otherHandle ->
+                match getByHandle db otherHandle () with
+                  None                            -> None
+                  Some (User otherUserId _ _ _ _) -> Some otherUserId
+        match resolvedOther with
+          None ->
+            badRequest.json
+              (empty |> addText "error" "missing otherUserId or otherHandle")
+          Some otherUserId ->
+            if toText otherUserId == toText currentUserId then
+              badRequest.json (empty |> addText "error" "cannot invite self")
+            else
+              channel = getOrCreateDirect db currentUserId otherUserId ()
+              channelId =
+                (DirectChannel channelId _ _ _) = channel
+                channelId
+              invite = createOrReuse db currentUserId otherUserId channelId ()
+              availability = users.availability db otherUserId ()
+              inviteJson = internal.inviteJson db currentUserId invite ()
+              ok.json
+                (inviteJson
+                  |> addText
+                       "targetAvailability" (availabilityText availability)
+                  |> (unison_json_1_3_5.core.Json.object.addBoolean
+                       "shouldAutoJoinPeer"
+                       match availability with
+                       Available -> true
+                       _         -> false))
+
+turbo.service.invites.create.doc : base.Doc
+turbo.service.invites.create.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> invites.create db }} creates or reuses a
+  pending direct invite.
+  
+  If the target user is online and idle, the response indicates that the peer
+  should auto-join when it notices the incoming request.
+  
+  **Also see:** {createOrReuse}, {{ docLink (docEmbedTermLink do incoming) }}
+  }}
+
+turbo.service.invites.decline :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.invites.decline db =
+  do
+    use Parser /
+    use UserId toText
+    use base.Function |>
+    use base.Optional None Some
+    use base.Text ==
+    use unison_json_1_3_5.core.Json.object addText empty
+    inviteIdText =
+      route
+        base.IO.net.URI.Method.POST
+        (s "v1" / s "invites" / Parser.text / s "decline")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        inviteId = InviteId.fromText inviteIdText
+        match invites.getById db inviteId () with
+          None -> notFound.json (empty |> addText "error" "invite not found")
+          Some invite ->
+            (Invite _ _ toUserId _ _ _ _ _) = invite
+            if base.Boolean.not (toText toUserId == toText currentUserId) then
+              unauthorized.json
+                (empty |> addText "error" "not invite recipient")
+            else
+              match markDeclined db inviteId () with
+                None ->
+                  notFound.json (empty |> addText "error" "invite not found")
+                Some updated ->
+                  ok.json (inviteJson db currentUserId updated ())
+
+turbo.service.invites.decline.doc : base.Doc
+turbo.service.invites.decline.doc =
+  use base.syntax docParagraph docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> decline db }} declines a pending invite
+  for the current user.
+  
+  **Also see:** {markDeclined}
+  }}
+
+turbo.service.invites.incoming :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote} ()
+turbo.service.invites.incoming db =
+  do
+    use Parser /
+    use base.Function |>
+    Route.noCapture
+      base.IO.net.URI.Method.GET (s "v1" / s "invites" / s "incoming")
+    match requireUser db () with
+      base.Either.Left err ->
+        unauthorized.json
+          (unison_json_1_3_5.core.Json.object.empty
+            |> unison_json_1_3_5.core.Json.object.addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        invites = listIncomingPending db currentUserId ()
+        inviteJsons =
+          base.data.List.map
+            (invite -> inviteJson db currentUserId invite ()) invites
+        ok.json (unison_json_1_3_5.core.Json.array inviteJsons)
+
+turbo.service.invites.incoming.doc : base.Doc
+turbo.service.invites.incoming.doc =
+  use base.syntax docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> incoming db }} lists pending incoming
+  requests for the current user, newest first.
+  
+  **Also see:** {{
+  base.syntax.docLink (base.syntax.docEmbedTermLink do outgoing) }}
+  }}
+
+turbo.service.invites.internal.inviteJson :
+  unison_cloud_27_3_0.Database
+  -> UserId
+  -> Invite
+  -> '{base.abilities.Exception, unison_cloud_27_3_0.Remote} unison_json_1_3_5.core.Json
+turbo.service.invites.internal.inviteJson db currentUserId invite =
+  do
+    use User User
+    use base.Function |>
+    use base.Optional None Some
+    use base.time Instant.toText
+    use unison_json_1_3_5.core.Json.object addOptionalText addText
+    use users getById
+    fromHandle =
+      (Invite _ fromUserId _ _ _ _ _ _) = invite
+      match getById db fromUserId () with
+        Some (User _ handleText _ _ _) -> Some handleText
+        None                           -> None
+    toHandle =
+      (Invite _ _ toUserId _ _ _ _ _) = invite
+      match getById db toUserId () with
+        Some (User _ handleText _ _ _) -> Some handleText
+        None                           -> None
+    (Invite
+      inviteId
+      fromUserId
+      toUserId
+      channelId
+      status
+      requestCount
+      createdAt
+      updatedAt)
+      =
+      invite
+    statusText = match status with
+      InviteStatus.Pending   -> "pending"
+      Connected              -> "connected"
+      Declined               -> "declined"
+      InviteStatus.Cancelled -> "cancelled"
+    unison_json_1_3_5.core.Json.object.empty
+      |> addText "inviteId" (InviteId.toText inviteId)
+      |> addText "fromUserId" (UserId.toText fromUserId)
+      |> addOptionalText "fromHandle" fromHandle
+      |> addText "toUserId" (UserId.toText toUserId)
+      |> addOptionalText "toHandle" toHandle
+      |> addText "channelId" (ChannelId.toText channelId)
+      |> addText "status" statusText
+      |> addText "direction" (directionText currentUserId invite)
+      |> unison_json_1_3_5.core.Json.object.addNat "requestCount" requestCount
+      |> addText "createdAt" (Instant.toText createdAt)
+      |> addOptionalText
+           "updatedAt" (base.Optional.map Instant.toText updatedAt)
+
+turbo.service.invites.outgoing :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote} ()
+turbo.service.invites.outgoing db =
+  do
+    use Parser /
+    use base.Function |>
+    Route.noCapture
+      base.IO.net.URI.Method.GET (s "v1" / s "invites" / s "outgoing")
+    match requireUser db () with
+      base.Either.Left err ->
+        unauthorized.json
+          (unison_json_1_3_5.core.Json.object.empty
+            |> unison_json_1_3_5.core.Json.object.addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        invites = listOutgoingPending db currentUserId ()
+        inviteJsons =
+          base.data.List.map
+            (invite -> inviteJson db currentUserId invite ()) invites
+        ok.json (unison_json_1_3_5.core.Json.array inviteJsons)
+
+turbo.service.invites.outgoing.doc : base.Doc
+turbo.service.invites.outgoing.doc =
+  use base.syntax docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> outgoing db }} lists pending outgoing
+  requests for the current user, newest first.
+  
+  **Also see:** {{
+  base.syntax.docLink (base.syntax.docEmbedTermLink do incoming) }}
+  }}
+
+turbo.service.presence.heartbeat :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  base.abilities.Random} ()
+turbo.service.presence.heartbeat db =
+  do
+    use Parser /
+    use base.Function |>
+    use unison_json_1_3_5.core.Json.object addText empty
+    Route.noCapture
+      base.IO.net.URI.Method.POST (s "v1" / s "presence" / s "heartbeat")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right currentUser ->
+        currentUserId =
+          (User.User userId _ _ _ _) = currentUser
+          userId
+        fields =
+          decodeJson
+            (unison_json_1_3_5.Decoder.object unison_json_1_3_5.Decoder.text)
+        match base.data.Map.get "deviceId" fields with
+          base.Optional.None ->
+            badRequest.json (empty |> addText "error" "missing deviceId")
+          base.Optional.Some deviceIdText ->
+            _ =
+              store.presence.heartbeat
+                db (DeviceId.fromText deviceIdText) currentUserId ()
+            ok.json
+              (empty
+                |> addText "deviceId" deviceIdText
+                |> addText "userId" (UserId.toText currentUserId)
+                |> addText "status" "online")
+
+turbo.service.presence.heartbeat.doc : base.Doc
+turbo.service.presence.heartbeat.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> service.presence.heartbeat db }} records
+  app-level online presence for the caller's device.
+  
+  This endpoint keeps contact online/offline state separate from channel join
+  state.
+  
+  **Also see:** {store.presence.heartbeat}, {{
+  docLink (docEmbedTermLink do leave) }}
+  }}
+
+turbo.service.users.byHandle :
+  unison_cloud_27_3_0.Database
+  -> '{Route, base.abilities.Exception, unison_cloud_27_3_0.Remote} ()
+turbo.service.users.byHandle db =
+  do
+    use Parser /
+    use base.Function |>
+    use unison_json_1_3_5.core.Json.object addText empty
+    userHandle =
+      route
+        base.IO.net.URI.Method.GET
+        (s "v1" / s "users" / s "by-handle" / Parser.text)
+    userJson = cases
+      User.User userId handleText displayName _ _ ->
+        empty
+          |> addText "userId" (UserId.toText userId)
+          |> addText "handle" handleText
+          |> addText "displayName" displayName
+    match getByHandle db userHandle () with
+      base.Optional.None ->
+        notFound.json (empty |> addText "error" "user not found")
+      base.Optional.Some user -> ok.json (userJson user)
+
+turbo.service.users.byHandle.doc : base.Doc
+turbo.service.users.byHandle.doc =
+  use base.syntax docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> users.byHandle db }} serves simple dev
+  user directory lookup by handle.
+  
+  **Also see:** {{
+  base.syntax.docLink (base.syntax.docEmbedTermLink do getByHandle) }}
+  }}
+
+turbo.service.users.presenceByHandle :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote} ()
+turbo.service.users.presenceByHandle db =
+  do
+    use Parser /
+    use base.Function |>
+    use base.Optional None Some
+    use unison_json_1_3_5.core.Json.object addText empty
+    userHandle =
+      route
+        base.IO.net.URI.Method.GET
+        (s "v1" / s "users" / s "by-handle" / Parser.text / s "presence")
+    match requireUser db () with
+      base.Either.Left err -> unauthorized.json (empty |> addText "error" err)
+      base.Either.Right _ ->
+        match getByHandle db userHandle () with
+          None -> notFound.json (empty |> addText "error" "user not found")
+          Some (User.User userId handleText displayName _ _) ->
+            presence = getForUser db userId ()
+            (isOnline, currentChannelIdText) =
+              match presence with
+                None -> (false, None)
+                Some (DevicePresence _ _ status currentChannelId _) ->
+                  online = match status with
+                    Online                       -> true
+                    DevicePresenceStatus.Offline -> false
+                  channelText = match currentChannelId with
+                    None           -> None
+                    Some channelId -> Some (ChannelId.toText channelId)
+                  (online, channelText)
+            ok.json
+              (empty
+                |> addText "userId" (UserId.toText userId)
+                |> addText "handle" handleText
+                |> addText "displayName" displayName
+                |> unison_json_1_3_5.core.Json.object.addBoolean
+                     "isOnline" isOnline
+                |> unison_json_1_3_5.core.Json.object.addOptionalText
+                     "currentChannelId" currentChannelIdText)
+
+turbo.service.users.presenceByHandle.doc : base.Doc
+turbo.service.users.presenceByHandle.doc =
+  use base.syntax docEmbedTermLink docGroup docJoin docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> presenceByHandle db }} reports whether a
+  dev-directory user currently has any online device presence.
+  
+  It matches `GET /v1/users/by-handle/<handle>/presence`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do getByHandle) }}, {getForUser}
+  }}
+
+turbo.service.web.doc : base.Doc
+turbo.service.web.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> web db }} combines Turbo's HTTP control
+  plane with the websocket signaling endpoint.
+  
+  This is the shared route intended for both local serving and cloud
+  deployment.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do service.http) }}, {{
+  docLink (docEmbedTermLink do ws) }}
+  }}
+
+turbo.service.ws :
+  unison_cloud_27_3_0.Database
+  -> '{Route,
+  base.abilities.Exception,
+  unison_http_15_0_0.client.Http,
+  OpenWebSocket,
+  unison_cloud_27_3_0.Storage,
+  unison_cloud_27_3_0.Remote,
+  unison_cloud_27_3_0.websockets.WebSockets,
+  base.abilities.Random,
+  unison_cloud_27_3_0.Log} ()
+turbo.service.ws db =
+  do
+    use Parser & /
+    use base.Function |>
+    use unison_json_1_3_5.core.Json.object addText empty
+    deviceIdOpt =
+      route
+        base.IO.net.URI.Method.GET
+        (s "v1" / s "ws" & (do ParseQuery.text "deviceId"))
+    match deviceIdOpt with
+      base.Optional.None ->
+        badRequest.json (empty |> addText "error" "missing deviceId")
+      base.Optional.Some deviceIdText ->
+        match requireUser db () with
+          base.Either.Left err ->
+            unauthorized.json (empty |> addText "error" err)
+          base.Either.Right currentUser ->
+            currentUserId =
+              (User.User userId _ _ _ _) = currentUser
+              userId
+            ws = openWebSocket
+            deviceId = DeviceId.fromText deviceIdText
+            _ = sockets.connect db currentUserId deviceId ws ()
+            _ = base.abilities.Exception.catch do
+              base.abilities.forever do
+                message = unison_cloud_27_3_0.websockets.WebSockets.receive ws
+                handleMessage db currentUserId deviceId ws message ()
+            disconnect db deviceId ()
+
+turbo.service.ws.doc : base.Doc
+turbo.service.ws.doc =
+  use base.syntax docCode docGroup docJoin docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 1 do db -> ws db }} serves Turbo's authenticated
+  websocket signaling endpoint at `/v1/ws`.
+  
+  The websocket handshake uses the existing dev auth header plus a required
+  `deviceId` query parameter. Each incoming text frame must be a serialized
+  {type SignalEnvelope}.
+  
+  **Also see:** {{ docLink (base.syntax.docEmbedTermLink do web) }}
+  }}
+
+turbo.store.channels.getOrCreateDirect.doc : base.Doc
+turbo.store.channels.getOrCreateDirect.doc =
+  use base.syntax docCode docParagraph docWord
+  {{
+  {{
+  base.syntax.docExample 3 do
+    db userA userB -> getOrCreateDirect db userA userB }} returns the stable
+  direct channel for `userA` and `userB`.
+  
+  The same channel is returned regardless of caller order.
+  
+  **Also see:** {directChannelKey}
+  }}
+
+turbo.store.devices.register.doc : base.Doc
+turbo.store.devices.register.doc =
+  use base.syntax docParagraph docTransclude docWord
+  {{
+  {{
+  base.syntax.docExample 5 do
+    db userId deviceId platform deviceLabel ->
+      store.devices.register db userId deviceId platform deviceLabel }} upserts
+  a device registration for `userId`.
+  
+  If the device already exists, its last-seen timestamp and metadata are
+  refreshed.
+  
+  **Also see:** {{
+  base.syntax.docLink (base.syntax.docEmbedTermLink do users.getById) }}
+  }}
+
+turbo.store.presence.getForUserInChannel.doc : base.Doc
+turbo.store.presence.getForUserInChannel.doc =
+  use base.syntax docCode docEmbedTermLink docGroup docJoin docLink docParagraph docTransclude docWord
+  {{
+  {{
+  base.syntax.docExample 3 do
+    db userId channelId -> getForUserInChannel db userId channelId }} returns
+  the currently online device presence for `userId` in `channelId`, if one
+  exists.
+  
+  This v1 lookup scans the presence table and returns the first matching online
+  device bound to the channel.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do presence.get) }}, {{
+  docLink (docEmbedTermLink do resolveTransmitTarget) }}
+  }}
+
+turbo.store.runtime.resolveTransmitTarget :
+  unison_cloud_27_3_0.Database
+  -> ChannelId
+  -> UserId
+  -> '{base.abilities.Exception, unison_cloud_27_3_0.Remote} base.Either
+    base.Text (UserId, DeviceId)
+turbo.store.runtime.resolveTransmitTarget db channelId senderUserId =
+  do
+    use UserId toText
+    use base.Either Left
+    use base.Optional None Some
+    use base.Text ==
+    channelOpt =
+      unison_cloud_27_3_0.durable.OrderedTable.tryRead
+        (channels.tables.byId db) channelId
+    match channelOpt with
+      None -> Left "channel not found"
+      Some channel ->
+        targetUserId =
+          (DirectChannel _ lowUserId highUserId _) = channel
+          senderIsLow = toText senderUserId == toText lowUserId
+          if senderIsLow then highUserId else lowUserId
+        match getForUserInChannel db targetUserId channelId () with
+          None -> Left "no active receiving device for target user"
+          Some (DevicePresence targetDeviceId _ _ _ _) ->
+            base.Either.Right (targetUserId, targetDeviceId)
+
+turbo.store.runtime.resolveTransmitTarget.doc : base.Doc
+turbo.store.runtime.resolveTransmitTarget.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docTransclude docWord
+  {{
+  {{
+  base.syntax.docExample 3 do
+    db channelId senderUserId ->
+      resolveTransmitTarget db channelId senderUserId }} resolves the receiving
+  target for a transmit attempt.
+  
+  The backend finds the other direct-channel member and then selects that
+  user's currently online device presence for the same channel.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do getForUserInChannel) }}, {{
+  docLink (docEmbedTermLink do runtime.beginTransmit) }}
+  }}
+
+turbo.store.users.create.doc : base.Doc
+turbo.store.users.create.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docTransclude docWord
+  {{
+  {{
+  base.syntax.docExample 3 do
+    db userHandle displayName -> users.create db userHandle displayName }}
+  ensures a dev user exists for `userHandle` and returns it.
+  
+  If a user with the same handle already exists, the existing user is returned.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do getByHandle) }}, {{
+  docLink (docEmbedTermLink do requireUser) }}
+  }}
+
+turbo.store.users.getByHandle.doc : base.Doc
+turbo.store.users.getByHandle.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 2 do db userHandle -> getByHandle db userHandle }}
+  looks up a user by handle.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do users.getById) }}, {{
+  docLink (docEmbedTermLink do users.create) }}
+  }}
+
+turbo.store.users.getById.doc : base.Doc
+turbo.store.users.getById.doc =
+  use base.syntax docEmbedTermLink docLink docParagraph docTransclude docWord
+  {{
+  {{ base.syntax.docExample 2 do db userId -> users.getById db userId }} looks
+  up a user by backend id.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do getByHandle) }}, {{
+  docLink (docEmbedTermLink do users.create) }}
+  }}
+
+
+
+---- Anything below this line is ignored by Unison.
+
+
+cuts.service.buildStamp : Text
+cuts.service.buildStamp = "2026-03-25T20:33:36Z"

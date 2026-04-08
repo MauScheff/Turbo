@@ -1,0 +1,287 @@
+//
+//  PTTViewModel+Selection.swift
+//  Turbo
+//
+//  Created by Codex on 08.04.2026.
+//
+
+import Foundation
+
+extension PTTViewModel {
+    var contactSummaryByContactID: [UUID: TurboContactSummaryResponse] {
+        backendSyncCoordinator.state.syncState.contactSummaries
+    }
+
+    var channelStateByContactID: [UUID: TurboChannelStateResponse] {
+        backendSyncCoordinator.state.syncState.channelStates
+    }
+
+    var incomingInviteByContactID: [UUID: TurboInviteResponse] {
+        backendSyncCoordinator.state.syncState.incomingInvites
+    }
+
+    var outgoingInviteByContactID: [UUID: TurboInviteResponse] {
+        backendSyncCoordinator.state.syncState.outgoingInvites
+    }
+
+    var requestCooldownDeadlineByContactID: [UUID: Date] {
+        backendSyncCoordinator.state.syncState.requestCooldownDeadlines
+    }
+
+    var requestContactIDs: Set<UUID> {
+        backendSyncCoordinator.state.syncState.requestContactIDs
+    }
+
+    func systemSessionMatches(_ contactID: UUID) -> Bool {
+        guard let contact = contacts.first(where: { $0.id == contactID }) else { return false }
+        switch systemSessionState {
+        case .active(let activeContactID, let channelUUID):
+            return activeContactID == contactID && contact.channelId == channelUUID
+        case .none, .mismatched:
+            return false
+        }
+    }
+
+    func conversationContext(for contact: Contact) -> ConversationDerivationContext {
+        ConversationDerivationContext(
+            contactID: contact.id,
+            selectedContactID: selectedContactId,
+            baseState: selectedContactId == contact.id
+                ? selectedPeerBaseState(for: contact.id, relationship: relationshipState(for: contact.id))
+                : listConversationState(for: contact.id),
+            contactName: contact.name,
+            contactIsOnline: contactSummaryByContactID[contact.id]?.isOnline ?? contact.isOnline,
+            isJoined: isJoined,
+            activeChannelID: activeChannelId,
+            systemSessionMatchesContact: systemSessionMatches(contact.id),
+            systemSessionState: systemSessionState,
+            pendingAction: sessionCoordinator.pendingAction,
+            channel: channelStateByContactID[contact.id].map(ChannelReadinessSnapshot.init(channelState:))
+        )
+    }
+
+    func relationshipState(for contactID: UUID) -> PairRelationshipState {
+        if let invite = incomingInviteByContactID[contactID] {
+            return .incomingRequest(requestCount: invite.requestCount)
+        }
+        if let invite = outgoingInviteByContactID[contactID] {
+            return .outgoingRequest(requestCount: invite.requestCount)
+        }
+        if let summary = contactSummaryByContactID[contactID] {
+            return ConversationStateMachine.relationshipState(
+                hasIncomingRequest: summary.hasIncomingRequest,
+                hasOutgoingRequest: summary.hasOutgoingRequest,
+                requestCount: summary.requestCount
+            )
+        }
+        return .none
+    }
+
+    func selectedPeerBaseState(for contactID: UUID, relationship: PairRelationshipState) -> ConversationState {
+        if let status = channelStateByContactID[contactID]?.status,
+           let state = ConversationState(rawValue: status) {
+            return state
+        }
+        return relationship.fallbackConversationState
+    }
+
+    func syncSelectedPeerSession() {
+        guard let contact = selectedContact else {
+            selectedPeerCoordinator.send(.selectedContactChanged(nil))
+            return
+        }
+
+        let relationship = relationshipState(for: contact.id)
+        selectedPeerCoordinator.send(
+            .selectedContactChanged(
+                SelectedPeerSelection(
+                    contactID: contact.id,
+                    contactName: contact.name,
+                    contactIsOnline: contactSummaryByContactID[contact.id]?.isOnline ?? contact.isOnline
+                )
+            )
+        )
+        selectedPeerCoordinator.send(.relationshipUpdated(relationship))
+        selectedPeerCoordinator.send(.baseStateUpdated(selectedPeerBaseState(for: contact.id, relationship: relationship)))
+        selectedPeerCoordinator.send(.channelUpdated(channelStateByContactID[contact.id].map(ChannelReadinessSnapshot.init(channelState:))))
+        selectedPeerCoordinator.send(
+            .localSessionUpdated(
+                isJoined: isJoined,
+                activeChannelID: activeChannelId,
+                pendingAction: sessionCoordinator.pendingAction
+            )
+        )
+        selectedPeerCoordinator.send(
+            .systemSessionUpdated(
+                systemSessionState,
+                matchesSelectedContact: systemSessionMatches(contact.id)
+            )
+        )
+        selectedPeerCoordinator.send(.mediaStateUpdated(mediaRuntime.connectionState))
+    }
+
+    func selectedPeerState(for contactID: UUID) -> SelectedPeerState {
+        if selectedContactId == contactID {
+            syncSelectedPeerSession()
+            return selectedPeerCoordinator.state.selectedPeerState
+        }
+
+        guard let contact = contacts.first(where: { $0.id == contactID }) else {
+            return SelectedPeerState(
+                relationship: .none,
+                phase: .idle,
+                statusMessage: "Ready to connect",
+                canTransmitNow: false
+            )
+        }
+        return ConversationStateMachine.selectedPeerState(
+            for: conversationContext(for: contact),
+            relationship: relationshipState(for: contactID)
+        )
+    }
+
+    // List decoration only. Selected-screen truth must come from selectedPeerState.
+    func listConversationState(for contactID: UUID) -> ConversationState {
+        if selectedContactId == contactID,
+           let status = channelStateByContactID[contactID]?.status,
+           let state = ConversationState(rawValue: status) {
+            return state
+        }
+        if let summary = contactSummaryByContactID[contactID] {
+            return ConversationStateMachine.listConversationState(for: summary)
+        }
+        return .idle
+    }
+
+    func incomingInvite(for contactID: UUID) -> TurboInviteResponse? {
+        incomingInviteByContactID[contactID]
+    }
+
+    func outgoingInvite(for contactID: UUID) -> TurboInviteResponse? {
+        outgoingInviteByContactID[contactID]
+    }
+
+    func contactSummary(for contactID: UUID) -> TurboContactSummaryResponse? {
+        contactSummaryByContactID[contactID]
+    }
+
+    func contactName(for contactID: UUID) -> String? {
+        contacts.first(where: { $0.id == contactID })?.name
+    }
+
+    func requestCooldownRemaining(for contactID: UUID, now: Date = .now) -> Int? {
+        guard let deadline = requestCooldownDeadlineByContactID[contactID] else { return nil }
+        let remaining = Int(ceil(deadline.timeIntervalSince(now)))
+        guard remaining > 0 else { return nil }
+        return remaining
+    }
+
+    var visibleContacts: [Contact] {
+        contacts.filter { contact in
+            contact.handle != currentDevUserHandle
+                && !requestContactIDs.contains(contact.id)
+                && !(activeChannelId == contact.id)
+                && !(selectedContactId == contact.id)
+        }
+    }
+
+    var sortedContacts: [Contact] {
+        visibleContacts.sorted { lhs, rhs in
+            if lhs.isOnline != rhs.isOnline {
+                return lhs.isOnline && !rhs.isOnline
+            }
+            return lhs.name < rhs.name
+        }
+    }
+
+    var incomingRequests: [(Contact, TurboInviteResponse)] {
+        contacts.compactMap { contact in
+            guard contact.handle != currentDevUserHandle else { return nil }
+            guard contact.id != selectedContactId else { return nil }
+            guard contactSummaryByContactID[contact.id]?.hasIncomingRequest == true,
+                  let invite = incomingInviteByContactID[contact.id] else { return nil }
+            return (contact, invite)
+        }
+    }
+
+    var outgoingRequests: [(Contact, TurboInviteResponse)] {
+        contacts.compactMap { contact in
+            guard contact.handle != currentDevUserHandle else { return nil }
+            guard contact.id != selectedContactId else { return nil }
+            guard contactSummaryByContactID[contact.id]?.hasOutgoingRequest == true,
+                  let invite = outgoingInviteByContactID[contact.id] else { return nil }
+            return (contact, invite)
+        }
+    }
+
+    func ensureContactExists(handle: String, remoteUserId: String, channelId: String) -> UUID {
+        let result = ContactDirectory.ensureContact(
+            handle: handle,
+            remoteUserId: remoteUserId,
+            channelId: channelId,
+            existingContacts: contacts
+        )
+        contacts = result.contacts
+        return result.contactID
+    }
+
+    func selectContact(_ contact: Contact) {
+        backendRuntime.trackedContactIDs.insert(contact.id)
+        selectedContactId = contact.id
+        sessionCoordinator.select(contactID: contact.id)
+        diagnostics.record(.state, message: "Selected contact", metadata: ["handle": contact.handle])
+        updateStatusForSelectedContact()
+    }
+
+    func resetSelection() {
+        selectedContactId = nil
+    }
+
+    func updateStatusForSelectedContact() {
+        if selectedContact != nil {
+            syncSelectedPeerSession()
+            statusMessage = selectedPeerCoordinator.state.selectedPeerState.statusMessage
+        } else {
+            statusMessage = ConversationStateMachine.statusMessage(
+                for: ConversationDerivationContext(
+                    contactID: UUID(),
+                    selectedContactID: nil,
+                    baseState: .idle,
+                    contactName: "",
+                    contactIsOnline: false,
+                    isJoined: isJoined,
+                    activeChannelID: activeChannelId,
+                    systemSessionMatchesContact: false,
+                    systemSessionState: systemSessionState,
+                    pendingAction: sessionCoordinator.pendingAction,
+                    channel: nil
+                )
+            )
+        }
+    }
+
+    func updateContact(_ id: UUID, mutate: (inout Contact) -> Void) {
+        guard let index = contacts.firstIndex(where: { $0.id == id }) else { return }
+        var contact = contacts[index]
+        mutate(&contact)
+        contacts[index] = contact
+    }
+
+    var authoritativeContactIDs: Set<UUID> {
+        ContactDirectory.authoritativeContactIDs(
+            trackedContactIDs: backendRuntime.trackedContactIDs,
+            selectedContactID: selectedContactId,
+            activeChannelID: activeChannelId,
+            mediaSessionContactID: mediaRuntime.contactID,
+            pendingJoinContactID: pendingJoinContactId,
+            inviteContactIDs: requestContactIDs
+        )
+    }
+
+    func pruneContactsToAuthoritativeState() {
+        contacts = ContactDirectory.retainedContacts(
+            existingContacts: contacts,
+            authoritativeContactIDs: authoritativeContactIDs
+        )
+    }
+}

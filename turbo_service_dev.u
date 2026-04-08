@@ -1,0 +1,162 @@
+turbo.service.dev.seed.internal.defaultUsers.doc = {{
+
+``turbo.service.dev.seed.internal.defaultUsers`` is the canonical list of dev users seeded into the Turbo backend for local development.
+
+*Also see:* {turbo.service.dev.seed}
+
+}}
+turbo.service.dev.seed.internal.defaultUsers : [(Text, Text)]
+turbo.service.dev.seed.internal.defaultUsers =
+  [
+    ("@turbo-ios", "Turbo iOS"),
+    ("@avery", "Avery"),
+    ("@blake", "Blake"),
+    ("@casey", "Casey"),
+    ("@devin", "Devin"),
+    ("@elliot", "Elliot"),
+    ("@finley", "Finley"),
+    ("@gray", "Gray"),
+    ("@harper", "Harper"),
+    ("@indigo", "Indigo"),
+    ("@jules", "Jules"),
+    ("@kai", "Kai"),
+    ("@logan", "Logan"),
+    ("@maya", "Maya"),
+    ("@noel", "Noel"),
+    ("@orion", "Orion"),
+    ("@parker", "Parker"),
+    ("@quinn", "Quinn"),
+    ("@riley", "Riley"),
+    ("@sasha", "Sasha"),
+    ("@tatum", "Tatum")
+  ]
+
+turbo.service.dev.seed.doc = {{
+
+``turbo.service.dev.seed db`` seeds Turbo's local dev users.
+
+This route is intended only for development. It upserts a fixed list of test users and returns them as JSON.
+
+*Also see:* {turbo.service.dev.seed.internal.defaultUsers}, {turbo.store.users.create}
+
+}}
+turbo.service.dev.seed :
+  Database
+  -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote, Random} ()
+turbo.service.dev.seed db = do
+  use Parser s /
+  noCapture POST (s "v1" / s "dev" / s "seed")
+  seeded =
+    List.map
+      (entry ->
+        match entry with
+          (userHandle, displayName) ->
+            turbo.store.users.create db userHandle displayName ())
+      turbo.service.dev.seed.internal.defaultUsers
+  usersJson =
+    Json.array
+      (List.map
+        (user ->
+          match user with
+            User userId handleText displayName _ _ ->
+              Json.object.empty
+                |> Json.object.addText "userId" (turbo.domain.UserId.toText userId)
+                |> Json.object.addText "handle" handleText
+                |> Json.object.addText "displayName" displayName)
+        seeded)
+  ok.json
+    (Json.object.empty
+      |> Json.object.addText "status" "seeded"
+      |> Json.object.add "users" usersJson)
+
+turbo.service.dev.resetState.doc = {{
+
+``turbo.service.dev.resetState db`` clears Turbo's local dev runtime state.
+
+This deletes durable state that can get wedged during local iteration, including
+presence, pending or connected invites, transient transmit locks, and stored
+ephemeral tokens. It deliberately keeps seeded users, devices, and channels.
+
+*Also see:* {turbo.service.dev.seed}
+
+}}
+turbo.service.dev.resetState :
+  Database
+  -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote} ()
+turbo.service.dev.resetState db = do
+  use Parser s /
+  noCapture POST (s "v1" / s "dev" / s "reset-state")
+
+  runtimeTable = turbo.store.runtime.tables.byChannel db
+  runtimeKeys =
+    List.map
+      (cases
+        (channelId, _) -> channelId)
+      (Stream.toList (OrderedTable.toStream runtimeTable))
+  _ =
+    transact (OrderedTable.database runtimeTable) do
+      List.foreach runtimeKeys key ->
+        OrderedTable.delete.tx runtimeTable key
+
+  presenceTable = turbo.store.presence.tables.byDevice db
+  presenceKeys =
+    List.map
+      (cases
+        (deviceId, _) -> deviceId)
+      (Stream.toList (OrderedTable.toStream presenceTable))
+  _ =
+    transact (OrderedTable.database presenceTable) do
+      List.foreach presenceKeys key ->
+        OrderedTable.delete.tx presenceTable key
+
+  tokenTable = turbo.store.tokens.tables.byChannelUserDevice db
+  tokenKeys =
+    List.map
+      (cases
+        (key, _) -> key)
+      (Stream.toList (OrderedTable.toStream tokenTable))
+  _ =
+    transact (OrderedTable.database tokenTable) do
+      List.foreach tokenKeys key ->
+        OrderedTable.delete.tx tokenTable key
+
+  inviteById = turbo.store.invites.tables.byId db
+  inviteByIdKeys =
+    List.map
+      (cases
+        (inviteId, _) -> inviteId)
+      (Stream.toList (OrderedTable.toStream inviteById))
+  _ =
+    transact (OrderedTable.database inviteById) do
+      List.foreach inviteByIdKeys key ->
+        OrderedTable.delete.tx inviteById key
+
+  inviteByTo = turbo.store.invites.tables.byToCreatedAt db
+  inviteByToKeys =
+    List.map
+      (cases
+        (key, _) -> key)
+      (Stream.toList (OrderedTable.toStream inviteByTo))
+  _ =
+    transact (OrderedTable.database inviteByTo) do
+      List.foreach inviteByToKeys key ->
+        OrderedTable.delete.tx inviteByTo key
+
+  inviteByFrom = turbo.store.invites.tables.byFromCreatedAt db
+  inviteByFromKeys =
+    List.map
+      (cases
+        (key, _) -> key)
+      (Stream.toList (OrderedTable.toStream inviteByFrom))
+  _ =
+    transact (OrderedTable.database inviteByFrom) do
+      List.foreach inviteByFromKeys key ->
+        OrderedTable.delete.tx inviteByFrom key
+
+  ok.json
+    (Json.object.empty
+      |> Json.object.addText "status" "reset"
+      |> Json.object.addNat "clearedTransmitStates" (List.size runtimeKeys)
+      |> Json.object.addNat "clearedPresenceEntries" (List.size presenceKeys)
+      |> Json.object.addNat "clearedTokenEntries" (List.size tokenKeys)
+      |> Json.object.addNat "clearedInvites" (List.size inviteByIdKeys))

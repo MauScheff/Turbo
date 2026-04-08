@@ -1,0 +1,430 @@
+turbo.service.presence.heartbeat.doc = {{
+
+``turbo.service.presence.heartbeat db`` records app-level online presence for the caller's device.
+
+This endpoint keeps contact online/offline state separate from channel join state.
+
+*Also see:* {turbo.store.presence.heartbeat}, {turbo.service.channels.leave}
+
+}}
+turbo.service.presence.heartbeat :
+  Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote, Random} ()
+turbo.service.presence.heartbeat db = do
+  use Parser s /
+  noCapture POST (s "v1" / s "presence" / s "heartbeat")
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId = match currentUser with
+        User userId _ _ _ _ -> userId
+      fields = decodeJson (Decoder.object Decoder.text)
+      match Map.get "deviceId" fields with
+        None ->
+          badRequest.json (Json.object.empty |> Json.object.addText "error" "missing deviceId")
+        Some deviceIdText ->
+          _ =
+            turbo.store.presence.heartbeat
+              db
+              (turbo.domain.DeviceId.fromText deviceIdText)
+              currentUserId
+              ()
+          ok.json
+            (Json.object.empty
+              |> Json.object.addText "deviceId" deviceIdText
+              |> Json.object.addText "userId" (turbo.domain.UserId.toText currentUserId)
+              |> Json.object.addText "status" "online")
+
+turbo.service.channels.leave.doc = {{
+
+``turbo.service.channels.leave db`` clears the caller's active device-channel binding for `channelId`.
+
+This is the control-plane leave operation used when a device exits a conversation.
+
+*Also see:* {turbo.store.presence.clearActiveChannel}, {turbo.service.channels.join}
+
+}}
+turbo.service.channels.leave :
+  Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote, Random} ()
+turbo.service.channels.leave db = do
+  use Parser s /
+  channelIdText = route POST (s "v1" / s "channels" / Parser.text / s "leave")
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId = match currentUser with
+        User userId _ _ _ _ -> userId
+      fields = decodeJson (Decoder.object Decoder.text)
+      channelId = turbo.domain.ChannelId.fromText channelIdText
+      match Map.get "deviceId" fields with
+        None ->
+          badRequest.json (Json.object.empty |> Json.object.addText "error" "missing deviceId")
+        Some deviceIdText ->
+          deviceId = turbo.domain.DeviceId.fromText deviceIdText
+          _ = turbo.store.runtime.endTransmit db channelId currentUserId deviceId ()
+          _ = turbo.store.presence.clearActiveChannel db deviceId currentUserId ()
+          ok.json
+            (Json.object.empty
+              |> Json.object.addText "channelId" channelIdText
+              |> Json.object.addText "deviceId" deviceIdText
+              |> Json.object.addText "status" "left")
+
+turbo.service.invites.internal.availabilityText :
+  turbo.domain.UserAvailability -> Text
+turbo.service.invites.internal.availabilityText = cases
+  turbo.domain.UserAvailability.Available -> "available"
+  turbo.domain.UserAvailability.Busy _ -> "busy"
+  turbo.domain.UserAvailability.Offline -> "offline"
+
+turbo.service.invites.internal.directionText :
+  turbo.domain.UserId
+  -> turbo.domain.Invite
+  -> Text
+turbo.service.invites.internal.directionText currentUserId invite =
+  match invite with
+    Invite _ fromUserId _ _ _ _ _ _ ->
+      if (Text.==) (turbo.domain.UserId.toText fromUserId) (turbo.domain.UserId.toText currentUserId) then
+        "outgoing"
+      else
+        "incoming"
+
+turbo.service.invites.internal.inviteJson :
+  Database
+  -> turbo.domain.UserId
+  -> turbo.domain.Invite
+  -> '{Exception, Remote} Json
+turbo.service.invites.internal.inviteJson db currentUserId invite = do
+  fromHandle = match invite with
+    Invite _ fromUserId _ _ _ _ _ _ ->
+      match turbo.store.users.getById db fromUserId () with
+        Some (User _ handleText _ _ _) -> Some handleText
+        None -> None
+  toHandle = match invite with
+    Invite _ _ toUserId _ _ _ _ _ ->
+      match turbo.store.users.getById db toUserId () with
+        Some (User _ handleText _ _ _) -> Some handleText
+        None -> None
+  match invite with
+    Invite inviteId fromUserId toUserId channelId status requestCount createdAt updatedAt ->
+      statusText = match status with
+        turbo.domain.InviteStatus.Pending -> "pending"
+        turbo.domain.InviteStatus.Connected -> "connected"
+        turbo.domain.InviteStatus.Declined -> "declined"
+        turbo.domain.InviteStatus.Cancelled -> "cancelled"
+      Json.object.empty
+        |> Json.object.addText "inviteId" (turbo.domain.InviteId.toText inviteId)
+        |> Json.object.addText "fromUserId" (turbo.domain.UserId.toText fromUserId)
+        |> Json.object.addOptionalText "fromHandle" fromHandle
+        |> Json.object.addText "toUserId" (turbo.domain.UserId.toText toUserId)
+        |> Json.object.addOptionalText "toHandle" toHandle
+        |> Json.object.addText "channelId" (turbo.domain.ChannelId.toText channelId)
+        |> Json.object.addText "status" statusText
+        |> Json.object.addText "direction" (turbo.service.invites.internal.directionText currentUserId invite)
+        |> Json.object.addNat "requestCount" requestCount
+        |> Json.object.addText "createdAt" (toText createdAt)
+        |> Json.object.addOptionalText "updatedAt" (Optional.map toText updatedAt)
+
+turbo.service.invites.create.doc = {{
+
+``turbo.service.invites.create db`` creates or reuses a pending direct invite.
+
+If the target user is online and idle, the response indicates that the peer should auto-join when it notices the incoming request.
+
+*Also see:* {turbo.store.invites.createOrReuse}, {turbo.service.invites.incoming}
+
+}}
+turbo.service.invites.create :
+  Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote, Random} ()
+turbo.service.invites.create db = do
+  use Parser s /
+  noCapture POST (s "v1" / s "invites")
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId = match currentUser with
+        User userId _ _ _ _ -> userId
+      fields = decodeJson (Decoder.object Decoder.text)
+      resolvedOther =
+        match Map.get "otherUserId" fields with
+          Some otherUserIdText -> Some (turbo.domain.UserId.fromText otherUserIdText)
+          None ->
+            match Map.get "otherHandle" fields with
+              None -> None
+              Some otherHandle ->
+                match turbo.store.users.getByHandle db otherHandle () with
+                  None -> None
+                  Some (User otherUserId _ _ _ _) -> Some otherUserId
+      match resolvedOther with
+        None ->
+          badRequest.json
+            (Json.object.empty |> Json.object.addText "error" "missing otherUserId or otherHandle")
+        Some otherUserId ->
+          if (Text.==) (turbo.domain.UserId.toText otherUserId) (turbo.domain.UserId.toText currentUserId) then
+            badRequest.json (Json.object.empty |> Json.object.addText "error" "cannot invite self")
+          else
+            channel = turbo.store.channels.getOrCreateDirect db currentUserId otherUserId ()
+            channelId = match channel with
+              DirectChannel channelId _ _ _ -> channelId
+            invite = turbo.store.invites.createOrReuse db currentUserId otherUserId channelId ()
+            availability = turbo.store.users.availability db otherUserId ()
+            inviteJson = turbo.service.invites.internal.inviteJson db currentUserId invite ()
+            ok.json
+              (inviteJson
+                |> Json.object.addText "targetAvailability" (turbo.service.invites.internal.availabilityText availability)
+                |> Json.object.addBoolean
+                  "shouldAutoJoinPeer"
+                  (match availability with
+                    turbo.domain.UserAvailability.Available -> true
+                    _ -> false))
+
+turbo.service.invites.incoming.doc = {{
+
+``turbo.service.invites.incoming db`` lists pending incoming requests for the current user, newest first.
+
+*Also see:* {turbo.service.invites.outgoing}
+
+}}
+turbo.service.invites.incoming :
+  Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote} ()
+turbo.service.invites.incoming db = do
+  use Parser s /
+  noCapture GET (s "v1" / s "invites" / s "incoming")
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId = match currentUser with
+        User userId _ _ _ _ -> userId
+      invites = turbo.store.invites.listIncomingPending db currentUserId ()
+      inviteJsons = List.map (invite -> turbo.service.invites.internal.inviteJson db currentUserId invite ()) invites
+      ok.json (Json.array inviteJsons)
+
+turbo.service.invites.outgoing.doc = {{
+
+``turbo.service.invites.outgoing db`` lists pending outgoing requests for the current user, newest first.
+
+*Also see:* {turbo.service.invites.incoming}
+
+}}
+turbo.service.invites.outgoing :
+  Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote} ()
+turbo.service.invites.outgoing db = do
+  use Parser s /
+  noCapture GET (s "v1" / s "invites" / s "outgoing")
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId = match currentUser with
+        User userId _ _ _ _ -> userId
+      invites = turbo.store.invites.listOutgoingPending db currentUserId ()
+      inviteJsons = List.map (invite -> turbo.service.invites.internal.inviteJson db currentUserId invite ()) invites
+      ok.json (Json.array inviteJsons)
+
+turbo.service.invites.accept.doc = {{
+
+``turbo.service.invites.accept db`` acknowledges an incoming invite for the current user.
+
+The invite remains pending until both peers have actually joined the channel; the join step is still authoritative for transitioning to connected state.
+
+*Also see:* {turbo.service.channels.join}, {turbo.store.invites.getById}
+
+}}
+turbo.service.invites.accept :
+  Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote} ()
+turbo.service.invites.accept db = do
+  use Parser s /
+  inviteIdText = route POST (s "v1" / s "invites" / Parser.text / s "accept")
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId = match currentUser with
+        User userId _ _ _ _ -> userId
+      inviteId = turbo.domain.InviteId.fromText inviteIdText
+      match turbo.store.invites.getById db inviteId () with
+        None ->
+          notFound.json (Json.object.empty |> Json.object.addText "error" "invite not found")
+        Some invite ->
+          match invite with
+            Invite _ _ toUserId _ status _ _ _ ->
+              if Boolean.not ((Text.==) (turbo.domain.UserId.toText toUserId) (turbo.domain.UserId.toText currentUserId)) then
+                unauthorized.json (Json.object.empty |> Json.object.addText "error" "not invite recipient")
+              else
+                inviteJson = turbo.service.invites.internal.inviteJson db currentUserId invite ()
+                ok.json
+                  (inviteJson
+                    |> Json.object.addBoolean "accepted" true
+                    |> Json.object.addBoolean "pendingJoin" (match status with
+                      turbo.domain.InviteStatus.Pending -> true
+                      _ -> false))
+
+turbo.service.invites.decline.doc = {{
+
+``turbo.service.invites.decline db`` declines a pending invite for the current user.
+
+*Also see:* {turbo.store.invites.markDeclined}
+
+}}
+turbo.service.invites.decline :
+  Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote, Random} ()
+turbo.service.invites.decline db = do
+  use Parser s /
+  inviteIdText = route POST (s "v1" / s "invites" / Parser.text / s "decline")
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId = match currentUser with
+        User userId _ _ _ _ -> userId
+      inviteId = turbo.domain.InviteId.fromText inviteIdText
+      match turbo.store.invites.getById db inviteId () with
+        None ->
+          notFound.json (Json.object.empty |> Json.object.addText "error" "invite not found")
+        Some invite ->
+          match invite with
+            Invite _ _ toUserId _ _ _ _ _ ->
+              if Boolean.not ((Text.==) (turbo.domain.UserId.toText toUserId) (turbo.domain.UserId.toText currentUserId)) then
+                unauthorized.json (Json.object.empty |> Json.object.addText "error" "not invite recipient")
+              else
+                match turbo.store.invites.markDeclined db inviteId () with
+                  None ->
+                    notFound.json (Json.object.empty |> Json.object.addText "error" "invite not found")
+                  Some updated ->
+                    ok.json (turbo.service.invites.internal.inviteJson db currentUserId updated ())
+
+turbo.service.invites.cancel.doc = {{
+
+``turbo.service.invites.cancel db`` cancels an outgoing pending invite for the current user.
+
+*Also see:* {turbo.store.invites.markCancelled}
+
+}}
+turbo.service.invites.cancel :
+  Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote, Random} ()
+turbo.service.invites.cancel db = do
+  use Parser s /
+  inviteIdText = route POST (s "v1" / s "invites" / Parser.text / s "cancel")
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId = match currentUser with
+        User userId _ _ _ _ -> userId
+      inviteId = turbo.domain.InviteId.fromText inviteIdText
+      match turbo.store.invites.getById db inviteId () with
+        None ->
+          notFound.json (Json.object.empty |> Json.object.addText "error" "invite not found")
+        Some invite ->
+          match invite with
+            Invite _ fromUserId _ _ _ _ _ _ ->
+              if Boolean.not ((Text.==) (turbo.domain.UserId.toText fromUserId) (turbo.domain.UserId.toText currentUserId)) then
+                unauthorized.json (Json.object.empty |> Json.object.addText "error" "not invite sender")
+              else
+                match turbo.store.invites.markCancelled db inviteId () with
+                  None ->
+                    notFound.json (Json.object.empty |> Json.object.addText "error" "invite not found")
+                  Some updated ->
+                    ok.json (turbo.service.invites.internal.inviteJson db currentUserId updated ())
+
+turbo.service.channels.state.doc = {{
+
+``turbo.service.channels.state db`` returns the authoritative control-plane snapshot for a direct channel and device.
+
+The snapshot drives contact pills and conversation state in the client without relying on local ad hoc booleans.
+
+*Also see:* {turbo.service.invites.create}, {turbo.service.channels.readiness}
+
+}}
+turbo.service.channels.state :
+  Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote, Random} ()
+turbo.service.channels.state db = do
+  use Parser s /
+  (channelIdText, deviceIdText) =
+    route GET
+      (s "v1" / s "channels" / Parser.text / s "state" / Parser.text => Tuple.pair)
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId = match currentUser with
+        User userId _ _ _ _ -> userId
+      channelId = turbo.domain.ChannelId.fromText channelIdText
+      deviceId = turbo.domain.DeviceId.fromText deviceIdText
+      match OrderedTable.tryRead (turbo.store.channels.tables.byId db) channelId with
+        None ->
+          notFound.json (Json.object.empty |> Json.object.addText "error" "channel not found")
+        Some (DirectChannel _ lowUserId highUserId _) ->
+          peerUserId =
+            if (Text.==) (turbo.domain.UserId.toText lowUserId) (turbo.domain.UserId.toText currentUserId) then
+              highUserId
+            else
+              lowUserId
+          selfPresence = turbo.store.presence.get db deviceId ()
+          selfOnline = match selfPresence with
+            Some (DevicePresence _ presenceUserId Online _ _) ->
+              (Text.==) (turbo.domain.UserId.toText presenceUserId) (turbo.domain.UserId.toText currentUserId)
+            _ -> false
+          selfJoined = match selfPresence with
+            Some (DevicePresence _ presenceUserId Online (Some activeChannelId) _) ->
+              (Text.==) (turbo.domain.UserId.toText presenceUserId) (turbo.domain.UserId.toText currentUserId)
+                && (Text.==) (turbo.domain.ChannelId.toText activeChannelId) (turbo.domain.ChannelId.toText channelId)
+            _ -> false
+          peerPresence = turbo.store.presence.getForUser db peerUserId ()
+          peerOnline = Optional.isSome peerPresence
+          peerJoined = Optional.isSome (turbo.store.presence.getForUserInChannel db peerUserId channelId ())
+          activeTransmit = turbo.store.runtime.currentTransmit db channelId ()
+          activeTransmitterUserId =
+            Optional.map
+              (cases
+                TransmitState _ activeUserId _ _ _ _ _ -> activeUserId)
+              activeTransmit
+          activeTransmitExpiresAt =
+            Optional.map
+              (cases
+                TransmitState _ _ _ _ _ _ expiresAt -> toText expiresAt)
+              activeTransmit
+          pendingInvite = turbo.store.invites.pendingBetween db currentUserId peerUserId channelId ()
+          pendingInviteId = Optional.map (cases Invite inviteId _ _ _ _ _ _ _ -> turbo.domain.InviteId.toText inviteId) pendingInvite
+          pendingDirection =
+            Optional.map (turbo.service.invites.internal.directionText currentUserId) pendingInvite
+          status =
+            match activeTransmitterUserId with
+              Some activeUserId ->
+                if (Text.==) (turbo.domain.UserId.toText activeUserId) (turbo.domain.UserId.toText currentUserId) then
+                  "self-transmitting"
+                else
+                  "peer-transmitting"
+              None ->
+                if selfJoined && peerJoined then
+                  "ready"
+                else
+                  match pendingDirection with
+                    Some "incoming" -> "incoming-request"
+                    Some "outgoing" -> "requested"
+                    _ ->
+                      if selfJoined then
+                        "waiting-for-peer"
+                      else
+                        "idle"
+          _ =
+            if selfJoined && peerJoined then
+              turbo.store.invites.markConnectedForChannel db currentUserId peerUserId channelId ()
+            else
+              None
+          ok.json
+            (Json.object.empty
+              |> Json.object.addText "channelId" channelIdText
+              |> Json.object.addText "selfUserId" (turbo.domain.UserId.toText currentUserId)
+              |> Json.object.addText "peerUserId" (turbo.domain.UserId.toText peerUserId)
+              |> Json.object.addBoolean "selfOnline" selfOnline
+              |> Json.object.addBoolean "peerOnline" peerOnline
+              |> Json.object.addBoolean "selfJoined" selfJoined
+              |> Json.object.addBoolean "peerJoined" peerJoined
+              |> Json.object.addOptionalText "pendingInviteId" pendingInviteId
+              |> Json.object.addOptionalText "pendingDirection" pendingDirection
+              |> Json.object.addOptionalText "activeTransmitterUserId" (Optional.map turbo.domain.UserId.toText activeTransmitterUserId)
+              |> Json.object.addOptionalText "activeTransmitExpiresAt" activeTransmitExpiresAt
+              |> Json.object.addText "status" status)

@@ -1,0 +1,151 @@
+turbo.service.dev.resetState.doc = {{
+
+``turbo.service.dev.resetState db`` clears Turbo's dev runtime and relationship state.
+
+This deletes transient runtime state and accumulated test relationship data,
+including presence, websocket session state, pending invites, direct channels,
+and ephemeral tokens. It deliberately keeps seeded users and registered devices.
+
+*Also see:* {turbo.service.dev.seed}, {turbo.service.contacts.summary}
+
+}}
+turbo.service.dev.resetState :
+  Database
+  -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote} ()
+turbo.service.dev.resetState db = do
+  use Parser s /
+  noCapture POST (s "v1" / s "dev" / s "reset-state")
+
+  runtimeTable = turbo.store.runtime.tables.byChannel db
+  runtimeKeys =
+    List.map
+      (cases
+        (channelId, _) -> channelId)
+      (Stream.toList (OrderedTable.toStream runtimeTable))
+  _ =
+    transact (OrderedTable.database runtimeTable) do
+      List.foreach runtimeKeys key ->
+        OrderedTable.delete.tx runtimeTable key
+
+  presenceTable = turbo.store.presence.tables.byDevice db
+  presenceKeys =
+    List.map
+      (cases
+        (deviceId, _) -> deviceId)
+      (Stream.toList (OrderedTable.toStream presenceTable))
+  _ =
+    transact (OrderedTable.database presenceTable) do
+      List.foreach presenceKeys key ->
+        OrderedTable.delete.tx presenceTable key
+
+  tokenTable = turbo.store.tokens.tables.byChannelUserDevice db
+  tokenKeys =
+    List.map
+      (cases
+        (key, _) -> key)
+      (Stream.toList (OrderedTable.toStream tokenTable))
+  _ =
+    transact (OrderedTable.database tokenTable) do
+      List.foreach tokenKeys key ->
+        OrderedTable.delete.tx tokenTable key
+
+  inviteById = turbo.store.invites.tables.byId db
+  inviteByIdKeys =
+    List.map
+      (cases
+        (inviteId, _) -> inviteId)
+      (Stream.toList (OrderedTable.toStream inviteById))
+  _ =
+    transact (OrderedTable.database inviteById) do
+      List.foreach inviteByIdKeys key ->
+        OrderedTable.delete.tx inviteById key
+
+  inviteByTo = turbo.store.invites.tables.byToCreatedAt db
+  inviteByToKeys =
+    List.map
+      (cases
+        (key, _) -> key)
+      (Stream.toList (OrderedTable.toStream inviteByTo))
+  _ =
+    transact (OrderedTable.database inviteByTo) do
+      List.foreach inviteByToKeys key ->
+        OrderedTable.delete.tx inviteByTo key
+
+  inviteByFrom = turbo.store.invites.tables.byFromCreatedAt db
+  inviteByFromKeys =
+    List.map
+      (cases
+        (key, _) -> key)
+      (Stream.toList (OrderedTable.toStream inviteByFrom))
+  _ =
+    transact (OrderedTable.database inviteByFrom) do
+      List.foreach inviteByFromKeys key ->
+        OrderedTable.delete.tx inviteByFrom key
+
+  sessionTable = turbo.store.sessions.tables.byDevice db
+  sessions =
+    List.map
+      (cases
+        (_, session) -> session)
+      (Stream.toList (OrderedTable.toStream sessionTable))
+  _ =
+    List.foreach sessions session ->
+      turbo.domain.SignalInbox.delete (turbo.store.sessions.internal.inbox session)
+  sessionKeys =
+    List.map
+      (cases
+        (deviceId, _) -> deviceId)
+      (Stream.toList (OrderedTable.toStream sessionTable))
+  _ =
+    transact (OrderedTable.database sessionTable) do
+      List.foreach sessionKeys key ->
+        OrderedTable.delete.tx sessionTable key
+
+  socketTable = turbo.store.sockets.tables.byDevice db
+  socketKeys =
+    List.map
+      (cases
+        (deviceId, _) -> deviceId)
+      (Stream.toList (OrderedTable.toStream socketTable))
+  _ =
+    transact (OrderedTable.database socketTable) do
+      List.foreach socketKeys key ->
+        OrderedTable.delete.tx socketTable key
+
+  channelById = turbo.store.channels.tables.byId db
+  channels =
+    List.map
+      (cases
+        (_, channel) -> channel)
+      (Stream.toList (OrderedTable.toStream channelById))
+  channelByIdKeys =
+    List.map
+      (cases
+        (channelId, _) -> channelId)
+      (Stream.toList (OrderedTable.toStream channelById))
+  _ =
+    transact (OrderedTable.database channelById) do
+      List.foreach channelByIdKeys key ->
+        OrderedTable.delete.tx channelById key
+
+  channelByPair = turbo.store.channels.tables.byUserPair db
+  channelPairKeys =
+    List.map
+      (cases
+        (pairKey, _) -> pairKey)
+      (Stream.toList (OrderedTable.toStream channelByPair))
+  _ =
+    transact (OrderedTable.database channelByPair) do
+      List.foreach channelPairKeys key ->
+        OrderedTable.delete.tx channelByPair key
+
+  ok.json
+    (Json.object.empty
+      |> Json.object.addText "status" "reset"
+      |> Json.object.addNat "clearedTransmitStates" (List.size runtimeKeys)
+      |> Json.object.addNat "clearedPresenceEntries" (List.size presenceKeys)
+      |> Json.object.addNat "clearedTokenEntries" (List.size tokenKeys)
+      |> Json.object.addNat "clearedInvites" (List.size inviteByIdKeys)
+      |> Json.object.addNat "clearedSessions" (List.size sessionKeys)
+      |> Json.object.addNat "clearedSockets" (List.size socketKeys)
+      |> Json.object.addNat "clearedChannels" (List.size channelByIdKeys))

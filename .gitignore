@@ -1,0 +1,5 @@
+.DS_Store
+.unisonHistory
+build/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/

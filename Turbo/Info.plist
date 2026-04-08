@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>BeepBeep uses the microphone to send push-to-talk audio to the connected contact.</string>
+	<key>TurboBackendBaseURL</key>
+	<string>https://beepbeep.to</string>
+	<key>TurboDevUserHandle</key>
+	<string>@turbo-ios</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>push-to-talk</string>
+	</array>
+</dict>
+</plist>

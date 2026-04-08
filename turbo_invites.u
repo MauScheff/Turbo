@@ -1,0 +1,1698 @@
+type turbo.domain.InviteIdTag
+  = InviteIdTag
+
+type turbo.domain.InviteId
+  = TurboInviteId Text turbo.domain.InviteIdTag
+
+type turbo.domain.InviteStatus
+  = Pending
+  | Connected
+  | Declined
+  | Cancelled
+
+type turbo.domain.Invite
+  = Invite
+      turbo.domain.InviteId
+      UserId
+      UserId
+      ChannelId
+      turbo.domain.InviteStatus
+      Nat
+      Instant
+      (Optional Instant)
+
+type turbo.domain.UserAvailability
+  = Available
+  | Offline
+  | Busy ChannelId
+
+type turbo.domain.ChannelStateStatus
+  = Idle
+  | Requested
+  | IncomingRequest
+  | WaitingForPeer
+  | Ready
+  | SelfTransmitting
+  | PeerTransmitting
+
+turbo.domain.InviteId.toText.doc =
+  {{
+  {{ docExample 1 do inviteId -> turbo.domain.InviteId.toText inviteId }}
+  returns the raw text inside `inviteId`.
+  
+  **Also see:** {UserId.toText}
+  }}
+
+turbo.domain.InviteId.toText : turbo.domain.InviteId -> Text
+turbo.domain.InviteId.toText = cases
+  turbo.domain.InviteId.TurboInviteId text _ -> text
+
+turbo.domain.InviteId.fromText.doc =
+  {{
+  {{ docExample 1 do text -> turbo.domain.InviteId.fromText text }} wraps
+  `text` as an invite id.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do turbo.domain.InviteId.toText)
+  }}
+  }}
+
+turbo.domain.InviteId.fromText : Text -> turbo.domain.InviteId
+turbo.domain.InviteId.fromText text =
+  turbo.domain.InviteId.TurboInviteId text turbo.domain.InviteIdTag.InviteIdTag
+
+test> turbo.domain.InviteId.toText.tests.examples = 
+  test.verify do
+    labeled "roundtrips a simple invite id" do
+      ensureEqual
+        (turbo.domain.InviteId.toText
+          (turbo.domain.InviteId.fromText "invite-1"))
+        "invite-1"
+
+test> turbo.domain.InviteId.toText.tests.props = 
+  test.verify do
+    use Text ++
+    Each.repeat 100
+    suffix = Nat.toText (natIn 0 1000000)
+    raw = "invite-" ++ suffix
+    labeled "toText inverts fromText" do
+      ensureEqual
+        (turbo.domain.InviteId.toText (turbo.domain.InviteId.fromText raw)) raw
+
+turbo.store.presence.heartbeat.doc =
+  {{
+  {{
+  docExample 3 do
+    db deviceId userId -> turbo.store.presence.heartbeat db deviceId userId }}
+  marks `deviceId` online without discarding its current active channel, if
+  any.
+  
+  This is used for app-level online/offline presence independent of channel
+  join state.
+  
+  **Also see:** {presence.upsert}, {{
+  docLink (docEmbedTermLink do turbo.store.users.availability) }}
+  }}
+
+turbo.store.presence.heartbeat :
+  Database
+  -> DeviceId
+  -> UserId
+  -> '{Exception, Storage, Remote, Random} DevicePresence
+turbo.store.presence.heartbeat db deviceId userId = do
+  existingChannelId = match presence.get db deviceId () with
+    None                                           -> None
+    Some (DevicePresence _ _ _ currentChannelId _) -> currentChannelId
+  presence.upsert db deviceId userId Online existingChannelId ()
+
+turbo.store.presence.clearActiveChannel.doc =
+  {{
+  {{
+  docExample 3 do
+    db deviceId userId ->
+      turbo.store.presence.clearActiveChannel db deviceId userId }} keeps
+  `deviceId` online but clears any active channel binding.
+  
+  **Also see:**
+  {{ docLink (docEmbedTermLink do turbo.store.presence.heartbeat) }},
+  {presence.upsert}
+  }}
+
+turbo.store.presence.clearActiveChannel :
+  Database
+  -> DeviceId
+  -> UserId
+  -> '{Exception, Storage, Remote, Random} DevicePresence
+turbo.store.presence.clearActiveChannel db deviceId userId =
+  presence.upsert db deviceId userId Online None
+
+turbo.store.users.availability.doc =
+  {{
+  {{ docExample 2 do db userId -> turbo.store.users.availability db userId }}
+  derives whether `userId` is online and available, already busy in another
+  channel, or offline.
+  
+  **Also see:** {getForUser}
+  }}
+
+turbo.store.users.availability :
+  Database -> UserId -> '{Exception, Remote} turbo.domain.UserAvailability
+turbo.store.users.availability db userId =
+  do
+    match getForUser db userId () with
+      None -> turbo.domain.UserAvailability.Offline
+      Some (DevicePresence _ _ status currentChannelId _) ->
+        match status with
+          DevicePresenceStatus.Offline -> turbo.domain.UserAvailability.Offline
+          Online                       ->
+            match currentChannelId with
+              None           -> turbo.domain.UserAvailability.Available
+              Some channelId -> turbo.domain.UserAvailability.Busy channelId
+
+turbo.store.invites.createOrReuse.doc =
+  {{
+  {{
+  docExample 4 do
+    db fromUserId toUserId channelId ->
+      turbo.store.invites.createOrReuse db fromUserId toUserId channelId }}
+  creates a pending invite unless one already exists for the same sender,
+  receiver, and channel.
+  
+  If a pending invite already exists, it is reused and its `requestCount` is
+  incremented.
+  
+  **Also see:**
+  {{ docLink (docEmbedTermLink do turbo.store.invites.pendingFromTo) }}, {{
+  docLink (docEmbedTermLink do turbo.store.invites.listIncomingPending) }}
+  }}
+
+turbo.store.invites.createOrReuse :
+  Database
+  -> UserId
+  -> UserId
+  -> ChannelId
+  -> '{Exception, Storage, Remote, Random} turbo.domain.Invite
+turbo.store.invites.createOrReuse db fromUserId toUserId channelId =
+  do
+    use Nat +
+    use OrderedTable write
+    use OrderedTable.write tx
+    use turbo.domain.Invite Invite
+    existing =
+      turbo.store.invites.pendingFromTo db fromUserId toUserId channelId ()
+    match existing with
+      Some
+        (Invite
+          inviteId
+          existingFromUserId
+          existingToUserId
+          existingChannelId
+          status
+          requestCount
+          createdAt
+          _) ->
+        table = turbo.store.invites.tables.byId db
+        byToCreatedAt = turbo.store.invites.tables.byToCreatedAt db
+        byFromCreatedAt = turbo.store.invites.tables.byFromCreatedAt db
+        updatedAt = now!
+        updated =
+          Invite
+            inviteId
+            existingFromUserId
+            existingToUserId
+            existingChannelId
+            status
+            (requestCount + 1)
+            createdAt
+            (Some updatedAt)
+        _ = write table inviteId updated
+        _ = write byToCreatedAt (existingToUserId, createdAt, inviteId) updated
+        _ =
+          write
+            byFromCreatedAt (existingFromUserId, createdAt, inviteId) updated
+        updated
+      None ->
+        table = turbo.store.invites.tables.byId db
+        byToCreatedAt = turbo.store.invites.tables.byToCreatedAt db
+        byFromCreatedAt = turbo.store.invites.tables.byFromCreatedAt db
+        now = now!
+        transact (OrderedTable.database table) do
+          inviteId =
+            turbo.domain.InviteId.fromText (Random.bytes 20 |> Bytes.base32Hex)
+          invite =
+            Invite
+              inviteId
+              fromUserId
+              toUserId
+              channelId
+              turbo.domain.InviteStatus.Pending
+              1
+              now
+              None
+          _ = tx table inviteId invite
+          _ = tx byToCreatedAt (toUserId, now, inviteId) invite
+          _ = tx byFromCreatedAt (fromUserId, now, inviteId) invite
+          invite
+
+turbo.store.invites.getById.doc =
+  {{
+  {{ docExample 2 do db inviteId -> turbo.store.invites.getById db inviteId }}
+  looks up an invite by backend id.
+  
+  **Also see:**
+  {{ docLink (docEmbedTermLink do turbo.store.invites.createOrReuse) }}, {{
+  docLink (docEmbedTermLink do turbo.store.invites.markCancelled) }}
+  }}
+
+turbo.store.invites.getById :
+  Database
+  -> turbo.domain.InviteId
+  -> '{Exception, Remote} Optional turbo.domain.Invite
+turbo.store.invites.getById db inviteId =
+  do OrderedTable.tryRead (turbo.store.invites.tables.byId db) inviteId
+
+turbo.store.invites.pendingFromTo.doc =
+  {{
+  {{
+  docExample 4 do
+    db fromUserId toUserId channelId ->
+      turbo.store.invites.pendingFromTo db fromUserId toUserId channelId }}
+  returns the current pending invite for that exact direction, if one exists.
+  
+  **Also see:** {{
+  docLink (docEmbedTermLink do turbo.store.invites.pendingBetween) }}
+  }}
+
+turbo.store.invites.pendingFromTo :
+  Database
+  -> UserId
+  -> UserId
+  -> ChannelId
+  -> '{Exception, Remote} Optional turbo.domain.Invite
+turbo.store.invites.pendingFromTo db fromUserId toUserId channelId =
+  do
+    use Text ==
+    pendingInvites = turbo.store.invites.listOutgoingPending db fromUserId ()
+    List.find
+      (cases
+        turbo.domain.Invite.Invite
+          _ candidateFromUserId candidateToUserId candidateChannelId _ _ _ _ ->
+          sameFrom =
+            UserId.toText candidateFromUserId == UserId.toText fromUserId
+          sameTo = UserId.toText candidateToUserId == UserId.toText toUserId
+          sameChannel =
+            ChannelId.toText candidateChannelId == ChannelId.toText channelId
+          sameFrom && sameTo
+            && sameChannel)
+      pendingInvites
+
+turbo.store.invites.pendingBetween.doc =
+  {{
+  {{
+  docExample 4 do
+    db userA userB channelId ->
+      turbo.store.invites.pendingBetween db userA userB channelId }} returns
+  any pending invite between the two users for `channelId`, regardless of
+  direction.
+  
+  **Also see:** {{
+  docLink (docEmbedTermLink do turbo.store.invites.pendingFromTo) }}
+  }}
+
+turbo.store.invites.pendingBetween :
+  Database
+  -> UserId
+  -> UserId
+  -> ChannelId
+  -> '{Exception, Remote} Optional turbo.domain.Invite
+turbo.store.invites.pendingBetween db userA userB channelId =
+  do
+    match turbo.store.invites.pendingFromTo db userA userB channelId () with
+      Some invite -> Some invite
+      None -> turbo.store.invites.pendingFromTo db userB userA channelId ()
+
+turbo.store.invites.listIncomingPending.doc =
+  {{
+  {{
+  docExample 2 do
+    db userId -> turbo.store.invites.listIncomingPending db userId }} returns
+  pending inbound invites for `userId`, newest first.
+  
+  **Also see:** {{
+  docLink (docEmbedTermLink do turbo.store.invites.listOutgoingPending) }}
+  }}
+
+turbo.store.invites.listIncomingPending :
+  Database -> UserId -> '{Exception, Remote} [turbo.domain.Invite]
+turbo.store.invites.listIncomingPending db userId =
+  do
+    use Text ==
+    use UserId toText
+    rows =
+      Stream.toList
+        (Stream.filter
+          (cases
+            ( (candidateToUserId, _, _),
+              turbo.domain.Invite.Invite _ _ _ _ status _ _ _) ->
+              sameUser = toText candidateToUserId == toText userId
+              isPending = match status with
+                turbo.domain.InviteStatus.Pending -> true
+                _                                 -> false
+              sameUser && isPending)
+          (OrderedTable.toStream (turbo.store.invites.tables.byToCreatedAt db)))
+    List.map (cases (_, invite) -> invite) (List.reverse rows)
+
+turbo.store.invites.listOutgoingPending.doc =
+  {{
+  {{
+  docExample 2 do
+    db userId -> turbo.store.invites.listOutgoingPending db userId }} returns
+  pending outbound invites for `userId`, newest first.
+  
+  **Also see:** {{
+  docLink (docEmbedTermLink do turbo.store.invites.listIncomingPending) }}
+  }}
+
+turbo.store.invites.listOutgoingPending :
+  Database -> UserId -> '{Exception, Remote} [turbo.domain.Invite]
+turbo.store.invites.listOutgoingPending db userId =
+  do
+    use Text ==
+    use UserId toText
+    rows =
+      Stream.toList
+        (Stream.filter
+          (cases
+            ( (candidateFromUserId, _, _),
+              turbo.domain.Invite.Invite _ _ _ _ status _ _ _) ->
+              sameUser = toText candidateFromUserId == toText userId
+              isPending = match status with
+                turbo.domain.InviteStatus.Pending -> true
+                _                                 -> false
+              sameUser && isPending)
+          (OrderedTable.toStream
+            (turbo.store.invites.tables.byFromCreatedAt db)))
+    List.map (cases (_, invite) -> invite) (List.reverse rows)
+
+turbo.store.invites.markConnectedForChannel.doc =
+  {{
+  {{
+  docExample 4 do
+    db userA userB channelId ->
+      turbo.store.invites.markConnectedForChannel db userA userB channelId }}
+  marks the pending invite between `userA` and `userB` for `channelId` as
+  connected, if one exists.
+  
+  **Also see:**
+  {{ docLink (docEmbedTermLink do turbo.store.invites.markDeclined) }}, {{
+  docLink (docEmbedTermLink do turbo.store.invites.markCancelled) }}
+  }}
+
+turbo.store.invites.markConnectedForChannel :
+  Database
+  -> UserId
+  -> UserId
+  -> ChannelId
+  -> '{Exception, Storage, Remote, Random} Optional turbo.domain.Invite
+turbo.store.invites.markConnectedForChannel db userA userB channelId =
+  do
+    match turbo.store.invites.pendingBetween db userA userB channelId () with
+      None -> None
+      Some
+        (turbo.domain.Invite.Invite
+          inviteId
+          fromUserId
+          toUserId
+          inviteChannelId
+          _
+          requestCount
+          createdAt
+          _) ->
+        use OrderedTable write
+        updatedAt = now!
+        updated =
+          turbo.domain.Invite.Invite
+            inviteId
+            fromUserId
+            toUserId
+            inviteChannelId
+            turbo.domain.InviteStatus.Connected
+            requestCount
+            createdAt
+            (Some updatedAt)
+        _ = write (turbo.store.invites.tables.byId db) inviteId updated
+        _ =
+          write
+            (turbo.store.invites.tables.byToCreatedAt db)
+            (toUserId, createdAt, inviteId)
+            updated
+        _ =
+          write
+            (turbo.store.invites.tables.byFromCreatedAt db)
+            (fromUserId, createdAt, inviteId)
+            updated
+        Some updated
+
+turbo.store.invites.markDeclined.doc =
+  {{
+  {{
+  docExample 2 do db inviteId -> turbo.store.invites.markDeclined db inviteId
+  }} marks a pending invite as declined.
+  }}
+
+turbo.store.invites.markDeclined :
+  Database
+  -> turbo.domain.InviteId
+  -> '{Exception, Storage, Remote, Random} Optional turbo.domain.Invite
+turbo.store.invites.markDeclined db inviteId =
+  turbo.store.invites.internal.updateStatus
+    db inviteId turbo.domain.InviteStatus.Declined
+
+turbo.store.invites.markCancelled.doc =
+  {{
+  {{
+  docExample 2 do db inviteId -> turbo.store.invites.markCancelled db inviteId
+  }} marks a pending invite as cancelled by the sender.
+  }}
+
+turbo.store.invites.markCancelled :
+  Database
+  -> turbo.domain.InviteId
+  -> '{Exception, Storage, Remote, Random} Optional turbo.domain.Invite
+turbo.store.invites.markCancelled db inviteId =
+  turbo.store.invites.internal.updateStatus
+    db inviteId turbo.domain.InviteStatus.Cancelled
+
+turbo.store.invites.internal.updateStatus :
+  Database
+  -> turbo.domain.InviteId
+  -> turbo.domain.InviteStatus
+  -> '{Exception, Storage, Remote, Random} Optional turbo.domain.Invite
+turbo.store.invites.internal.updateStatus db inviteId nextStatus =
+  do
+    use OrderedTable write
+    use turbo.domain.Invite Invite
+    table = turbo.store.invites.tables.byId db
+    match OrderedTable.tryRead table inviteId with
+      None -> None
+      Some
+        (Invite
+          _
+          fromUserId
+          toUserId
+          channelId
+          currentStatus
+          requestCount
+          createdAt
+          _) ->
+        updatedAt = now!
+        status = match currentStatus with
+          turbo.domain.InviteStatus.Pending -> nextStatus
+          _                                 -> currentStatus
+        updated =
+          Invite
+            inviteId
+            fromUserId
+            toUserId
+            channelId
+            status
+            requestCount
+            createdAt
+            (Some updatedAt)
+        _ = write table inviteId updated
+        _ =
+          write
+            (turbo.store.invites.tables.byToCreatedAt db)
+            (toUserId, createdAt, inviteId)
+            updated
+        _ =
+          write
+            (turbo.store.invites.tables.byFromCreatedAt db)
+            (fromUserId, createdAt, inviteId)
+            updated
+        Some updated
+
+turbo.store.invites.tables.byId :
+  Database -> OrderedTable turbo.domain.InviteId turbo.domain.Invite
+turbo.store.invites.tables.byId db =
+  OrderedTable.named db "turboInvitesById_v1" Universal.ordering
+
+turbo.store.invites.tables.byToCreatedAt :
+  Database
+  -> OrderedTable (UserId, Instant, turbo.domain.InviteId) turbo.domain.Invite
+turbo.store.invites.tables.byToCreatedAt db =
+  OrderedTable.named db "turboInvitesByToCreatedAt_v1" Universal.ordering
+
+turbo.store.invites.tables.byFromCreatedAt :
+  Database
+  -> OrderedTable (UserId, Instant, turbo.domain.InviteId) turbo.domain.Invite
+turbo.store.invites.tables.byFromCreatedAt db =
+  OrderedTable.named db "turboInvitesByFromCreatedAt_v1" Universal.ordering
+
+-- The definitions below no longer typecheck with the changes above.
+-- Please fix the errors and try `update` again.
+
+turbo.deploy : '{IO, Exception} URI
+turbo.deploy = Cloud.main do
+  env = Environment.named "turbo-production"
+  database = Database.named "turbo-control-plane"
+  Database.assign database env
+  serviceHash = Route.deployWebSocket env (web database)
+  serviceName = ServiceName.named "turbo"
+  ServiceName.assign serviceName serviceHash
+
+turbo.deploy.doc : Doc
+turbo.deploy.doc =
+  {{
+  {{ docExample 0 do turbo.deploy }} deploys Turbo's backend to Unison Cloud.
+  
+  This entrypoint provisions the environment, attaches the database, and
+  exposes the shared HTTP plus websocket Turbo service.
+  }}
+
+turbo.serveHttpLocal : '{IO, Exception} ()
+turbo.serveHttpLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8081)
+    Random.run do
+      Threads.run do
+        _ = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localHttpService = httpWithConfig "local-http" false database
+            hash = deployHttp env (Route.run localHttpService)
+            serviceNameText = "turbo"
+            serviceName = ServiceName.named serviceNameText
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8081/h/" ++ hashText ++ "/")
+            ()
+        printLine
+          "Local HTTP computation starting on port 8081. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        ()
+
+turbo.serveHttpLocal.doc : Doc
+turbo.serveHttpLocal.doc =
+  {{
+  {{ docExample 0 do serveHttpLocal }} runs Turbo's HTTP control plane locally
+  on a fixed development port.
+  
+  This entrypoint bypasses the websocket-style local cloud exposure and serves
+  the HTTP routes through a plain local cloud HTTP service on port `8081`.
+  }}
+
+turbo.serveLocal :
+  '{IO, Exception} ServiceHash
+    HttpRequest (Either HttpResponse (WebSocket ->{Remote, WebSockets} ()))
+turbo.serveLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config = LocalCloudConfig.default() |> printBanners.set true
+    Random.run do
+      Threads.run do
+        hash = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localHttpService = httpWithConfig "local-cloud" true database
+            hash =
+              deployHttpWebSocket
+                env (req -> Left (Route.run localHttpService req))
+            serviceNameText = "turbo"
+            serviceName = ServiceName.named serviceNameText
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8080/h/" ++ hashText ++ "/")
+            hash
+        printLine "Local Cloud computation starting. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        hash
+
+turbo.serveLocal.doc : Doc
+turbo.serveLocal.doc =
+  {{
+  {{ docExample 0 do serveLocal }} runs Turbo's backend locally using the same
+  shared service logic intended for deployment.
+  
+  This entrypoint serves the combined HTTP control plane and websocket
+  signaling route under local cloud serving, keeps the local service alive so
+  the printed hash URL remains reachable during development, and prints both
+  named and hash local URLs for local debugging.
+  }}
+
+turbo.service.channels.join :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.join db =
+  do
+    use Parser /
+    use Text ==
+    use memberships add
+    use object empty
+    channelIdText = route POST (s "v1" / s "channels" / Parser.text / s "join")
+    currentUser = requireUser db ()
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    fields = decodeJson (Decoder.object Decoder.text)
+    channelId = ChannelId.fromText channelIdText
+    joinedJson membership presence =
+      membershipUserId =
+        (ChannelMembership _ userId _) = membership
+        userId
+      presenceDeviceId =
+        (DevicePresence deviceId _ _ _ _) = presence
+        deviceId
+      empty
+        |> addText "channelId" channelIdText
+        |> addText "userId" (UserId.toText membershipUserId)
+        |> addText "deviceId" (DeviceId.toText presenceDeviceId)
+        |> addText "status" "joined"
+    channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+    match channelOpt with
+      None -> notFound.json (empty |> addText "error" "channel not found")
+      Some channel ->
+        use UserId toText
+        otherUserId =
+          (DirectChannel _ lowUserId highUserId _) = channel
+          if toText lowUserId == toText currentUserId then highUserId
+          else lowUserId
+        match Map.get "deviceId" fields with
+          None -> badRequest.json (empty |> addText "error" "missing deviceId")
+          Some deviceIdText ->
+            _ = add db channelId currentUserId ()
+            _ = add db channelId otherUserId ()
+            presence =
+              presence.upsert
+                db
+                (DeviceId.fromText deviceIdText)
+                currentUserId
+                Online
+                (Some channelId)
+                ()
+            _ =
+              match getForUserInChannel db otherUserId channelId () with
+                Some _ ->
+                  markConnectedForChannel
+                    db currentUserId otherUserId channelId ()
+                None -> None
+            membership = add db channelId currentUserId ()
+            ok.json (joinedJson membership presence)
+
+turbo.service.channels.join.doc : Doc
+turbo.service.channels.join.doc =
+  {{
+  {{ docExample 1 do db -> channels.join db }} marks the caller's device as
+  joined to a direct channel.
+  }}
+
+turbo.service.channels.leave.doc : Doc
+turbo.service.channels.leave.doc =
+  {{
+  `` leave db `` clears the caller's active device-channel binding for
+  `channelId`.
+  
+  This is the control-plane leave operation used when a device exits a
+  conversation.
+  
+  **Also see:** {clearActiveChannel}, {channels.join}
+  }}
+
+turbo.service.channels.state :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.state db =
+  do
+    use Optional map
+    use Parser / text
+    use Text ==
+    use object empty
+    (channelIdText, deviceIdText) =
+      route GET (s "v1" / s "channels" / text / s "state" / text => Tuple.pair)
+    currentUser = requireUser db ()
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    channelId = ChannelId.fromText channelIdText
+    deviceId = DeviceId.fromText deviceIdText
+    match OrderedTable.tryRead (channels.tables.byId db) channelId with
+      None -> notFound.json (empty |> addText "error" "channel not found")
+      Some (DirectChannel _ lowUserId highUserId _) ->
+        peerUserId =
+          if UserId.toText lowUserId == UserId.toText currentUserId then
+            highUserId
+          else lowUserId
+        selfPresence = presence.get db deviceId ()
+        selfOnline =
+          match selfPresence with
+            Some (DevicePresence _ presenceUserId Online _ _) ->
+              UserId.toText presenceUserId == UserId.toText currentUserId
+            _ -> false
+        selfJoined =
+          match selfPresence with
+            Some
+              (DevicePresence _ presenceUserId Online (Some activeChannelId) _) ->
+              UserId.toText presenceUserId == UserId.toText currentUserId
+                && ChannelId.toText activeChannelId
+                  == ChannelId.toText channelId
+            _ -> false
+        peerPresence = getForUser db peerUserId ()
+        peerOnline = isSome peerPresence
+        peerJoined = isSome (getForUserInChannel db peerUserId channelId ())
+        activeTransmit = currentTransmit db channelId ()
+        activeTransmitterUserId =
+          map
+            (cases TransmitState _ activeUserId _ _ _ _ _ -> activeUserId)
+            activeTransmit
+        activeTransmitExpiresAt =
+          map
+            (cases
+              TransmitState _ _ _ _ _ _ expiresAt -> Instant.toText expiresAt)
+            activeTransmit
+        pendingInvite = pendingBetween db currentUserId peerUserId channelId ()
+        pendingInviteId =
+          map
+            (cases Invite inviteId _ _ _ _ _ _ _ -> InviteId.toText inviteId)
+            pendingInvite
+        pendingDirection = map (directionText currentUserId) pendingInvite
+        status =
+          match activeTransmitterUserId with
+            Some activeUserId ->
+              if UserId.toText activeUserId == UserId.toText currentUserId then
+                "self-transmitting"
+              else "peer-transmitting"
+            None ->
+              if selfJoined
+                && peerJoined then "ready"
+              else
+                match pendingDirection with
+                  Some "incoming" -> "incoming-request"
+                  Some "outgoing" -> "requested"
+                  _ -> if selfJoined then "waiting-for-peer" else "idle"
+        _ =
+          if selfJoined && peerJoined then
+            markConnectedForChannel db currentUserId peerUserId channelId ()
+          else None
+        ok.json
+          (empty
+            |> addText "channelId" channelIdText
+            |> addText "selfUserId" (UserId.toText currentUserId)
+            |> addText "peerUserId" (UserId.toText peerUserId)
+            |> addBoolean "selfOnline" selfOnline
+            |> addBoolean "peerOnline" peerOnline
+            |> addBoolean "selfJoined" selfJoined
+            |> addBoolean "peerJoined" peerJoined
+            |> addOptionalText "pendingInviteId" pendingInviteId
+            |> addOptionalText "pendingDirection" pendingDirection
+            |> addOptionalText
+                 "activeTransmitterUserId"
+                 (map UserId.toText activeTransmitterUserId)
+            |> addOptionalText
+                 "activeTransmitExpiresAt" activeTransmitExpiresAt
+            |> addText "status" status)
+
+turbo.service.channels.state.doc : Doc
+turbo.service.channels.state.doc =
+  {{
+  `` channels.state db `` returns the authoritative control-plane snapshot for
+  a direct channel and device.
+  
+  The snapshot drives contact pills and conversation state in the client
+  without relying on local ad hoc booleans.
+  
+  **Also see:** {invites.create}, {readiness}
+  }}
+
+turbo.service.config.doc : Doc
+turbo.service.config.doc =
+  {{
+  {{
+  docExample 2 do
+    mode supportsWebSocket -> service.config mode supportsWebSocket }} serves
+  backend runtime capabilities for the client.
+  
+  Clients can use this route to discover whether the current backend supports
+  websocket signaling and which runtime mode is active.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do httpWithConfig) }}, {web}
+  }}
+
+turbo.service.dev.resetState :
+  Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.dev.resetState db =
+  do
+    use List map size
+    use OrderedTable database toStream
+    use OrderedTable.delete tx
+    use Parser /
+    use Stream toList
+    noCapture POST (s "v1" / s "dev" / s "reset-state")
+    runtimeTable = byChannel db
+    runtimeKeys =
+      map (cases (channelId, _) -> channelId) (toList (toStream runtimeTable))
+    _ = 
+      transact (database runtimeTable) do
+        List.foreach runtimeKeys key -> tx runtimeTable key
+    presenceTable = presence.tables.byDevice db
+    presenceKeys =
+      map (cases (deviceId, _) -> deviceId) (toList (toStream presenceTable))
+    _ = 
+      transact (database presenceTable) do
+        List.foreach presenceKeys key -> tx presenceTable key
+    tokenTable = byChannelUserDevice db
+    tokenKeys = map (cases (key, _) -> key) (toList (toStream tokenTable))
+    _ = 
+      transact (database tokenTable) do
+        List.foreach tokenKeys key -> tx tokenTable key
+    inviteById = invites.tables.byId db
+    inviteByIdKeys =
+      map (cases (inviteId, _) -> inviteId) (toList (toStream inviteById))
+    _ = 
+      transact (database inviteById) do
+        List.foreach inviteByIdKeys key -> tx inviteById key
+    inviteByTo = byToCreatedAt db
+    inviteByToKeys = map (cases (key, _) -> key) (toList (toStream inviteByTo))
+    _ = 
+      transact (database inviteByTo) do
+        List.foreach inviteByToKeys key -> tx inviteByTo key
+    inviteByFrom = byFromCreatedAt db
+    inviteByFromKeys =
+      map (cases (key, _) -> key) (toList (toStream inviteByFrom))
+    _ = 
+      transact (database inviteByFrom) do
+        List.foreach inviteByFromKeys key -> tx inviteByFrom key
+    ok.json
+      (object.empty
+        |> addText "status" "reset"
+        |> addNat "clearedTransmitStates" (size runtimeKeys)
+        |> addNat "clearedPresenceEntries" (size presenceKeys)
+        |> addNat "clearedTokenEntries" (size tokenKeys)
+        |> addNat "clearedInvites" (size inviteByIdKeys))
+
+turbo.service.dev.resetState.doc : Doc
+turbo.service.dev.resetState.doc =
+  {{
+  `` resetState db `` clears Turbo's local dev runtime state.
+  
+  This deletes durable state that can get wedged during local iteration,
+  including presence, pending or connected invites, transient transmit locks,
+  and stored ephemeral tokens. It deliberately keeps seeded users, devices, and
+  channels.
+  
+  **Also see:** {seed}
+  }}
+
+turbo.service.health.doc : Doc
+turbo.service.health.doc =
+  {{
+  {{ docExample 0 do health }} serves a tiny health endpoint for local route
+  debugging.
+  
+  This route matches `GET /v1/health` and returns a small JSON payload.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do service.http) }}
+  }}
+
+turbo.service.http :
+  Database -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.http db = httpWithConfig "cloud" true db
+
+turbo.service.http.doc : Doc
+turbo.service.http.doc =
+  {{
+  {{ docExample 1 do db -> service.http db }} combines Turbo's first HTTP
+  control-plane routes.
+  
+  This initial slice covers dev auth, user lookup, device registration, and
+  stable direct channel creation.
+  }}
+
+turbo.service.httpWithConfig :
+  Text
+  -> Boolean
+  -> Database
+  -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.httpWithConfig mode supportsWebSocket db =
+  use Route or
+  or
+    health
+    (or
+      (service.config mode supportsWebSocket)
+      (or
+        (seed db)
+        (or
+          (resetState db)
+          (or
+            (service.presence.heartbeat db)
+            (or
+              (session db)
+              (or
+                (service.devices.register db)
+                (or
+                  (users.byHandle db)
+                  (or
+                    (presenceByHandle db)
+                    (or
+                      (invites.create db)
+                      (or
+                        (incoming db)
+                        (or
+                          (outgoing db)
+                          (or
+                            (invites.accept db)
+                            (or
+                              (decline db)
+                              (or
+                                (invites.cancel db)
+                                (or
+                                  (channels.direct db)
+                                  (or
+                                    (channels.join db)
+                                    (or
+                                      (leave db)
+                                      (or
+                                        (channels.state db)
+                                        (or
+                                          (ephemeralToken db)
+                                          (or
+                                            (channels.beginTransmit db)
+                                            (or
+                                              (channels.renewTransmit db)
+                                              (or
+                                                (channels.endTransmit db)
+                                                (readiness db)))))))))))))))))))))))
+
+turbo.service.httpWithConfig.doc : Doc
+turbo.service.httpWithConfig.doc =
+  {{
+  {{
+  docExample 3 do
+    mode supportsWebSocket db -> httpWithConfig mode supportsWebSocket db }}
+  combines Turbo's HTTP control-plane routes with a small runtime capability
+  endpoint.
+  
+  The capability endpoint lets clients adapt cleanly between local HTTP-only
+  development and cloud websocket-capable serving.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do service.config) }}, {{
+  docLink (docEmbedTermLink do service.http) }}
+  }}
+
+turbo.service.invites.accept :
+  Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.invites.accept db =
+  do
+    use Parser /
+    use Text ==
+    use UserId toText
+    use object empty
+    inviteIdText = route POST (s "v1" / s "invites" / Parser.text / s "accept")
+    currentUser = requireUser db ()
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    inviteId = InviteId.fromText inviteIdText
+    match invites.getById db inviteId () with
+      None -> notFound.json (empty |> addText "error" "invite not found")
+      Some invite ->
+        (Invite _ _ toUserId _ status _ _ _) = invite
+        if Boolean.not (toText toUserId == toText currentUserId) then
+          unauthorized.json (empty |> addText "error" "not invite recipient")
+        else
+          inviteJson = internal.inviteJson db currentUserId invite ()
+          ok.json
+            (inviteJson
+              |> addBoolean "accepted" true
+              |> (addBoolean "pendingJoin" match status with
+                   Pending -> true
+                   _       -> false))
+
+turbo.service.invites.accept.doc : Doc
+turbo.service.invites.accept.doc =
+  {{
+  `` invites.accept db `` acknowledges an incoming invite for the current user.
+  
+  The invite remains pending until both peers have actually joined the channel;
+  the join step is still authoritative for transitioning to connected state.
+  
+  **Also see:** {channels.join}, {invites.getById}
+  }}
+
+turbo.service.invites.cancel :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.invites.cancel db =
+  do
+    use Parser /
+    use Text ==
+    use UserId toText
+    use object empty
+    inviteIdText = route POST (s "v1" / s "invites" / Parser.text / s "cancel")
+    currentUser = requireUser db ()
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    inviteId = InviteId.fromText inviteIdText
+    match invites.getById db inviteId () with
+      None -> notFound.json (empty |> addText "error" "invite not found")
+      Some invite ->
+        (Invite _ fromUserId _ _ _ _ _ _) = invite
+        if Boolean.not (toText fromUserId == toText currentUserId) then
+          unauthorized.json (empty |> addText "error" "not invite sender")
+        else
+          match markCancelled db inviteId () with
+            None -> notFound.json (empty |> addText "error" "invite not found")
+            Some updated -> ok.json (inviteJson db currentUserId updated ())
+
+turbo.service.invites.cancel.doc : Doc
+turbo.service.invites.cancel.doc =
+  {{
+  `` invites.cancel db `` cancels an outgoing pending invite for the current
+  user.
+  
+  **Also see:** {markCancelled}
+  }}
+
+turbo.service.invites.create :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.invites.create db =
+  do
+    use Map get
+    use Parser /
+    use Text ==
+    use UserId toText
+    use object empty
+    noCapture POST (s "v1" / s "invites")
+    currentUser = requireUser db ()
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    fields = decodeJson (Decoder.object Decoder.text)
+    resolvedOther = match get "otherUserId" fields with
+      Some otherUserIdText -> Some (UserId.fromText otherUserIdText)
+      None                 ->
+        match get "otherHandle" fields with
+          None             -> None
+          Some otherHandle ->
+            match getByHandle db otherHandle () with
+              None                            -> None
+              Some (User otherUserId _ _ _ _) -> Some otherUserId
+    match resolvedOther with
+      None ->
+        badRequest.json
+          (empty |> addText "error" "missing otherUserId or otherHandle")
+      Some otherUserId ->
+        if toText otherUserId == toText currentUserId then
+          badRequest.json (empty |> addText "error" "cannot invite self")
+        else
+          channel = getOrCreateDirect db currentUserId otherUserId ()
+          channelId =
+            (DirectChannel channelId _ _ _) = channel
+            channelId
+          invite = createOrReuse db currentUserId otherUserId channelId ()
+          availability = users.availability db otherUserId ()
+          inviteJson = internal.inviteJson db currentUserId invite ()
+          ok.json
+            (inviteJson
+              |> addText "targetAvailability" (availabilityText availability)
+              |> (addBoolean "shouldAutoJoinPeer" match availability with
+                   Available -> true
+                   _         -> false))
+
+turbo.service.invites.create.doc : Doc
+turbo.service.invites.create.doc =
+  {{
+  `` invites.create db `` creates or reuses a pending direct invite.
+  
+  If the target user is online and idle, the response indicates that the peer
+  should auto-join when it notices the incoming request.
+  
+  **Also see:** {createOrReuse}, {incoming}
+  }}
+
+turbo.service.invites.decline :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.invites.decline db =
+  do
+    use Parser /
+    use Text ==
+    use UserId toText
+    use object empty
+    inviteIdText =
+      route POST (s "v1" / s "invites" / Parser.text / s "decline")
+    currentUser = requireUser db ()
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    inviteId = InviteId.fromText inviteIdText
+    match invites.getById db inviteId () with
+      None -> notFound.json (empty |> addText "error" "invite not found")
+      Some invite ->
+        (Invite _ _ toUserId _ _ _ _ _) = invite
+        if Boolean.not (toText toUserId == toText currentUserId) then
+          unauthorized.json (empty |> addText "error" "not invite recipient")
+        else
+          match markDeclined db inviteId () with
+            None -> notFound.json (empty |> addText "error" "invite not found")
+            Some updated -> ok.json (inviteJson db currentUserId updated ())
+
+turbo.service.invites.decline.doc : Doc
+turbo.service.invites.decline.doc =
+  {{
+  `` decline db `` declines a pending invite for the current user.
+  
+  **Also see:** {markDeclined}
+  }}
+
+turbo.service.invites.incoming :
+  Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.invites.incoming db =
+  do
+    use Parser /
+    noCapture GET (s "v1" / s "invites" / s "incoming")
+    currentUser = requireUser db ()
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    invites = listIncomingPending db currentUserId ()
+    inviteJsons =
+      List.map (invite -> inviteJson db currentUserId invite ()) invites
+    ok.json (Json.array inviteJsons)
+
+turbo.service.invites.incoming.doc : Doc
+turbo.service.invites.incoming.doc =
+  {{
+  `` incoming db `` lists pending incoming requests for the current user,
+  newest first.
+  
+  **Also see:** {outgoing}
+  }}
+
+turbo.service.invites.internal.directionText : UserId -> Invite -> Text
+turbo.service.invites.internal.directionText currentUserId = cases
+  Invite _ fromUserId _ _ _ _ _ _ ->
+    if UserId.toText fromUserId Text.== UserId.toText currentUserId then
+      "outgoing"
+    else "incoming"
+
+turbo.service.invites.internal.inviteJson :
+  Database -> UserId -> Invite -> '{Exception, Remote} Json
+turbo.service.invites.internal.inviteJson db currentUserId invite =
+  do
+    use users getById
+    fromHandle =
+      (Invite _ fromUserId _ _ _ _ _ _) = invite
+      match getById db fromUserId () with
+        Some (User _ handleText _ _ _) -> Some handleText
+        None                           -> None
+    toHandle =
+      (Invite _ _ toUserId _ _ _ _ _) = invite
+      match getById db toUserId () with
+        Some (User _ handleText _ _ _) -> Some handleText
+        None                           -> None
+    (Invite inviteId fromUserId toUserId channelId status requestCount createdAt updatedAt) =
+      invite
+    statusText = match status with
+      Pending                -> "pending"
+      Connected              -> "connected"
+      Declined               -> "declined"
+      InviteStatus.Cancelled -> "cancelled"
+    object.empty
+      |> addText "inviteId" (InviteId.toText inviteId)
+      |> addText "fromUserId" (UserId.toText fromUserId)
+      |> addOptionalText "fromHandle" fromHandle
+      |> addText "toUserId" (UserId.toText toUserId)
+      |> addOptionalText "toHandle" toHandle
+      |> addText "channelId" (ChannelId.toText channelId)
+      |> addText "status" statusText
+      |> addText "direction" (directionText currentUserId invite)
+      |> addNat "requestCount" requestCount
+      |> addText "createdAt" (Instant.toText createdAt)
+      |> addOptionalText "updatedAt" (Optional.map Instant.toText updatedAt)
+
+turbo.service.invites.outgoing :
+  Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.invites.outgoing db =
+  do
+    use Parser /
+    noCapture GET (s "v1" / s "invites" / s "outgoing")
+    currentUser = requireUser db ()
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    invites = listOutgoingPending db currentUserId ()
+    inviteJsons =
+      List.map (invite -> inviteJson db currentUserId invite ()) invites
+    ok.json (Json.array inviteJsons)
+
+turbo.service.invites.outgoing.doc : Doc
+turbo.service.invites.outgoing.doc =
+  {{
+  `` outgoing db `` lists pending outgoing requests for the current user,
+  newest first.
+  
+  **Also see:** {incoming}
+  }}
+
+turbo.service.routes.tests.examples : '{IO, Exception} [Result]
+turbo.service.routes.tests.examples =
+  do
+    test.verify do
+      use cloud simple
+      setup _ = Database.default()
+      server db = service.http db ()
+      healthStatus = 
+        catch do simple setup server (clientStatusGet "/v1/health")
+      configStatus = 
+        catch do simple setup server (clientStatusGet "/v1/config")
+      seedStatus = 
+        catch do simple setup server (clientStatusPost "/v1/dev/seed")
+      resetStatus = 
+        catch do simple setup server (clientStatusPost "/v1/dev/reset-state")
+      heartbeatStatus = 
+        catch do
+          simple setup server (clientStatusPost "/v1/presence/heartbeat")
+      incomingInvitesStatus = 
+        catch do simple setup server (clientStatusGet "/v1/invites/incoming")
+      channelStateStatus = 
+        catch do
+          simple
+            setup server (clientStatusGet "/v1/channels/example/state/device")
+      ensureEqual healthStatus (Right 200)
+      ensureEqual configStatus (Right 200)
+      ensureEqual seedStatus (Right 200)
+      ensureEqual resetStatus (Right 200)
+      ensureEqual heartbeatStatus (Right 401)
+      ensureEqual incomingInvitesStatus (Right 401)
+      ensureEqual channelStateStatus (Right 401)
+
+turbo.service.web :
+  Database
+  -> '{Route,
+  Exception,
+  Http,
+  OpenWebSocket,
+  Storage,
+  Remote,
+  WebSockets,
+  Random,
+  Log} ()
+turbo.service.web db = Route.or (ws db) (service.http db)
+
+turbo.service.web.doc : Doc
+turbo.service.web.doc =
+  {{
+  `` web db `` combines Turbo's HTTP control plane with the websocket signaling
+  endpoint.
+  
+  This is the shared route intended for both local serving and cloud
+  deployment.
+  
+  **Also see:** {service.http}, {ws}
+  }}
+
+turbo.service.ws.doc : Doc
+turbo.service.ws.doc =
+  {{
+  `` ws db `` serves Turbo's authenticated websocket signaling endpoint at
+  `/v1/ws`.
+  
+  The websocket handshake uses the existing dev auth header plus a required
+  `deviceId` query parameter. Each incoming text frame must be a serialized
+  {type SignalEnvelope}.
+  
+  **Also see:** {web}
+  }}
+
+
+
+---- Anything below this line is ignored by Unison.
+
+
+type turbo.domain.InviteIdTag = InviteIdTag
+
+type turbo.domain.InviteId = TurboInviteId Text turbo.domain.InviteIdTag
+
+type turbo.domain.InviteStatus
+  = Pending
+  | Connected
+  | Declined
+  | Cancelled
+
+type turbo.domain.Invite
+  = Invite
+      turbo.domain.InviteId
+      turbo.domain.UserId
+      turbo.domain.UserId
+      turbo.domain.ChannelId
+      turbo.domain.InviteStatus
+      Nat
+      Instant
+      (Optional Instant)
+
+type turbo.domain.UserAvailability
+  = Available
+  | Busy turbo.domain.ChannelId
+  | Offline
+
+type turbo.domain.ChannelStateStatus
+  = Idle
+  | Requested
+  | IncomingRequest
+  | WaitingForPeer
+  | Ready
+  | SelfTransmitting
+  | PeerTransmitting
+
+turbo.domain.InviteId.toText.doc = {{
+
+``InviteId.toText inviteId`` returns the raw text inside `inviteId`.
+
+*Also see:* {turbo.domain.UserId.toText}
+
+}}
+turbo.domain.InviteId.toText : turbo.domain.InviteId -> Text
+turbo.domain.InviteId.toText = cases
+  TurboInviteId text _ -> text
+
+turbo.domain.InviteId.fromText.doc = {{
+
+``InviteId.fromText text`` wraps `text` as an invite id.
+
+*Also see:* {turbo.domain.InviteId.toText}
+
+}}
+turbo.domain.InviteId.fromText : Text -> turbo.domain.InviteId
+turbo.domain.InviteId.fromText text = TurboInviteId text InviteIdTag
+
+test> turbo.domain.InviteId.toText.tests.examples = test.verify do
+  labeled "roundtrips a simple invite id" do
+    test.ensureEqual
+      (turbo.domain.InviteId.toText (turbo.domain.InviteId.fromText "invite-1"))
+      "invite-1"
+
+test> turbo.domain.InviteId.toText.tests.props = test.verify do
+  Each.repeat 100
+  suffix = Nat.toText (Random.natIn 0 1000000)
+  raw = "invite-" ++ suffix
+  labeled "toText inverts fromText" do
+    test.ensureEqual
+      (turbo.domain.InviteId.toText (turbo.domain.InviteId.fromText raw))
+      raw
+
+turbo.store.presence.heartbeat.doc = {{
+
+``turbo.store.presence.heartbeat db deviceId userId`` marks `deviceId` online without discarding its current active channel, if any.
+
+This is used for app-level online/offline presence independent of channel join state.
+
+*Also see:* {turbo.store.presence.upsert}, {turbo.store.users.availability}
+
+}}
+turbo.store.presence.heartbeat :
+  Database
+  -> turbo.domain.DeviceId
+  -> turbo.domain.UserId
+  -> '{Exception, unison_cloud_27_3_0.Storage, Remote, Random} turbo.domain.DevicePresence
+turbo.store.presence.heartbeat db deviceId userId = do
+  existingChannelId = match turbo.store.presence.get db deviceId () with
+    None -> None
+    Some (DevicePresence _ _ _ currentChannelId _) -> currentChannelId
+  turbo.store.presence.upsert db deviceId userId Online existingChannelId ()
+
+turbo.store.presence.clearActiveChannel.doc = {{
+
+``turbo.store.presence.clearActiveChannel db deviceId userId`` keeps `deviceId` online but clears any active channel binding.
+
+*Also see:* {turbo.store.presence.heartbeat}, {turbo.store.presence.upsert}
+
+}}
+turbo.store.presence.clearActiveChannel :
+  Database
+  -> turbo.domain.DeviceId
+  -> turbo.domain.UserId
+  -> '{Exception, unison_cloud_27_3_0.Storage, Remote, Random} turbo.domain.DevicePresence
+turbo.store.presence.clearActiveChannel db deviceId userId =
+  turbo.store.presence.upsert db deviceId userId Online None
+
+turbo.store.users.availability.doc = {{
+
+``turbo.store.users.availability db userId`` derives whether `userId` is online and available, already busy in another channel, or offline.
+
+*Also see:* {turbo.store.presence.getForUser}
+
+}}
+turbo.store.users.availability :
+  Database
+  -> turbo.domain.UserId
+  -> '{Exception, Remote} turbo.domain.UserAvailability
+turbo.store.users.availability db userId = do
+  match turbo.store.presence.getForUser db userId () with
+    None -> turbo.domain.UserAvailability.Offline
+    Some (DevicePresence _ _ status currentChannelId _) ->
+      match status with
+        turbo.domain.DevicePresenceStatus.Offline -> turbo.domain.UserAvailability.Offline
+        turbo.domain.DevicePresenceStatus.Online ->
+          match currentChannelId with
+            None -> Available
+            Some channelId -> Busy channelId
+
+turbo.store.invites.createOrReuse.doc = {{
+
+``turbo.store.invites.createOrReuse db fromUserId toUserId channelId`` creates a pending invite unless one already exists for the same sender, receiver, and channel.
+
+If a pending invite already exists, it is reused and its `requestCount` is incremented.
+
+*Also see:* {turbo.store.invites.pendingFromTo}, {turbo.store.invites.listIncomingPending}
+
+}}
+turbo.store.invites.createOrReuse :
+  Database
+  -> turbo.domain.UserId
+  -> turbo.domain.UserId
+  -> turbo.domain.ChannelId
+  -> '{Exception, unison_cloud_27_3_0.Storage, Remote, Random} turbo.domain.Invite
+turbo.store.invites.createOrReuse db fromUserId toUserId channelId = do
+  existing = turbo.store.invites.pendingFromTo db fromUserId toUserId channelId ()
+  match existing with
+    Some (Invite inviteId existingFromUserId existingToUserId existingChannelId status requestCount createdAt _) ->
+      table = turbo.store.invites.tables.byId db
+      byToCreatedAt = turbo.store.invites.tables.byToCreatedAt db
+      byFromCreatedAt = turbo.store.invites.tables.byFromCreatedAt db
+      updatedAt = now!
+      updated =
+        Invite
+          inviteId
+          existingFromUserId
+          existingToUserId
+          existingChannelId
+          status
+          (requestCount + 1)
+          createdAt
+          (Some updatedAt)
+      _ = OrderedTable.write table inviteId updated
+      _ = OrderedTable.write byToCreatedAt (existingToUserId, createdAt, inviteId) updated
+      _ = OrderedTable.write byFromCreatedAt (existingFromUserId, createdAt, inviteId) updated
+      updated
+    None ->
+      table = turbo.store.invites.tables.byId db
+      byToCreatedAt = turbo.store.invites.tables.byToCreatedAt db
+      byFromCreatedAt = turbo.store.invites.tables.byFromCreatedAt db
+      now = now!
+      transact (OrderedTable.database table) do
+        inviteId = turbo.domain.InviteId.fromText (Random.bytes 20 |> Bytes.base32Hex)
+        invite = Invite inviteId fromUserId toUserId channelId Pending 1 now None
+        _ = OrderedTable.write.tx table inviteId invite
+        _ = OrderedTable.write.tx byToCreatedAt (toUserId, now, inviteId) invite
+        _ = OrderedTable.write.tx byFromCreatedAt (fromUserId, now, inviteId) invite
+        invite
+
+turbo.store.invites.getById.doc = {{
+
+``turbo.store.invites.getById db inviteId`` looks up an invite by backend id.
+
+*Also see:* {turbo.store.invites.createOrReuse}, {turbo.store.invites.markCancelled}
+
+}}
+turbo.store.invites.getById :
+  Database
+  -> turbo.domain.InviteId
+  -> '{Exception, Remote} Optional turbo.domain.Invite
+turbo.store.invites.getById db inviteId = do
+  OrderedTable.tryRead (turbo.store.invites.tables.byId db) inviteId
+
+turbo.store.invites.pendingFromTo.doc = {{
+
+``turbo.store.invites.pendingFromTo db fromUserId toUserId channelId`` returns the current pending invite for that exact direction, if one exists.
+
+*Also see:* {turbo.store.invites.pendingBetween}
+
+}}
+turbo.store.invites.pendingFromTo :
+  Database
+  -> turbo.domain.UserId
+  -> turbo.domain.UserId
+  -> turbo.domain.ChannelId
+  -> '{Exception, Remote} Optional turbo.domain.Invite
+turbo.store.invites.pendingFromTo db fromUserId toUserId channelId = do
+  pendingInvites = turbo.store.invites.listOutgoingPending db fromUserId ()
+  List.find
+    (cases
+      Invite _ candidateFromUserId candidateToUserId candidateChannelId _ _ _ _ ->
+        sameFrom = (Text.==) (turbo.domain.UserId.toText candidateFromUserId) (turbo.domain.UserId.toText fromUserId)
+        sameTo = (Text.==) (turbo.domain.UserId.toText candidateToUserId) (turbo.domain.UserId.toText toUserId)
+        sameChannel = (Text.==) (turbo.domain.ChannelId.toText candidateChannelId) (turbo.domain.ChannelId.toText channelId)
+        sameFrom && sameTo && sameChannel)
+    pendingInvites
+
+turbo.store.invites.pendingBetween.doc = {{
+
+``turbo.store.invites.pendingBetween db userA userB channelId`` returns any pending invite between the two users for `channelId`, regardless of direction.
+
+*Also see:* {turbo.store.invites.pendingFromTo}
+
+}}
+turbo.store.invites.pendingBetween :
+  Database
+  -> turbo.domain.UserId
+  -> turbo.domain.UserId
+  -> turbo.domain.ChannelId
+  -> '{Exception, Remote} Optional turbo.domain.Invite
+turbo.store.invites.pendingBetween db userA userB channelId = do
+  match turbo.store.invites.pendingFromTo db userA userB channelId () with
+    Some invite -> Some invite
+    None -> turbo.store.invites.pendingFromTo db userB userA channelId ()
+
+turbo.store.invites.listIncomingPending.doc = {{
+
+``turbo.store.invites.listIncomingPending db userId`` returns pending inbound invites for `userId`, newest first.
+
+*Also see:* {turbo.store.invites.listOutgoingPending}
+
+}}
+turbo.store.invites.listIncomingPending :
+  Database
+  -> turbo.domain.UserId
+  -> '{Exception, Remote} [turbo.domain.Invite]
+turbo.store.invites.listIncomingPending db userId = do
+  rows =
+    Stream.toList
+      (Stream.filter
+        (cases
+          ((candidateToUserId, _, _), Invite _ _ _ _ status _ _ _) ->
+            sameUser = (Text.==) (turbo.domain.UserId.toText candidateToUserId) (turbo.domain.UserId.toText userId)
+            isPending = match status with
+              Pending -> true
+              _ -> false
+            sameUser && isPending)
+        (OrderedTable.toStream (turbo.store.invites.tables.byToCreatedAt db)))
+  List.map (cases (_, invite) -> invite) (List.reverse rows)
+
+turbo.store.invites.listOutgoingPending.doc = {{
+
+``turbo.store.invites.listOutgoingPending db userId`` returns pending outbound invites for `userId`, newest first.
+
+*Also see:* {turbo.store.invites.listIncomingPending}
+
+}}
+turbo.store.invites.listOutgoingPending :
+  Database
+  -> turbo.domain.UserId
+  -> '{Exception, Remote} [turbo.domain.Invite]
+turbo.store.invites.listOutgoingPending db userId = do
+  rows =
+    Stream.toList
+      (Stream.filter
+        (cases
+          ((candidateFromUserId, _, _), Invite _ _ _ _ status _ _ _) ->
+            sameUser = (Text.==) (turbo.domain.UserId.toText candidateFromUserId) (turbo.domain.UserId.toText userId)
+            isPending = match status with
+              Pending -> true
+              _ -> false
+            sameUser && isPending)
+        (OrderedTable.toStream (turbo.store.invites.tables.byFromCreatedAt db)))
+  List.map (cases (_, invite) -> invite) (List.reverse rows)
+
+turbo.store.invites.markConnectedForChannel.doc = {{
+
+``turbo.store.invites.markConnectedForChannel db userA userB channelId`` marks the pending invite between `userA` and `userB` for `channelId` as connected, if one exists.
+
+*Also see:* {turbo.store.invites.markDeclined}, {turbo.store.invites.markCancelled}
+
+}}
+turbo.store.invites.markConnectedForChannel :
+  Database
+  -> turbo.domain.UserId
+  -> turbo.domain.UserId
+  -> turbo.domain.ChannelId
+  -> '{Exception, unison_cloud_27_3_0.Storage, Remote, Random} Optional turbo.domain.Invite
+turbo.store.invites.markConnectedForChannel db userA userB channelId = do
+  match turbo.store.invites.pendingBetween db userA userB channelId () with
+    None -> None
+    Some (Invite inviteId fromUserId toUserId inviteChannelId _ requestCount createdAt _) ->
+      updatedAt = now!
+      updated = Invite inviteId fromUserId toUserId inviteChannelId Connected requestCount createdAt (Some updatedAt)
+      _ = OrderedTable.write (turbo.store.invites.tables.byId db) inviteId updated
+      _ = OrderedTable.write (turbo.store.invites.tables.byToCreatedAt db) (toUserId, createdAt, inviteId) updated
+      _ = OrderedTable.write (turbo.store.invites.tables.byFromCreatedAt db) (fromUserId, createdAt, inviteId) updated
+      Some updated
+
+turbo.store.invites.markDeclined.doc = {{
+
+``turbo.store.invites.markDeclined db inviteId`` marks a pending invite as declined.
+
+}}
+turbo.store.invites.markDeclined :
+  Database
+  -> turbo.domain.InviteId
+  -> '{Exception, unison_cloud_27_3_0.Storage, Remote, Random} Optional turbo.domain.Invite
+turbo.store.invites.markDeclined db inviteId =
+  turbo.store.invites.internal.updateStatus db inviteId Declined
+
+turbo.store.invites.markCancelled.doc = {{
+
+``turbo.store.invites.markCancelled db inviteId`` marks a pending invite as cancelled by the sender.
+
+}}
+turbo.store.invites.markCancelled :
+  Database
+  -> turbo.domain.InviteId
+  -> '{Exception, unison_cloud_27_3_0.Storage, Remote, Random} Optional turbo.domain.Invite
+turbo.store.invites.markCancelled db inviteId =
+  turbo.store.invites.internal.updateStatus db inviteId Cancelled
+
+turbo.store.invites.internal.updateStatus :
+  Database
+  -> turbo.domain.InviteId
+  -> turbo.domain.InviteStatus
+  -> '{Exception, unison_cloud_27_3_0.Storage, Remote, Random} Optional turbo.domain.Invite
+turbo.store.invites.internal.updateStatus db inviteId nextStatus = do
+  table = turbo.store.invites.tables.byId db
+  match OrderedTable.tryRead table inviteId with
+    None -> None
+    Some (Invite _ fromUserId toUserId channelId currentStatus requestCount createdAt _) ->
+      updatedAt = now!
+      status = match currentStatus with
+        Pending -> nextStatus
+        _ -> currentStatus
+      updated = Invite inviteId fromUserId toUserId channelId status requestCount createdAt (Some updatedAt)
+      _ = OrderedTable.write table inviteId updated
+      _ = OrderedTable.write (turbo.store.invites.tables.byToCreatedAt db) (toUserId, createdAt, inviteId) updated
+      _ = OrderedTable.write (turbo.store.invites.tables.byFromCreatedAt db) (fromUserId, createdAt, inviteId) updated
+      Some updated
+
+turbo.store.invites.tables.byId :
+  Database
+  -> OrderedTable turbo.domain.InviteId turbo.domain.Invite
+turbo.store.invites.tables.byId db =
+  OrderedTable.named db "turboInvitesById_v1" Universal.ordering
+
+turbo.store.invites.tables.byToCreatedAt :
+  Database
+  -> OrderedTable (turbo.domain.UserId, Instant, turbo.domain.InviteId) turbo.domain.Invite
+turbo.store.invites.tables.byToCreatedAt db =
+  OrderedTable.named db "turboInvitesByToCreatedAt_v1" Universal.ordering
+
+turbo.store.invites.tables.byFromCreatedAt :
+  Database
+  -> OrderedTable (turbo.domain.UserId, Instant, turbo.domain.InviteId) turbo.domain.Invite
+turbo.store.invites.tables.byFromCreatedAt db =
+  OrderedTable.named db "turboInvitesByFromCreatedAt_v1" Universal.ordering

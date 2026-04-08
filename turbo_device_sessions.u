@@ -1,0 +1,241 @@
+type turbo.domain.DeviceSession
+  = DeviceSession turbo.domain.DeviceId turbo.domain.UserId Instant Instant
+
+turbo.store.sessions.tables.byDevice :
+  Database
+  -> OrderedTable turbo.domain.DeviceId turbo.domain.DeviceSession
+turbo.store.sessions.tables.byDevice db =
+  OrderedTable.named db "turboDeviceSessionsByDevice_v1" Universal.ordering
+
+turbo.store.sessions.connect.doc = {{
+
+``turbo.store.sessions.connect db userId deviceId`` records that `deviceId` has an active websocket session for `userId`.
+
+This is durable session truth for readiness and target selection. Raw websocket handles remain a separate live transport registry.
+
+*Also see:* {turbo.store.sessions.disconnect}, {turbo.store.sessions.get}, {turbo.store.sockets.connect}
+
+}}
+turbo.store.sessions.connect :
+  Database
+  -> turbo.domain.UserId
+  -> turbo.domain.DeviceId
+  -> '{Exception, Storage, Remote, Random} turbo.domain.DeviceSession
+turbo.store.sessions.connect db userId deviceId = do
+  now = now!
+  session =
+    turbo.domain.DeviceSession.DeviceSession
+      deviceId
+      userId
+      now
+      now
+  OrderedTable.write (turbo.store.sessions.tables.byDevice db) deviceId session
+  session
+
+turbo.store.sessions.touch.doc = {{
+
+``turbo.store.sessions.touch db userId deviceId`` refreshes the observed activity timestamp for an active websocket session.
+
+If the session does not exist yet, it is created.
+
+*Also see:* {turbo.store.sessions.connect}, {turbo.store.sessions.get}
+
+}}
+turbo.store.sessions.touch :
+  Database
+  -> turbo.domain.UserId
+  -> turbo.domain.DeviceId
+  -> '{Exception, Storage, Remote, Random} turbo.domain.DeviceSession
+turbo.store.sessions.touch db userId deviceId = do
+  table = turbo.store.sessions.tables.byDevice db
+  now = now!
+  session =
+    match OrderedTable.tryRead table deviceId with
+      Some (turbo.domain.DeviceSession.DeviceSession _ _ connectedAt _) ->
+        turbo.domain.DeviceSession.DeviceSession
+          deviceId
+          userId
+          connectedAt
+          now
+      None ->
+        turbo.domain.DeviceSession.DeviceSession
+          deviceId
+          userId
+          now
+          now
+  OrderedTable.write table deviceId session
+  session
+
+turbo.store.sessions.get.doc = {{
+
+``turbo.store.sessions.get db deviceId`` returns the active durable websocket session for `deviceId`, if one exists.
+
+*Also see:* {turbo.store.sessions.connect}, {turbo.store.sessions.isConnected}
+
+}}
+turbo.store.sessions.get :
+  Database
+  -> turbo.domain.DeviceId
+  -> '{Exception, Remote} Optional turbo.domain.DeviceSession
+turbo.store.sessions.get db deviceId = do
+  OrderedTable.tryRead (turbo.store.sessions.tables.byDevice db) deviceId
+
+turbo.store.sessions.disconnect.doc = {{
+
+``turbo.store.sessions.disconnect db deviceId`` removes the active websocket session for `deviceId`.
+
+*Also see:* {turbo.store.sessions.connect}, {turbo.store.sockets.disconnect}
+
+}}
+turbo.store.sessions.disconnect :
+  Database
+  -> turbo.domain.DeviceId
+  -> '{Exception, Storage, Remote} ()
+turbo.store.sessions.disconnect db deviceId = do
+  OrderedTable.delete (turbo.store.sessions.tables.byDevice db) deviceId
+
+turbo.store.sessions.isConnected.doc = {{
+
+``turbo.store.sessions.isConnected db deviceId`` returns whether `deviceId` currently has a durable active websocket session.
+
+*Also see:* {turbo.store.sessions.get}, {turbo.store.presence.getConnectedForUserInChannel}
+
+}}
+turbo.store.sessions.isConnected :
+  Database
+  -> turbo.domain.DeviceId
+  -> '{Exception, Remote} Boolean
+turbo.store.sessions.isConnected db deviceId = do
+  Optional.isSome (turbo.store.sessions.get db deviceId ())
+
+turbo.store.sockets.connect.doc = {{
+
+``turbo.store.sockets.connect db userId deviceId ws`` records the live websocket transport handle for `deviceId`.
+
+This registry is transport-local. Durable session truth lives in the `turbo.store.sessions.*` definitions.
+
+*Also see:* {turbo.store.sessions.connect}, {turbo.store.sockets.lookup}, {turbo.store.sockets.disconnect}
+
+}}
+turbo.store.sockets.connect :
+  Database
+  -> turbo.domain.UserId
+  -> turbo.domain.DeviceId
+  -> WebSocket
+  -> '{Exception, Storage, Remote, Random} ()
+turbo.store.sockets.connect db userId deviceId ws = do
+  now = now!
+  OrderedTable.write
+    (turbo.store.sockets.tables.byDevice db)
+    deviceId
+    (userId, ws, now)
+
+turbo.store.sockets.disconnect.doc = {{
+
+``turbo.store.sockets.disconnect db deviceId`` removes the live websocket transport handle for `deviceId`.
+
+*Also see:* {turbo.store.sockets.connect}, {turbo.store.sessions.disconnect}
+
+}}
+turbo.store.sockets.disconnect :
+  Database
+  -> turbo.domain.DeviceId
+  -> '{Exception, Storage, Remote} ()
+turbo.store.sockets.disconnect db deviceId = do
+  OrderedTable.delete (turbo.store.sockets.tables.byDevice db) deviceId
+
+turbo.store.presence.getConnectedForUserInChannel.doc = {{
+
+``turbo.store.presence.getConnectedForUserInChannel db userId channelId`` returns the online in-channel presence for `userId` whose device also has an active durable websocket session.
+
+This is the canonical receiving-device selector for readiness and target selection.
+
+*Also see:* {turbo.store.sessions.isConnected}, {turbo.store.runtime.resolveTransmitTarget}
+
+}}
+turbo.store.presence.getConnectedForUserInChannel :
+  Database
+  -> turbo.domain.UserId
+  -> turbo.domain.ChannelId
+  -> '{Exception, Remote} Optional turbo.domain.DevicePresence
+turbo.store.presence.getConnectedForUserInChannel db userId channelId = do
+  entries = Stream.toList (OrderedTable.toStream (turbo.store.presence.tables.byDevice db))
+  turbo.store.presence.internal.firstConnectedPresence db userId channelId entries ()
+
+turbo.store.presence.internal.firstConnectedPresence :
+  Database
+  -> turbo.domain.UserId
+  -> turbo.domain.ChannelId
+  -> [(turbo.domain.DeviceId, turbo.domain.DevicePresence)]
+  -> '{Exception, Remote} Optional turbo.domain.DevicePresence
+turbo.store.presence.internal.firstConnectedPresence db userId channelId entries = do
+  match entries with
+    [] -> None
+    (_, presence@(turbo.domain.DevicePresence.DevicePresence deviceId _ _ _ _)) +: rest ->
+      if turbo.store.presence.internal.matchesOnlinePresence userId channelId presence then
+        if turbo.store.sessions.isConnected db deviceId () then
+          Some presence
+        else
+          turbo.store.presence.internal.firstConnectedPresence db userId channelId rest ()
+      else
+        turbo.store.presence.internal.firstConnectedPresence db userId channelId rest ()
+
+turbo.store.sockets.isConnected.doc = {{
+
+``turbo.store.sockets.isConnected db deviceId`` returns whether this handler can currently look up a live websocket transport for `deviceId`.
+
+This is a transport-level diagnostic and should not be used as the durable readiness source.
+
+*Also see:* {turbo.store.sessions.isConnected}, {turbo.store.sockets.lookup}
+
+}}
+turbo.store.sockets.isConnected :
+  Database
+  -> turbo.domain.DeviceId
+  -> '{Exception, Remote} Boolean
+turbo.store.sockets.isConnected db deviceId = do
+  Optional.isSome (turbo.store.sockets.lookup db deviceId ())
+
+turbo.service.ws :
+  Database
+  -> '{Route, Exception, Http, OpenWebSocket, Storage, Remote, WebSockets, Random, Log} ()
+turbo.service.ws db = do
+  use Parser & s /
+  use object empty
+  deviceIdOpt = route GET (s "v1" / s "ws" & (do ParseQuery.text "deviceId"))
+  match deviceIdOpt with
+    None ->
+      badRequest.json (empty |> addText "error" "missing deviceId")
+    Some deviceIdText ->
+      match turbo.auth.requireUser db () with
+        Left err ->
+          unauthorized.json (empty |> addText "error" err)
+        Right currentUser ->
+          currentUserId =
+            (turbo.domain.User.User userId _ _ _ _) = currentUser
+            userId
+          ws = openWebSocket
+          deviceId = turbo.domain.DeviceId.fromText deviceIdText
+          _ = turbo.store.sockets.connect db currentUserId deviceId ws ()
+          _ = turbo.store.sessions.connect db currentUserId deviceId ()
+          _ =
+            WebSockets.send ws
+              (TextMessage
+                (Json.toText
+                  (empty
+                    |> addText "status" "connected"
+                    |> addText "deviceId" deviceIdText)))
+          _ =
+            Exception.catch do
+              forever do
+                _ = turbo.store.sessions.touch db currentUserId deviceId ()
+                message = WebSockets.receive ws
+                turbo.service.ws.internal.handleMessage
+                  db
+                  currentUserId
+                  deviceId
+                  ws
+                  message
+                  ()
+          _ = turbo.store.sockets.disconnect db deviceId ()
+          turbo.store.sessions.disconnect db deviceId ()

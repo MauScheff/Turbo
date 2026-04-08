@@ -1,0 +1,56 @@
+turbo.store.users.ensureDevUser.doc = {{
+
+``turbo.store.users.ensureDevUser db userHandle`` returns the dev user for `userHandle`, creating it on demand if needed.
+
+This removes seed-to-auth races for the temporary dev identity flow by lazily provisioning missing handles during authenticated requests.
+
+*Also see:* {turbo.auth.requireUser}, {turbo.store.users.getByHandle}, {turbo.store.users.create}
+
+}}
+turbo.store.users.ensureDevUser :
+  Database -> Text -> '{Exception, unison_cloud_27_3_0.Storage, Remote} turbo.domain.User
+turbo.store.users.ensureDevUser db userHandle = do
+  use OrderedTable tryRead.tx write.tx
+  use Text ++
+  table = turbo.store.users.tables.byId db
+  byHandle = turbo.store.users.tables.byHandle db
+  byCreatedAt = turbo.store.users.tables.byCreatedAt db
+  userId = turbo.domain.UserId.fromText ("dev-user:" ++ userHandle)
+  now = now!
+  transact (OrderedTable.database table) do
+    match tryRead.tx byHandle userHandle with
+      Some existingId ->
+        match tryRead.tx table existingId with
+          Some user -> user
+          None ->
+            user = turbo.domain.User.User existingId userHandle userHandle now now
+            _ = write.tx table existingId user
+            _ = write.tx byCreatedAt (now, existingId) user
+            user
+      None ->
+        match tryRead.tx table userId with
+          Some user ->
+            _ = write.tx byHandle userHandle userId
+            user
+          None ->
+            user = turbo.domain.User.User userId userHandle userHandle now now
+            _ = write.tx table userId user
+            _ = write.tx byHandle userHandle userId
+            _ = write.tx byCreatedAt (now, userId) user
+            user
+
+turbo.auth.requireUser.doc = {{
+
+``turbo.auth.requireUser db`` resolves the current dev user from the request headers.
+
+It accepts either `x-turbo-user-handle` or `Authorization: Bearer <handle>`. Missing auth still returns an error, but unknown dev handles are lazily provisioned so temporary startup races do not wedge the app.
+
+*Also see:* {turbo.auth.devHandle}, {turbo.store.users.ensureDevUser}, {turbo.store.users.getByHandle}
+
+}}
+turbo.auth.requireUser :
+  Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote} Either Text turbo.domain.User
+turbo.auth.requireUser db = do
+  match turbo.auth.devHandle () with
+    None -> Left "missing dev auth"
+    Some userHandle -> Right (turbo.store.users.ensureDevUser db userHandle ())
