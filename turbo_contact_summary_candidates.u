@@ -291,8 +291,7 @@ turbo.service.contacts.internal.candidateUserIds :
 turbo.service.contacts.internal.candidateUserIds db currentUserId = do
   incomingInvites = turbo.store.invites.listIncomingPending db currentUserId ()
   outgoingInvites = turbo.store.invites.listOutgoingPending db currentUserId ()
-  channelPairs =
-    Stream.toList (OrderedTable.toStream (turbo.store.channels.tables.byUserPair db))
+  channels = turbo.store.channels.listForUser db currentUserId ()
   inviteCandidates =
     turbo.service.contacts.internal.collectInviteCandidateUserIds
       currentUserId
@@ -303,6 +302,12 @@ turbo.service.contacts.internal.candidateUserIds db currentUserId = do
       currentUserId
       outgoingInvites
       inviteCandidates
+  channelPairs =
+    List.map
+      (cases
+        turbo.domain.DirectChannel.DirectChannel channelId lowUserId highUserId _ ->
+          ((lowUserId, highUserId), channelId))
+      channels
   turbo.service.contacts.internal.collectChannelCandidateUserIds
     currentUserId
     channelPairs

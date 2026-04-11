@@ -53,6 +53,19 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         try await request(path: "/v1/dev/reset-state", method: "POST")
     }
 
+    func resetAllDevState() async throws -> TurboResetStateResponse {
+        try await request(path: "/v1/dev/reset-all", method: "POST")
+    }
+
+    func uploadDiagnostics(_ payload: TurboDiagnosticsUploadRequest) async throws -> TurboDiagnosticsUploadResponse {
+        try await request(path: "/v1/dev/diagnostics", method: "POST", body: payload)
+    }
+
+    func latestDiagnostics(deviceId: String) async throws -> TurboLatestDiagnosticsResponse {
+        let escapedDeviceID = deviceId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? deviceId
+        return try await request(path: "/v1/dev/diagnostics/latest/\(escapedDeviceID)/")
+    }
+
     func registerDevice(label: String?) async throws -> TurboDeviceRegistrationResponse {
         try await request(
             path: "/v1/devices/register",
@@ -230,8 +243,10 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         guard supportsWebSocket else {
             throw TurboBackendError.webSocketUnavailable
         }
+        if webSocketConnectionState != .connected || webSocketTask == nil {
+            try await waitForWebSocketConnection()
+        }
         guard webSocketConnectionState == .connected, let webSocketTask else {
-            ensureWebSocketConnected()
             throw TurboBackendError.webSocketUnavailable
         }
         let data = try JSONEncoder().encode(envelope)
@@ -250,6 +265,11 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
                     if let data = text.data(using: .utf8),
                        let envelope = try? JSONDecoder().decode(TurboSignalEnvelope.self, from: data) {
                         onSignal?(envelope)
+                    } else if let data = text.data(using: .utf8),
+                              let notice = try? JSONDecoder().decode(TurboWebSocketStatusNotice.self, from: data) {
+                        if notice.status != "connected" {
+                            onServerNotice?("WebSocket \(notice.status)")
+                        }
                     } else if let data = text.data(using: .utf8),
                               let error = try? JSONDecoder().decode(TurboErrorResponse.self, from: data) {
                         onServerNotice?(error.error)

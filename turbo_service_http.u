@@ -261,6 +261,141 @@ turbo.service.channels.ephemeralToken db = do
           _ ->
             badRequest.json (Json.object.empty |> Json.object.addText "error" "missing deviceId or token")
 
+turbo.service.channels.pttPushTarget.doc = {{
+
+``turbo.service.channels.pttPushTarget db`` returns the current receiver push target for the caller's active transmit.
+
+This is the canonical background-wake payload shape for a live transmit owner. It is useful for APNs integration and simulator push tooling.
+
+*Also see:* {turbo.service.channels.beginTransmit}, {turbo.store.tokens.latestForUserInChannel}
+
+}}
+turbo.service.channels.pttPushTarget : Database -> '{Route, Exception, unison_cloud_27_3_0.Storage, Remote, Random} ()
+turbo.service.channels.pttPushTarget db = do
+  use Parser s /
+  channelIdText = route GET (s "v1" / s "channels" / Parser.text / s "ptt-push-target")
+  match turbo.auth.requireUser db () with
+    Left err ->
+      unauthorized.json (Json.object.empty |> Json.object.addText "error" err)
+    Right currentUser ->
+      currentUserId = match currentUser with
+        User userId _ _ _ _ -> userId
+      currentHandle = match currentUser with
+        User _ handleText _ _ _ -> handleText
+      channelId = turbo.domain.ChannelId.fromText channelIdText
+      isMember = turbo.store.memberships.exists db channelId currentUserId ()
+      if Boolean.not isMember then
+        unauthorized.json (Json.object.empty |> Json.object.addText "error" "not a channel member")
+      else
+        match turbo.store.runtime.currentTransmit db channelId () with
+          None ->
+            notFound.json (Json.object.empty |> Json.object.addText "error" "no active transmit state")
+          Some (TransmitState _ fromUserId fromDeviceId toUserId toDeviceId startedAt expiresAt) ->
+            if (Text.==) (turbo.domain.UserId.toText fromUserId) (turbo.domain.UserId.toText currentUserId) then
+              tokenRecord =
+                match turbo.store.tokens.get db channelId toUserId toDeviceId () with
+                  Some record -> Some record
+                  None -> turbo.store.tokens.latestForUserInChannel db channelId toUserId ()
+              match tokenRecord with
+                None ->
+                  notFound.json (Json.object.empty |> Json.object.addText "error" "no target ptt token")
+                Some (EphemeralToken _ _ tokenDeviceId token _) ->
+                  ok.json
+                    (Json.object.empty
+                      |> Json.object.addText "channelId" channelIdText
+                      |> Json.object.addText "event" "transmit-start"
+                      |> Json.object.addText "activeSpeaker" currentHandle
+                      |> Json.object.addText "senderUserId" (turbo.domain.UserId.toText fromUserId)
+                      |> Json.object.addText "senderDeviceId" (turbo.domain.DeviceId.toText fromDeviceId)
+                      |> Json.object.addText "targetUserId" (turbo.domain.UserId.toText toUserId)
+                      |> Json.object.addText "targetDeviceId" (turbo.domain.DeviceId.toText tokenDeviceId)
+                      |> Json.object.addText "startedAt" (toText startedAt)
+                      |> Json.object.addText "expiresAt" (toText expiresAt)
+                      |> Json.object.addText "token" token)
+            else
+              unauthorized.json (Json.object.empty |> Json.object.addText "error" "active transmit not owned by caller")
+
+turbo.service.routes.dev :
+  Database
+  -> '{Route, Exception, Http, unison_cloud_27_3_0.Storage, Remote, Random, Log} ()
+turbo.service.routes.dev db =
+  use Route or
+  or
+    (turbo.service.dev.seed db)
+    (or
+      (turbo.service.dev.resetState db)
+      (or
+        (turbo.service.dev.resetAll db)
+        (or
+          (turbo.service.dev.runtimeInspection db)
+          (or
+            (turbo.service.dev.uploadDiagnostics db)
+            (or
+              (turbo.service.dev.latestDiagnostics db)
+              (turbo.service.dev.latestDiagnosticsForCurrentUser db)))))))
+
+turbo.service.routes.auth :
+  Database
+  -> '{Route, Exception, Http, unison_cloud_27_3_0.Storage, Remote, Random, Log} ()
+turbo.service.routes.auth db =
+  use Route or
+  or
+    (turbo.service.auth.session db)
+    (turbo.service.devices.register db)
+
+turbo.service.routes.users :
+  Database
+  -> '{Route, Exception, Http, unison_cloud_27_3_0.Storage, Remote, Random, Log} ()
+turbo.service.routes.users db =
+  use Route or
+  or
+    (turbo.service.contacts.summary db)
+    (or
+      (turbo.service.users.presenceByHandle db)
+      (turbo.service.users.byHandle db))
+
+turbo.service.routes.invites :
+  Database
+  -> '{Route, Exception, Http, unison_cloud_27_3_0.Storage, Remote, Random, Log} ()
+turbo.service.routes.invites db =
+  use Route or
+  or
+    (turbo.service.invites.accept db)
+    (or
+      (turbo.service.invites.decline db)
+      (or
+        (turbo.service.invites.cancel db)
+        (or
+          (turbo.service.invites.create db)
+          (or
+            (turbo.service.invites.incoming db)
+            (turbo.service.invites.outgoing db)))))
+
+turbo.service.routes.channels :
+  Database
+  -> '{Route, Exception, Http, unison_cloud_27_3_0.Storage, Remote, Random, Log} ()
+turbo.service.routes.channels db =
+  use Route or
+  or
+    (turbo.service.channels.direct db)
+    (or
+      (turbo.service.channels.join db)
+      (or
+        (turbo.service.channels.leave db)
+        (or
+          (turbo.service.channels.state db)
+          (or
+            (turbo.service.channels.ephemeralToken db)
+            (or
+              (turbo.service.channels.pttPushTarget db)
+              (or
+                (turbo.service.channels.beginTransmit db)
+                (or
+                  (turbo.service.channels.renewTransmit db)
+                  (or
+                    (turbo.service.channels.endTransmit db)
+                    (turbo.service.channels.readiness db)))))))))
+
 turbo.service.channels.beginTransmit.doc = {{
 
 ``turbo.service.channels.beginTransmit db`` starts transmit state for a direct channel if it is currently idle.
@@ -539,48 +674,16 @@ turbo.service.httpWithConfig mode supportsWebSocket db =
     (or
       (turbo.service.config mode supportsWebSocket)
       (or
-        (turbo.service.dev.seed db)
+        (turbo.service.routes.dev db)
         (or
-          (turbo.service.dev.resetState db)
+          (turbo.service.presence.heartbeat db)
           (or
-            (turbo.service.presence.heartbeat db)
-          (or
-            (turbo.service.auth.session db)
+            (turbo.service.routes.auth db)
             (or
-              (turbo.service.devices.register db)
+              (turbo.service.routes.users db)
               (or
-                (turbo.service.users.byHandle db)
-                (or
-                  (turbo.service.users.presenceByHandle db)
-                  (or
-                    (turbo.service.invites.create db)
-                    (or
-                      (turbo.service.invites.incoming db)
-                      (or
-                        (turbo.service.invites.outgoing db)
-                        (or
-                          (turbo.service.invites.accept db)
-                          (or
-                            (turbo.service.invites.decline db)
-                            (or
-                              (turbo.service.invites.cancel db)
-                              (or
-                                (turbo.service.channels.direct db)
-                                (or
-                                  (turbo.service.channels.join db)
-                                  (or
-                                    (turbo.service.channels.leave db)
-                                    (or
-                                      (turbo.service.channels.state db)
-                                      (or
-                                        (turbo.service.channels.ephemeralToken db)
-                                        (or
-                                          (turbo.service.channels.beginTransmit db)
-                                          (or
-                                            (turbo.service.channels.renewTransmit db)
-                                            (or
-                                            (turbo.service.channels.endTransmit db)
-                                            (turbo.service.channels.readiness db)))))))))))))))))))))))
+                (turbo.service.routes.invites db)
+                (turbo.service.routes.channels db)))))))
 
 turbo.service.http.doc = {{
 

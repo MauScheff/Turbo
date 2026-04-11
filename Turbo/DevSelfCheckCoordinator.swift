@@ -1,4 +1,5 @@
 import Foundation
+import AVFAudio
 
 struct DevSelfCheckTarget: Equatable {
     let contactID: UUID
@@ -9,6 +10,7 @@ struct DevSelfCheckRequest: Equatable {
     let startedAt: Date
     let hasBackendConfig: Bool
     let isBackendClientReady: Bool
+    let microphonePermission: AVAudioApplication.recordPermission
     let selectedTarget: DevSelfCheckTarget?
 }
 
@@ -136,6 +138,50 @@ enum DevSelfCheckRunner {
             )
         }
         steps.append(DevSelfCheckStep(.backendConfig, status: .passed, detail: "Backend config loaded"))
+
+        switch request.microphonePermission {
+        case .granted:
+            steps.append(DevSelfCheckStep(.microphonePermission, status: .passed, detail: "Microphone access granted"))
+        case .denied:
+            steps.append(DevSelfCheckStep(.microphonePermission, status: .failed, detail: "Microphone access denied"))
+            return DevSelfCheckOutcome(
+                report: DevSelfCheckReport(
+                    startedAt: request.startedAt,
+                    completedAt: Date(),
+                    targetHandle: targetHandle,
+                    steps: steps
+                ),
+                authenticatedUserID: nil,
+                contactUpdate: nil,
+                channelStateUpdate: nil
+            )
+        case .undetermined:
+            steps.append(DevSelfCheckStep(.microphonePermission, status: .failed, detail: "Microphone access has not been requested"))
+            return DevSelfCheckOutcome(
+                report: DevSelfCheckReport(
+                    startedAt: request.startedAt,
+                    completedAt: Date(),
+                    targetHandle: targetHandle,
+                    steps: steps
+                ),
+                authenticatedUserID: nil,
+                contactUpdate: nil,
+                channelStateUpdate: nil
+            )
+        @unknown default:
+            steps.append(DevSelfCheckStep(.microphonePermission, status: .failed, detail: "Unknown microphone permission state"))
+            return DevSelfCheckOutcome(
+                report: DevSelfCheckReport(
+                    startedAt: request.startedAt,
+                    completedAt: Date(),
+                    targetHandle: targetHandle,
+                    steps: steps
+                ),
+                authenticatedUserID: nil,
+                contactUpdate: nil,
+                channelStateUpdate: nil
+            )
+        }
 
         guard request.isBackendClientReady else {
             steps.append(DevSelfCheckStep(.runtimeConfig, status: .failed, detail: "Backend client is not initialized"))

@@ -80,66 +80,64 @@ The `cuts` project is still the best local reference for service structure, stor
 If you are starting fresh in this repo:
 
 1. Read `AGENTS.md`.
-2. Read `Server/backend_architecture.md`.
-3. Check the current Unison project context and installed libraries.
+2. Read `HANDOFF.md`.
+3. Read `Server/backend_architecture.md` if you need backend structure or Unison deployment context.
 4. Treat the backend as control-plane-only unless the user explicitly changes scope.
 
-### Current app refactor status
+### Current app shape
 
-The iOS app is mid-refactor from a prototype-oriented screen into a production-style architecture.
-
-What has already been extracted:
+The iOS client is no longer a single-screen prototype. The important boundaries are now:
 
 - `Turbo/ConversationDomain.swift`
-  - conversation state types
-  - contact identity helpers
-  - primary action derivation
-  - session reconciliation rules
+  - authoritative selected-peer derivation
+  - relationship vs selected-session state
+  - primary action derivation and reconciliation rules
+- `Turbo/SelectedPeerSession.swift`
+  - selected-session reducer / coordinator state
+- `Turbo/TransmitCoordinator.swift`
+  - transmit lifecycle reducer
+- `Turbo/PTTCoordinator.swift`
+  - system PushToTalk reducer / callback state
+- `Turbo/PTTSystemClient.swift`
+  - real-device Apple PushToTalk client plus simulator shim
 - `Turbo/BackendClient.swift`
-  - backend HTTP + websocket transport client
-- `Turbo/BackendSync.swift`
-  - backend-owned sync state for summaries, invites, channel state, and request cooldowns
+  - backend HTTP + websocket transport
+- `Turbo/BackendSyncCoordinator.swift`
+  - summaries, invites, channel refresh, and reconciliation triggers
+- `Turbo/BackendCommandCoordinator.swift`
+  - open peer / connect / accept / disconnect orchestration
 - `Turbo/AppDiagnostics.swift`
-  - structured diagnostics store
-  - automatic persistent log file writing
-- `Turbo/DevSelfCheck.swift`
-  - app-owned self-check model for fast simulator/device verification
+  - structured diagnostics timeline and transcript export
 
-What is still intentionally not finished:
+`ContentView.swift` is still not tiny, but it is no longer the authority for session logic. New behavior should usually go into the domain, coordinators, or typed integration seams first.
 
-- `Turbo/ContentView.swift` still owns too much orchestration
-- selected-peer relationship state and selected-session state are still partially mixed together
-- contact summary badge state is still leaking into selected-screen behavior
-- PushToTalk lifecycle and backend session lifecycle still need a clearer coordinator boundary
+### Instrumentation and iteration model
 
-### Current known product issue
+Turbo now has a real development observability loop:
 
-The main remaining app bug is a relationship/session state conflation:
+- debug builds auto-capture structured state transitions
+- debug builds auto-publish diagnostics after high-signal transitions
+- the backend stores exact-device diagnostics per authenticated user
+- merged timeline tooling can read `device A + device B` without manual upload steps
+- simulator scenarios are checked into `scenarios/` and run against the simulator PTT shim plus the real backend
 
-- self-check can pass
-- backend can be healthy
-- but both peers can still render `Waiting`
+This means distributed control-plane bugs should now be debugged in this order:
 
-The current diagnosis is:
+1. reproduce in the simulator scenario runner when possible
+2. inspect the merged timeline
+3. only move to physical devices for Apple-specific behavior
 
-- the app still uses backend relationship/list summary state (`badgeStatus`, invite history, connecting/requested) too directly for the selected peer screen
-- that allows stale or historical relationship state to look like live session state
-- the selected peer screen needs one explicit authoritative state model that separates:
-  - contact/address-book state
-  - relationship state (invite/request/accepted)
-  - live selected-session state (connecting/connected/transmitting/receiving)
+### Current known blocker
 
-### Next structural increment
+The simulator diagnostics transport is fixed, but the scenario itself is not yet green.
 
-The next agent should implement a selected-peer authoritative state model.
+What is true right now:
 
-Target direction:
+- `just simulator-scenario-merge` reliably reads exact-device simulator reports after a scenario run
+- the scenario runner now executes real Swift Testing cases instead of silently running zero tests
+- the current failing test is `TurboTests/simulatorDistributedJoinScenario()`
 
-1. Introduce a dedicated `SelectedPeerState` / `PairRelationshipState` domain type.
-2. Compute selected-screen UI from that type only.
-3. Stop using list badge state as selected-session truth.
-4. Make `Waiting` only represent an active in-progress selected session transition.
-5. Keep contact summaries as list decoration, not session authority.
+So the next engineering task is no longer “make simulator diagnostics visible”; it is “fix the actual scenario crash now that the simulator runner is truthful.”
 
 ### Fast iteration loop
 
@@ -147,11 +145,95 @@ Prefer this order:
 
 1. Backend verification
    - `just prod-probe`
+   - probe defaults are the reserved handles `@quinn` and `@sasha`, not the manual device-test pair
 2. App verification in simulator
-   - run the in-app self-check
-   - inspect the persistent diagnostics log
+   - run `just simulator-scenario` for the distributed control-plane smoke
+   - run the in-app self-check when you need one-app diagnostics
+   - inspect the persistent diagnostics log when a state transition looks wrong
 3. Real device verification
    - only for PushToTalk / background / lock-screen / audio behavior
+
+### Scenario-driven simulator loop
+
+The simulator is now valid for distributed control-plane verification because the app uses a simulator PTT shim instead of `PTChannelManager` there.
+
+Use these commands:
+
+- `just simulator-scenario`
+  - runs the checked-in simulator scenarios in [`scenarios/`](/Users/mau/Development/Turbo/scenarios)
+  - covers request creation, incoming accept, peer-ready, both-ready, transmit begin/end, and disconnect
+  - activates the scenario runner through a temporary repo-local runtime config file so the simulator test process executes the selected spec deterministically
+- `just simulator-scenario request_accept_ready`
+  - runs only the named checked-in scenario
+  - use this when iterating on one distributed bug without paying for the whole scenario set
+- `just simulator-scenario-merge`
+  - fetches the simulator pair's latest published diagnostics by exact device id
+  - use it after a run to inspect the merged timeline without manual uploads
+
+Current source of truth:
+
+- the `simulatorDistributedJoinScenario()` spec runner result
+- the merged simulator diagnostics timeline fetched by `just simulator-scenario-merge`
+- the regular `TurboTests` unit suite
+
+Current status:
+
+- the merged simulator diagnostics path is now reliable
+- the scenario itself currently fails, so treat that failure as a real product/integration bug rather than a tooling issue
+
+Recommended testing strategy:
+
+- express new distributed regressions as checked-in scenario JSON in [`scenarios/`](/Users/mau/Development/Turbo/scenarios)
+- simulator scenarios for request/join/ready/transmit/disconnect and distributed state-machine bugs
+- physical devices only for microphone permission, real Apple PushToTalk UI, backgrounding, lock screen, and actual audio
+
+### Background PTT wake loop
+
+Foreground signaling can still use the app websocket, but background receive needs the real PushToTalk wake contract:
+
+- the app uploads the ephemeral PushToTalk token it receives while joined
+- the backend uses that token to send a `pushtotalk` APNs push when a remote speaker starts
+- the app's `incomingPushResult(...)` returns the active remote participant quickly
+- PushToTalk then activates the audio session
+- only after that activation should the app reconnect transport and start background playback
+
+For fast iteration:
+
+- simulator/unit loop:
+  - keep reducer/domain tests for payload parsing and wake state
+  - use `just simulator-ptt-push <channel_id>` to inject a simulator push payload into the running app
+- backend payload loop:
+  - use `just ptt-push-target <channel_id> <backend> <sender>` to inspect the canonical receiver token + wake payload for the sender's active transmit
+  - use `just ptt-apns-start <channel_id> <backend> <sender>` to send a real PushToTalk APNs wake push once APNs auth env vars are configured
+  - use `just ptt-apns-bridge <backend> @avery @blake` to automatically watch an active channel and send wake pushes for each new transmit start
+- device loop:
+  - use physical devices for lock-screen and blue-pill validation
+  - treat those runs as the source of truth for background wake behavior
+
+The simulator path is useful for payload handling and app state transitions, but physical devices are still required for the real PushToTalk wake + audio-session behavior.
+
+APNs sender env vars for the helper script:
+
+- `TURBO_APNS_TEAM_ID`
+- `TURBO_APNS_KEY_ID`
+- `TURBO_APNS_PRIVATE_KEY_PATH` or `TURBO_APNS_PRIVATE_KEY`
+- optional `TURBO_APNS_USE_SANDBOX=1` for development entitlements
+
+Recommended local setup uses `direnv` with an untracked `.envrc`:
+
+```bash
+export TURBO_APNS_TEAM_ID="YOUR_TEAM_ID"
+export TURBO_APNS_KEY_ID="YOUR_KEY_ID"
+export TURBO_APNS_PRIVATE_KEY_PATH="$HOME/.config/turbo/AuthKey_YOUR_KEY_ID.p8"
+export TURBO_APNS_USE_SANDBOX=1
+```
+
+Notes:
+
+- keep the `.p8` key outside the repo, for example under `~/.config/turbo/`
+- `.envrc` is ignored by git in this repo, so local APNs secrets stay untracked
+- after creating or editing `.envrc`, run `direnv allow`
+- verify the variables are visible inside the repo with `direnv exec . env | rg '^TURBO_APNS'`
 
 ### Diagnostics
 
@@ -172,6 +254,22 @@ The diagnostics snapshot currently includes:
 - status text
 - backend status text
 
+The app also auto-publishes diagnostics in debug builds after high-signal state transitions.
+
+That means the normal loop is now:
+
+1. reproduce once
+2. tell the agent which side looked wrong
+3. fetch the latest report or merged timeline from the backend
+
+Manual upload remains available, but it is now a fallback rather than the primary workflow.
+
+For simulator-driven distributed debugging, the normal loop is now:
+
+1. `just simulator-scenario <name>`
+2. `just simulator-scenario-merge`
+3. fix the failing invariant or state transition
+
 ### Verification baseline
 
 Most recent validated commands:
@@ -186,6 +284,8 @@ The unit suite currently covers:
 - selected-session reconciliation rules
 - primary action derivation
 - self-check summary behavior
+- simulator PTT join/transmit behavior
+- a simulator-backed distributed smoke scenario
 
 Important design decisions already agreed for v1:
 
@@ -199,29 +299,56 @@ Important design decisions already agreed for v1:
 - Enforce at most one active transmitter per direct channel.
 - Keep the media contract transport-agnostic so a relay-oriented transport can replace the prototype spike cleanly.
 
+## Unison Cloud storage guidance
+
+Backend storage changes in this repo should follow these rules:
+
+- model `OrderedTable` keys from the queries we need to serve
+- use compound keys and `rangeClosed.prefix` for scoped reads
+- avoid whole-table scans with in-memory filtering on route hot paths
+- add explicit secondary indexes or projections for additional access patterns
+- keep primary rows and secondary projections in sync in the same transaction
+- keep transactions small and focused
+- update dev reset/cleanup flows whenever a new projection is added
+
+Recent production debugging confirmed why this matters: a broad contact-summary path that scanned too much durable state was fine locally but unstable when deployed. The fix was not a hosting workaround; it was a better query-shaped schema and narrower reads.
+
 ## Local development workflow
 
 Use this for fast iteration right now:
 
-1. In UCM, run `turbo.serveHttpLocal`
-2. Use the printed named URL or the LAN equivalent, for example:
+1. For backend-focused local checks, run `turbo.serveHttpLocal`
+2. For full simulator ready/transmit scenario runs, run `turbo.serveLocal`
+3. Use the printed named URL or the LAN equivalent, for example:
    - `http://localhost:8081/s/turbo`
+   - `http://localhost:8080/s/turbo`
    - `http://192.168.1.161:8081/s/turbo`
-3. Set `TurboBackendBaseURL` in [Turbo/Info.plist](/Users/mau/Development/Turbo/Turbo/Info.plist) to that base URL
-4. Rebuild and reinstall the app
+4. Set `TurboBackendBaseURL` in [Turbo/Info.plist](/Users/mau/Development/Turbo/Turbo/Info.plist) to that base URL
+5. Rebuild and reinstall the app
 
 Important current split:
 
-- `turbo.serveHttpLocal` is the reliable local path and is HTTP-only
-- `turbo.serveLocal` is intended to mirror the websocket-capable cloud path, but its local websocket exposure is still broken
+- `turbo.serveHttpLocal` is the reliable local path for backend-only and route-level checks, and is HTTP-only
+- `turbo.serveLocal` is the websocket-capable path to use for simulator `request_accept_ready` / transmit scenario verification
 - `turbo.deploy` remains the intended production/cloud path
 
 Operational reminders:
 
-- `Turbo/Info.plist` `TurboBackendBaseURL` should be `http://localhost:8081/s/turbo` for simulator/local HTTP work, `http://<your-mac-lan-ip>:8081/s/turbo` for a physical device against local HTTP, and `https://beepbeep.to` for the deployed backend.
+- `Turbo/Info.plist` `TurboBackendBaseURL` should be `http://localhost:8081/s/turbo` for local HTTP route checks, `http://localhost:8080/s/turbo` for local websocket-backed simulator scenario work, `http://<your-mac-lan-ip>:8081/s/turbo` for a physical device against local HTTP, and `https://beepbeep.to` for the deployed backend.
 - Dev user seeding is no longer automatic on app launch. If you want the canonical dev handles on a fresh backend, call `POST /v1/dev/seed` explicitly.
-- Use `just reset` for the authenticated runtime reset, or `just reset-all` for a blank-world reset that also deletes users, devices, and channels. Both default to `https://beepbeep.to` and can be overridden, e.g. `just reset-all http://localhost:8081/s/turbo @avery`.
-- The simulator is valid for control-plane/UI verification, but PushToTalk instantiation is expected to fail there. Do not treat simulator PTT failures as product regressions.
+- Use `just reset` for the authenticated runtime reset and `just reset-all` for a full backend cleanup. `just seed` restores the canonical dev handles after a full reset. All default to `https://beepbeep.to` and can be overridden, e.g. `just reset http://localhost:8081/s/turbo @avery`.
+- Use `just clean-scratch` to delete repo-root `scratch_*.u` files when temporary route experiments or one-off migration drafts have drifted away from the actual codebase state.
+- Use `just route-probe` after changing backend route composition. It exercises the deployed HTTP surface end to end, including the routes most likely to regress when Unison route order changes:
+  - dev reset/seed
+  - diagnostics upload and latest-read routes
+  - auth and device bootstrap
+  - contact summaries
+  - invite subroutes (`accept`, `decline`, `cancel`)
+  - websocket registration held open during route assertions that depend on live connectivity
+  - channel state/readiness/transmit routes
+  - `ptt-push-target` during an actual active transmit
+- Treat [`scripts/route_probe.py`](/Users/mau/Development/Turbo/scripts/route_probe.py) as part of the route contract. When you add, remove, rename, or reorder backend routes, update the probe in the same change and run it before trusting the deploy. Some routes only become valid inside a live websocket session or active transmit window, so the probe intentionally keeps those preconditions alive while it asserts them.
+- The simulator is valid for distributed control-plane verification because the app uses the simulator PTT shim there. Real Apple PushToTalk UI, backgrounding, lock-screen behavior, and audio still require physical devices.
 - If local UI behavior looks impossible, restart `turbo.serveHttpLocal` and clear backend runtime state via `POST /v1/dev/reset-state` before debugging further.
 
 The backend now exposes `GET /v1/config`, and the app uses that to decide whether websocket signaling is supported by the current runtime.

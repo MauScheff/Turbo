@@ -1,0 +1,43 @@
+{
+  "name": "request_cancel_before_accept",
+  "baseURL": "https://beepbeep.to",
+  "participants": {
+    "a": {
+      "handle": "@avery",
+      "deviceId": "sim-scenario-avery"
+    },
+    "b": {
+      "handle": "@blake",
+      "deviceId": "sim-scenario-blake"
+    }
+  },
+  "steps": [
+    {
+      "description": "both peers open each other",
+      "actions": [
+        { "actor": "a", "type": "openPeer", "peer": "b" },
+        { "actor": "b", "type": "openPeer", "peer": "a" }
+      ]
+    },
+    {
+      "description": "request propagates to recipient",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "requested", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "incomingRequest", "isJoined": false }
+      }
+    },
+    {
+      "description": "requester cancels before recipient accepts",
+      "actions": [
+        { "actor": "a", "type": "cancelRequest" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "idle", "isJoined": false, "isTransmitting": false },
+        "b": { "selectedHandle": "@avery", "phase": "idle", "isJoined": false, "isTransmitting": false }
+      }
+    }
+  ]
+}

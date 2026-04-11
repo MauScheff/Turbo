@@ -52,10 +52,14 @@ extension PTTViewModel {
             contactName: contact.name,
             contactIsOnline: contactSummaryByContactID[contact.id]?.isOnline ?? contact.isOnline,
             isJoined: isJoined,
+            localIsTransmitting: isTransmitting,
+            peerSignalIsTransmitting: remoteTransmittingContactIDs.contains(contact.id),
             activeChannelID: activeChannelId,
             systemSessionMatchesContact: systemSessionMatches(contact.id),
             systemSessionState: systemSessionState,
             pendingAction: sessionCoordinator.pendingAction,
+            localJoinFailure: pttCoordinator.state.lastJoinFailure,
+            mediaState: mediaConnectionState,
             channel: channelStateByContactID[contact.id].map(ChannelReadinessSnapshot.init(channelState:))
         )
     }
@@ -108,7 +112,8 @@ extension PTTViewModel {
             .localSessionUpdated(
                 isJoined: isJoined,
                 activeChannelID: activeChannelId,
-                pendingAction: sessionCoordinator.pendingAction
+                pendingAction: sessionCoordinator.pendingAction,
+                localJoinFailure: pttCoordinator.state.lastJoinFailure
             )
         )
         selectedPeerCoordinator.send(
@@ -117,7 +122,7 @@ extension PTTViewModel {
                 matchesSelectedContact: systemSessionMatches(contact.id)
             )
         )
-        selectedPeerCoordinator.send(.mediaStateUpdated(mediaRuntime.connectionState))
+        selectedPeerCoordinator.send(.mediaStateUpdated(mediaConnectionState))
     }
 
     func selectedPeerState(for contactID: UUID) -> SelectedPeerState {
@@ -226,15 +231,17 @@ extension PTTViewModel {
     }
 
     func selectContact(_ contact: Contact) {
-        backendRuntime.trackedContactIDs.insert(contact.id)
+        trackContact(contact.id)
         selectedContactId = contact.id
         sessionCoordinator.select(contactID: contact.id)
         diagnostics.record(.state, message: "Selected contact", metadata: ["handle": contact.handle])
         updateStatusForSelectedContact()
+        captureDiagnosticsState("selected-contact")
     }
 
     func resetSelection() {
         selectedContactId = nil
+        captureDiagnosticsState("selection-reset")
     }
 
     func updateStatusForSelectedContact() {
@@ -254,10 +261,12 @@ extension PTTViewModel {
                     systemSessionMatchesContact: false,
                     systemSessionState: systemSessionState,
                     pendingAction: sessionCoordinator.pendingAction,
+                    localJoinFailure: pttCoordinator.state.lastJoinFailure,
                     channel: nil
                 )
             )
         }
+        captureDiagnosticsState("selected-status-refresh")
     }
 
     func updateContact(_ id: UUID, mutate: (inout Contact) -> Void) {
@@ -269,10 +278,10 @@ extension PTTViewModel {
 
     var authoritativeContactIDs: Set<UUID> {
         ContactDirectory.authoritativeContactIDs(
-            trackedContactIDs: backendRuntime.trackedContactIDs,
+            trackedContactIDs: trackedContactIDs,
             selectedContactID: selectedContactId,
             activeChannelID: activeChannelId,
-            mediaSessionContactID: mediaRuntime.contactID,
+            mediaSessionContactID: mediaSessionContactID,
             pendingJoinContactID: pendingJoinContactId,
             inviteContactIDs: requestContactIDs
         )

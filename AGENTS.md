@@ -11,7 +11,7 @@ At the same time, try to teach the user as you go.
 ## Starting a new agent session (handoff)
 
 If you are starting a new Codex/agent session on this repo and you don’t have the prior conversation context, first read `README.md` (especially **AI agents / handoff notes**) for the current architecture, local-dev workflow, and common gotchas.
-Then read `Handoff.md` for the short operational state, current testing path, and the latest app/backend workflow decisions.
+Then read `HANDOFF.md` for the short operational state, current testing path, and the latest app/backend workflow decisions.
 
 ## Instructions
 
@@ -48,6 +48,22 @@ You should typecheck the scratch file regularly as you are working to make sure 
 ## Product engineering expectations
 
 For this repo, prefer structural increments over localized quick fixes.
+
+## Unison Cloud storage rules
+
+When changing backend storage or query paths in this repo:
+
+- Design `OrderedTable` schemas from the queries outward, not from the entity shape inward.
+- Prefer compound keys plus `OrderedTable.rangeClosed.prefix` for per-user or per-channel reads.
+- Do not stream whole tables and filter in memory on hot paths if a query-shaped key can exist instead.
+- Add explicit secondary projections when the product needs multiple access patterns.
+- Keep transactional writes small and focused. If a route or mutation touches many rows, stop and reconsider the schema or split the work.
+- Keep secondary indexes and projections updated in the same transaction as the primary write.
+- When adding a new projection, update reset/dev-cleanup paths in the same change.
+- Treat route-level scans over all users, channels, or invites as a design smell unless the dataset is provably bounded and non-hot.
+- For contact/session queries, optimize for the active user's relationship-backed subset, not the entire dev directory.
+
+If a hosted failure looks like an intermittent server error, check transaction shape and table-scan behavior before blaming the platform.
 
 ## Design maxims (Unison)
 
@@ -136,6 +152,29 @@ When in doubt: simplify, split, and make the data flow obvious.
   - simulator and Xcode agent checks before real-device checks
   - app-owned self-checks before manual tap-through debugging
   - persistent readable logs before screenshot-based diagnosis
+  - prefer checked-in simulator scenario specs under `scenarios/` for distributed control-plane bugs
+  - when adding a new distributed regression, prefer extending the scenario spec set and runner over adding another bespoke manual test path
+  - after a simulator scenario run, prefer `just simulator-scenario-merge` before guessing from screenshots or prose
+  - treat simulator exact-device diagnostics as authoritative only after the scenario run itself actually executed tests; check the test summary if a green result looks suspicious
+
+## Turbo-specific iteration notes
+
+- Debug builds auto-publish structured diagnostics after high-signal state transitions. Manual `Upload` in the diagnostics sheet is now fallback behavior, not the primary path.
+- The backend now supports exact-device diagnostics reads for simulator identities too, so `just simulator-scenario-merge` is part of the normal loop.
+- The simulator scenario runner is controlled by a temporary repo-local file `.scenario-runtime-config.json` that `just simulator-scenario` creates and removes. Do not check this file in or depend on it manually.
+- If `xcodebuild` says the simulator scenario command succeeded unusually quickly, confirm that tests actually ran. Swift Testing does not use the same selector behavior as classic XCTest, so a bad `-only-testing` filter can silently run zero tests.
+- For background/lock-screen PushToTalk work, treat the loop as:
+  1. `direnv exec . just ptt-push-target <channel_id> <backend> <sender>` to prove the receiver token exists
+  2. `direnv exec . just ptt-apns-bridge` to prove real wake pushes are being sent
+  3. only then use physical-device diagnostics to debug post-wake playback or Apple PTT behavior
+- `ptt-push-target` returning a real token means the token-upload/backend-send boundary is healthy. If wake still fails after that, the bug is in app wake handling or playback, not in Apple Developer credential setup.
+- On locked receive, prefer a playback-only media startup path under the PTT-owned activated audio session. Do not eagerly boot capture/input just to play remote audio after wake.
+- Wake-ready transmit also requires the backend transmit-target selector to accept a token-backed receiver device when websocket presence is absent; otherwise the app will show `Hold to talk to wake ...` but `beginTransmit` will still fail server-side.
+- For distributed control-plane bugs, prefer this order:
+  1. `just simulator-scenario <scenario>`
+  2. `just simulator-scenario-merge`
+  3. inspect the merged timeline
+  4. only then move to physical devices for Apple/PTT/audio/background behavior
 
 ## DISCOVERY mode instructions
 

@@ -17,14 +17,29 @@ struct BackendSyncState: Equatable {
     }
 
     mutating func applyChannelState(_ channelState: TurboChannelStateResponse, for contactID: UUID) {
-        channelStates[contactID] = channelState
-        if !channelState.hasIncomingRequest {
+        let effectiveChannelState = Self.effectiveChannelState(
+            existing: channelStates[contactID],
+            incoming: channelState
+        )
+        channelStates[contactID] = effectiveChannelState
+        if !effectiveChannelState.hasIncomingRequest {
             incomingInvites[contactID] = nil
         }
-        if !channelState.hasOutgoingRequest {
+        if !effectiveChannelState.hasOutgoingRequest {
             outgoingInvites[contactID] = nil
             requestCooldownDeadlines[contactID] = nil
         }
+    }
+
+    static func effectiveChannelState(
+        existing: TurboChannelStateResponse?,
+        incoming: TurboChannelStateResponse
+    ) -> TurboChannelStateResponse {
+        guard let existing else { return incoming }
+        guard shouldPreserveJoinedMembership(existing: existing, incoming: incoming) else {
+            return incoming
+        }
+        return existing
     }
 
     mutating func clearChannelState(for contactID: UUID) {
@@ -70,5 +85,30 @@ struct BackendSyncState: Equatable {
             .union(summaryOutgoing)
             .union(incomingInvites.keys)
             .union(outgoingInvites.keys)
+    }
+
+    private static func shouldPreserveJoinedMembership(
+        existing: TurboChannelStateResponse,
+        incoming: TurboChannelStateResponse
+    ) -> Bool {
+        let transientStatuses = [
+            "connecting",
+            ConversationState.requested.rawValue,
+            ConversationState.incomingRequest.rawValue,
+            ConversationState.waitingForPeer.rawValue,
+        ]
+        let preservesLocalMembership = existing.channelId == incoming.channelId
+            && existing.selfJoined
+            && !incoming.selfJoined
+            && transientStatuses.contains(incoming.status)
+        let preservesObservedPeerMembership = existing.channelId == incoming.channelId
+            && !existing.selfJoined
+            && existing.peerJoined
+            && existing.peerDeviceConnected
+            && !incoming.selfJoined
+            && !incoming.peerJoined
+            && !incoming.peerDeviceConnected
+            && transientStatuses.contains(incoming.status)
+        return preservesLocalMembership || preservesObservedPeerMembership
     }
 }

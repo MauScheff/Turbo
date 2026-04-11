@@ -63,6 +63,55 @@ enum TurboSignalKind: String, Codable {
     case audioChunk = "audio-chunk"
 }
 
+enum TurboPTTPushEvent: String, Codable, Equatable {
+    case transmitStart = "transmit-start"
+    case leaveChannel = "leave-channel"
+}
+
+struct TurboPTTPushPayload: Equatable {
+    let event: TurboPTTPushEvent
+    let channelId: String?
+    let activeSpeaker: String?
+    let senderUserId: String?
+    let senderDeviceId: String?
+
+    var participantName: String {
+        activeSpeaker ?? "Remote"
+    }
+
+    init(
+        event: TurboPTTPushEvent,
+        channelId: String?,
+        activeSpeaker: String?,
+        senderUserId: String?,
+        senderDeviceId: String?
+    ) {
+        self.event = event
+        self.channelId = channelId
+        self.activeSpeaker = activeSpeaker
+        self.senderUserId = senderUserId
+        self.senderDeviceId = senderDeviceId
+    }
+
+    init?(pushPayload: [String: Any]) {
+        let eventText =
+            (pushPayload["event"] as? String)
+            ?? (pushPayload["type"] as? String)
+        guard let eventText,
+              let event = TurboPTTPushEvent(rawValue: eventText) else {
+            return nil
+        }
+
+        self.init(
+            event: event,
+            channelId: pushPayload["channelId"] as? String,
+            activeSpeaker: pushPayload["activeSpeaker"] as? String,
+            senderUserId: pushPayload["senderUserId"] as? String,
+            senderDeviceId: pushPayload["senderDeviceId"] as? String
+        )
+    }
+}
+
 struct TurboSignalEnvelope: Codable {
     let type: TurboSignalKind
     let channelId: String
@@ -89,6 +138,41 @@ struct TurboSeedResponse: Decodable {
     let users: [TurboUserLookupResponse]
 }
 
+struct TurboWebSocketStatusNotice: Decodable {
+    let status: String
+    let deviceId: String?
+}
+
+struct TurboDiagnosticsUploadRequest: Encodable {
+    let deviceId: String
+    let appVersion: String
+    let backendBaseURL: String
+    let selectedHandle: String?
+    let snapshot: String
+    let transcript: String
+}
+
+struct TurboPublishedDiagnosticsReport: Decodable {
+    let userId: String
+    let deviceId: String
+    let appVersion: String
+    let backendBaseURL: String
+    let selectedHandle: String?
+    let snapshot: String
+    let transcript: String
+    let uploadedAt: String
+}
+
+struct TurboDiagnosticsUploadResponse: Decodable {
+    let status: String
+    let report: TurboPublishedDiagnosticsReport
+}
+
+struct TurboLatestDiagnosticsResponse: Decodable {
+    let status: String
+    let report: TurboPublishedDiagnosticsReport
+}
+
 struct TurboResetStateResponse: Decodable {
     let status: String
     let clearedTransmitStates: Int
@@ -98,6 +182,8 @@ struct TurboResetStateResponse: Decodable {
     let clearedSessions: Int?
     let clearedSockets: Int?
     let clearedChannels: Int?
+    let clearedDevices: Int?
+    let clearedUsers: Int?
 }
 
 struct TurboUserLookupResponse: Decodable {

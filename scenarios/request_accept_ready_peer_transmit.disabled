@@ -1,0 +1,83 @@
+{
+  "name": "request_accept_ready_peer_transmit",
+  "baseURL": "https://beepbeep.to",
+  "participants": {
+    "a": {
+      "handle": "@avery",
+      "deviceId": "sim-scenario-avery"
+    },
+    "b": {
+      "handle": "@blake",
+      "deviceId": "sim-scenario-blake"
+    }
+  },
+  "steps": [
+    {
+      "description": "both peers open each other",
+      "actions": [
+        { "actor": "a", "type": "openPeer", "peer": "b" },
+        { "actor": "b", "type": "openPeer", "peer": "a" }
+      ]
+    },
+    {
+      "description": "request propagates to recipient",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "requested", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "incomingRequest", "isJoined": false }
+      }
+    },
+    {
+      "description": "recipient joins and requester becomes peerReady",
+      "actions": [
+        { "actor": "b", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "peerReady", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "waitingForPeer", "isJoined": true }
+      }
+    },
+    {
+      "description": "both sides become ready",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "ready", "isJoined": true },
+        "b": { "selectedHandle": "@avery", "phase": "ready", "isJoined": true }
+      }
+    },
+    {
+      "description": "recipient begins transmitting",
+      "actions": [
+        { "actor": "b", "type": "beginTransmit" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "receiving", "isJoined": true },
+        "b": { "selectedHandle": "@avery", "phase": "transmitting", "isJoined": true, "isTransmitting": true }
+      }
+    },
+    {
+      "description": "recipient stops transmitting",
+      "actions": [
+        { "actor": "b", "type": "endTransmit" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "ready", "isJoined": true },
+        "b": { "selectedHandle": "@avery", "phase": "ready", "isJoined": true, "isTransmitting": false }
+      }
+    },
+    {
+      "description": "recipient disconnects",
+      "actions": [
+        { "actor": "b", "type": "disconnect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "isJoined": false, "isTransmitting": false },
+        "b": { "selectedHandle": "@avery", "isJoined": false, "isTransmitting": false }
+      }
+    }
+  ]
+}

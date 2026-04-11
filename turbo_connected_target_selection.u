@@ -281,14 +281,14 @@ turbo.service.contacts.internal.sessionStatus currentUserId selfJoined peerJoine
       else
         "peer-transmitting"
     None ->
-      if hasIncomingRequest then
-        "incoming-request"
-      else if hasOutgoingRequest then
-        "requested"
-      else if selfJoined && peerJoined && peerDeviceConnected then
+      if selfJoined && peerJoined && peerDeviceConnected then
         "ready"
       else if selfJoined then
         "waiting-for-peer"
+      else if hasIncomingRequest then
+        "incoming-request"
+      else if hasOutgoingRequest then
+        "requested"
       else if peerJoined || peerOnline then
         "connecting"
       else

@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 struct TurboHeaderView: View {
     let wordmarkName: String
@@ -13,11 +12,14 @@ struct TurboHeaderView: View {
     let diagnosticsHasError: Bool
     let isRunningSelfCheck: Bool
     let isResettingDevState: Bool
+    let microphonePermissionStatus: String
+    let needsMicrophonePermission: Bool
     let onBack: () -> Void
     let onShowIdentity: () -> Void
     let onShowDiagnostics: () -> Void
     let onRunSelfCheck: () -> Void
     let onResetDevState: () -> Void
+    let onRequestMicrophonePermission: () -> Void
 
     var body: some View {
         VStack(spacing: 6) {
@@ -85,6 +87,20 @@ struct TurboHeaderView: View {
                     .font(.caption2)
                     .foregroundStyle(selfCheckPassing == false ? Color.red : Color.secondary)
                     .lineLimit(2)
+            }
+
+            if needsMicrophonePermission {
+                Button(action: onRequestMicrophonePermission) {
+                    Text(microphonePermissionStatus)
+                        .font(.caption2.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+            } else {
+                Text(microphonePermissionStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             if let logFilePath {
@@ -215,186 +231,5 @@ struct TurboSplashView<LookupBar: View>: View {
             Spacer()
         }
         .padding()
-    }
-}
-
-struct TurboDiagnosticsView: View {
-    let report: DevSelfCheckReport?
-    let logFilePath: String?
-    let diagnosticsTranscript: String
-    let entries: [DiagnosticsEntry]
-
-    var body: some View {
-        List {
-            if let report {
-                Section("Self-check") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(report.summary)
-                                .font(.body.weight(.semibold))
-                                .foregroundStyle(report.isPassing ? Color.primary : Color.red)
-                            Spacer()
-                            Text(report.completedAt.formatted(date: .omitted, time: .standard))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-
-                        if let targetHandle = report.targetHandle {
-                            Text("Target: \(targetHandle)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        ForEach(report.steps) { step in
-                            HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: iconName(for: step.status))
-                                    .foregroundStyle(color(for: step.status))
-                                    .frame(width: 18)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(step.id.title)
-                                        .font(.caption.weight(.semibold))
-                                    Text(step.detail)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .padding(.vertical, 2)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-
-            if let logFilePath {
-                Section("Log file") {
-                    Text(logFilePath)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                    Button("Copy transcript") {
-                        UIPasteboard.general.string = diagnosticsTranscript
-                    }
-                }
-            }
-
-            if entries.isEmpty {
-                ContentUnavailableView("No diagnostics yet", systemImage: "waveform.path.ecg")
-            } else {
-                ForEach(entries) { entry in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(entry.subsystem.rawValue.uppercased())
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(entry.level == .error ? .red : .secondary)
-                            Spacer()
-                            Text(entry.timestamp.formatted(date: .omitted, time: .standard))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                        Text(entry.message)
-                            .font(.body)
-                        if !entry.metadata.isEmpty {
-                            Text(entry.metadata.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: "\n"))
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-        }
-    }
-
-    private func iconName(for status: DevSelfCheckStatus) -> String {
-        switch status {
-        case .passed:
-            return "checkmark.circle.fill"
-        case .failed:
-            return "xmark.octagon.fill"
-        case .skipped:
-            return "minus.circle.fill"
-        }
-    }
-
-    private func color(for status: DevSelfCheckStatus) -> Color {
-        switch status {
-        case .passed:
-            return .green
-        case .failed:
-            return .red
-        case .skipped:
-            return .secondary
-        }
-    }
-}
-
-struct TurboDevIdentitySheet: View {
-    @Binding var draftDevUserHandle: String
-    let availableDevUserHandles: [String]
-    let isSaving: Bool
-    let onCancel: () -> Void
-    let onSave: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Current backend user") {
-                    TextField("Dev handle", text: $draftDevUserHandle)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Text("Use a different handle on each physical device.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Suggested handles") {
-                    ForEach(availableDevUserHandles, id: \.self) { handle in
-                        Button(handle) {
-                            draftDevUserHandle = handle
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Dev Identity")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onCancel)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", action: onSave)
-                        .disabled(draftDevUserHandle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-    }
-}
-
-struct TurboDiagnosticsSheet: View {
-    let report: DevSelfCheckReport?
-    let logFilePath: String?
-    let diagnosticsTranscript: String
-    let entries: [DiagnosticsEntry]
-    let onClose: () -> Void
-    let onClear: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            TurboDiagnosticsView(
-                report: report,
-                logFilePath: logFilePath,
-                diagnosticsTranscript: diagnosticsTranscript,
-                entries: entries
-            )
-            .navigationTitle("Diagnostics")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close", action: onClose)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Clear", action: onClear)
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
     }
 }

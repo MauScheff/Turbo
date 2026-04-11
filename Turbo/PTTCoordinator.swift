@@ -1,11 +1,50 @@
 import Foundation
 
+enum PTTJoinFailureReason: Equatable {
+    case channelLimitReached
+    case other(message: String)
+
+    var message: String {
+        switch self {
+        case .channelLimitReached:
+            return "Channel limit reached"
+        case .other(let message):
+            return message
+        }
+    }
+
+    var recoveryMessage: String {
+        switch self {
+        case .channelLimitReached:
+            return "Reconnect failed. End session and retry."
+        case .other(let message):
+            return "Join failed: \(message)"
+        }
+    }
+
+    var blocksAutomaticRestore: Bool {
+        switch self {
+        case .channelLimitReached:
+            return true
+        case .other:
+            return false
+        }
+    }
+}
+
+struct PTTJoinFailure: Equatable {
+    let contactID: UUID?
+    let channelUUID: UUID
+    let reason: PTTJoinFailureReason
+}
+
 struct PTTSessionState: Equatable {
     var systemChannelUUID: UUID?
     var activeContactID: UUID?
     var isJoined: Bool = false
     var isTransmitting: Bool = false
     var lastError: String?
+    var lastJoinFailure: PTTJoinFailure?
 
     static let initial = PTTSessionState()
 
@@ -22,7 +61,7 @@ enum PTTEvent: Equatable {
     case restoredChannel(channelUUID: UUID, contactID: UUID?)
     case didJoinChannel(channelUUID: UUID, contactID: UUID?, reason: String)
     case didLeaveChannel(channelUUID: UUID, contactID: UUID?, reason: String, autoRejoinContactID: UUID?)
-    case failedToJoinChannel(channelUUID: UUID, message: String)
+    case failedToJoinChannel(channelUUID: UUID, contactID: UUID?, reason: PTTJoinFailureReason)
     case failedToLeaveChannel(channelUUID: UUID, message: String)
     case didBeginTransmitting(channelUUID: UUID, source: String)
     case didEndTransmitting(channelUUID: UUID, source: String)
@@ -56,12 +95,14 @@ enum PTTReducer {
             nextState.systemChannelUUID = channelUUID
             nextState.activeContactID = contactID
             nextState.lastError = nil
+            nextState.lastJoinFailure = nil
 
         case .didJoinChannel(let channelUUID, let contactID, _):
             nextState.systemChannelUUID = channelUUID
             nextState.activeContactID = contactID
             nextState.isJoined = true
             nextState.lastError = nil
+            nextState.lastJoinFailure = nil
             effects.append(.syncJoinedChannel(contactID: contactID))
 
         case .didLeaveChannel(let channelUUID, let contactID, _, let autoRejoinContactID):
@@ -72,12 +113,14 @@ enum PTTReducer {
             nextState.isJoined = false
             nextState.isTransmitting = false
             nextState.lastError = nil
+            nextState.lastJoinFailure = nil
             effects.append(.syncLeftChannel(contactID: contactID, autoRejoinContactID: autoRejoinContactID))
 
-        case .failedToJoinChannel(_, let message):
+        case .failedToJoinChannel(let channelUUID, let contactID, let reason):
             nextState.isJoined = false
             nextState.isTransmitting = false
-            nextState.lastError = message
+            nextState.lastError = reason.message
+            nextState.lastJoinFailure = PTTJoinFailure(contactID: contactID, channelUUID: channelUUID, reason: reason)
             effects.append(.closeMediaSession)
 
         case .failedToLeaveChannel(_, let message):

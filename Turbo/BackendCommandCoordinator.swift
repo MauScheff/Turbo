@@ -2,13 +2,14 @@ import Foundation
 
 enum BackendCommandOperation: Equatable {
     case openPeer(handle: String)
-    case join(contactID: UUID)
+    case join(request: BackendJoinRequest)
     case leave(contactID: UUID)
 }
 
 struct BackendJoinRequest: Equatable {
     let contactID: UUID
     let handle: String
+    let relationship: PairRelationshipState
     let existingRemoteUserID: String?
     let existingBackendChannelID: String?
     let incomingInvite: TurboInviteResponse?
@@ -24,6 +25,7 @@ struct BackendLeaveRequest: Equatable {
 
 struct BackendCommandState: Equatable {
     var activeOperation: BackendCommandOperation?
+    var queuedJoinRequest: BackendJoinRequest?
     var lastError: String?
 
     static let initial = BackendCommandState()
@@ -68,11 +70,17 @@ enum BackendCommandReducer {
             effects.append(.openPeer(handle: handle))
 
         case .joinRequested(let request):
-            let operation = BackendCommandOperation.join(contactID: request.contactID)
-            guard nextState.activeOperation != operation else {
+            let operation = BackendCommandOperation.join(request: request)
+            if case .join(let activeRequest) = nextState.activeOperation,
+               activeRequest.contactID == request.contactID {
+                if activeRequest == request || nextState.queuedJoinRequest == request {
+                    return BackendCommandTransition(state: nextState)
+                }
+                nextState.queuedJoinRequest = request
                 return BackendCommandTransition(state: nextState)
             }
             nextState.activeOperation = operation
+            nextState.queuedJoinRequest = nil
             nextState.lastError = nil
             effects.append(.join(request))
 
@@ -86,12 +94,26 @@ enum BackendCommandReducer {
             effects.append(.leave(request))
 
         case .operationFinished:
-            nextState.activeOperation = nil
-            nextState.lastError = nil
+            if let queuedJoinRequest = nextState.queuedJoinRequest {
+                nextState.activeOperation = .join(request: queuedJoinRequest)
+                nextState.queuedJoinRequest = nil
+                nextState.lastError = nil
+                effects.append(.join(queuedJoinRequest))
+            } else {
+                nextState.activeOperation = nil
+                nextState.lastError = nil
+            }
 
         case .operationFailed(let message):
-            nextState.activeOperation = nil
-            nextState.lastError = message
+            if let queuedJoinRequest = nextState.queuedJoinRequest {
+                nextState.activeOperation = .join(request: queuedJoinRequest)
+                nextState.queuedJoinRequest = nil
+                nextState.lastError = nil
+                effects.append(.join(queuedJoinRequest))
+            } else {
+                nextState.activeOperation = nil
+                nextState.lastError = message
+            }
 
         case .reset:
             nextState = .initial

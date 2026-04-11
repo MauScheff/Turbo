@@ -17,6 +17,9 @@ struct ContentView: View {
     @State private var isSavingDevIdentity: Bool = false
     @State private var isOpeningPeer: Bool = false
     @State private var isResettingDevState: Bool = false
+    @State private var isUploadingDiagnostics: Bool = false
+    @State private var isRequestingMicrophonePermission: Bool = false
+    @State private var diagnosticsUploadStatus: String?
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -45,11 +48,20 @@ struct ContentView: View {
         .sheet(isPresented: $isShowingDiagnostics) {
             TurboDiagnosticsSheet(
                 report: viewModel.latestSelfCheckReport,
+                selectedSession: viewModel.selectedSessionDiagnosticsSummary,
+                contacts: viewModel.contactDiagnosticsSummaries,
+                microphonePermissionStatus: viewModel.microphonePermissionStatusText,
+                needsMicrophonePermission: viewModel.needsMicrophonePermission,
                 logFilePath: viewModel.diagnostics.logFilePath,
                 diagnosticsTranscript: viewModel.diagnosticsTranscript,
                 entries: viewModel.diagnostics.entries,
+                uploadStatus: diagnosticsUploadStatus,
+                isUploading: isUploadingDiagnostics,
+                isRequestingMicrophonePermission: isRequestingMicrophonePermission,
                 onClose: { isShowingDiagnostics = false },
-                onClear: { viewModel.diagnostics.clear() }
+                onUpload: uploadDiagnostics,
+                onClear: { viewModel.diagnostics.clear() },
+                onRequestMicrophonePermission: requestMicrophonePermission
             )
         }
     }
@@ -68,6 +80,8 @@ struct ContentView: View {
                 diagnosticsHasError: viewModel.diagnostics.latestError != nil,
                 isRunningSelfCheck: viewModel.isRunningSelfCheck,
                 isResettingDevState: isResettingDevState,
+                microphonePermissionStatus: viewModel.microphonePermissionStatusText,
+                needsMicrophonePermission: viewModel.needsMicrophonePermission,
                 onBack: {
                     viewModel.disconnect()
                     viewModel.resetSelection()
@@ -81,7 +95,8 @@ struct ContentView: View {
                     isShowingDiagnostics = true
                 },
                 onRunSelfCheck: runSelfCheckAndShowDiagnostics,
-                onResetDevState: resetDevState
+                onResetDevState: resetDevState,
+                onRequestMicrophonePermission: requestMicrophonePermission
             )
             peerLookupBar
             TurboContactListView(
@@ -195,6 +210,36 @@ struct ContentView: View {
         }
     }
 
+    private func uploadDiagnostics() {
+        isUploadingDiagnostics = true
+        diagnosticsUploadStatus = nil
+        Task {
+            do {
+                let response = try await viewModel.publishDiagnostics()
+                await MainActor.run {
+                    diagnosticsUploadStatus =
+                        "Uploaded for \(response.report.deviceId) at \(response.report.uploadedAt)"
+                    isUploadingDiagnostics = false
+                }
+            } catch {
+                await MainActor.run {
+                    diagnosticsUploadStatus = "Upload failed: \(error.localizedDescription)"
+                    isUploadingDiagnostics = false
+                }
+            }
+        }
+    }
+
+    private func requestMicrophonePermission() {
+        isRequestingMicrophonePermission = true
+        Task {
+            await viewModel.requestMicrophonePermission()
+            await MainActor.run {
+                isRequestingMicrophonePermission = false
+            }
+        }
+    }
+
     private var systemSessionSubtitle: String? {
         switch viewModel.systemSessionState {
         case .none:
@@ -230,9 +275,13 @@ struct ContentView: View {
 
     private func contactStatusPillModel(_ contact: Contact) -> ContactStatusPillModel {
         let isSelected = viewModel.selectedContactId == contact.id
+        let selectedPeerState = isSelected ? viewModel.selectedPeerState(for: contact.id) : nil
+        if selectedPeerState?.phase == .peerReady {
+            return ContactStatusPillModel(text: "Ready", tint: .green)
+        }
         let conversationState =
             isSelected
-            ? viewModel.selectedPeerState(for: contact.id).conversationState
+            ? (selectedPeerState?.conversationState ?? .idle)
             : viewModel.listConversationState(for: contact.id)
         let summary = viewModel.contactSummary(for: contact.id)
 

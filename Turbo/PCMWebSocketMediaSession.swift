@@ -2,41 +2,54 @@ import Foundation
 import AVFAudio
 
 actor AudioChunkSender {
-    private let sendChunk: @Sendable (String) async throws -> Void
+    private var sendChunk: (@Sendable (String) async throws -> Void)?
     private let reportFailure: @Sendable (String) async -> Void
-    private let minimumSpacingNanoseconds: UInt64 = 100_000_000
-    private var latestPayload: String?
+    private let maximumPendingPayloads = 8
+    private var pendingPayloads: [String] = []
     private var isDraining = false
 
     init(
-        sendChunk: @escaping @Sendable (String) async throws -> Void,
+        sendChunk: (@Sendable (String) async throws -> Void)?,
         reportFailure: @escaping @Sendable (String) async -> Void
     ) {
         self.sendChunk = sendChunk
         self.reportFailure = reportFailure
     }
 
+    func updateSendChunk(_ handler: (@Sendable (String) async throws -> Void)?) {
+        sendChunk = handler
+    }
+
     func enqueue(_ payload: String) async {
-        latestPayload = payload
+        pendingPayloads.append(payload)
+        if pendingPayloads.count > maximumPendingPayloads {
+            pendingPayloads.removeFirst(pendingPayloads.count - maximumPendingPayloads)
+        }
         guard !isDraining else { return }
         isDraining = true
         await drain()
     }
 
     func reset() {
-        latestPayload = nil
+        pendingPayloads.removeAll(keepingCapacity: false)
         isDraining = false
     }
 
     private func drain() async {
-        while let payload = latestPayload {
-            latestPayload = nil
+        while !pendingPayloads.isEmpty {
+            let payload = pendingPayloads.removeFirst()
+            guard let sendChunk else {
+                await reportFailure("audio send failed: websocket transport is not configured")
+                pendingPayloads.removeAll(keepingCapacity: false)
+                break
+            }
             do {
                 try await sendChunk(payload)
             } catch {
                 await reportFailure("audio send failed: \(error.localizedDescription)")
+                pendingPayloads.removeAll(keepingCapacity: false)
+                break
             }
-            try? await Task.sleep(nanoseconds: minimumSpacingNanoseconds)
         }
         isDraining = false
     }
@@ -52,29 +65,44 @@ final class PCMWebSocketMediaSession: MediaSession {
         }
     }
 
-    private let sendAudioChunk: @Sendable (String) async throws -> Void
+    private let reportEvent: (@Sendable (String, [String: String]) async -> Void)?
     private lazy var audioChunkSender =
         AudioChunkSender(
-            sendChunk: sendAudioChunk,
-            reportFailure: { [weak self] message in
+            sendChunk: initialSendAudioChunk,
+            reportFailure: { [weak self] (message: String) in
                 guard let self else { return }
                 await MainActor.run {
                     self.state = .failed(message)
                 }
             }
         )
-    private let engine = AVAudioEngine()
+    private let captureEngine = AVAudioEngine()
+    private let playbackEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private let stateLock = NSLock()
     private let targetFormat: AVAudioFormat
     private var captureConverter: AVAudioConverter?
     private var playbackConverter: AVAudioConverter?
-    private var isStarted = false
+    private var isPlaybackReady = false
+    private var isCaptureReady = false
     private var isSendingAudio = false
     private var inputTapInstalled = false
+    private var pendingPlaybackBuffers: [AVAudioPCMBuffer] = []
+    private var pendingRemoteAudioChunks: [Data] = []
+    private var playbackStartTask: Task<Void, Never>?
+    private var startTask: Task<Void, Error>?
+    private let maximumPendingPlaybackBuffers = 24
+    private let maximumPendingRemoteAudioChunks = 24
+    private let initialSendAudioChunk: (@Sendable (String) async throws -> Void)?
+    private var currentSendAudioChunk: (@Sendable (String) async throws -> Void)?
 
-    init(sendAudioChunk: @escaping @Sendable (String) async throws -> Void) {
-        self.sendAudioChunk = sendAudioChunk
+    init(
+        sendAudioChunk: (@Sendable (String) async throws -> Void)?,
+        reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil
+    ) {
+        self.initialSendAudioChunk = sendAudioChunk
+        self.currentSendAudioChunk = sendAudioChunk
+        self.reportEvent = reportEvent
         self.targetFormat =
             AVAudioFormat(
                 commonFormat: .pcmFormatInt16,
@@ -83,25 +111,99 @@ final class PCMWebSocketMediaSession: MediaSession {
                 interleaved: true
             )!
 
-        engine.attach(playerNode)
-        engine.connect(playerNode, to: engine.mainMixerNode, format: targetFormat)
+        playbackEngine.attach(playerNode)
+        playbackEngine.connect(playerNode, to: playbackEngine.mainMixerNode, format: targetFormat)
     }
 
-    func start() async throws {
-        guard !isStarted else { return }
+    func updateSendAudioChunk(_ handler: (@Sendable (String) async throws -> Void)?) {
+        currentSendAudioChunk = handler
+        Task {
+            await audioChunkSender.updateSendChunk(handler)
+        }
+    }
+
+    func start(
+        activationMode: MediaSessionActivationMode,
+        startupMode: MediaSessionStartupMode
+    ) async throws {
+        if let existingStartTask = startTask {
+            try await existingStartTask.value
+        }
+
+        let requiresCapture = startupMode == .interactive
+        let playbackAlreadyReady = isPlaybackReady
+        let captureAlreadyReady = isCaptureReady
+        guard !playbackAlreadyReady || (requiresCapture && !captureAlreadyReady) else { return }
+
+        let task = Task<Void, Error> { [weak self] in
+            guard let self else { return }
+            try await self.performStart(
+                activationMode: activationMode,
+                startupMode: startupMode,
+                playbackAlreadyReady: playbackAlreadyReady,
+                captureAlreadyReady: captureAlreadyReady
+            )
+        }
+        startTask = task
+
+        defer {
+            startTask = nil
+        }
+
+        try await task.value
+    }
+
+    private func performStart(
+        activationMode: MediaSessionActivationMode,
+        startupMode: MediaSessionStartupMode,
+        playbackAlreadyReady: Bool,
+        captureAlreadyReady: Bool
+    ) async throws {
+        await report(
+            "Media session start requested",
+            metadata: [
+                "activationMode": String(describing: activationMode),
+                "startupMode": String(describing: startupMode),
+                "playbackReady": String(playbackAlreadyReady),
+                "captureReady": String(captureAlreadyReady)
+            ]
+        )
         state = .preparing
-        try configureAudioSession()
-        try prepareConverters()
-        try installInputTapIfNeeded()
-        try startEngineIfNeeded()
-        isStarted = true
+        try configureAudioSession(
+            activationMode: activationMode,
+            startupMode: startupMode
+        )
+        try preparePlaybackPathIfNeeded()
+        try startPlaybackEngineIfNeeded()
+        isPlaybackReady = true
+        try drainPendingRemoteAudioChunksIfReady()
+
+        let requiresCapture = startupMode == .interactive
+        if requiresCapture {
+            try prepareCapturePathIfNeeded()
+            try installInputTapIfNeeded()
+            try startCaptureEngineIfNeeded()
+            isCaptureReady = true
+        }
+
         state = .connected
+        await report(
+            "Media session start completed",
+            metadata: [
+                "activationMode": String(describing: activationMode),
+                "startupMode": String(describing: startupMode),
+                "captureReady": String(isCaptureReady),
+                "playbackReady": String(isPlaybackReady)
+            ]
+        )
     }
 
     func startSendingAudio() async throws {
-        if !isStarted {
-            try await start()
+        if !isPlaybackReady || !isCaptureReady {
+            try await start(activationMode: .appManaged, startupMode: .interactive)
         }
+        await audioChunkSender.updateSendChunk(currentSendAudioChunk)
+        resetPlaybackForTransmit()
         setSendingAudio(true)
     }
 
@@ -116,12 +218,21 @@ final class PCMWebSocketMediaSession: MediaSession {
             state = .failed("received invalid audio chunk")
             return
         }
+        if !isPlaybackReady {
+            enqueuePendingRemoteAudioChunk(data)
+            await report(
+                "Queued remote audio chunk until playback ready",
+                metadata: ["pendingChunkCount": String(pendingRemoteAudioChunkCount())]
+            )
+            return
+        }
         do {
-            if !isStarted {
-                try await start()
-            }
             try schedulePlayback(for: data)
         } catch {
+            await report(
+                "Receive playback failed",
+                metadata: ["error": error.localizedDescription]
+            )
             state = .failed("playback failed: \(error.localizedDescription)")
         }
     }
@@ -133,25 +244,56 @@ final class PCMWebSocketMediaSession: MediaSession {
         Task {
             await audioChunkSender.reset()
         }
+        startTask?.cancel()
+        startTask = nil
+        playbackStartTask?.cancel()
+        playbackStartTask = nil
+        pendingPlaybackBuffers.removeAll(keepingCapacity: false)
+        pendingRemoteAudioChunks.removeAll(keepingCapacity: false)
 
         if inputTapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
+            captureEngine.inputNode.removeTap(onBus: 0)
             inputTapInstalled = false
         }
         playerNode.stop()
-        engine.stop()
+        playerNode.reset()
+        captureEngine.stop()
+        playbackEngine.stop()
         captureConverter = nil
         playbackConverter = nil
-        isStarted = false
+        isPlaybackReady = false
+        isCaptureReady = false
         state = .closed
     }
 
-    private func configureAudioSession() throws {
+    private func configureAudioSession(
+        activationMode: MediaSessionActivationMode,
+        startupMode: MediaSessionStartupMode
+    ) throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
+        let configuration = MediaSessionAudioPolicy.configuration(
+            activationMode: activationMode,
+            startupMode: startupMode
+        )
+        try session.setCategory(
+            configuration.category,
+            mode: configuration.mode,
+            options: configuration.options
+        )
         try session.setPreferredSampleRate(targetFormat.sampleRate)
         try session.setPreferredIOBufferDuration(0.04)
-        try session.setActive(true)
+        if configuration.shouldActivateSession {
+            try session.setActive(true)
+        }
+        Task {
+            await report(
+                "Audio session configured",
+                metadata: audioSessionMetadata(session).merging(
+                    ["activationMode": String(describing: activationMode)],
+                    uniquingKeysWith: { _, new in new }
+                )
+            )
+        }
     }
 
     private func setSendingAudio(_ newValue: Bool) {
@@ -160,15 +302,17 @@ final class PCMWebSocketMediaSession: MediaSession {
         isSendingAudio = newValue
     }
 
-    private func prepareConverters() throws {
-        let inputFormat = engine.inputNode.inputFormat(forBus: 0)
+    private func prepareCapturePathIfNeeded() throws {
+        let inputFormat = captureEngine.inputNode.inputFormat(forBus: 0)
         if captureConverter == nil {
             guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
                 throw NSError(domain: "PCMWebSocketMediaSession", code: 1, userInfo: [NSLocalizedDescriptionKey: "unable to create capture converter"])
             }
             captureConverter = converter
         }
+    }
 
+    private func preparePlaybackPathIfNeeded() throws {
         let outputFormat = playerNode.outputFormat(forBus: 0)
         if outputFormat != targetFormat && playbackConverter == nil {
             playbackConverter = AVAudioConverter(from: targetFormat, to: outputFormat)
@@ -178,7 +322,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     private func installInputTapIfNeeded() throws {
         guard !inputTapInstalled else { return }
 
-        let inputNode = engine.inputNode
+        let inputNode = captureEngine.inputNode
         let inputFormat = inputNode.inputFormat(forBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1_920, format: inputFormat) { [weak self] buffer, _ in
             self?.handleCapturedBuffer(buffer)
@@ -264,11 +408,46 @@ final class PCMWebSocketMediaSession: MediaSession {
         )
 
         let playbackBuffer = try makePlaybackBuffer(from: sourceBuffer)
-        try startEngineIfNeeded()
-        if !playerNode.isPlaying {
-            playerNode.play()
+        try startPlaybackEngineIfNeeded()
+        if !startPlaybackNodeIfPossible(with: playbackBuffer) {
+            enqueuePendingPlaybackBuffer(playbackBuffer)
+            requestPlaybackStartWhenReady()
+            Task {
+                await report(
+                    "Deferred playback node start until IO cycle",
+                    metadata: ["pendingBufferCount": String(pendingPlaybackBufferCount())]
+                )
+            }
+            return
         }
+        schedulePlaybackBuffer(playbackBuffer)
+    }
+
+    private func schedulePlaybackBuffer(_ playbackBuffer: AVAudioPCMBuffer) {
         playerNode.scheduleBuffer(playbackBuffer, completionHandler: nil)
+        Task {
+            await report(
+                "Playback buffer scheduled",
+                metadata: [
+                    "frameLength": String(playbackBuffer.frameLength),
+                    "sampleRate": String(playbackBuffer.format.sampleRate)
+                ]
+            )
+        }
+    }
+
+    private func startPlaybackNodeIfPossible(with playbackBuffer: AVAudioPCMBuffer) -> Bool {
+        if playerNode.isPlaying {
+            return true
+        }
+        guard playbackIOCycleAvailable else { return false }
+        schedulePlaybackBuffer(playbackBuffer)
+        playerNode.play()
+        Task {
+            await report("Playback node started", metadata: [:])
+        }
+        drainPendingPlaybackBuffers()
+        return true
     }
 
     private func makePlaybackBuffer(from sourceBuffer: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {
@@ -313,9 +492,130 @@ final class PCMWebSocketMediaSession: MediaSession {
         }
     }
 
-    private func startEngineIfNeeded() throws {
-        if !engine.isRunning {
-            try engine.start()
+    private func resetPlaybackForTransmit() {
+        playbackStartTask?.cancel()
+        playbackStartTask = nil
+        pendingPlaybackBuffers.removeAll(keepingCapacity: false)
+        playerNode.stop()
+        playerNode.reset()
+    }
+
+    private func startCaptureEngineIfNeeded() throws {
+        if !captureEngine.isRunning {
+            try captureEngine.start()
+            Task {
+                await report("Capture engine started", metadata: [:])
+            }
         }
+    }
+
+    private func startPlaybackEngineIfNeeded() throws {
+        if !playbackEngine.isRunning {
+            playbackEngine.prepare()
+            try playbackEngine.start()
+            Task {
+                await report("Playback engine started", metadata: [:])
+            }
+        }
+    }
+
+    private var playbackIOCycleAvailable: Bool {
+        playbackEngine.outputNode.lastRenderTime != nil
+            || playbackEngine.mainMixerNode.lastRenderTime != nil
+    }
+
+    private func enqueuePendingPlaybackBuffer(_ playbackBuffer: AVAudioPCMBuffer) {
+        pendingPlaybackBuffers.append(playbackBuffer)
+        if pendingPlaybackBuffers.count > maximumPendingPlaybackBuffers {
+            pendingPlaybackBuffers.removeFirst(pendingPlaybackBuffers.count - maximumPendingPlaybackBuffers)
+        }
+    }
+
+    private func pendingPlaybackBufferCount() -> Int {
+        pendingPlaybackBuffers.count
+    }
+
+    private func enqueuePendingRemoteAudioChunk(_ data: Data) {
+        pendingRemoteAudioChunks.append(data)
+        if pendingRemoteAudioChunks.count > maximumPendingRemoteAudioChunks {
+            pendingRemoteAudioChunks.removeFirst(
+                pendingRemoteAudioChunks.count - maximumPendingRemoteAudioChunks
+            )
+        }
+    }
+
+    private func pendingRemoteAudioChunkCount() -> Int {
+        pendingRemoteAudioChunks.count
+    }
+
+    private func drainPendingRemoteAudioChunksIfReady() throws {
+        guard isPlaybackReady else { return }
+        guard !pendingRemoteAudioChunks.isEmpty else { return }
+        let chunks = pendingRemoteAudioChunks
+        pendingRemoteAudioChunks.removeAll(keepingCapacity: false)
+        for chunk in chunks {
+            try schedulePlayback(for: chunk)
+        }
+    }
+
+    private func drainPendingPlaybackBuffers() {
+        guard playerNode.isPlaying else { return }
+        guard !pendingPlaybackBuffers.isEmpty else { return }
+        let buffers = pendingPlaybackBuffers
+        pendingPlaybackBuffers.removeAll(keepingCapacity: false)
+        for buffer in buffers {
+            schedulePlaybackBuffer(buffer)
+        }
+    }
+
+    private func requestPlaybackStartWhenReady() {
+        guard playbackStartTask == nil else { return }
+        playbackStartTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.playbackStartTask = nil }
+            for attempt in 1...25 {
+                if Task.isCancelled { return }
+                if self.playerNode.isPlaying {
+                    self.drainPendingPlaybackBuffers()
+                    return
+                }
+                if self.playbackIOCycleAvailable {
+                    if !self.pendingPlaybackBuffers.isEmpty {
+                        let buffers = self.pendingPlaybackBuffers
+                        self.pendingPlaybackBuffers.removeAll(keepingCapacity: false)
+                        for buffer in buffers {
+                            self.schedulePlaybackBuffer(buffer)
+                        }
+                    }
+                    self.playerNode.play()
+                    await self.report(
+                        "Playback node started after IO cycle wait",
+                        metadata: ["attempt": String(attempt)]
+                    )
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            await self.report(
+                "Playback node still waiting for IO cycle",
+                metadata: ["pendingBufferCount": String(self.pendingPlaybackBufferCount())]
+            )
+        }
+    }
+
+    private func report(_ message: String, metadata: [String: String]) async {
+        await reportEvent?(message, metadata)
+    }
+
+    private func audioSessionMetadata(_ session: AVAudioSession) -> [String: String] {
+        let outputs = session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ",")
+        let inputs = session.currentRoute.inputs.map(\.portType.rawValue).joined(separator: ",")
+        return [
+            "category": session.category.rawValue,
+            "mode": session.mode.rawValue,
+            "sampleRate": String(session.sampleRate),
+            "outputs": outputs.isEmpty ? "none" : outputs,
+            "inputs": inputs.isEmpty ? "none" : inputs
+        ]
     }
 }

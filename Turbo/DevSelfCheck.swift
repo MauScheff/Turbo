@@ -8,6 +8,7 @@ enum DevSelfCheckStatus: String, Equatable {
 
 enum DevSelfCheckStepID: String, Equatable, CaseIterable {
     case backendConfig = "backend-config"
+    case microphonePermission = "microphone-permission"
     case runtimeConfig = "runtime-config"
     case authSession = "auth-session"
     case deviceHeartbeat = "device-heartbeat"
@@ -21,6 +22,8 @@ enum DevSelfCheckStepID: String, Equatable, CaseIterable {
         switch self {
         case .backendConfig:
             return "Backend config"
+        case .microphonePermission:
+            return "Microphone permission"
         case .runtimeConfig:
             return "Runtime config"
         case .authSession:

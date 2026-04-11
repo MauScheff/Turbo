@@ -193,8 +193,8 @@ async def websocket_roundtrip(
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Run a direct production probe against Turbo.")
     parser.add_argument("--base-url", default="https://beepbeep.to")
-    parser.add_argument("--caller", default="@avery")
-    parser.add_argument("--callee", default="@blake")
+    parser.add_argument("--caller", default="@quinn")
+    parser.add_argument("--callee", default="@sasha")
     parser.add_argument("--insecure", action="store_true")
     args = parser.parse_args()
 

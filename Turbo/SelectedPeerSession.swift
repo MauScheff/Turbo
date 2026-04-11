@@ -15,6 +15,7 @@ struct SelectedPeerSessionState: Equatable {
     var systemSessionMatchesContact: Bool = false
     var systemSessionState: SystemPTTSessionState = .none
     var pendingAction: PendingSessionAction = .none
+    var localJoinFailure: PTTJoinFailure?
     var channel: ChannelReadinessSnapshot?
     var mediaState: MediaConnectionState = .idle
     var selectedPeerState: SelectedPeerState = .initial
@@ -28,7 +29,12 @@ enum SelectedPeerEvent: Equatable {
     case relationshipUpdated(PairRelationshipState)
     case baseStateUpdated(ConversationState)
     case channelUpdated(ChannelReadinessSnapshot?)
-    case localSessionUpdated(isJoined: Bool, activeChannelID: UUID?, pendingAction: PendingSessionAction)
+    case localSessionUpdated(
+        isJoined: Bool,
+        activeChannelID: UUID?,
+        pendingAction: PendingSessionAction,
+        localJoinFailure: PTTJoinFailure?
+    )
     case systemSessionUpdated(SystemPTTSessionState, matchesSelectedContact: Bool)
     case mediaStateUpdated(MediaConnectionState)
     case joinRequested
@@ -69,10 +75,11 @@ enum SelectedPeerReducer {
             nextState.baseState = baseState
         case .channelUpdated(let channel):
             nextState.channel = channel
-        case .localSessionUpdated(let isJoined, let activeChannelID, let pendingAction):
+        case .localSessionUpdated(let isJoined, let activeChannelID, let pendingAction, let localJoinFailure):
             nextState.isJoined = isJoined
             nextState.activeChannelID = activeChannelID
             nextState.pendingAction = pendingAction
+            nextState.localJoinFailure = localJoinFailure
         case .systemSessionUpdated(let systemSessionState, let matchesSelectedContact):
             nextState.systemSessionState = systemSessionState
             nextState.systemSessionMatchesContact = matchesSelectedContact
@@ -120,6 +127,8 @@ enum SelectedPeerReducer {
             systemSessionMatchesContact: state.systemSessionMatchesContact,
             systemSessionState: state.systemSessionState,
             pendingAction: state.pendingAction,
+            localJoinFailure: state.localJoinFailure,
+            mediaState: state.mediaState,
             channel: state.channel
         )
 
@@ -134,15 +143,19 @@ enum SelectedPeerReducer {
         guard let contactID = state.selection?.contactID else { return nil }
 
         switch state.selectedPeerState.phase {
-        case .idle, .requested, .incomingRequest:
+        case .idle, .requested, .incomingRequest, .peerReady:
             return .connect(contactID: contactID)
-        case .waitingForPeer, .ready, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+        case .wakeReady, .waitingForPeer, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
             return nil
         }
     }
 
     private static func disconnectEffect(for state: SelectedPeerSessionState) -> SelectedPeerEffect? {
         guard let contactID = state.selection?.contactID else { return nil }
+
+        if state.pendingAction.isLeaveInFlight(for: contactID) {
+            return nil
+        }
 
         let hasLocalOrSystemSession =
             state.isJoined
@@ -161,6 +174,9 @@ enum SelectedPeerReducer {
         case .restoreLocalSession(let contactID):
             return .restoreLocalSession(contactID: contactID)
         case .teardownSelectedSession(let contactID):
+            if state.pendingAction.isLeaveInFlight(for: contactID) {
+                return nil
+            }
             return .teardownLocalSession(contactID: contactID)
         }
     }

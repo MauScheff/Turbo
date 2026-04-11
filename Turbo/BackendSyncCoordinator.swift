@@ -74,7 +74,12 @@ enum BackendSyncReducer {
 
         case .webSocketStateChanged(let state, let selectedContactID):
             if state == .connected, let selectedContactID {
-                effects.append(.refreshChannelState(selectedContactID))
+                effects.append(contentsOf: [
+                    .heartbeatPresence,
+                    .refreshContactSummaries,
+                    .refreshInvites,
+                    .refreshChannelState(selectedContactID),
+                ])
             }
 
         case .contactSummariesUpdated(let updates):
@@ -82,7 +87,6 @@ enum BackendSyncReducer {
             nextState.syncState.applyContactSummaries(summaries)
 
         case .contactSummariesFailed(let message):
-            nextState.syncState.clearContactSummaries()
             nextState.syncState.statusMessage = message
 
         case .channelStateUpdated(let contactID, let channelState):
@@ -91,8 +95,7 @@ enum BackendSyncReducer {
         case .channelStateCleared(let contactID):
             nextState.syncState.clearChannelState(for: contactID)
 
-        case .channelStateFailed(let contactID, let message):
-            nextState.syncState.clearChannelState(for: contactID)
+        case .channelStateFailed(_, let message):
             nextState.syncState.statusMessage = message
 
         case .clearAllChannelStates:
@@ -104,7 +107,6 @@ enum BackendSyncReducer {
             nextState.syncState.applyInvites(incoming: incomingMap, outgoing: outgoingMap, now: now)
 
         case .invitesFailed(let message):
-            nextState.syncState.clearInvites()
             nextState.syncState.statusMessage = message
 
         case .outgoingInviteSeeded(let contactID, let invite, let now):

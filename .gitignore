@@ -3,3 +3,8 @@
 build/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
+__pycache__/
+*.pyc
+.scenario-diagnostics/
+.scenario-runtime-config.json
+.envrc

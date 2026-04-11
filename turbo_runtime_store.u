@@ -1505,6 +1505,41 @@ turbo.store.tokens.get db channelId userId deviceId = do
     (turbo.store.tokens.tables.byChannelUserDevice db)
     (channelId, userId, deviceId)
 
+turbo.store.tokens.internal.channelUserPrefixOrdering :
+  (turbo.domain.ChannelId, turbo.domain.UserId)
+  -> (turbo.domain.ChannelId, turbo.domain.UserId, turbo.domain.DeviceId)
+  -> Ordering
+turbo.store.tokens.internal.channelUserPrefixOrdering prefix key =
+  match key with
+    (candidateChannelId, candidateUserId, _) ->
+      Universal.ordering prefix (candidateChannelId, candidateUserId)
+
+turbo.store.tokens.latestForUserInChannel.doc = {{
+
+``turbo.store.tokens.latestForUserInChannel db channelId userId`` returns one current ephemeral PushToTalk token stored for `userId` in `channelId`.
+
+This uses a scoped prefix scan over the `channel + user + device` token projection and returns the first available token for that user in the channel.
+
+*Also see:* {turbo.store.tokens.get}, {turbo.store.tokens.upsert}
+
+}}
+turbo.store.tokens.latestForUserInChannel :
+  Database
+  -> turbo.domain.ChannelId
+  -> turbo.domain.UserId
+  -> '{Exception, Remote} Optional turbo.domain.EphemeralToken
+turbo.store.tokens.latestForUserInChannel db channelId userId = do
+  rows =
+    Stream.toList
+      (OrderedTable.rangeClosed.prefix
+        (turbo.store.tokens.tables.byChannelUserDevice db)
+        turbo.store.tokens.internal.channelUserPrefixOrdering
+        (channelId, userId)
+        (channelId, userId))
+  match rows with
+    [] -> None
+    (_, record) +: _ -> Some record
+
 turbo.store.runtime.beginTransmit.doc = {{
 
 ``turbo.store.runtime.beginTransmit db channelId fromUserId fromDeviceId toUserId toDeviceId`` tries to mark a channel as actively transmitting.

@@ -132,14 +132,14 @@ turbo.service.contacts.internal.sessionStatus currentUserId selfJoined peerJoine
       else
         "peer-transmitting"
     None ->
-      if hasIncomingRequest then
-        "incoming-request"
-      else if hasOutgoingRequest then
-        "requested"
-      else if selfJoined && peerJoined then
+      if selfJoined && peerJoined then
         "ready"
       else if selfJoined then
         "waiting-for-peer"
+      else if hasIncomingRequest then
+        "incoming-request"
+      else if hasOutgoingRequest then
+        "requested"
       else if peerJoined || peerOnline then
         "connecting"
       else
@@ -267,6 +267,9 @@ Each summary is computed from canonical facts only: online presence, pending inv
 direct-channel membership, and the current transmit lease. The client can render pills
 directly from this route without guessing local state.
 
+The route only summarizes relationship-backed contacts: peers with a pending invite
+or an existing direct channel. It does not enumerate the entire seeded dev user directory.
+
 It matches `GET /v1/contacts/summaries/<deviceId>`.
 
 *Also see:* {turbo.service.channels.state}, {turbo.store.users.availability}
@@ -285,7 +288,9 @@ turbo.service.contacts.summary db = do
         turbo.domain.User.User userId _ _ _ _ -> userId
       currentDeviceId = turbo.domain.DeviceId.fromText deviceIdText
       selfPresence = turbo.store.presence.get db currentDeviceId ()
-      users = List.map (cases (_, user) -> user) (Stream.toList (OrderedTable.toStream (turbo.store.users.tables.byCreatedAt db)))
+      candidateUserIds =
+        turbo.service.contacts.internal.candidateUserIds db currentUserId ()
+      users = turbo.service.contacts.internal.usersByIds db candidateUserIds ()
       summaries =
         turbo.service.contacts.internal.summaryJsons
           db

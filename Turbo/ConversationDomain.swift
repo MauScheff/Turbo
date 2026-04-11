@@ -54,23 +54,52 @@ enum SystemPTTSessionState: Equatable {
 
 enum PendingSessionAction: Equatable {
     case none
+    case connect(contactID: UUID)
     case join(contactID: UUID)
     case explicitLeave(contactID: UUID?)
+    case teardown(contactID: UUID)
+
+    var pendingConnectContactID: UUID? {
+        switch self {
+        case .connect(let contactID), .join(let contactID):
+            return contactID
+        case .none, .explicitLeave, .teardown:
+            return nil
+        }
+    }
 
     var pendingJoinContactID: UUID? {
         switch self {
         case .join(let contactID):
             return contactID
-        case .none, .explicitLeave:
+        case .none, .connect, .explicitLeave, .teardown:
             return nil
         }
     }
 
+    var pendingTeardownContactID: UUID? {
+        guard case .teardown(let contactID) = self else { return nil }
+        return contactID
+    }
+
     var blocksAutoRejoin: Bool {
-        if case .explicitLeave = self {
+        switch self {
+        case .explicitLeave, .teardown:
             return true
+        case .none, .connect, .join:
+            return false
         }
-        return false
+    }
+
+    func isLeaveInFlight(for contactID: UUID) -> Bool {
+        switch self {
+        case .explicitLeave(let pendingContactID):
+            return pendingContactID == nil || pendingContactID == contactID
+        case .teardown(let pendingContactID):
+            return pendingContactID == contactID
+        case .none, .connect, .join:
+            return false
+        }
     }
 }
 
@@ -81,7 +110,15 @@ struct SessionCoordinatorState: Equatable {
         pendingAction.pendingJoinContactID
     }
 
+    mutating func queueConnect(contactID: UUID) {
+        pendingAction = .connect(contactID: contactID)
+    }
+
     mutating func queueJoin(contactID: UUID) {
+        if case .explicitLeave(let pendingContactID) = pendingAction,
+           pendingContactID == nil || pendingContactID == contactID {
+            return
+        }
         pendingAction = .join(contactID: contactID)
     }
 
@@ -89,9 +126,60 @@ struct SessionCoordinatorState: Equatable {
         pendingAction = .explicitLeave(contactID: contactID)
     }
 
+    mutating func markReconciledTeardown(contactID: UUID) {
+        pendingAction = .teardown(contactID: contactID)
+    }
+
     mutating func clearAfterSuccessfulJoin(for contactID: UUID) {
         if pendingJoinContactID == contactID {
             pendingAction = .none
+        }
+    }
+
+    mutating func clearPendingJoin(for contactID: UUID) {
+        if pendingJoinContactID == contactID {
+            pendingAction = .none
+        }
+    }
+
+    mutating func clearPendingConnect(for contactID: UUID) {
+        if pendingAction.pendingConnectContactID == contactID {
+            pendingAction = .none
+        }
+    }
+
+    mutating func clearExplicitLeave(for contactID: UUID?) {
+        guard case .explicitLeave(let pendingContactID) = pendingAction else { return }
+        if pendingContactID == nil || pendingContactID == contactID {
+            pendingAction = .none
+        }
+    }
+
+    mutating func clearLeaveAction(for contactID: UUID?) {
+        switch pendingAction {
+        case .explicitLeave(let pendingContactID):
+            if pendingContactID == nil || pendingContactID == contactID {
+                pendingAction = .none
+            }
+        case .teardown(let pendingContactID):
+            if pendingContactID == contactID {
+                pendingAction = .none
+            }
+        case .none, .connect, .join:
+            break
+        }
+    }
+
+    mutating func reconcileAfterChannelRefresh(
+        for contactID: UUID,
+        effectiveChannelState: TurboChannelStateResponse,
+        localSessionEstablished: Bool,
+        localSessionCleared: Bool
+    ) {
+        if effectiveChannelState.selfJoined, localSessionEstablished {
+            clearAfterSuccessfulJoin(for: contactID)
+        } else if !effectiveChannelState.selfJoined, localSessionCleared {
+            clearExplicitLeave(for: contactID)
         }
     }
 
@@ -112,7 +200,7 @@ struct SessionCoordinatorState: Equatable {
 
     func autoRejoinContactID(afterLeaving _: UUID?) -> UUID? {
         guard !pendingAction.blocksAutoRejoin else { return nil }
-        return pendingJoinContactID
+        return pendingAction.pendingConnectContactID
     }
 }
 
@@ -139,6 +227,20 @@ enum PairRelationshipState: Equatable {
     case outgoingRequest(requestCount: Int)
     case incomingRequest(requestCount: Int)
 
+    var isIncomingRequest: Bool {
+        if case .incomingRequest = self {
+            return true
+        }
+        return false
+    }
+
+    var isOutgoingRequest: Bool {
+        if case .outgoingRequest = self {
+            return true
+        }
+        return false
+    }
+
     var fallbackConversationState: ConversationState {
         switch self {
         case .none:
@@ -155,8 +257,12 @@ enum SelectedPeerPhase: Equatable {
     case idle
     case requested
     case incomingRequest
+    case peerReady
+    case wakeReady
     case waitingForPeer
+    case localJoinFailed
     case ready
+    case startingTransmit
     case transmitting
     case receiving
     case blockedByOtherSession
@@ -169,18 +275,26 @@ struct SelectedPeerState: Equatable {
     let statusMessage: String
     let canTransmitNow: Bool
 
+    var allowsHoldToTalk: Bool {
+        canTransmitNow || phase == .wakeReady || phase == .transmitting || phase == .startingTransmit
+    }
+
     var conversationState: ConversationState {
         switch phase {
         case .idle:
             return relationship.fallbackConversationState
-        case .requested:
+        case .requested, .peerReady:
             return .requested
         case .incomingRequest:
             return .incomingRequest
-        case .waitingForPeer:
+        case .wakeReady:
+            return .ready
+        case .waitingForPeer, .localJoinFailed:
             return .waitingForPeer
         case .ready:
             return .ready
+        case .startingTransmit:
+            return .transmitting
         case .transmitting:
             return .transmitting
         case .receiving:
@@ -201,6 +315,8 @@ struct ChannelReadinessSnapshot: Equatable {
     let selfJoined: Bool
     let peerJoined: Bool
     let peerDeviceConnected: Bool
+    let hasIncomingRequest: Bool
+    let hasOutgoingRequest: Bool
     let canTransmit: Bool
     let status: ConversationState?
 
@@ -208,6 +324,8 @@ struct ChannelReadinessSnapshot: Equatable {
         selfJoined = channelState.selfJoined
         peerJoined = channelState.peerJoined
         peerDeviceConnected = channelState.peerDeviceConnected
+        hasIncomingRequest = channelState.hasIncomingRequest
+        hasOutgoingRequest = channelState.hasOutgoingRequest
         canTransmit = channelState.canTransmit
         status = ConversationState(rawValue: channelState.status)
     }
@@ -220,11 +338,49 @@ struct ConversationDerivationContext: Equatable {
     let contactName: String
     let contactIsOnline: Bool
     let isJoined: Bool
+    let localIsTransmitting: Bool
+    let peerSignalIsTransmitting: Bool
     let activeChannelID: UUID?
     let systemSessionMatchesContact: Bool
     let systemSessionState: SystemPTTSessionState
     let pendingAction: PendingSessionAction
+    let localJoinFailure: PTTJoinFailure?
+    let mediaState: MediaConnectionState
     let channel: ChannelReadinessSnapshot?
+
+    init(
+        contactID: UUID,
+        selectedContactID: UUID?,
+        baseState: ConversationState,
+        contactName: String,
+        contactIsOnline: Bool,
+        isJoined: Bool,
+        localIsTransmitting: Bool = false,
+        peerSignalIsTransmitting: Bool = false,
+        activeChannelID: UUID?,
+        systemSessionMatchesContact: Bool,
+        systemSessionState: SystemPTTSessionState,
+        pendingAction: PendingSessionAction,
+        localJoinFailure: PTTJoinFailure?,
+        mediaState: MediaConnectionState = .idle,
+        channel: ChannelReadinessSnapshot?
+    ) {
+        self.contactID = contactID
+        self.selectedContactID = selectedContactID
+        self.baseState = baseState
+        self.contactName = contactName
+        self.contactIsOnline = contactIsOnline
+        self.isJoined = isJoined
+        self.localIsTransmitting = localIsTransmitting
+        self.peerSignalIsTransmitting = peerSignalIsTransmitting
+        self.activeChannelID = activeChannelID
+        self.systemSessionMatchesContact = systemSessionMatchesContact
+        self.systemSessionState = systemSessionState
+        self.pendingAction = pendingAction
+        self.localJoinFailure = localJoinFailure
+        self.mediaState = mediaState
+        self.channel = channel
+    }
 }
 
 enum ConversationStateMachine {
@@ -277,6 +433,7 @@ enum ConversationStateMachine {
         relationship: PairRelationshipState
     ) -> SelectedPeerState {
         let canTransmitNow = context.canTransmitNow
+        let leaveInFlight = context.pendingAction.isLeaveInFlight(for: context.contactID)
 
         switch context.systemSessionState {
         case .active(let activeContactID, _) where activeContactID != context.contactID:
@@ -297,6 +454,17 @@ enum ConversationStateMachine {
             break
         }
 
+        if let localJoinFailure = context.localJoinFailure,
+           localJoinFailure.contactID == context.contactID,
+           localJoinFailure.reason.blocksAutomaticRestore {
+            return SelectedPeerState(
+                relationship: relationship,
+                phase: .localJoinFailed,
+                statusMessage: localJoinFailure.reason.recoveryMessage,
+                canTransmitNow: false
+            )
+        }
+
         if context.pendingAction.pendingJoinContactID == context.contactID {
             return SelectedPeerState(
                 relationship: relationship,
@@ -311,6 +479,15 @@ enum ConversationStateMachine {
             || context.activeChannelID == context.contactID
             || (context.isJoined && context.selectedContactID == context.contactID)
 
+        if leaveInFlight && localSessionActive {
+            return SelectedPeerState(
+                relationship: relationship,
+                phase: .waitingForPeer,
+                statusMessage: "Disconnecting...",
+                canTransmitNow: false
+            )
+        }
+
         if let channel = context.channel,
            let liveSessionState = liveSelectedSessionState(for: context, channel: channel) {
             return SelectedPeerState(
@@ -322,11 +499,22 @@ enum ConversationStateMachine {
         }
 
         if let channel = context.channel {
+            let peerReadyToConnect =
+                !localSessionActive
+                && !channel.selfJoined
+                && channel.peerJoined
+            if peerReadyToConnect {
+                return SelectedPeerState(
+                    relationship: relationship,
+                    phase: .peerReady,
+                    statusMessage: "\(context.contactName) is ready to connect",
+                    canTransmitNow: false
+                )
+            }
+
             let sessionTransitionInFlight =
                 localSessionActive
                 || channel.selfJoined
-                || channel.peerJoined
-                || channel.peerDeviceConnected
             if sessionTransitionInFlight {
                 return SelectedPeerState(
                     relationship: relationship,
@@ -530,7 +718,21 @@ enum ConversationStateMachine {
                 isEnabled: false,
                 style: .muted
             )
-        case .idle, .requested, .incomingRequest, .waitingForPeer, .ready, .transmitting, .receiving:
+        case .peerReady:
+            return ConversationPrimaryAction(
+                kind: .connect,
+                label: "Connect",
+                isEnabled: true,
+                style: .accent
+            )
+        case .wakeReady:
+            return ConversationPrimaryAction(
+                kind: .holdToTalk,
+                label: "Hold To Talk",
+                isEnabled: selectedPeerState.allowsHoldToTalk,
+                style: .accent
+            )
+        case .idle, .requested, .incomingRequest, .waitingForPeer, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving:
             return primaryAction(
                 conversationState: selectedPeerState.conversationState,
                 isSelectedChannelJoined: isSelectedChannelJoined,
@@ -550,9 +752,21 @@ enum ConversationStateMachine {
             return .none
         }
 
-        if case .explicitLeave(let contactID) = context.pendingAction,
-           contactID == nil || contactID == context.contactID {
+        if context.pendingAction.pendingTeardownContactID == context.contactID {
             return .none
+        }
+
+        if let localJoinFailure = context.localJoinFailure,
+           localJoinFailure.contactID == context.contactID,
+           localJoinFailure.reason.blocksAutomaticRestore {
+            return .none
+        }
+
+        let explicitLeaveRequested: Bool
+        if case .explicitLeave(let contactID) = context.pendingAction {
+            explicitLeaveRequested = contactID == nil || contactID == context.contactID
+        } else {
+            explicitLeaveRequested = false
         }
 
         switch context.systemSessionState {
@@ -567,6 +781,12 @@ enum ConversationStateMachine {
             || context.isJoined
             || context.activeChannelID == context.contactID
 
+        if explicitLeaveRequested,
+           context.systemSessionState == .none,
+           localSessionActive {
+            return .teardownSelectedSession(contactID: context.contactID)
+        }
+
         guard let channel = context.channel else {
             return localSessionActive ? .teardownSelectedSession(contactID: context.contactID) : .none
         }
@@ -576,13 +796,29 @@ enum ConversationStateMachine {
             && context.isJoined
             && context.activeChannelID == context.contactID
 
+        let localRestoreInFlight =
+            context.systemSessionMatchesContact
+            || context.pendingAction.pendingJoinContactID == context.contactID
+
         let backendSessionReady =
             channel.selfJoined
             && channel.peerJoined
             && channel.peerDeviceConnected
 
-        if backendSessionReady && !localSessionAligned {
+        if backendSessionReady && !localSessionAligned && !localRestoreInFlight && !explicitLeaveRequested {
             return .restoreLocalSession(contactID: context.contactID)
+        }
+
+        let peerDepartedFromAlignedSession =
+            localSessionAligned
+            && channel.selfJoined
+            && !channel.peerJoined
+            && !channel.hasIncomingRequest
+            && !channel.hasOutgoingRequest
+            && channel.status == .waitingForPeer
+
+        if peerDepartedFromAlignedSession {
+            return .teardownSelectedSession(contactID: context.contactID)
         }
 
         if !channel.selfJoined && localSessionActive {
@@ -598,26 +834,54 @@ private extension ConversationStateMachine {
         for context: ConversationDerivationContext,
         channel: ChannelReadinessSnapshot
     ) -> (phase: SelectedPeerPhase, statusMessage: String)? {
-        let sessionAligned =
+        let sessionConnected =
             context.systemSessionMatchesContact
             && context.isJoined
             && context.activeChannelID == context.contactID
             && channel.selfJoined
             && channel.peerJoined
-            && channel.peerDeviceConnected
+        let sessionTransmitReady = sessionConnected && channel.peerDeviceConnected
 
-        guard sessionAligned, let channelStatus = channel.status else {
+        guard sessionConnected, let channelStatus = channel.status else {
             return nil
         }
 
-        switch channelStatus {
-        case .receiving:
+        if sessionTransmitReady && context.localIsTransmitting {
+            switch context.mediaState {
+            case .connected:
+                return (.transmitting, "Talking to \(context.contactName)")
+            case .preparing, .idle, .closed:
+                return (.startingTransmit, "Establishing audio...")
+            case .failed:
+                return (.startingTransmit, "Audio unavailable")
+            }
+        }
+
+        if sessionTransmitReady && context.peerSignalIsTransmitting {
             return (.receiving, "\(context.contactName) is talking")
-        case .transmitting:
-            return (.transmitting, "Talking to \(context.contactName)")
+        }
+
+        if sessionConnected && !channel.peerDeviceConnected {
+            return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+        }
+
+        switch channelStatus {
+        case .receiving where sessionTransmitReady:
+            return (.receiving, "\(context.contactName) is talking")
+        case .transmitting where sessionTransmitReady:
+            switch context.mediaState {
+            case .connected:
+                return (.transmitting, "Talking to \(context.contactName)")
+            case .preparing, .idle, .closed:
+                return (.startingTransmit, "Establishing audio...")
+            case .failed:
+                return (.startingTransmit, "Audio unavailable")
+            }
         case .ready where channel.canTransmit:
             return (.ready, "Connected")
-        case .idle, .requested, .incomingRequest, .waitingForPeer, .ready:
+        case .waitingForPeer, .ready:
+            return (.waitingForPeer, "Establishing connection...")
+        case .idle, .requested, .incomingRequest, .receiving, .transmitting:
             return nil
         }
     }

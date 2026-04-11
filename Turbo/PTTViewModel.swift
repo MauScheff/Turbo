@@ -8,33 +8,40 @@
 import Foundation
 import Observation
 import PushToTalk
+import AVFAudio
 
-struct BackendRuntimeState {
-    var pollTask: Task<Void, Never>?
-    var config = TurboBackendConfig.load()
-    var client: TurboBackendClient?
-    var currentUserID: String?
-    var isReady: Bool = false
-    var mode: String = "unknown"
-    var trackedContactIDs: Set<UUID> = []
-}
+enum AudioOutputPreference: String, Equatable {
+    case speaker
+    case phone
 
-struct TransmitRuntimeState {
-    var activeTarget: TransmitTarget?
-    var beginTask: Task<Void, Never>?
-    var renewTask: Task<Void, Never>?
-    var isPressingTalk: Bool = false
-}
+    static let storageKey = "turbo.audioOutputPreference"
 
-struct MediaRuntimeState {
-    var session: MediaSession?
-    var contactID: UUID?
-    var connectionState: MediaConnectionState = .idle
+    static func loadStored() -> AudioOutputPreference {
+        .speaker
+    }
+
+    var next: AudioOutputPreference {
+        switch self {
+        case .speaker:
+            return .phone
+        case .phone:
+            return .speaker
+        }
+    }
+
+    var buttonLabel: String {
+        switch self {
+        case .speaker:
+            return "Speaker"
+        case .phone:
+            return "Phone"
+        }
+    }
 }
 
 @MainActor
 @Observable
-final class PTTViewModel: NSObject, PTChannelManagerDelegate, PTChannelRestorationDelegate, MediaSessionDelegate {
+final class PTTViewModel: NSObject, MediaSessionDelegate {
     var isReady: Bool = false
     var isJoined: Bool = false
     var isTransmitting: Bool = false
@@ -45,7 +52,7 @@ final class PTTViewModel: NSObject, PTChannelManagerDelegate, PTChannelRestorati
     var activeChannelId: UUID?
     let diagnostics = DiagnosticsStore()
 
-    let pttSystemClient = PTTSystemClient()
+    let pttSystemClient: any PTTSystemClientProtocol
     let channelName: String = "BeepBeep Prototype"
     var sessionCoordinator = SessionCoordinatorState()
     let backendSyncCoordinator = BackendSyncCoordinator()
@@ -57,9 +64,18 @@ final class PTTViewModel: NSObject, PTChannelManagerDelegate, PTChannelRestorati
     let pttSystemPolicyCoordinator = PTTSystemPolicyCoordinator()
     var backendRuntime = BackendRuntimeState()
     var transmitRuntime = TransmitRuntimeState()
+    var pttWakeRuntime = PTTWakeRuntimeState()
     var mediaRuntime = MediaRuntimeState()
+    var remoteTransmittingContactIDs: Set<UUID> = []
+    var remoteAudioSilenceTasks: [UUID: Task<Void, Never>] = [:]
+    private var diagnosticsAutoPublishTask: Task<Void, Never>?
+    var microphonePermission: AVAudioApplication.recordPermission = AVAudioApplication.shared.recordPermission
+    var audioOutputPreference: AudioOutputPreference = .loadStored()
 
     override init() {
+        pttSystemClient = makeDefaultPTTSystemClient()
+        audioOutputPreference = .speaker
+        UserDefaults.standard.set(AudioOutputPreference.speaker.rawValue, forKey: AudioOutputPreference.storageKey)
         super.init()
         selectedPeerCoordinator.effectHandler = { [weak self] effect in
             await self?.runSelectedPeerEffect(effect)
@@ -82,12 +98,18 @@ final class PTTViewModel: NSObject, PTChannelManagerDelegate, PTChannelRestorati
         transmitCoordinator.effectHandler = { [weak self] effect in
             await self?.runTransmitEffect(effect)
         }
+        registerAudioSessionObservers()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     func syncPTTState() {
         activeChannelId = pttCoordinator.state.activeContactID
         isJoined = pttCoordinator.state.isJoined
         isTransmitting = pttCoordinator.state.isTransmitting
+        captureDiagnosticsState("ptt-sync")
     }
 
     var pendingJoinContactId: UUID? {
@@ -95,12 +117,16 @@ final class PTTViewModel: NSObject, PTChannelManagerDelegate, PTChannelRestorati
     }
 
     func syncTransmitState() {
-        transmitRuntime.activeTarget = transmitCoordinator.state.activeTarget
-        transmitRuntime.isPressingTalk = transmitCoordinator.state.isPressingTalk
+        transmitRuntime.sync(
+            activeTarget: transmitCoordinator.state.activeTarget,
+            isPressingTalk: transmitCoordinator.state.isPressingTalk
+        )
+        captureDiagnosticsState("transmit-sync")
     }
 
     func syncPTTSystemPolicyState() {
         pushTokenHex = pttSystemPolicyCoordinator.state.latestTokenHex
+        captureDiagnosticsState("ptt-policy-sync")
     }
 
     func applyAuthenticatedBackendSession(
@@ -108,37 +134,43 @@ final class PTTViewModel: NSObject, PTChannelManagerDelegate, PTChannelRestorati
         userID: String,
         mode: String
     ) {
-        backendRuntime.client = client
-        backendRuntime.currentUserID = userID
-        backendRuntime.isReady = true
-        backendRuntime.mode = mode
+        backendRuntime.applyAuthenticatedSession(client: client, userID: userID, mode: mode)
+    }
+
+    func storeAuthenticatedUserID(_ userID: String) {
+        backendRuntime.storeAuthenticatedUserID(userID)
     }
 
     func resetBackendRuntimeForReconnect() {
-        backendRuntime.client?.disconnectWebSocket()
-        backendRuntime.client = nil
-        backendRuntime.currentUserID = nil
-        backendRuntime.isReady = false
-        backendRuntime.mode = "unknown"
-        backendRuntime.pollTask?.cancel()
-        backendRuntime.pollTask = nil
+        backendRuntime.disconnectForReconnect()
+    }
+
+    func replaceBackendConfig(with config: TurboBackendConfig?) {
+        backendRuntime.replaceConfig(with: config)
+    }
+
+    func replaceBackendPollTask(with task: Task<Void, Never>?) {
+        backendRuntime.replacePollTask(with: task)
     }
 
     func clearTrackedContacts() {
-        backendRuntime.trackedContactIDs = []
+        backendRuntime.clearTrackedContacts()
+    }
+
+    func trackContact(_ contactID: UUID) {
+        backendRuntime.track(contactID: contactID)
     }
 
     func cancelPendingTransmitWork() {
-        transmitRuntime.beginTask?.cancel()
-        transmitRuntime.beginTask = nil
-        transmitRuntime.renewTask?.cancel()
-        transmitRuntime.renewTask = nil
+        transmitRuntime.clearPendingWork()
+    }
+
+    func resetTransmitRuntimeOnly() {
+        transmitRuntime.reset()
     }
 
     func tearDownTransmitRuntime(resetCoordinator: Bool) {
-        transmitRuntime.isPressingTalk = false
-        transmitRuntime.activeTarget = nil
-        cancelPendingTransmitWork()
+        transmitRuntime.reset()
         if resetCoordinator {
             transmitCoordinator.reset()
             syncTransmitState()
@@ -158,8 +190,113 @@ final class PTTViewModel: NSObject, PTChannelManagerDelegate, PTChannelRestorati
         return contacts.first { $0.id == selectedContactId }
     }
 
+    var backendConfig: TurboBackendConfig? {
+        backendRuntime.config
+    }
+
+    var hasBackendConfig: Bool {
+        backendConfig != nil
+    }
+
+    var backendServices: BackendServices? {
+        let runtime = backendRuntime
+        guard let client = runtime.client else { return nil }
+        return BackendServices(
+            client: client,
+            currentUserID: runtime.currentUserID,
+            mode: runtime.mode
+        )
+    }
+
     var latestSelfCheckReport: DevSelfCheckReport? {
         selfCheckCoordinator.state.latestReport
+    }
+
+    var hasPendingBackendPollTask: Bool {
+        backendRuntime.pollTask != nil
+    }
+
+    var trackedContactIDs: Set<UUID> {
+        backendRuntime.trackedContactIDs
+    }
+
+    var transmitServices: TransmitServices {
+        TransmitServices(
+            hasPendingBeginOrActiveTarget: { [weak self] in
+                self?.transmitRuntime.hasPendingBeginOrActiveTarget ?? false
+            },
+            activeTarget: { [weak self] in
+                self?.transmitRuntime.activeTarget
+            },
+            replaceBeginTask: { [weak self] task in
+                self?.transmitRuntime.replaceBeginTask(with: task)
+            },
+            replaceRenewTask: { [weak self] task in
+                self?.transmitRuntime.replaceRenewTask(with: task)
+            },
+            clearPendingWork: { [weak self] in
+                self?.transmitRuntime.clearPendingWork()
+            },
+            reset: { [weak self] in
+                self?.transmitRuntime.reset()
+            }
+        )
+    }
+
+    var mediaServices: MediaServices {
+        MediaServices(
+            session: { [weak self] in
+                self?.mediaRuntime.session
+            },
+            contactID: { [weak self] in
+                self?.mediaRuntime.contactID
+            },
+            hasSession: { [weak self] in
+                self?.mediaRuntime.hasSession ?? false
+            },
+            sendAudioChunk: { [weak self] in
+                self?.mediaRuntime.sendAudioChunk
+            },
+            attach: { [weak self] session, contactID in
+                self?.mediaRuntime.attach(session: session, contactID: contactID)
+            },
+            updateConnectionState: { [weak self] state in
+                self?.mediaRuntime.updateConnectionState(state)
+            },
+            isStartupInFlight: { [weak self] context in
+                self?.mediaRuntime.isStartupInFlight(for: context) ?? false
+            },
+            shouldDelayRetry: { [weak self] context, cooldown in
+                self?.mediaRuntime.shouldDelayRetry(for: context, cooldown: cooldown) ?? false
+            },
+            markStartupInFlight: { [weak self] context in
+                self?.mediaRuntime.markStartupInFlight(context)
+            },
+            markStartupSucceeded: { [weak self] in
+                self?.mediaRuntime.markStartupSucceeded()
+            },
+            markStartupFailed: { [weak self] context, message in
+                self?.mediaRuntime.markStartupFailed(context, message: message)
+            },
+            replaceSendAudioChunk: { [weak self] handler in
+                self?.mediaRuntime.replaceSendAudioChunk(with: handler)
+            },
+            reset: { [weak self] in
+                self?.mediaRuntime.reset()
+            }
+        )
+    }
+
+    var mediaConnectionState: MediaConnectionState {
+        mediaRuntime.connectionState
+    }
+
+    var mediaSessionContactID: UUID? {
+        mediaRuntime.contactID
+    }
+
+    var hasActiveTransmitOrMediaSession: Bool {
+        transmitServices.activeTarget() != nil || mediaServices.session() != nil
     }
 
     var isRunningSelfCheck: Bool {
@@ -173,6 +310,16 @@ final class PTTViewModel: NSObject, PTChannelManagerDelegate, PTChannelRestorati
 
     var currentDevUserHandle: String {
         backendRuntime.config?.devUserHandle ?? "@turbo-ios"
+    }
+
+    var appVersionDescription: String {
+        let shortVersion =
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "dev"
+        let buildNumber =
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+            ?? shortVersion
+        return shortVersion == buildNumber ? shortVersion : "\(shortVersion) (\(buildNumber))"
     }
 
     var availableDevUserHandles: [String] {
@@ -189,25 +336,129 @@ final class PTTViewModel: NSObject, PTChannelManagerDelegate, PTChannelRestorati
         backendRuntime.mode == "local-http"
     }
 
+    var selectedSessionDiagnosticsSummary: SelectedSessionDiagnosticsSummary {
+        let selectedState: SelectedPeerState
+        if let selectedContactId {
+            selectedState = selectedPeerState(for: selectedContactId)
+        } else {
+            selectedState = SelectedPeerState(
+                relationship: .none,
+                phase: .idle,
+                statusMessage: "Ready to connect",
+                canTransmitNow: false
+            )
+        }
+
+        return SelectedSessionDiagnosticsSummary(
+            selectedHandle: selectedContact?.handle,
+            selectedPhase: String(describing: selectedState.phase),
+            relationship: String(describing: selectedState.relationship),
+            statusMessage: selectedState.statusMessage,
+            canTransmitNow: selectedState.canTransmitNow,
+            isJoined: isJoined,
+            isTransmitting: isTransmitting,
+            activeChannelID: activeChannelId?.uuidString,
+            pendingAction: String(describing: sessionCoordinator.pendingAction),
+            systemSession: String(describing: systemSessionState),
+            mediaState: String(describing: mediaRuntime.connectionState),
+            backendChannelStatus: selectedChannelState?.status,
+            backendSelfJoined: selectedChannelState?.selfJoined,
+            backendPeerJoined: selectedChannelState?.peerJoined,
+            backendPeerDeviceConnected: selectedChannelState?.peerDeviceConnected,
+            backendCanTransmit: selectedChannelState?.canTransmit
+        )
+    }
+
+    var contactDiagnosticsSummaries: [ContactDiagnosticsSummary] {
+        contacts
+            .filter { $0.handle != currentDevUserHandle }
+            .sorted { $0.handle < $1.handle }
+            .map { contact in
+                let summary = contactSummaryByContactID[contact.id]
+                return ContactDiagnosticsSummary(
+                    handle: contact.handle,
+                    listState: listConversationState(for: contact.id).rawValue,
+                    badgeStatus: summary?.badgeStatus,
+                    hasIncomingRequest: summary?.hasIncomingRequest ?? false,
+                    hasOutgoingRequest: summary?.hasOutgoingRequest ?? false,
+                    requestCount: summary?.requestCount ?? 0,
+                    incomingInviteCount: incomingInviteByContactID[contact.id]?.requestCount,
+                    outgoingInviteCount: outgoingInviteByContactID[contact.id]?.requestCount
+                )
+            }
+    }
+
+    var diagnosticsStateFields: [String: String] {
+        let selectedSession = selectedSessionDiagnosticsSummary
+        return [
+            "identity": currentDevUserHandle,
+            "selectedContact": selectedContact?.handle ?? "none",
+            "selectedPeerPhase": selectedSession.selectedPhase,
+            "selectedPeerRelationship": selectedSession.relationship,
+            "selectedPeerStatus": selectedSession.statusMessage,
+            "selectedPeerCanTransmit": String(selectedSession.canTransmitNow),
+            "pendingAction": selectedSession.pendingAction,
+            "activeChannelId": activeChannelId?.uuidString ?? "none",
+            "isJoined": String(isJoined),
+            "isTransmitting": String(isTransmitting),
+            "isBackendReady": String(backendRuntime.isReady),
+            "backendMode": backendRuntime.mode,
+            "systemSession": String(describing: systemSessionState),
+            "pttClientMode": pttSystemClient.modeDescription,
+            "pendingIncomingPush": pttWakeRuntime.pendingIncomingPush.map { push in
+                "\(push.payload.event.rawValue):\(contacts.first(where: { $0.id == push.contactID })?.handle ?? push.contactID.uuidString)"
+            } ?? "none",
+            "pendingIncomingPushActivated": pttWakeRuntime.pendingIncomingPush.map {
+                String($0.playbackMode == .systemActivated)
+            } ?? "false",
+            "localJoinFailure": pttCoordinator.state.lastJoinFailure.map(String.init(describing:)) ?? "none",
+            "websocket": backendRuntime.isWebSocketConnected ? "connected" : "disconnected",
+            "mediaState": String(describing: mediaRuntime.connectionState),
+            "backendChannelStatus": selectedSession.backendChannelStatus ?? "none",
+            "backendSelfJoined": selectedSession.backendSelfJoined.map(String.init(describing:)) ?? "none",
+            "backendPeerJoined": selectedSession.backendPeerJoined.map(String.init(describing:)) ?? "none",
+            "backendPeerDeviceConnected": selectedSession.backendPeerDeviceConnected.map(String.init(describing:)) ?? "none",
+            "backendCanTransmit": selectedSession.backendCanTransmit.map(String.init(describing:)) ?? "none",
+            "status": statusMessage,
+            "backendStatus": backendStatusMessage
+        ]
+    }
+
     var diagnosticsSnapshot: String {
-        [
-            "identity=\(currentDevUserHandle)",
-            "selectedContact=\(selectedContact?.handle ?? "none")",
-            "activeChannelId=\(activeChannelId?.uuidString ?? "none")",
-            "isJoined=\(isJoined)",
-            "isTransmitting=\(isTransmitting)",
-            "isBackendReady=\(backendRuntime.isReady)",
-            "backendMode=\(backendRuntime.mode)",
-            "systemSession=\(String(describing: systemSessionState))",
-            "websocket=\(backendRuntime.client?.isWebSocketConnected == true ? "connected" : "disconnected")",
-            "mediaState=\(String(describing: mediaRuntime.connectionState))",
-            "status=\(statusMessage)",
-            "backendStatus=\(backendStatusMessage)"
-        ].joined(separator: "\n")
+        let contactLines =
+            contactDiagnosticsSummaries.map { summary in
+                "contact=\(summary.handle) listState=\(summary.listState) badge=\(summary.badgeStatus ?? "none") incoming=\(summary.hasIncomingRequest) outgoing=\(summary.hasOutgoingRequest) requestCount=\(summary.requestCount) incomingInviteCount=\(summary.incomingInviteCount.map(String.init(describing:)) ?? "none") outgoingInviteCount=\(summary.outgoingInviteCount.map(String.init(describing:)) ?? "none")"
+            }
+
+        let coreLines = diagnosticsStateFields.keys.sorted().map { "\($0)=\(diagnosticsStateFields[$0] ?? "")" }
+        return (coreLines + contactLines).joined(separator: "\n")
     }
 
     var diagnosticsTranscript: String {
         diagnostics.exportText(snapshot: diagnosticsSnapshot)
+    }
+
+    func captureDiagnosticsState(_ reason: String) {
+        diagnostics.captureState(reason: reason, fields: diagnosticsStateFields)
+        scheduleAutomaticDiagnosticsPublish(trigger: reason)
+    }
+
+    func scheduleAutomaticDiagnosticsPublish(trigger: String) {
+#if DEBUG
+        guard backendServices != nil, backendConfig != nil else { return }
+        diagnosticsAutoPublishTask?.cancel()
+        diagnosticsAutoPublishTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+            _ = try? await self.publishDiagnosticsIfPossible(trigger: trigger, recordSuccess: false)
+        }
+#endif
+    }
+
+    func cancelAutomaticDiagnosticsPublish() {
+        diagnosticsAutoPublishTask?.cancel()
+        diagnosticsAutoPublishTask = nil
     }
 
     var selectedChannelState: TurboChannelStateResponse? {
@@ -222,5 +473,112 @@ final class PTTViewModel: NSObject, PTChannelManagerDelegate, PTChannelRestorati
     func canTransmitNow(for contactID: UUID) -> Bool {
         guard selectedContactId == contactID else { return false }
         return selectedPeerState(for: contactID).canTransmitNow
+    }
+
+    func canBeginTransmit(for contactID: UUID) -> Bool {
+        guard selectedContactId == contactID else { return false }
+        return selectedPeerState(for: contactID).allowsHoldToTalk
+    }
+
+    func receiveRemoteAudioChunk(_ payload: String) async {
+        await mediaServices.session()?.receiveRemoteAudioChunk(payload)
+    }
+
+    func refreshMicrophonePermission() {
+        microphonePermission = AVAudioApplication.shared.recordPermission
+    }
+
+    var microphonePermissionStatusText: String {
+        switch microphonePermission {
+        case .granted:
+            return "Microphone enabled"
+        case .denied:
+            return "Microphone denied"
+        case .undetermined:
+            return "Microphone not requested"
+        @unknown default:
+            return "Microphone unknown"
+        }
+    }
+
+    var needsMicrophonePermission: Bool {
+        microphonePermission != .granted
+    }
+
+    func requestMicrophonePermission() async {
+        await withCheckedContinuation { continuation in
+            AVAudioApplication.requestRecordPermission { [weak self] granted in
+                Task { @MainActor [weak self] in
+                    self?.refreshMicrophonePermission()
+                    self?.diagnostics.record(
+                        .app,
+                        message: "Microphone permission resolved",
+                        metadata: ["granted": granted ? "true" : "false"]
+                    )
+                    self?.captureDiagnosticsState("microphone-permission")
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    private func registerAudioSessionObservers() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionInterruptionNotification(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionRouteChangeNotification(_:)),
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionMediaServicesResetNotification(_:)),
+            name: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleAudioSessionInterruptionNotification(_ notification: Notification) {
+        let info = notification.userInfo ?? [:]
+        let rawType = (info[AVAudioSessionInterruptionTypeKey] as? UInt).map(String.init) ?? "unknown"
+        let rawOptions = (info[AVAudioSessionInterruptionOptionKey] as? UInt).map(String.init) ?? "0"
+        diagnostics.record(
+            .media,
+            message: "Audio session interruption notification",
+            metadata: audioSessionDiagnostics().merging(
+                [
+                    "type": rawType,
+                    "options": rawOptions
+                ],
+                uniquingKeysWith: { _, new in new }
+            )
+        )
+    }
+
+    @objc private func handleAudioSessionRouteChangeNotification(_ notification: Notification) {
+        let info = notification.userInfo ?? [:]
+        let rawReason = (info[AVAudioSessionRouteChangeReasonKey] as? UInt).map(String.init) ?? "unknown"
+        diagnostics.record(
+            .media,
+            message: "Audio session route change notification",
+            metadata: audioSessionDiagnostics().merging(
+                ["reason": rawReason],
+                uniquingKeysWith: { _, new in new }
+            )
+        )
+    }
+
+    @objc private func handleAudioSessionMediaServicesResetNotification(_ notification: Notification) {
+        let _ = notification
+        diagnostics.record(
+            .media,
+            message: "Audio session media services were reset",
+            metadata: audioSessionDiagnostics()
+        )
     }
 }

@@ -50,6 +50,7 @@ enum TransmitEffect: Equatable {
     case beginTransmit(TransmitRequestContext)
     case activateTransmit(TransmitRequestContext, TransmitTarget)
     case stopTransmit(TransmitTarget)
+    case abortTransmit(TransmitTarget)
 }
 
 struct TransmitTransition: Equatable {
@@ -118,8 +119,9 @@ enum TransmitReducer {
             nextState.isPressingTalk = false
             nextState.pendingRequest = nil
             if let activeTarget = nextState.activeTarget {
-                nextState.phase = .stopping(contactID: activeTarget.contactID)
-                effects.append(.stopTransmit(activeTarget))
+                nextState.phase = .idle
+                nextState.activeTarget = nil
+                effects.append(.abortTransmit(activeTarget))
             } else {
                 nextState.phase = .idle
                 nextState.activeTarget = nil

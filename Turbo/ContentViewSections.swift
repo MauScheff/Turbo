@@ -256,6 +256,19 @@ struct TurboTalkControlsView: View {
                         .tint(primaryActionTint(primaryAction.style))
                         .disabled(!primaryAction.isEnabled)
                     }
+
+                    if isSelectedChannelJoined {
+                        HStack(spacing: 12) {
+                            Text("Audio Route")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            AudioRoutePickerButton()
+                                .frame(width: 96, height: 36)
+                                .buttonStyle(.bordered)
+                        }
+                        .padding(.horizontal, 4)
+                    }
                 }
             }
         }

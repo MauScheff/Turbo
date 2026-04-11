@@ -8,13 +8,16 @@ struct PTTTokenUploadRequest: Equatable {
 struct PTTSystemPolicyState: Equatable {
     var latestTokenHex: String = ""
     var lastTokenUploadError: String?
+    var uploadedTokenHex: String?
+    var uploadedBackendChannelID: String?
 
     static let initial = PTTSystemPolicyState()
 }
 
 enum PTTSystemPolicyEvent: Equatable {
     case ephemeralTokenReceived(tokenHex: String, backendChannelID: String?)
-    case tokenUploadFinished
+    case backendChannelReady(String)
+    case tokenUploadFinished(PTTTokenUploadRequest)
     case tokenUploadFailed(String)
     case reset
 }
@@ -40,7 +43,8 @@ enum PTTSystemPolicyReducer {
         case .ephemeralTokenReceived(let tokenHex, let backendChannelID):
             nextState.latestTokenHex = tokenHex
             nextState.lastTokenUploadError = nil
-            if let backendChannelID {
+            if let backendChannelID,
+               nextState.uploadedTokenHex != tokenHex || nextState.uploadedBackendChannelID != backendChannelID {
                 effects.append(
                     .uploadEphemeralToken(
                         PTTTokenUploadRequest(
@@ -51,8 +55,24 @@ enum PTTSystemPolicyReducer {
                 )
             }
 
-        case .tokenUploadFinished:
+        case .backendChannelReady(let backendChannelID):
             nextState.lastTokenUploadError = nil
+            if !nextState.latestTokenHex.isEmpty,
+               nextState.uploadedTokenHex != nextState.latestTokenHex || nextState.uploadedBackendChannelID != backendChannelID {
+                effects.append(
+                    .uploadEphemeralToken(
+                        PTTTokenUploadRequest(
+                            backendChannelID: backendChannelID,
+                            tokenHex: nextState.latestTokenHex
+                        )
+                    )
+                )
+            }
+
+        case .tokenUploadFinished(let request):
+            nextState.lastTokenUploadError = nil
+            nextState.uploadedTokenHex = request.tokenHex
+            nextState.uploadedBackendChannelID = request.backendChannelID
 
         case .tokenUploadFailed(let message):
             nextState.lastTokenUploadError = message

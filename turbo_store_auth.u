@@ -1591,11 +1591,95 @@ turbo.store.channels.getOrCreateDirect.doc = {{
 
 ``turbo.store.channels.getOrCreateDirect db userA userB`` returns the stable direct channel for `userA` and `userB`.
 
-The same channel is returned regardless of caller order.
+The same channel is returned regardless of caller order, and the participant
+projection is kept in sync so per-user queries stay cheap.
 
-*Also see:* {turbo.domain.directChannelKey}
+*Also see:* {turbo.domain.directChannelKey}, {turbo.store.channels.listForUser}
 
 }}
+turbo.store.channels.internal.userIdEqual :
+  turbo.domain.UserId
+  -> turbo.domain.UserId
+  -> Boolean
+turbo.store.channels.internal.userIdEqual left right =
+  (Text.==) (turbo.domain.UserId.toText left) (turbo.domain.UserId.toText right)
+
+turbo.store.channels.internal.userPrefixOrdering :
+  turbo.domain.UserId
+  -> (turbo.domain.UserId, Instant, turbo.domain.ChannelId)
+  -> Ordering
+turbo.store.channels.internal.userPrefixOrdering prefix key =
+  match key with
+    (candidateUserId, _, _) ->
+      Universal.ordering prefix candidateUserId
+
+turbo.store.channels.internal.writeParticipantProjection :
+  OrderedTable
+    (turbo.domain.UserId, Instant, turbo.domain.ChannelId)
+    turbo.domain.DirectChannel
+  -> turbo.domain.DirectChannel
+  ->{Transaction, Random} ()
+turbo.store.channels.internal.writeParticipantProjection byParticipant channel =
+  match channel with
+    turbo.domain.DirectChannel.DirectChannel channelId lowUserId highUserId createdAt ->
+      _ =
+        OrderedTable.write.tx
+          byParticipant
+          (lowUserId, createdAt, channelId)
+          channel
+      if turbo.store.channels.internal.userIdEqual lowUserId highUserId then
+        ()
+      else
+        OrderedTable.write.tx
+          byParticipant
+          (highUserId, createdAt, channelId)
+          channel
+
+turbo.store.channels.tables.byParticipantCreatedAt.doc = {{
+
+``turbo.store.channels.tables.byParticipantCreatedAt db`` stores direct-channel rows keyed by participant first.
+
+This projection supports per-user channel queries without scanning the entire
+direct-channel directory.
+
+*Also see:* {turbo.store.channels.listForUser}, {turbo.store.channels.tables.byUserPair}
+
+}}
+turbo.store.channels.tables.byParticipantCreatedAt :
+  Database
+  -> OrderedTable
+    (turbo.domain.UserId, Instant, turbo.domain.ChannelId)
+    turbo.domain.DirectChannel
+turbo.store.channels.tables.byParticipantCreatedAt db =
+  OrderedTable.named
+    db
+    "turboDirectChannelsByParticipantCreatedAt_v1"
+    Universal.ordering
+
+turbo.store.channels.listForUser.doc = {{
+
+``turbo.store.channels.listForUser db userId`` returns direct channels for `userId`, newest first.
+
+It uses the participant-first projection so contact summaries can gather
+relationship-backed channels without scanning the whole channel table.
+
+*Also see:* {turbo.store.channels.getOrCreateDirect}, {turbo.store.channels.tables.byParticipantCreatedAt}
+
+}}
+turbo.store.channels.listForUser :
+  Database
+  -> turbo.domain.UserId
+  -> '{Exception, Remote} [turbo.domain.DirectChannel]
+turbo.store.channels.listForUser db userId = do
+  rows =
+    Stream.toList
+      (OrderedTable.rangeClosed.prefix
+        (turbo.store.channels.tables.byParticipantCreatedAt db)
+        turbo.store.channels.internal.userPrefixOrdering
+        userId
+        userId)
+  List.map (cases (_, channel) -> channel) (List.reverse rows)
+
 turbo.store.channels.getOrCreateDirect :
   Database
   -> turbo.domain.UserId
@@ -1604,6 +1688,7 @@ turbo.store.channels.getOrCreateDirect :
 turbo.store.channels.getOrCreateDirect db userA userB = do
   table = turbo.store.channels.tables.byId db
   byPair = turbo.store.channels.tables.byUserPair db
+  byParticipant = turbo.store.channels.tables.byParticipantCreatedAt db
   pair = turbo.domain.directChannelKey userA userB
   (lowUserId, highUserId) = pair
   now = now!
@@ -1611,16 +1696,29 @@ turbo.store.channels.getOrCreateDirect db userA userB = do
     match OrderedTable.tryRead.tx byPair pair with
       Some channelId ->
         match OrderedTable.tryRead.tx table channelId with
-          Some channel -> channel
+          Some channel ->
+            _ =
+              turbo.store.channels.internal.writeParticipantProjection
+                byParticipant
+                channel
+            channel
           None ->
             channel = DirectChannel channelId lowUserId highUserId now
             _ = OrderedTable.write.tx table channelId channel
+            _ =
+              turbo.store.channels.internal.writeParticipantProjection
+                byParticipant
+                channel
             channel
       None ->
         channelId = turbo.domain.ChannelId.fromText (Random.bytes 20 |> Bytes.base32Hex)
         channel = DirectChannel channelId lowUserId highUserId now
         _ = OrderedTable.write.tx table channelId channel
         _ = OrderedTable.write.tx byPair pair channelId
+        _ =
+          turbo.store.channels.internal.writeParticipantProjection
+            byParticipant
+            channel
         channel
 
 turbo.auth.requireUser.doc = {{

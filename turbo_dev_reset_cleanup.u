@@ -4,7 +4,8 @@ turbo.service.dev.resetState.doc = {{
 
 This deletes transient runtime state and accumulated test relationship data,
 including presence, websocket session state, pending invites, direct channels,
-and ephemeral tokens. It deliberately keeps seeded users and registered devices.
+their participant projection, and ephemeral tokens. It deliberately keeps
+seeded users and registered devices.
 
 *Also see:* {turbo.service.dev.seed}, {turbo.service.contacts.summary}
 
@@ -139,6 +140,17 @@ turbo.service.dev.resetState db = do
       List.foreach channelPairKeys key ->
         OrderedTable.delete.tx channelByPair key
 
+  channelByParticipant = turbo.store.channels.tables.byParticipantCreatedAt db
+  channelParticipantKeys =
+    List.map
+      (cases
+        (key, _) -> key)
+      (Stream.toList (OrderedTable.toStream channelByParticipant))
+  _ =
+    transact (OrderedTable.database channelByParticipant) do
+      List.foreach channelParticipantKeys key ->
+        OrderedTable.delete.tx channelByParticipant key
+
   ok.json
     (Json.object.empty
       |> Json.object.addText "status" "reset"
@@ -148,4 +160,5 @@ turbo.service.dev.resetState db = do
       |> Json.object.addNat "clearedInvites" (List.size inviteByIdKeys)
       |> Json.object.addNat "clearedSessions" (List.size sessionKeys)
       |> Json.object.addNat "clearedSockets" (List.size socketKeys)
-      |> Json.object.addNat "clearedChannels" (List.size channelByIdKeys))
+      |> Json.object.addNat "clearedChannels" (List.size channelByIdKeys)
+      |> Json.object.addNat "clearedChannelParticipantEntries" (List.size channelParticipantKeys))

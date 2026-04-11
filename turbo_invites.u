@@ -1565,30 +1565,65 @@ turbo.store.invites.listIncomingPending.doc = {{
 
 ``turbo.store.invites.listIncomingPending db userId`` returns pending inbound invites for `userId`, newest first.
 
+It reads only that user's invite range instead of scanning the full invite table.
+
 *Also see:* {turbo.store.invites.listOutgoingPending}
 
 }}
+turbo.store.invites.internal.userPrefixOrdering :
+  turbo.domain.UserId
+  -> (turbo.domain.UserId, Instant, turbo.domain.InviteId)
+  -> Ordering
+turbo.store.invites.internal.userPrefixOrdering prefix key =
+  match key with
+    (candidateUserId, _, _) ->
+      Universal.ordering prefix candidateUserId
+
+turbo.store.invites.internal.pendingInvitesForUserProjection :
+  OrderedTable
+    (turbo.domain.UserId, Instant, turbo.domain.InviteId)
+    turbo.domain.Invite
+  -> turbo.domain.UserId
+  -> '{Exception, Remote} [turbo.domain.Invite]
+turbo.store.invites.internal.pendingInvitesForUserProjection table userId = do
+  rows =
+    Stream.toList
+      (OrderedTable.rangeClosed.prefix
+        table
+        turbo.store.invites.internal.userPrefixOrdering
+        userId
+        userId)
+  pendingRows =
+    List.filter
+      (cases
+        (_,
+          turbo.domain.Invite.Invite
+            _
+            _
+            _
+            _
+            turbo.domain.InviteStatus.Pending
+            _
+            _
+            _) -> true
+        _ -> false)
+      rows
+  List.map (cases (_, invite) -> invite) (List.reverse pendingRows)
+
 turbo.store.invites.listIncomingPending :
   Database
   -> turbo.domain.UserId
   -> '{Exception, Remote} [turbo.domain.Invite]
-turbo.store.invites.listIncomingPending db userId = do
-  rows =
-    Stream.toList
-      (Stream.filter
-        (cases
-          ((candidateToUserId, _, _), Invite _ _ _ _ status _ _ _) ->
-            sameUser = (Text.==) (turbo.domain.UserId.toText candidateToUserId) (turbo.domain.UserId.toText userId)
-            isPending = match status with
-              Pending -> true
-              _ -> false
-            sameUser && isPending)
-        (OrderedTable.toStream (turbo.store.invites.tables.byToCreatedAt db)))
-  List.map (cases (_, invite) -> invite) (List.reverse rows)
+turbo.store.invites.listIncomingPending db userId =
+  turbo.store.invites.internal.pendingInvitesForUserProjection
+    (turbo.store.invites.tables.byToCreatedAt db)
+    userId
 
 turbo.store.invites.listOutgoingPending.doc = {{
 
 ``turbo.store.invites.listOutgoingPending db userId`` returns pending outbound invites for `userId`, newest first.
+
+It reads only that user's invite range instead of scanning the full invite table.
 
 *Also see:* {turbo.store.invites.listIncomingPending}
 
@@ -1597,19 +1632,10 @@ turbo.store.invites.listOutgoingPending :
   Database
   -> turbo.domain.UserId
   -> '{Exception, Remote} [turbo.domain.Invite]
-turbo.store.invites.listOutgoingPending db userId = do
-  rows =
-    Stream.toList
-      (Stream.filter
-        (cases
-          ((candidateFromUserId, _, _), Invite _ _ _ _ status _ _ _) ->
-            sameUser = (Text.==) (turbo.domain.UserId.toText candidateFromUserId) (turbo.domain.UserId.toText userId)
-            isPending = match status with
-              Pending -> true
-              _ -> false
-            sameUser && isPending)
-        (OrderedTable.toStream (turbo.store.invites.tables.byFromCreatedAt db)))
-  List.map (cases (_, invite) -> invite) (List.reverse rows)
+turbo.store.invites.listOutgoingPending db userId =
+  turbo.store.invites.internal.pendingInvitesForUserProjection
+    (turbo.store.invites.tables.byFromCreatedAt db)
+    userId
 
 turbo.store.invites.markConnectedForChannel.doc = {{
 
