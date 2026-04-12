@@ -6,7 +6,6 @@ struct TurboHeaderView: View {
     let backendStatusMessage: String
     let selfCheckSummary: String?
     let selfCheckPassing: Bool?
-    let logFilePath: String?
     let latestErrorText: String?
     let currentDevUserHandle: String
     let diagnosticsHasError: Bool
@@ -101,14 +100,6 @@ struct TurboHeaderView: View {
                 Text(microphonePermissionStatus)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-            }
-
-            if let logFilePath {
-                Text(logFilePath)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
             }
 
             if let latestErrorText {

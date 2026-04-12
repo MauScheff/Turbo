@@ -1,15 +1,24 @@
 import Foundation
 
 struct BackendSyncState: Equatable {
-    var statusMessage: String = "Backend not configured"
+    var statusMessage: String = "Starting backend..."
     var contactSummaries: [UUID: TurboContactSummaryResponse] = [:]
     var channelStates: [UUID: TurboChannelStateResponse] = [:]
+    var channelReadiness: [UUID: TurboChannelReadinessResponse] = [:]
     var incomingInvites: [UUID: TurboInviteResponse] = [:]
     var outgoingInvites: [UUID: TurboInviteResponse] = [:]
     var requestCooldownDeadlines: [UUID: Date] = [:]
 
     mutating func applyContactSummaries(_ summaries: [UUID: TurboContactSummaryResponse]) {
         contactSummaries = summaries
+        let contactsWithLiveChannels: Set<UUID> = Set(
+            summaries.compactMap { contactID, summary in
+                guard let channelID = summary.channelId, !channelID.isEmpty else { return nil }
+                return contactID
+            }
+        )
+        channelStates = channelStates.filter { contactsWithLiveChannels.contains($0.key) }
+        channelReadiness = channelReadiness.filter { contactsWithLiveChannels.contains($0.key) }
     }
 
     mutating func clearContactSummaries() {
@@ -17,33 +26,23 @@ struct BackendSyncState: Equatable {
     }
 
     mutating func applyChannelState(_ channelState: TurboChannelStateResponse, for contactID: UUID) {
-        let effectiveChannelState = Self.effectiveChannelState(
-            existing: channelStates[contactID],
-            incoming: channelState
-        )
-        channelStates[contactID] = effectiveChannelState
-        if !effectiveChannelState.hasIncomingRequest {
+        channelStates[contactID] = channelState
+        if !channelState.requestRelationship.hasIncomingRequest {
             incomingInvites[contactID] = nil
         }
-        if !effectiveChannelState.hasOutgoingRequest {
+        if !channelState.requestRelationship.hasOutgoingRequest {
             outgoingInvites[contactID] = nil
             requestCooldownDeadlines[contactID] = nil
         }
     }
 
-    static func effectiveChannelState(
-        existing: TurboChannelStateResponse?,
-        incoming: TurboChannelStateResponse
-    ) -> TurboChannelStateResponse {
-        guard let existing else { return incoming }
-        guard shouldPreserveJoinedMembership(existing: existing, incoming: incoming) else {
-            return incoming
-        }
-        return existing
+    mutating func applyChannelReadiness(_ readiness: TurboChannelReadinessResponse, for contactID: UUID) {
+        channelReadiness[contactID] = readiness
     }
 
     mutating func clearChannelState(for contactID: UUID) {
         channelStates[contactID] = nil
+        channelReadiness[contactID] = nil
     }
 
     mutating func applyInvites(
@@ -69,6 +68,7 @@ struct BackendSyncState: Equatable {
         self.statusMessage = statusMessage
         contactSummaries = [:]
         channelStates = [:]
+        channelReadiness = [:]
         incomingInvites = [:]
         outgoingInvites = [:]
         requestCooldownDeadlines = [:]
@@ -76,39 +76,14 @@ struct BackendSyncState: Equatable {
 
     var requestContactIDs: Set<UUID> {
         let summaryIncoming = contactSummaries.compactMap { contactID, summary in
-            summary.hasIncomingRequest ? contactID : nil
+            summary.requestRelationship.hasIncomingRequest ? contactID : nil
         }
         let summaryOutgoing = contactSummaries.compactMap { contactID, summary in
-            summary.hasOutgoingRequest ? contactID : nil
+            summary.requestRelationship.hasOutgoingRequest ? contactID : nil
         }
         return Set(summaryIncoming)
             .union(summaryOutgoing)
             .union(incomingInvites.keys)
             .union(outgoingInvites.keys)
-    }
-
-    private static func shouldPreserveJoinedMembership(
-        existing: TurboChannelStateResponse,
-        incoming: TurboChannelStateResponse
-    ) -> Bool {
-        let transientStatuses = [
-            "connecting",
-            ConversationState.requested.rawValue,
-            ConversationState.incomingRequest.rawValue,
-            ConversationState.waitingForPeer.rawValue,
-        ]
-        let preservesLocalMembership = existing.channelId == incoming.channelId
-            && existing.selfJoined
-            && !incoming.selfJoined
-            && transientStatuses.contains(incoming.status)
-        let preservesObservedPeerMembership = existing.channelId == incoming.channelId
-            && !existing.selfJoined
-            && existing.peerJoined
-            && existing.peerDeviceConnected
-            && !incoming.selfJoined
-            && !incoming.peerJoined
-            && !incoming.peerDeviceConnected
-            && transientStatuses.contains(incoming.status)
-        return preservesLocalMembership || preservesObservedPeerMembership
     }
 }

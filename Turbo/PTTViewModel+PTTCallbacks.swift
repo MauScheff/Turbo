@@ -8,8 +8,13 @@
 import Foundation
 import PushToTalk
 import AVFAudio
+import UIKit
 
 extension PTTViewModel {
+    private var shouldArmWakeFlowForIncomingPush: Bool {
+        UIApplication.shared.applicationState != .active
+    }
+
     var pttSystemCallbacks: PTTSystemClientCallbacks {
         PTTSystemClientCallbacks(
             receivedEphemeralPushToken: { [weak self] token in
@@ -99,22 +104,35 @@ extension PTTViewModel {
         switch payload.event {
         case .transmitStart:
             remoteTransmittingContactIDs.insert(contactID)
-            if pttWakeRuntime.hasPendingWake(for: contactID) {
-                pttWakeRuntime.confirmIncomingPush(for: channelUUID, payload: payload)
-            } else {
-                pttWakeRuntime.store(
-                    PendingIncomingPTTPush(
-                        contactID: contactID,
-                        channelUUID: channelUUID,
-                        payload: payload,
-                        hasConfirmedIncomingPush: true
+            if shouldArmWakeFlowForIncomingPush {
+                if pttWakeRuntime.hasPendingWake(for: contactID) {
+                    pttWakeRuntime.confirmIncomingPush(for: channelUUID, payload: payload)
+                } else {
+                    pttWakeRuntime.store(
+                        PendingIncomingPTTPush(
+                            contactID: contactID,
+                            channelUUID: channelUUID,
+                            payload: payload,
+                            hasConfirmedIncomingPush: true
+                        )
                     )
+                }
+                scheduleWakePlaybackFallback(for: contactID)
+            } else {
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Ignored foreground wake flow for incoming PTT push",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                        "event": payload.event.rawValue,
+                    ]
                 )
+                pttWakeRuntime.clear(for: contactID)
             }
             if selectedContactId == nil {
                 selectedContactId = contactID
             }
-            scheduleWakePlaybackFallback(for: contactID)
         case .leaveChannel:
             clearRemoteAudioActivity(for: contactID)
             pttWakeRuntime.clear(for: contactID)
@@ -125,7 +143,9 @@ extension PTTViewModel {
 
         Task { [weak self] in
             guard let self else { return }
-            if let backendServices, backendServices.supportsWebSocket {
+            if shouldArmWakeFlowForIncomingPush,
+               let backendServices,
+               backendServices.supportsWebSocket {
                 backendServices.ensureWebSocketConnected()
                 do {
                     try await backendServices.waitForWebSocketConnection()
@@ -150,8 +170,10 @@ extension PTTViewModel {
                     )
                 }
             }
-            await refreshContactSummaries()
-            await refreshChannelState(for: contactID)
+            if shouldArmWakeFlowForIncomingPush {
+                await refreshContactSummaries()
+                await refreshChannelState(for: contactID)
+            }
         }
     }
 

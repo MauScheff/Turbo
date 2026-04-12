@@ -172,6 +172,43 @@ ability Exception where
 - Internal implementation details
 - Functions with very obvious behavior from their name and type
 
+### Document Behavioral Contracts
+For non-trivial functions, reducers, validators, and domain types, make the contract explicit instead of leaving it implicit in the implementation.
+
+Useful sections to add when relevant:
+
+- `# Preconditions`
+  - what must already be true for the function to be called correctly
+- `# Postconditions`
+  - what the function guarantees on success
+- `# Invariants`
+  - properties that must remain true before and after transitions
+- `# Failure modes` or `# Edge cases`
+  - boundary behavior, rejected inputs, and important exceptional outcomes
+
+Example:
+
+````
+{{
+``allocateTurn state request`` applies a valid turn-allocation request to `state`.
+
+# Preconditions
+
+- `request.channelId` refers to the same channel represented by `state`
+- the requester is a current member of the channel
+
+# Postconditions
+
+- returns a state for the same channel
+- if allocation succeeds, exactly one active transmitter is recorded
+
+# Invariants
+
+- there is never more than one active transmitter
+- membership is unchanged by allocation alone
+}}
+````
+
 ## Doc Style Guidelines
 
 ### Start with a Summary
@@ -291,4 +328,4 @@ Or in UCM (Unison Codebase Manager):
 2. Good examples are worth more than lengthy prose
 3. Keep examples realistic and runnable
 4. Update docs when you change function behavior
-5. Use the documentation to think through edge cases
+5. Use the documentation to think through edge cases, preconditions, postconditions, and invariants

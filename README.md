@@ -1,19 +1,54 @@
 # Turbo
 
-Turbo is an iOS Push-to-Talk prototype plus an in-progress Unison Cloud backend.
+Turbo is an iOS Push-to-Talk App that uses a Unison Cloud backend.
 
-The app side currently proves out Apple's PushToTalk framework integration. The backend side is now a first control-plane slice for direct 1:1 channels, device registration, ephemeral PTT token handling, HTTP control endpoints, websocket signaling, and later APNs wakeups.
+The app side currently proves out Apple's PushToTalk framework integration. The backend side is now a first control-plane slice for direct 1:1 channels, device registration, ephemeral PTT token handling, HTTP control endpoints, websocket signaling, and APNs wakeups.
 
 ## Repository layout
 
 - `Turbo/`: SwiftUI iOS prototype app.
 - `Server/`: backend notes and architecture documentation.
 - `AGENTS.md`: repo-specific instructions for AI/code agents working on the Unison codebase.
+- `UNISON.md`: Unison workflow, mode rules, and documentation/testing rules.
+- `UNISON_LANGUAGE.md`: Unison language guide and syntax reference.
+- `SWIFT.md`: app-side Swift/iOS architecture and working guidance.
+- `APP_STATE.md`: app-side state machines, session phases, and successful PTT flow examples.
+- `SWIFT_DEBUGGING.md`: simulator/device/PTT/audio debugging guidance.
+- `BACKEND.md`: backend/control-plane/storage/query guidance.
+- `TOOLING.md`: tooling, operational entrypoints, and infrastructure overview.
+- `STATE_MACHINE_TESTING.md`: canonical scenario-driven state-machine testing workflow.
 - `.agents/`: supporting Unison language and workflow notes.
+
+## Docs ownership
+
+Use these docs as the primary authority for their respective concerns:
+
+- `AGENTS.md`
+  - repo-level working rules, mode overview, startup guidance, and doc-loading rules
+- `TOOLING.md`
+  - tooling, operational entrypoints, simulator/probe infrastructure, and how to choose the right tool
+- `UNISON.md`
+  - Unison workflow, scratch-file/typechecking process, and Unison-specific mode rules
+- `UNISON_LANGUAGE.md`
+  - Unison syntax, semantics, and language-reference guidance
+- `SWIFT.md`
+  - app/client architecture, state management boundaries, and implementation guidance
+- `APP_STATE.md`
+  - app-visible session phases, state derivation, and PTT journey examples
+- `SWIFT_DEBUGGING.md`
+  - simulator/device/PTT/audio debugging loops and escalation rules
+- `BACKEND.md`
+  - backend/control-plane scope, storage/query rules, and backend operational guidance
+- `STATE_MACHINE_TESTING.md`
+  - the default distributed bug reproduction, proof, and regression-testing model
+- `handoffs/README.md`
+  - handoff conventions and how to use the timestamped handoff log
+- `handoffs/*.md`
+  - timestamped project state and session memory
 
 ## Current app status
 
-The iOS app is still partly a local prototype, but it now has a real backend integration path:
+The iOS app has a backend integration path:
 
 - It uses Apple's PushToTalk framework.
 - It has the PTT entitlement and background mode configured.
@@ -62,7 +97,7 @@ Start here for backend design:
 Current local facts confirmed in this repo:
 
 - Unison project name: `turbo`
-- Reference project: `cuts`
+- Reference project (read-only): `cuts`
 - `ucm` is installed locally
 - the local Unison MCP can access `turbo/main` and `cuts/main`
 
@@ -79,37 +114,29 @@ The `cuts` project is still the best local reference for service structure, stor
 
 If you are starting fresh in this repo:
 
+Read this core set first:
+
 1. Read `AGENTS.md`.
-2. Read `HANDOFF.md`.
-3. Read `Server/backend_architecture.md` if you need backend structure or Unison deployment context.
-4. Treat the backend as control-plane-only unless the user explicitly changes scope.
+2. Read `handoffs/README.md`.
+3. Read the latest file in `handoffs/` if you need the current project state.
+
+Then load only the docs needed for the task:
+
+- Read `TOOLING.md` for tooling and infrastructure context.
+- Read `UNISON.md` for Unison/backend workflow rules.
+- Read `UNISON_LANGUAGE.md` only for Unison syntax or semantics.
+- Read `SWIFT.md` for app/client architecture and implementation work.
+- Read `APP_STATE.md` for app-visible conversation/session states and transition examples.
+- Read `SWIFT_DEBUGGING.md` for simulator/device/PTT/audio debugging.
+- Read `BACKEND.md` for backend/cloud/storage/route work.
+- Read `STATE_MACHINE_TESTING.md` when the task is about distributed bugs, scenario design, or proof loops.
+- Read `Server/backend_architecture.md` if you need backend structure or Unison deployment context.
+
+Treat the backend as control-plane-only unless the user explicitly changes scope.
 
 ### Current app shape
 
-The iOS client is no longer a single-screen prototype. The important boundaries are now:
-
-- `Turbo/ConversationDomain.swift`
-  - authoritative selected-peer derivation
-  - relationship vs selected-session state
-  - primary action derivation and reconciliation rules
-- `Turbo/SelectedPeerSession.swift`
-  - selected-session reducer / coordinator state
-- `Turbo/TransmitCoordinator.swift`
-  - transmit lifecycle reducer
-- `Turbo/PTTCoordinator.swift`
-  - system PushToTalk reducer / callback state
-- `Turbo/PTTSystemClient.swift`
-  - real-device Apple PushToTalk client plus simulator shim
-- `Turbo/BackendClient.swift`
-  - backend HTTP + websocket transport
-- `Turbo/BackendSyncCoordinator.swift`
-  - summaries, invites, channel refresh, and reconciliation triggers
-- `Turbo/BackendCommandCoordinator.swift`
-  - open peer / connect / accept / disconnect orchestration
-- `Turbo/AppDiagnostics.swift`
-  - structured diagnostics timeline and transcript export
-
-`ContentView.swift` is still not tiny, but it is no longer the authority for session logic. New behavior should usually go into the domain, coordinators, or typed integration seams first.
+The iOS client important boundaries are authority for session logic. New behavior should usually go into the domain, coordinators, or typed integration seams first.
 
 ### Instrumentation and iteration model
 
@@ -126,6 +153,8 @@ This means distributed control-plane bugs should now be debugged in this order:
 1. reproduce in the simulator scenario runner when possible
 2. inspect the merged timeline
 3. only move to physical devices for Apple-specific behavior
+
+Treat [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md) as the canonical statement of that loop.
 
 ### Current known blocker
 
@@ -321,7 +350,7 @@ Use this for fast iteration right now:
 2. For full simulator ready/transmit scenario runs, run `turbo.serveLocal`
 3. Use the printed named URL or the LAN equivalent, for example:
    - `http://localhost:8081/s/turbo`
-   - `http://localhost:8080/s/turbo`
+   - `http://localhost:8090/s/turbo`
    - `http://192.168.1.161:8081/s/turbo`
 4. Set `TurboBackendBaseURL` in [Turbo/Info.plist](/Users/mau/Development/Turbo/Turbo/Info.plist) to that base URL
 5. Rebuild and reinstall the app
@@ -334,7 +363,7 @@ Important current split:
 
 Operational reminders:
 
-- `Turbo/Info.plist` `TurboBackendBaseURL` should be `http://localhost:8081/s/turbo` for local HTTP route checks, `http://localhost:8080/s/turbo` for local websocket-backed simulator scenario work, `http://<your-mac-lan-ip>:8081/s/turbo` for a physical device against local HTTP, and `https://beepbeep.to` for the deployed backend.
+- `Turbo/Info.plist` `TurboBackendBaseURL` should be `http://localhost:8081/s/turbo` for local HTTP route checks, `http://localhost:8090/s/turbo` for local websocket-backed simulator scenario work, `http://<your-mac-lan-ip>:8081/s/turbo` for a physical device against local HTTP, and `https://beepbeep.to` for the deployed backend.
 - Dev user seeding is no longer automatic on app launch. If you want the canonical dev handles on a fresh backend, call `POST /v1/dev/seed` explicitly.
 - Use `just reset` for the authenticated runtime reset and `just reset-all` for a full backend cleanup. `just seed` restores the canonical dev handles after a full reset. All default to `https://beepbeep.to` and can be overridden, e.g. `just reset http://localhost:8081/s/turbo @avery`.
 - Use `just clean-scratch` to delete repo-root `scratch_*.u` files when temporary route experiments or one-off migration drafts have drifted away from the actual codebase state.
@@ -392,11 +421,3 @@ Current transmit contract:
 - the backend resolves the peer user and their active receiving device server-side
 - requests fail if the target user has no active device joined to that channel
 - the active-session snapshot also exposes backend-derived `canTransmit`, so the client can treat `ready` as “press-to-talk is actually possible now”
-
-## Documentation and testing expectations
-
-For core Unison code in this repo:
-
-- add `.doc` definitions for exported or user-facing functions and important types
-- include example tests and property-based tests for core pure logic where appropriate
-- use the built-in Unison testing style, not ad hoc checks

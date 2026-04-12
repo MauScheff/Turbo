@@ -9,8 +9,50 @@ import Foundation
 import UIKit
 
 extension PTTViewModel {
+    func trackedPresenceFallbackTargets(
+        excluding summaries: [UUID: TurboContactSummaryResponse]
+    ) -> [(contactID: UUID, handle: String)] {
+        let summaryContactIDs = Set(summaries.keys)
+        return contacts.compactMap { contact in
+            guard trackedContactIDs.contains(contact.id) else { return nil }
+            guard !summaryContactIDs.contains(contact.id) else { return nil }
+            let normalizedHandle = Contact.normalizedHandle(contact.handle)
+            guard normalizedHandle != currentDevUserHandle else { return nil }
+            return (contact.id, normalizedHandle)
+        }
+    }
+
+    func refreshTrackedContactPresenceFallback(
+        excluding summaries: [UUID: TurboContactSummaryResponse]
+    ) async {
+        guard let backend = backendServices else { return }
+
+        for target in trackedPresenceFallbackTargets(excluding: summaries) {
+            do {
+                let presence = try await backend.lookupPresence(handle: target.handle)
+                updateContact(target.contactID) { contact in
+                    contact.isOnline = presence.isOnline
+                    contact.remoteUserId = presence.userId
+                }
+            } catch {
+                diagnostics.record(
+                    .backend,
+                    level: .error,
+                    message: "Tracked presence lookup failed",
+                    metadata: ["handle": target.handle, "error": error.localizedDescription]
+                )
+            }
+        }
+    }
+
     private func shouldTreatIncomingSignalAsWakeCandidate(for contactID: UUID) -> Bool {
         guard UIApplication.shared.applicationState != .active else { return false }
+        guard let channelUUID = channelUUID(for: contactID) else { return false }
+        return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
+    }
+
+    private func shouldUseSystemActivatedReceivePlayback(for contactID: UUID) -> Bool {
+        guard remoteTransmittingContactIDs.contains(contactID) else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
     }
@@ -130,14 +172,14 @@ extension PTTViewModel {
         guard liveSessionActive else { return false }
 
         let existingSessionReady =
-            existing.selfJoined
-            && existing.peerJoined
-            && (existing.peerDeviceConnected || remoteTransmittingContactIDs.contains(contactID))
+            existing.membership.hasLocalMembership
+            && existing.membership.hasPeerMembership
+            && (existing.membership.peerDeviceConnected || remoteTransmittingContactIDs.contains(contactID))
 
         let incomingLostMembership =
-            !incoming.selfJoined
-            && !incoming.peerJoined
-            && !incoming.peerDeviceConnected
+            !incoming.membership.hasLocalMembership
+            && !incoming.membership.hasPeerMembership
+            && !incoming.membership.peerDeviceConnected
 
         let transientStatuses = [
             ConversationState.idle.rawValue,
@@ -163,6 +205,94 @@ extension PTTViewModel {
         case .refreshChannelState(let contactID):
             await refreshChannelState(for: contactID)
         }
+    }
+
+    func scheduleIncomingSignalDelivery(_ envelope: TurboSignalEnvelope) {
+        switch backendRuntime.transportFaults.consumeWebSocketReorderResult(for: envelope) {
+        case .buffered:
+            diagnostics.record(
+                .websocket,
+                message: "Buffered websocket signal for scenario reorder",
+                metadata: ["type": envelope.type.rawValue, "channelId": envelope.channelId]
+            )
+            captureDiagnosticsState("backend-signal:buffered:\(envelope.type.rawValue)")
+        case .deliver(let envelopes):
+            if envelopes.count > 1 {
+                diagnostics.record(
+                    .websocket,
+                    message: "Reordered websocket signals for scenario fault injection",
+                    metadata: [
+                        "count": "\(envelopes.count)",
+                        "types": envelopes.map(\.type.rawValue).joined(separator: ",")
+                    ]
+                )
+                captureDiagnosticsState("backend-signal:reordered")
+            }
+            for envelope in envelopes {
+                deliverIncomingSignalWithFaultPlan(envelope)
+            }
+        }
+    }
+
+    private func deliverIncomingSignalWithFaultPlan(_ envelope: TurboSignalEnvelope) {
+        let plan = backendRuntime.transportFaults.consumeWebSocketSignalDeliveryPlan(for: envelope.type)
+
+        if plan.shouldDrop {
+            diagnostics.record(
+                .websocket,
+                message: "Dropped websocket signal for scenario fault injection",
+                metadata: ["type": envelope.type.rawValue, "channelId": envelope.channelId]
+            )
+            captureDiagnosticsState("backend-signal:dropped:\(envelope.type.rawValue)")
+            return
+        }
+
+        for deliveryIndex in 0...plan.duplicateDeliveries {
+            let deliveryDelayMilliseconds = plan.delayMilliseconds + (deliveryIndex * 25)
+            Task { @MainActor [weak self] in
+                if deliveryDelayMilliseconds > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(deliveryDelayMilliseconds) * 1_000_000)
+                }
+                guard let self else { return }
+                if deliveryIndex > 0 {
+                    self.diagnostics.record(
+                        .websocket,
+                        message: "Duplicated websocket signal for scenario fault injection",
+                        metadata: ["type": envelope.type.rawValue, "channelId": envelope.channelId]
+                    )
+                } else if plan.delayMilliseconds > 0 {
+                    self.diagnostics.record(
+                        .websocket,
+                        message: "Delayed websocket signal for scenario fault injection",
+                        metadata: [
+                            "type": envelope.type.rawValue,
+                            "channelId": envelope.channelId,
+                            "delayMilliseconds": "\(plan.delayMilliseconds)"
+                        ]
+                    )
+                }
+                self.handleIncomingSignal(envelope)
+            }
+        }
+    }
+
+    func withHTTPTransportFault<Response>(
+        route: TransportFaultHTTPRoute,
+        operation: () async throws -> Response
+    ) async throws -> Response {
+        let delayMilliseconds = backendRuntime.transportFaults.consumeHTTPDelay(for: route)
+        if delayMilliseconds > 0 {
+            diagnostics.record(
+                .backend,
+                message: "Delayed HTTP backend request for scenario fault injection",
+                metadata: [
+                    "route": route.rawValue,
+                    "delayMilliseconds": "\(delayMilliseconds)"
+                ]
+            )
+            try? await Task.sleep(nanoseconds: UInt64(delayMilliseconds) * 1_000_000)
+        }
+        return try await operation()
     }
 
     func handleIncomingSignal(_ envelope: TurboSignalEnvelope) {
@@ -251,7 +381,13 @@ extension PTTViewModel {
                     await receiveRemoteAudioChunk(envelope.payload)
                     return
                 }
-                await ensureMediaSession(for: contactID, startupMode: .playbackOnly)
+                let receiveActivationMode: MediaSessionActivationMode? =
+                    shouldUseSystemActivatedReceivePlayback(for: contactID) ? .systemActivated : nil
+                await ensureMediaSession(
+                    for: contactID,
+                    activationMode: receiveActivationMode,
+                    startupMode: .playbackOnly
+                )
                 await receiveRemoteAudioChunk(envelope.payload)
             }
         case .offer, .answer, .iceCandidate, .hangup:
@@ -320,7 +456,9 @@ extension PTTViewModel {
         guard let backend = backendServices else { return }
 
         do {
-            let summaries = try await backend.contactSummaries()
+            let summaries = try await withHTTPTransportFault(route: .contactSummaries) {
+                try await backend.contactSummaries()
+            }
             var nextSummaries: [UUID: TurboContactSummaryResponse] = [:]
             for summary in summaries {
                 let channelID = summary.channelId ?? ""
@@ -339,6 +477,7 @@ extension PTTViewModel {
                     }
                 }
             }
+            await refreshTrackedContactPresenceFallback(excluding: nextSummaries)
             let updates = nextSummaries.map { BackendContactSummaryUpdate(contactID: $0.key, summary: $0.value) }
             backendSyncCoordinator.send(.contactSummariesUpdated(updates))
             pruneContactsToAuthoritativeState()
@@ -365,21 +504,25 @@ extension PTTViewModel {
         }
 
         do {
-            let channelState = try await backend.channelState(channelId: backendChannelId)
+            async let channelStateTask = withHTTPTransportFault(route: .channelState) {
+                try await backend.channelState(channelId: backendChannelId)
+            }
+            async let channelReadinessTask = withHTTPTransportFault(route: .channelReadiness) {
+                try await backend.channelReadiness(channelId: backendChannelId)
+            }
+
+            let channelState = try await channelStateTask
+            let fetchedChannelReadiness = try? await channelReadinessTask
             let existingChannelState = backendSyncCoordinator.state.syncState.channelStates[contactID]
-            let mergedChannelState = BackendSyncState.effectiveChannelState(
-                existing: existingChannelState,
-                incoming: channelState
-            )
+            let effectiveChannelReadiness = fetchedChannelReadiness ?? channelReadinessByContactID[contactID]
             let effectiveChannelState =
                 shouldPreserveLiveChannelState(
                     contactID: contactID,
                     existing: existingChannelState,
-                    incoming: mergedChannelState
+                    incoming: channelState
                 )
-                ? existingChannelState ?? mergedChannelState
-                : mergedChannelState
-            let leaveInFlight = sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
+                ? existingChannelState ?? channelState
+                : channelState
             let localSessionEstablished =
                 systemSessionMatches(contactID)
                 || (isJoined && activeChannelId == contactID)
@@ -393,16 +536,25 @@ extension PTTViewModel {
                 localSessionCleared: localSessionCleared
             )
             backendSyncCoordinator.send(.channelStateUpdated(contactID: contactID, channelState: channelState))
+            if let effectiveChannelReadiness {
+                backendSyncCoordinator.send(
+                    .channelReadinessUpdated(contactID: contactID, readiness: effectiveChannelReadiness)
+                )
+            }
             updateContact(contactID) { contact in
                 contact.isOnline = effectiveChannelState.peerOnline
                 contact.remoteUserId = effectiveChannelState.peerUserId
             }
             if selectedContactId == contactID {
-                let backendShowsLocalTransmit = effectiveChannelState.status == ConversationState.transmitting.rawValue
+                let backendChannelSnapshot = ChannelReadinessSnapshot(
+                    channelState: effectiveChannelState,
+                    readiness: effectiveChannelReadiness
+                )
+                let backendShowsLocalTransmit = backendChannelSnapshot.status == .transmitting
                 let shouldPreserveTransmitState = shouldPreserveLocalTransmitState(
                     selectedContactID: selectedContactId,
                     refreshedContactID: contactID,
-                    backendChannelStatus: effectiveChannelState.status,
+                    backendChannelStatus: backendChannelSnapshot.status?.rawValue ?? effectiveChannelState.status,
                     transmitPhase: transmitCoordinator.state.phase,
                     systemIsTransmitting: pttCoordinator.state.isTransmitting
                 )
@@ -442,8 +594,14 @@ extension PTTViewModel {
     func refreshInvites() async {
         guard let backend = backendServices else { return }
         do {
-            let incoming = try await backend.incomingInvites()
-            let outgoing = try await backend.outgoingInvites()
+            async let incomingTask = withHTTPTransportFault(route: .incomingInvites) {
+                try await backend.incomingInvites()
+            }
+            async let outgoingTask = withHTTPTransportFault(route: .outgoingInvites) {
+                try await backend.outgoingInvites()
+            }
+            let incoming = try await incomingTask
+            let outgoing = try await outgoingTask
             var nextIncoming: [UUID: TurboInviteResponse] = [:]
             var nextOutgoing: [UUID: TurboInviteResponse] = [:]
             for invite in incoming {

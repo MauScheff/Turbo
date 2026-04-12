@@ -1,0 +1,1641 @@
+type turbo.domain.RequestRelationship
+  = IncomingPendingRequest Nat
+  | OutgoingPendingRequest Nat
+  | MutualPendingRequest Nat
+  | NoPendingRequest
+
+type turbo.domain.ChannelMembershipView
+  = NoMembership
+  | LocalOnlyMembership
+  | PeerOnlyMembership Boolean
+  | SharedMembership Boolean
+
+turbo.domain.requestRelationshipFromFlags :
+  Boolean -> Boolean -> Nat -> turbo.domain.RequestRelationship
+turbo.domain.requestRelationshipFromFlags
+  hasIncomingRequest hasOutgoingRequest requestCount =
+  use Nat ==
+  normalizedRequestCount = if requestCount == 0 then 1 else requestCount
+  if hasIncomingRequest && hasOutgoingRequest then
+    turbo.domain.RequestRelationship.MutualPendingRequest
+      normalizedRequestCount
+  else
+    if hasIncomingRequest then
+      turbo.domain.RequestRelationship.IncomingPendingRequest
+        normalizedRequestCount
+    else
+      if hasOutgoingRequest then
+        turbo.domain.RequestRelationship.OutgoingPendingRequest
+          normalizedRequestCount
+      else turbo.domain.RequestRelationship.NoPendingRequest
+
+turbo.domain.requestRelationshipRequestCount :
+  turbo.domain.RequestRelationship -> Optional Nat
+turbo.domain.requestRelationshipRequestCount = cases
+  turbo.domain.RequestRelationship.NoPendingRequest             -> None
+  turbo.domain.RequestRelationship.IncomingPendingRequest count -> Some count
+  turbo.domain.RequestRelationship.OutgoingPendingRequest count -> Some count
+  turbo.domain.RequestRelationship.MutualPendingRequest count   -> Some count
+
+turbo.domain.requestRelationshipHasIncoming :
+  turbo.domain.RequestRelationship -> Boolean
+turbo.domain.requestRelationshipHasIncoming = cases
+  turbo.domain.RequestRelationship.IncomingPendingRequest _ -> true
+  turbo.domain.RequestRelationship.MutualPendingRequest _   -> true
+  turbo.domain.RequestRelationship.NoPendingRequest         -> false
+  turbo.domain.RequestRelationship.OutgoingPendingRequest _ -> false
+
+turbo.domain.requestRelationshipHasOutgoing :
+  turbo.domain.RequestRelationship -> Boolean
+turbo.domain.requestRelationshipHasOutgoing = cases
+  turbo.domain.RequestRelationship.OutgoingPendingRequest _ -> true
+  turbo.domain.RequestRelationship.MutualPendingRequest _   -> true
+  turbo.domain.RequestRelationship.NoPendingRequest         -> false
+  turbo.domain.RequestRelationship.IncomingPendingRequest _ -> false
+
+turbo.domain.requestRelationshipKindText :
+  turbo.domain.RequestRelationship -> Text
+turbo.domain.requestRelationshipKindText = cases
+  turbo.domain.RequestRelationship.NoPendingRequest         -> "none"
+  turbo.domain.RequestRelationship.IncomingPendingRequest _ -> "incoming"
+  turbo.domain.RequestRelationship.OutgoingPendingRequest _ -> "outgoing"
+  turbo.domain.RequestRelationship.MutualPendingRequest _   -> "mutual"
+
+turbo.domain.channelMembershipFromFlags :
+  Boolean -> Boolean -> Boolean -> turbo.domain.ChannelMembershipView
+turbo.domain.channelMembershipFromFlags
+  selfJoined peerJoined peerDeviceConnected =
+  if selfJoined && peerJoined then
+    turbo.domain.ChannelMembershipView.SharedMembership peerDeviceConnected
+  else
+    if selfJoined then turbo.domain.ChannelMembershipView.LocalOnlyMembership
+    else
+      if peerJoined then
+        turbo.domain.ChannelMembershipView.PeerOnlyMembership peerDeviceConnected
+      else turbo.domain.ChannelMembershipView.NoMembership
+
+turbo.domain.channelMembershipHasLocalMembership :
+  turbo.domain.ChannelMembershipView -> Boolean
+turbo.domain.channelMembershipHasLocalMembership = cases
+  turbo.domain.ChannelMembershipView.LocalOnlyMembership  -> true
+  turbo.domain.ChannelMembershipView.SharedMembership _   -> true
+  turbo.domain.ChannelMembershipView.NoMembership         -> false
+  turbo.domain.ChannelMembershipView.PeerOnlyMembership _ -> false
+
+turbo.domain.channelMembershipHasPeerMembership :
+  turbo.domain.ChannelMembershipView -> Boolean
+turbo.domain.channelMembershipHasPeerMembership = cases
+  turbo.domain.ChannelMembershipView.PeerOnlyMembership _ -> true
+  turbo.domain.ChannelMembershipView.SharedMembership _   -> true
+  turbo.domain.ChannelMembershipView.NoMembership         -> false
+  turbo.domain.ChannelMembershipView.LocalOnlyMembership  -> false
+
+turbo.domain.channelMembershipPeerDeviceConnected :
+  turbo.domain.ChannelMembershipView -> Boolean
+turbo.domain.channelMembershipPeerDeviceConnected = cases
+  turbo.domain.ChannelMembershipView.PeerOnlyMembership peerDeviceConnected ->
+    peerDeviceConnected
+  turbo.domain.ChannelMembershipView.SharedMembership peerDeviceConnected ->
+    peerDeviceConnected
+  turbo.domain.ChannelMembershipView.NoMembership -> false
+  turbo.domain.ChannelMembershipView.LocalOnlyMembership -> false
+
+turbo.domain.channelMembershipKindText : turbo.domain.ChannelMembershipView -> Text
+turbo.domain.channelMembershipKindText = cases
+  turbo.domain.ChannelMembershipView.NoMembership         -> "absent"
+  turbo.domain.ChannelMembershipView.LocalOnlyMembership  -> "self-only"
+  turbo.domain.ChannelMembershipView.PeerOnlyMembership _ -> "peer-only"
+  turbo.domain.ChannelMembershipView.SharedMembership _   -> "both"
+
+turbo.service.internal.requestRelationshipJson :
+  turbo.domain.RequestRelationship -> Json
+turbo.service.internal.requestRelationshipJson requestRelationship =
+  object.empty
+    |> addText
+         "kind" (turbo.domain.requestRelationshipKindText requestRelationship)
+    |> addOptionalNat
+         "requestCount"
+         (turbo.domain.requestRelationshipRequestCount requestRelationship)
+
+turbo.service.internal.channelMembershipJson :
+  turbo.domain.ChannelMembershipView -> Json
+turbo.service.internal.channelMembershipJson membership =
+  object.empty
+    |> addText "kind" (turbo.domain.channelMembershipKindText membership)
+    |> addOptionalBoolean
+         "peerDeviceConnected"
+         (if turbo.domain.channelMembershipHasPeerMembership membership then
+           Some (turbo.domain.channelMembershipPeerDeviceConnected membership)
+         else None)
+
+turbo.service.contacts.internal.sessionStatus :
+  UserId
+  -> turbo.domain.ChannelMembershipView
+  -> turbo.domain.RequestRelationship
+  -> Boolean
+  -> Optional UserId
+  -> Text
+turbo.service.contacts.internal.sessionStatus
+  currentUserId membership requestRelationship peerOnline = cases
+  Some activeUserId ->
+    if textEqual (UserId.toText activeUserId) (UserId.toText currentUserId) then
+      "self-transmitting"
+    else "peer-transmitting"
+  None ->
+    readyMembership =
+      turbo.domain.channelMembershipHasLocalMembership membership
+        && turbo.domain.channelMembershipHasPeerMembership membership
+        && turbo.domain.channelMembershipPeerDeviceConnected membership
+    if readyMembership then "ready"
+    else
+      if turbo.domain.channelMembershipHasLocalMembership membership then
+        "waiting-for-peer"
+      else
+        if turbo.domain.requestRelationshipHasIncoming requestRelationship then
+          "incoming-request"
+        else
+          if turbo.domain.requestRelationshipHasOutgoing requestRelationship then
+            "requested"
+          else
+            if
+              turbo.domain.channelMembershipHasPeerMembership membership
+                || peerOnline then "connecting"
+            else "idle"
+
+turbo.service.contacts.internal.summaryStatus :
+  UserId
+  -> Boolean
+  -> turbo.domain.ChannelMembershipView
+  -> turbo.domain.RequestRelationship
+  -> Optional UserId
+  -> Text
+turbo.service.contacts.internal.summaryStatus
+  currentUserId peerOnline membership requestRelationship = cases
+  Some activeUserId ->
+    if textEqual (UserId.toText activeUserId) (UserId.toText currentUserId) then
+      "talking"
+    else "receiving"
+  None ->
+    activeMembership =
+      turbo.domain.channelMembershipHasLocalMembership membership
+        || turbo.domain.channelMembershipHasPeerMembership membership
+    readyMembership =
+      turbo.domain.channelMembershipHasLocalMembership membership
+        && turbo.domain.channelMembershipHasPeerMembership membership
+        && turbo.domain.channelMembershipPeerDeviceConnected membership
+    if activeMembership then if readyMembership then "ready" else "connecting"
+    else
+      if turbo.domain.requestRelationshipHasIncoming requestRelationship then
+        "incoming"
+      else
+        if turbo.domain.requestRelationshipHasOutgoing requestRelationship then
+          "requested"
+        else if peerOnline then "online" else "offline"
+
+turbo.service.contacts.internal.canTransmit :
+  UserId
+  -> Boolean
+  -> Boolean
+  -> turbo.domain.ChannelMembershipView
+  -> Optional UserId
+  -> Boolean
+turbo.service.contacts.internal.canTransmit
+  currentUserId selfOnline peerOnline membership activeTransmitterUserId =
+  use UserId toText
+  transmitReady =
+    selfOnline && peerOnline
+      && turbo.domain.channelMembershipHasLocalMembership membership
+      && turbo.domain.channelMembershipHasPeerMembership membership
+      && turbo.domain.channelMembershipPeerDeviceConnected membership
+  if Boolean.not transmitReady then false
+  else
+    match activeTransmitterUserId with
+      None -> true
+      Some activeUserId ->
+        textEqual (toText activeUserId) (toText currentUserId)
+
+turbo.service.channels.state :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.state db =
+  do
+    use Optional map
+    use Parser / text
+    use UserId toText
+    use object add empty
+    (channelIdText, deviceIdText) =
+      route GET (s "v1" / s "channels" / text / s "state" / text => Tuple.pair)
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        channelId = ChannelId.fromText channelIdText
+        deviceId = DeviceId.fromText deviceIdText
+        match OrderedTable.tryRead (channels.tables.byId db) channelId with
+          None -> notFound.json (empty |> addText "error" "channel not found")
+          Some (DirectChannel _ lowUserId highUserId _) ->
+            peerUserId =
+              if userIdEqual lowUserId currentUserId then highUserId
+              else lowUserId
+            peerHandle = match users.getById db peerUserId () with
+              Some (User _ handleText _ _ _) -> handleText
+              None                           -> toText peerUserId
+            selfPresence = presence.get db deviceId ()
+            selfOnline = match selfPresence with
+              Some presence -> presenceMatches currentUserId presence
+              None          -> false
+            rawSelfJoined =
+              selfJoinedChannel currentUserId channelId selfPresence
+            peerPresence = getForUser db peerUserId ()
+            peerOnline = isSome peerPresence
+            peerJoinedPresence = getForUserInChannel db peerUserId channelId ()
+            rawPeerJoined = isSome peerJoinedPresence
+            peerConnectedPresence =
+              getConnectedForUserInChannel db peerUserId channelId ()
+            rawPeerDeviceConnected = isSome peerConnectedPresence
+            incomingInvite =
+              incomingInviteForChannel db currentUserId peerUserId channelId ()
+            outgoingInvite =
+              outgoingInviteForChannel db currentUserId peerUserId channelId ()
+            hasIncomingRequest = isSome incomingInvite
+            hasOutgoingRequest = isSome outgoingInvite
+            hasPendingRequest = hasIncomingRequest || hasOutgoingRequest
+            selfJoined = if hasPendingRequest then false else rawSelfJoined
+            peerJoined = if hasPendingRequest then false else rawPeerJoined
+            peerDeviceConnected =
+              if hasPendingRequest then false else rawPeerDeviceConnected
+            requestCount = pendingCount incomingInvite outgoingInvite
+            requestRelationship =
+              turbo.domain.requestRelationshipFromFlags
+                hasIncomingRequest hasOutgoingRequest requestCount
+            membership =
+              turbo.domain.channelMembershipFromFlags
+                selfJoined peerJoined peerDeviceConnected
+            activeTransmit = currentTransmit db channelId ()
+            activeTransmitterUserId = map transmitUserId activeTransmit
+            activeTransmitExpiresAt = map transmitExpiresAtText activeTransmit
+            ok.json
+              (empty
+                |> addText "channelId" channelIdText
+                |> addText "selfUserId" (toText currentUserId)
+                |> addText "peerUserId" (toText peerUserId)
+                |> addText "peerHandle" peerHandle
+                |> addBoolean "selfOnline" selfOnline
+                |> addBoolean "peerOnline" peerOnline
+                |> addBoolean "selfJoined" selfJoined
+                |> addBoolean "peerJoined" peerJoined
+                |> addBoolean "peerDeviceConnected" peerDeviceConnected
+                |> addBoolean "hasIncomingRequest" hasIncomingRequest
+                |> addBoolean "hasOutgoingRequest" hasOutgoingRequest
+                |> addNat "requestCount" requestCount
+                |> add
+                     "membership"
+                     (turbo.service.internal.channelMembershipJson membership)
+                |> add
+                     "requestRelationship"
+                     (turbo.service.internal.requestRelationshipJson
+                       requestRelationship)
+                |> addOptionalText
+                     "activeTransmitterUserId"
+                     (map toText activeTransmitterUserId)
+                |> addOptionalText
+                     "transmitLeaseExpiresAt" activeTransmitExpiresAt
+                |> addText
+                     "status"
+                     (turbo.service.contacts.internal.sessionStatus
+                       currentUserId
+                       membership
+                       requestRelationship
+                       peerOnline
+                       activeTransmitterUserId)
+                |> addBoolean
+                     "canTransmit"
+                     (turbo.service.contacts.internal.canTransmit
+                       currentUserId
+                       selfOnline
+                       peerOnline
+                       membership
+                       activeTransmitterUserId))
+
+turbo.service.contacts.internal.summaryJson :
+  Database
+  -> UserId
+  -> Optional DevicePresence
+  -> User
+  -> '{Exception, Storage, Remote, Random} Optional Json
+turbo.service.contacts.internal.summaryJson db currentUserId selfPresence user =
+  do
+    use object add
+    (User otherUserId handleText displayName _ _) = user
+    if userIdEqual currentUserId otherUserId then None
+    else
+      directChannelOpt = directChannel db currentUserId otherUserId ()
+      peerPresence = getForUser db otherUserId ()
+      peerOnline = isSome peerPresence
+      channelFacts =
+        match directChannelOpt with
+          None -> (None, false, false, false, None, None, None)
+          Some (DirectChannel channelId _ _ _) ->
+            rawSelfJoined =
+              selfJoinedChannel currentUserId channelId selfPresence
+            rawPeerDeviceConnected =
+              isSome (getConnectedForUserInChannel db otherUserId channelId ())
+            incomingInvite =
+              incomingInviteForChannel
+                db currentUserId otherUserId channelId ()
+            outgoingInvite =
+              outgoingInviteForChannel
+                db currentUserId otherUserId channelId ()
+            hasPendingRequest = isSome incomingInvite || isSome outgoingInvite
+            selfJoined = if hasPendingRequest then false else rawSelfJoined
+            peerDeviceConnected =
+              if hasPendingRequest then false else rawPeerDeviceConnected
+            peerJoined = peerDeviceConnected
+            activeTransmit = currentTransmit db channelId ()
+            activeTransmitterUserId =
+              Optional.map transmitUserId activeTransmit
+            ( Some (ChannelId.toText channelId)
+            , selfJoined
+            , peerJoined
+            , peerDeviceConnected
+            , incomingInvite
+            , outgoingInvite
+            , activeTransmitterUserId
+            )
+      ( channelIdTextOpt,
+        selfJoined,
+        peerJoined,
+        peerDeviceConnected,
+        incomingInvite,
+        outgoingInvite,
+        activeTransmitterUserId)
+        =
+        channelFacts
+      hasIncomingRequest = isSome incomingInvite
+      hasOutgoingRequest = isSome outgoingInvite
+      requestCount = pendingCount incomingInvite outgoingInvite
+      requestRelationship =
+        turbo.domain.requestRelationshipFromFlags
+          hasIncomingRequest hasOutgoingRequest requestCount
+      membership =
+        turbo.domain.channelMembershipFromFlags
+          selfJoined peerJoined peerDeviceConnected
+      badgeStatus =
+        turbo.service.contacts.internal.summaryStatus
+          currentUserId
+          peerOnline
+          membership
+          requestRelationship
+          activeTransmitterUserId
+      isActiveConversation =
+        turbo.domain.channelMembershipHasLocalMembership membership
+          || turbo.domain.channelMembershipHasPeerMembership membership
+          || isSome activeTransmitterUserId
+      Some
+        (object.empty
+          |> addText "userId" (UserId.toText otherUserId)
+          |> addText "handle" handleText
+          |> addText "displayName" displayName
+          |> addOptionalText "channelId" channelIdTextOpt
+          |> addBoolean "isOnline" peerOnline
+          |> addBoolean "hasIncomingRequest" hasIncomingRequest
+          |> addBoolean "hasOutgoingRequest" hasOutgoingRequest
+          |> addNat "requestCount" requestCount
+          |> add
+               "membership"
+               (turbo.service.internal.channelMembershipJson membership)
+          |> add
+               "requestRelationship"
+               (turbo.service.internal.requestRelationshipJson
+                 requestRelationship)
+          |> addBoolean "isActiveConversation" isActiveConversation
+          |> addText "badgeStatus" badgeStatus)
+
+-- The definitions below no longer typecheck with the changes above.
+-- Please fix the errors and try `update` again.
+
+turbo.deploy : '{IO, Exception} URI
+turbo.deploy = 
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    database = Database.named "turbo-control-plane-v2"
+    Database.assign database env
+    serviceHash = Route.deployWebSocket env (web database)
+    serviceName = ServiceName.named "turbo"
+    uri = ServiceName.assign serviceName serviceHash
+    _ =
+      createDomainMapping
+        (HostName "beepbeep.to") (ServiceName.name serviceName)
+    uri
+
+turbo.serveHttpLocal : '{IO, Exception} ()
+turbo.serveHttpLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8081)
+    Random.run do
+      Threads.run do
+        _ = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localHttpService = httpWithConfig "local-http" false database
+            hash = deployHttp env (Route.run localHttpService)
+            serviceName = ServiceName.named "turbo"
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8081/h/" ++ hashText ++ "/")
+            ()
+        printLine
+          "Local HTTP computation starting on port 8081. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        ()
+
+turbo.serveLocal :
+  '{IO, Exception} ServiceHash
+    HttpRequest (Either HttpResponse (WebSocket ->{Remote, WebSockets} ()))
+turbo.serveLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8090)
+    Random.run do
+      Threads.run do
+        hash = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localWebService = web database
+            hash = Route.deployWebSocket env localWebService
+            serviceName = ServiceName.named "turbo"
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8090/h/" ++ hashText ++ "/")
+            hash
+        printLine
+          "Local Cloud computation starting on port 8090. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        hash
+
+turbo.service.channels.beginTransmit :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.beginTransmit db =
+  do
+    use Parser /
+    use object empty
+    channelIdText =
+      route POST (s "v1" / s "channels" / Parser.text / s "begin-transmit")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        fields = decodeJson (Decoder.object Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match Map.get "deviceId" fields with
+            Some deviceIdText ->
+              resolvedTarget =
+                resolveTransmitTarget db channelId currentUserId ()
+              match resolvedTarget with
+                Left err -> badRequest.json (empty |> addText "error" err)
+                Right (targetUserId, targetDeviceId) ->
+                  result =
+                    runtime.beginTransmit
+                      db
+                      channelId
+                      currentUserId
+                      (DeviceId.fromText deviceIdText)
+                      targetUserId
+                      targetDeviceId
+                      ()
+                  match result with
+                    Left err -> badRequest.json (empty |> addText "error" err)
+                    Right state ->
+                      (startedAt, expiresAt) =
+                        (TransmitState _ _ _ _ _ startedAt expiresAt) = state
+                        (Instant.toText startedAt, Instant.toText expiresAt)
+                      ok.json
+                        (empty
+                          |> addText "channelId" channelIdText
+                          |> addText "status" "transmitting"
+                          |> addText "startedAt" startedAt
+                          |> addText "expiresAt" expiresAt
+                          |> addText
+                               "targetUserId" (UserId.toText targetUserId)
+                          |> addText
+                               "targetDeviceId"
+                               (DeviceId.toText targetDeviceId))
+            None ->
+              badRequest.json (empty |> addText "error" "missing deviceId")
+
+turbo.service.channels.beginTransmit.doc : Doc
+turbo.service.channels.beginTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.beginTransmit db }} starts transmit state
+  for a direct channel if it is currently idle.
+  
+  The request body only needs the sender `deviceId`.
+  
+  The backend resolves the other channel member and selects that user's
+  currently active receiving device.
+  }}
+
+turbo.service.channels.endTransmit :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.endTransmit db =
+  do
+    use Parser /
+    use object empty
+    channelIdText =
+      route POST (s "v1" / s "channels" / Parser.text / s "end-transmit")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        fields = decodeJson (Decoder.object Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match Map.get "deviceId" fields with
+            None ->
+              badRequest.json (empty |> addText "error" "missing deviceId")
+            Some deviceIdText ->
+              _ =
+                runtime.endTransmit
+                  db
+                  channelId
+                  currentUserId
+                  (DeviceId.fromText deviceIdText)
+                  ()
+              ok.json
+                (empty
+                  |> addText "channelId" channelIdText
+                  |> addText "status" "idle")
+
+turbo.service.channels.endTransmit.doc : Doc
+turbo.service.channels.endTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.endTransmit db }} ends transmit state for
+  the caller's device.
+  
+  This operation is idempotent: if the caller no longer owns an active transmit
+  lease, the backend still returns `idle`.
+  
+  **Also see:** {channels.beginTransmit}, {runtime.endTransmit}
+  }}
+
+turbo.service.channels.ephemeralToken :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.ephemeralToken db =
+  do
+    use Map get
+    use Parser /
+    use object empty
+    channelIdText =
+      route POST (s "v1" / s "channels" / Parser.text / s "ephemeral-token")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        fields = decodeJson (Decoder.object Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        tokenJson record =
+          tokenText =
+            (EphemeralToken _ _ _ token _) = record
+            token
+          empty
+            |> addText "channelId" channelIdText
+            |> addText "token" tokenText
+            |> addText "status" "stored"
+        isMember = memberships.exists db channelId currentUserId ()
+        if Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match (get "deviceId" fields, get "token" fields) with
+            (Some deviceIdText, Some tokenText) ->
+              record =
+                tokens.upsert
+                  db
+                  channelId
+                  currentUserId
+                  (DeviceId.fromText deviceIdText)
+                  tokenText
+                  ()
+              ok.json (tokenJson record)
+            _ ->
+              badRequest.json
+                (empty |> addText "error" "missing deviceId or token")
+
+turbo.service.channels.ephemeralToken.doc : Doc
+turbo.service.channels.ephemeralToken.doc =
+  {{
+  {{ docExample 1 do db -> ephemeralToken db }} stores the caller's ephemeral
+  PushToTalk token for a direct channel.
+  }}
+
+turbo.service.channels.join :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.join db =
+  do
+    use Parser /
+    use Text ==
+    use memberships add
+    use object empty
+    channelIdText = route POST (s "v1" / s "channels" / Parser.text / s "join")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        fields = decodeJson (Decoder.object Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        joinedJson membership presence =
+          membershipUserId =
+            (ChannelMembership _ userId _) = membership
+            userId
+          presenceDeviceId =
+            (DevicePresence deviceId _ _ _ _) = presence
+            deviceId
+          empty
+            |> addText "channelId" channelIdText
+            |> addText "userId" (UserId.toText membershipUserId)
+            |> addText "deviceId" (DeviceId.toText presenceDeviceId)
+            |> addText "status" "joined"
+        channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+        match channelOpt with
+          None -> notFound.json (empty |> addText "error" "channel not found")
+          Some channel ->
+            use UserId toText
+            otherUserId =
+              (DirectChannel _ lowUserId highUserId _) = channel
+              if toText lowUserId == toText currentUserId then highUserId
+              else lowUserId
+            match Map.get "deviceId" fields with
+              None ->
+                badRequest.json (empty |> addText "error" "missing deviceId")
+              Some deviceIdText ->
+                _ = add db channelId currentUserId ()
+                _ = add db channelId otherUserId ()
+                presence =
+                  presence.upsert
+                    db
+                    (DeviceId.fromText deviceIdText)
+                    currentUserId
+                    Online
+                    (Some channelId)
+                    ()
+                _ =
+                  match getForUserInChannel db otherUserId channelId () with
+                    Some _ ->
+                      markConnectedForChannel
+                        db currentUserId otherUserId channelId ()
+                    None -> None
+                membership = add db channelId currentUserId ()
+                ok.json (joinedJson membership presence)
+
+turbo.service.channels.join.doc : Doc
+turbo.service.channels.join.doc =
+  {{
+  {{ docExample 1 do db -> channels.join db }} marks the caller's device as
+  joined to a direct channel.
+  }}
+
+turbo.service.channels.leave.doc : Doc
+turbo.service.channels.leave.doc =
+  {{
+  {{ docExample 1 do db -> leave db }} clears the caller's active
+  device-channel binding for `channelId`.
+  
+  This is the control-plane leave operation used when a device exits a
+  conversation.
+  
+  **Also see:** {clearActiveChannel}, {{
+  docLink (docEmbedTermLink do channels.join) }}
+  }}
+
+turbo.service.channels.pttPushTarget :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.pttPushTarget db =
+  do
+    use Parser /
+    use Text ==
+    use object empty
+    channelIdText =
+      route GET (s "v1" / s "channels" / Parser.text / s "ptt-push-target")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        currentHandle =
+          (User _ handleText _ _ _) = currentUser
+          handleText
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match currentTransmit db channelId () with
+            None ->
+              notFound.json
+                (empty |> addText "error" "no active transmit state")
+            Some
+              (TransmitState
+                _
+                fromUserId
+                fromDeviceId
+                toUserId
+                toDeviceId
+                startedAt
+                expiresAt) ->
+              if UserId.toText fromUserId == UserId.toText currentUserId then
+                tokenRecord =
+                  match tokens.get db channelId toUserId toDeviceId () with
+                    Some record -> Some record
+                    None -> latestForUserInChannel db channelId toUserId ()
+                match tokenRecord with
+                  None ->
+                    notFound.json
+                      (empty |> addText "error" "no target ptt token")
+                  Some (EphemeralToken _ _ tokenDeviceId token _) ->
+                    ok.json
+                      (empty
+                        |> addText "channelId" channelIdText
+                        |> addText "event" "transmit-start"
+                        |> addText "activeSpeaker" currentHandle
+                        |> addText "senderUserId" (UserId.toText fromUserId)
+                        |> addText
+                             "senderDeviceId" (DeviceId.toText fromDeviceId)
+                        |> addText "targetUserId" (UserId.toText toUserId)
+                        |> addText
+                             "targetDeviceId" (DeviceId.toText tokenDeviceId)
+                        |> addText "startedAt" (Instant.toText startedAt)
+                        |> addText "expiresAt" (Instant.toText expiresAt)
+                        |> addText "token" token)
+              else
+                unauthorized.json
+                  (empty
+                    |> addText "error" "active transmit not owned by caller")
+
+turbo.service.channels.pttPushTarget.doc : Doc
+turbo.service.channels.pttPushTarget.doc =
+  {{
+  {{ docExample 1 do db -> pttPushTarget db }} returns the current receiver
+  push target for the caller's active transmit.
+  
+  This is the canonical background-wake payload shape for a live transmit
+  owner. It is useful for APNs integration and simulator push tooling.
+  
+  **Also see:** {channels.beginTransmit}, {{
+  docLink (docEmbedTermLink do latestForUserInChannel) }}
+  }}
+
+turbo.service.channels.readiness :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.readiness db =
+  do
+    use Boolean not
+    use Optional map
+    use Parser / text
+    use Text ==
+    use object empty
+    (channelIdText, deviceIdText) =
+      route
+        GET (s "v1" / s "channels" / text / s "readiness" / text => Tuple.pair)
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+          match channelOpt with
+            None ->
+              notFound.json (empty |> addText "error" "channel not found")
+            Some channel ->
+              peerUserId =
+                (DirectChannel _ lowUserId highUserId _) = channel
+                if UserId.toText lowUserId == UserId.toText currentUserId then
+                  highUserId
+                else lowUserId
+              selfPresence =
+                presence.get db (DeviceId.fromText deviceIdText) ()
+              selfHasActiveDevice = match selfPresence with
+                Some (DevicePresence _ _ status currentChannelId _) ->
+                  match (status, currentChannelId) with
+                    (Online, Some activeChannelId) ->
+                      use ChannelId toText
+                      _ = (activeChannelId, channelId)
+                      toText activeChannelId == toText channelId
+                    _                              -> false
+                None                                                -> false
+              peerPresence = getForUserInChannel db peerUserId channelId ()
+              peerHasActiveDevice = isSome peerPresence
+              activeTransmit = currentTransmit db channelId ()
+              activeTransmitterUserId =
+                map
+                  (cases TransmitState _ activeUserId _ _ _ _ _ -> activeUserId)
+                  activeTransmit
+              activeTransmitExpiresAt =
+                map
+                  (cases
+                    TransmitState _ _ _ _ _ _ expiresAt ->
+                      Instant.toText expiresAt)
+                  activeTransmit
+              status =
+                match activeTransmitterUserId with
+                  Some activeUserId ->
+                    if
+                      UserId.toText activeUserId == UserId.toText currentUserId then
+                      "self-transmitting"
+                    else "peer-transmitting"
+                  None ->
+                    if not selfHasActiveDevice then "waiting-for-self"
+                    else
+                      if not peerHasActiveDevice then "waiting-for-peer"
+                      else "ready"
+              ok.json
+                (empty
+                  |> addText "channelId" channelIdText
+                  |> addText "peerUserId" (UserId.toText peerUserId)
+                  |> addBoolean "selfHasActiveDevice" selfHasActiveDevice
+                  |> addBoolean "peerHasActiveDevice" peerHasActiveDevice
+                  |> addOptionalText
+                       "activeTransmitterUserId"
+                       (map UserId.toText activeTransmitterUserId)
+                  |> addOptionalText
+                       "activeTransmitExpiresAt" activeTransmitExpiresAt
+                  |> addText "status" status)
+
+turbo.service.channels.readiness.doc : Doc
+turbo.service.channels.readiness.doc =
+  {{
+  {{ docExample 1 do db -> readiness db }} reports the caller and peer
+  readiness state for a direct channel.
+  
+  This is a control-plane readiness check used by the client to distinguish
+  local join state from true peer availability.
+  
+  It matches `GET /v1/channels/<channelId>/readiness/<deviceId>`.
+  }}
+
+turbo.service.channels.renewTransmit :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.renewTransmit db =
+  do
+    use Instant toText
+    use Parser /
+    use object empty
+    channelIdText =
+      route POST (s "v1" / s "channels" / Parser.text / s "renew-transmit")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        fields = decodeJson (Decoder.object Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match Map.get "deviceId" fields with
+            None ->
+              badRequest.json (empty |> addText "error" "missing deviceId")
+            Some deviceIdText ->
+              match runtime.renewTransmit
+                db channelId currentUserId (DeviceId.fromText deviceIdText) () with
+                Left err -> badRequest.json (empty |> addText "error" err)
+                Right state ->
+                  (startedAt, expiresAt) =
+                    (TransmitState _ _ _ _ _ startedAt expiresAt) = state
+                    (toText startedAt, toText expiresAt)
+                  ok.json
+                    (empty
+                      |> addText "channelId" channelIdText
+                      |> addText "status" "transmitting"
+                      |> addText "startedAt" startedAt
+                      |> addText "expiresAt" expiresAt)
+
+turbo.service.channels.renewTransmit.doc : Doc
+turbo.service.channels.renewTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.renewTransmit db }} extends the caller's
+  active transmit lease for a direct channel.
+  
+  The request body only needs the sender `deviceId`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do channels.beginTransmit) }}, {{
+  docLink (docEmbedTermLink do channels.endTransmit) }}
+  }}
+
+turbo.service.channels.state.doc : Doc
+turbo.service.channels.state.doc =
+  {{
+  {{ docExample 1 do db -> channels.state db }} returns the authoritative
+  active-session snapshot for a direct channel and device.
+  
+  The snapshot is derived from canonical facts only: device presence, pending
+  invites, memberships, and the current transmit lease. Clients should render
+  the selected conversation directly from this route instead of merging
+  multiple backend reads.
+  
+  It matches `GET /v1/channels/<channelId>/state/<deviceId>`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do summary) }}, {currentTransmit}
+  }}
+
+turbo.service.contacts.internal.summaryJsons :
+  Database
+  -> UserId
+  -> Optional DevicePresence
+  -> [User]
+  -> '{Exception, Storage, Remote, Random} [Json]
+turbo.service.contacts.internal.summaryJsons
+  db currentUserId selfPresence users =
+  do match users with
+    []           -> []
+    user +: rest ->
+      use List +:
+      current = summaryJson db currentUserId selfPresence user ()
+      remaining = summaryJsons db currentUserId selfPresence rest ()
+      match current with
+        None         -> remaining
+        Some summary -> summary +: remaining
+
+turbo.service.contacts.summary :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.contacts.summary db =
+  do
+    use Parser /
+    deviceIdText =
+      route GET (s "v1" / s "contacts" / s "summaries" / Parser.text)
+    match requireUser db () with
+      Left err -> unauthorized.json (object.empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        currentDeviceId = DeviceId.fromText deviceIdText
+        selfPresence = presence.get db currentDeviceId ()
+        candidateUserIds = internal.candidateUserIds db currentUserId ()
+        users = usersByIds db candidateUserIds ()
+        summaries = summaryJsons db currentUserId selfPresence users ()
+        ok.json (Json.array summaries)
+
+turbo.service.contacts.summary.doc : Doc
+turbo.service.contacts.summary.doc =
+  {{
+  {{ docExample 1 do db -> summary db }} returns authoritative contact
+  summaries for the caller's current device.
+  
+  The route only summarizes relationship-backed contacts: peers with a pending
+  invite or an existing direct channel. It does not enumerate the entire seeded
+  dev user directory.
+  
+  **Also see:** {incoming}, {outgoing}, {{
+  docLink (docEmbedTermLink do channels.state) }}
+  }}
+
+turbo.service.dev.internal.deleteMembershipRow :
+  Database -> ((ChannelId, UserId), a) ->{Remote} ()
+turbo.service.dev.internal.deleteMembershipRow db = cases
+  (key, _) ->
+    _ = OrderedTable.delete (byChannelUser db) key
+    ()
+
+turbo.service.dev.internal.performReset : Database -> '{Remote} ResetSummary
+turbo.service.dev.internal.performReset db =
+  do
+    use List foreach size
+    use OrderedTable toStream
+    use Stream toList
+    runtimeRows = toList (toStream (byChannel db))
+    _ = foreach (deleteRuntimeRow db) runtimeRows
+    presenceRows = toList (toStream (presence.tables.byDevice db))
+    _ = foreach (deletePresenceRow db) presenceRows
+    tokenRows = toList (toStream (byChannelUserDevice db))
+    _ = foreach (deleteTokenRow db) tokenRows
+    inviteIdRows = toList (toStream (invites.tables.byId db))
+    _ = foreach (deleteInviteIdRow db) inviteIdRows
+    inviteFromRows = toList (toStream (byFromCreatedAt db))
+    _ = foreach (deleteInviteFromRow db) inviteFromRows
+    inviteToRows = toList (toStream (byToCreatedAt db))
+    _ = foreach (deleteInviteToRow db) inviteToRows
+    membershipRows = toList (toStream (byChannelUser db))
+    _ = foreach (deleteMembershipRow db) membershipRows
+    sessionRows = toList (toStream (sessions.tables.byDevice db))
+    _ = foreach (deleteSessionRow db) sessionRows
+    channelRows = toList (toStream (channels.tables.byId db))
+    _ = foreach (deleteChannelRow db) channelRows
+    participantRows = toList (toStream (byParticipantCreatedAt db))
+    _ = foreach (deleteChannelParticipantRow db) participantRows
+    userPairRows = toList (toStream (byUserPair db))
+    _ = foreach (deleteChannelUserPairRow db) userPairRows
+    ResetSummary
+      (size runtimeRows)
+      (size presenceRows)
+      (size tokenRows)
+      (size inviteIdRows)
+      (size inviteFromRows)
+      (size inviteToRows)
+      (size membershipRows)
+      (size sessionRows)
+      0
+      (size channelRows)
+      (size userPairRows)
+
+turbo.service.dev.resetAll : Database -> '{Route, Remote} ()
+turbo.service.dev.resetAll db = do
+  use Parser /
+  noCapture POST (s "v1" / s "dev" / s "reset-all")
+  summary = performReset db ()
+  ok.json (resetSummaryJson "reset-all" summary)
+
+turbo.service.dev.resetState : Database -> '{Route, Remote} ()
+turbo.service.dev.resetState db = do
+  use Parser /
+  noCapture POST (s "v1" / s "dev" / s "reset-state")
+  summary = performReset db ()
+  ok.json (resetSummaryJson "reset" summary)
+
+turbo.service.dev.runtimeInspection :
+  Database -> '{Route, Exception, Http, Storage, Remote, Random} ()
+turbo.service.dev.runtimeInspection db =
+  do
+    use Parser / text
+    use memberships exists
+    use object empty
+    (channelIdText, deviceIdText) =
+      route GET (s "v1" / s "dev" / s "runtime" / text / text => Tuple.pair)
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        channelId = ChannelId.fromText channelIdText
+        deviceId = DeviceId.fromText deviceIdText
+        match OrderedTable.tryRead (channels.tables.byId db) channelId with
+          None -> notFound.json (empty |> addText "error" "channel not found")
+          Some (DirectChannel _ lowUserId highUserId _) ->
+            peerUserId =
+              if
+                textEqual
+                  (UserId.toText lowUserId) (UserId.toText currentUserId) then
+                highUserId
+              else lowUserId
+            selfPresence = presence.get db deviceId ()
+            selfSession = sessions.get db deviceId ()
+            selfSocketVisible = sockets.isConnected db deviceId ()
+            selfMembership = exists db channelId currentUserId ()
+            peerPresence = getForUser db peerUserId ()
+            peerMembership = exists db channelId peerUserId ()
+            peerJoinedPresence = getForUserInChannel db peerUserId channelId ()
+            peerConnectedPresence =
+              getConnectedForUserInChannel db peerUserId channelId ()
+            activeTransmit = currentTransmit db channelId ()
+            selfPresenceChannelId =
+              match selfPresence with
+                Some (DevicePresence _ _ _ currentChannelId _) ->
+                  Optional.map ChannelId.toText currentChannelId
+                None -> None
+            selfSessionTimes =
+              match selfSession with
+                Some (DeviceSession sessionId _ _ _ connectedAt lastSeenAt) ->
+                  ( Some sessionId
+                  , Some (Instant.toText connectedAt)
+                  , Some (Instant.toText lastSeenAt)
+                  )
+                None -> (None, None, None)
+            (selfSessionIdText, selfConnectedAtText, selfLastSeenAtText) =
+              selfSessionTimes
+            peerConnectedDeviceId =
+              match peerConnectedPresence with
+                Some (DevicePresence connectedDeviceId _ _ _ _) ->
+                  Some (DeviceId.toText connectedDeviceId)
+                None -> None
+            activeTransmitJson =
+              match activeTransmit with
+                None -> Null
+                Some
+                  (TransmitState
+                    _
+                    fromUserId
+                    fromDeviceId
+                    toUserId
+                    toDeviceId
+                    startedAt
+                    expiresAt) ->
+                  empty
+                    |> addText "fromUserId" (UserId.toText fromUserId)
+                    |> addText "fromDeviceId" (DeviceId.toText fromDeviceId)
+                    |> addText "toUserId" (UserId.toText toUserId)
+                    |> addText "toDeviceId" (DeviceId.toText toDeviceId)
+                    |> addText "startedAt" (Instant.toText startedAt)
+                    |> addText "expiresAt" (Instant.toText expiresAt)
+            ok.json
+              (empty
+                |> addText "channelId" channelIdText
+                |> addText "currentUserId" (UserId.toText currentUserId)
+                |> addText "peerUserId" (UserId.toText peerUserId)
+                |> addText "deviceId" deviceIdText
+                |> addBoolean "selfPresenceFound" (isSome selfPresence)
+                |> addOptionalText
+                     "selfPresenceChannelId" selfPresenceChannelId
+                |> addBoolean "selfSessionConnected" (isSome selfSession)
+                |> addOptionalText "selfSessionId" selfSessionIdText
+                |> addOptionalText "selfSessionConnectedAt" selfConnectedAtText
+                |> addOptionalText "selfSessionLastSeenAt" selfLastSeenAtText
+                |> addBoolean "selfSocketVisible" selfSocketVisible
+                |> addBoolean "selfMembership" selfMembership
+                |> addBoolean "peerPresenceFound" (isSome peerPresence)
+                |> addBoolean "peerMembership" peerMembership
+                |> addBoolean
+                     "peerJoinedPresenceFound" (isSome peerJoinedPresence)
+                |> addBoolean
+                     "peerConnectedPresenceFound"
+                     (isSome peerConnectedPresence)
+                |> addOptionalText
+                     "peerConnectedDeviceId" peerConnectedDeviceId
+                |> object.add "activeTransmit" activeTransmitJson)
+
+turbo.service.dev.runtimeInspection.doc : Doc
+turbo.service.dev.runtimeInspection.doc =
+  {{
+  {{ docExample 1 do db -> runtimeInspection db }} returns a backend runtime
+  snapshot for the caller's device in a channel.
+  
+  This is a dev-only diagnostic surface used by probes and on-device tooling to
+  distinguish presence, durable websocket session truth, local socket
+  visibility, and transmit ownership.
+  
+  **Also see:** {channels.state}, {sessions.get}, {sockets.lookup}
+  }}
+
+turbo.service.http :
+  Database -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.http db = httpWithConfig "cloud" true db
+
+turbo.service.httpWithConfig :
+  Text
+  -> Boolean
+  -> Database
+  -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.httpWithConfig mode supportsWebSocket db =
+  use Route or
+  or
+    health
+    (or
+      (service.config mode supportsWebSocket)
+      (or
+        (dev db)
+        (or
+          (service.presence.heartbeat db)
+          (or (auth db) (or (users db) (or (invites db) (channels db)))))))
+
+turbo.service.invites.accept.doc : Doc
+turbo.service.invites.accept.doc =
+  {{
+  {{ docExample 1 do db -> invites.accept db }} acknowledges an incoming invite
+  for the current user.
+  
+  The invite remains pending until both peers have actually joined the channel;
+  the join step is still authoritative for transitioning to connected state.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do channels.join) }},
+  {invites.getById}
+  }}
+
+turbo.service.routes.channels :
+  Database -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.channels db =
+  use Route or
+  or
+    (channels.direct db)
+    (or
+      (channels.join db)
+      (or
+        (leave db)
+        (or
+          (channels.state db)
+          (or
+            (ephemeralToken db)
+            (or
+              (pttPushTarget db)
+              (or
+                (channels.beginTransmit db)
+                (or
+                  (channels.renewTransmit db)
+                  (or (channels.endTransmit db) (readiness db)))))))))
+
+turbo.service.routes.dev :
+  Database -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.dev db =
+  use Route or
+  or
+    (seed db)
+    (or
+      (resetAll db)
+      (or
+        (resetState db)
+        (or
+          (uploadDiagnostics db)
+          (or
+            (latestDiagnostics db)
+            (or (latestDiagnosticsForCurrentUser db) (runtimeInspection db))))))
+
+turbo.service.routes.users :
+  Database -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.users db =
+  use Route or
+  or (summary db) (or (presenceByHandle db) (users.byHandle db))
+
+turbo.service.web :
+  Database
+  -> '{Route,
+  Exception,
+  Http,
+  OpenWebSocket,
+  Storage,
+  Remote,
+  WebSockets,
+  Random,
+  Log} ()
+turbo.service.web db = Route.or (service.http db) (ws db)
+
+turbo.store.memberships.add :
+  Database
+  -> ChannelId
+  -> UserId
+  -> '{Exception, Storage, Remote, Random} ChannelMembership
+turbo.store.memberships.add db channelId userId = do
+  table = byChannelUser db
+  now = now!
+  transact (OrderedTable.database table) do
+    key = (channelId, userId)
+    match OrderedTable.tryRead.tx table key with
+      Some membership -> membership
+      None            ->
+        membership = ChannelMembership channelId userId now
+        _ = OrderedTable.write.tx table key membership
+        membership
+
+turbo.store.memberships.add.doc : Doc
+turbo.store.memberships.add.doc =
+  {{
+  {{ docExample 3 do db channelId userId -> memberships.add db channelId userId
+  }} ensures that `userId` is recorded as a member of `channelId`.
+  
+  If the membership already exists, the existing membership is returned.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do memberships.exists) }}
+  }}
+
+turbo.store.memberships.exists :
+  Database -> ChannelId -> UserId -> '{Exception, Remote} Boolean
+turbo.store.memberships.exists db channelId userId =
+  do match OrderedTable.tryRead (byChannelUser db) (channelId, userId) with
+    None   -> false
+    Some _ -> true
+
+turbo.store.memberships.exists.doc : Doc
+turbo.store.memberships.exists.doc =
+  {{
+  {{
+  docExample 3 do db channelId userId -> memberships.exists db channelId userId
+  }} returns whether `userId` is a member of `channelId`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do memberships.add) }}
+  }}
+
+turbo.store.memberships.tables.byChannelUser :
+  Database -> OrderedTable (ChannelId, UserId) ChannelMembership
+turbo.store.memberships.tables.byChannelUser db =
+  OrderedTable.named db "turboMembershipsByChannelUser_v1" Universal.ordering
+
+
+
+---- Anything below this line is ignored by Unison.
+
+
+use lib.unison_json_1_3_5.core.Json
+use lib.unison_json_1_3_5.core.Json.object add addBoolean addNat addOptionalBoolean addOptionalNat addOptionalText addText empty
+
+type turbo.domain.RequestRelationship
+  = NoPendingRequest
+  | IncomingPendingRequest Nat
+  | OutgoingPendingRequest Nat
+  | MutualPendingRequest Nat
+
+type turbo.domain.ChannelMembership
+  = NoMembership
+  | LocalOnlyMembership
+  | PeerOnlyMembership Boolean
+  | SharedMembership Boolean
+
+turbo.domain.requestRelationshipFromFlags : Boolean -> Boolean -> Nat -> RequestRelationship
+turbo.domain.requestRelationshipFromFlags hasIncomingRequest hasOutgoingRequest requestCount =
+  normalizedRequestCount = if requestCount == 0 then 1 else requestCount
+  if hasIncomingRequest && hasOutgoingRequest then MutualPendingRequest normalizedRequestCount
+  else if hasIncomingRequest then IncomingPendingRequest normalizedRequestCount
+  else if hasOutgoingRequest then OutgoingPendingRequest normalizedRequestCount
+  else NoPendingRequest
+
+turbo.domain.requestRelationshipRequestCount : RequestRelationship -> Optional Nat
+turbo.domain.requestRelationshipRequestCount = cases
+  NoPendingRequest                -> None
+  IncomingPendingRequest count    -> Some count
+  OutgoingPendingRequest count    -> Some count
+  MutualPendingRequest count      -> Some count
+
+turbo.domain.requestRelationshipHasIncoming : RequestRelationship -> Boolean
+turbo.domain.requestRelationshipHasIncoming = cases
+  IncomingPendingRequest _ -> true
+  MutualPendingRequest _   -> true
+  NoPendingRequest         -> false
+  OutgoingPendingRequest _ -> false
+
+turbo.domain.requestRelationshipHasOutgoing : RequestRelationship -> Boolean
+turbo.domain.requestRelationshipHasOutgoing = cases
+  OutgoingPendingRequest _ -> true
+  MutualPendingRequest _   -> true
+  NoPendingRequest         -> false
+  IncomingPendingRequest _ -> false
+
+turbo.domain.requestRelationshipKindText : RequestRelationship -> Text
+turbo.domain.requestRelationshipKindText = cases
+  NoPendingRequest         -> "none"
+  IncomingPendingRequest _ -> "incoming"
+  OutgoingPendingRequest _ -> "outgoing"
+  MutualPendingRequest _   -> "mutual"
+
+turbo.domain.channelMembershipFromFlags : Boolean -> Boolean -> Boolean -> ChannelMembershipView
+turbo.domain.channelMembershipFromFlags selfJoined peerJoined peerDeviceConnected =
+  if selfJoined && peerJoined then SharedMembership peerDeviceConnected
+  else if selfJoined then LocalOnlyMembership
+  else if peerJoined then PeerOnlyMembership peerDeviceConnected
+  else NoMembership
+
+turbo.domain.channelMembershipHasLocalMembership : ChannelMembershipView -> Boolean
+turbo.domain.channelMembershipHasLocalMembership = cases
+  LocalOnlyMembership   -> true
+  SharedMembership _    -> true
+  NoMembership          -> false
+  PeerOnlyMembership _  -> false
+
+turbo.domain.channelMembershipHasPeerMembership : ChannelMembershipView -> Boolean
+turbo.domain.channelMembershipHasPeerMembership = cases
+  PeerOnlyMembership _ -> true
+  SharedMembership _   -> true
+  NoMembership         -> false
+  LocalOnlyMembership  -> false
+
+turbo.domain.channelMembershipPeerDeviceConnected : ChannelMembershipView -> Boolean
+turbo.domain.channelMembershipPeerDeviceConnected = cases
+  PeerOnlyMembership peerDeviceConnected -> peerDeviceConnected
+  SharedMembership peerDeviceConnected   -> peerDeviceConnected
+  NoMembership                           -> false
+  LocalOnlyMembership                    -> false
+
+turbo.domain.channelMembershipKindText : ChannelMembershipView -> Text
+turbo.domain.channelMembershipKindText = cases
+  NoMembership          -> "absent"
+  LocalOnlyMembership   -> "self-only"
+  PeerOnlyMembership _  -> "peer-only"
+  SharedMembership _    -> "both"
+
+turbo.service.internal.requestRelationshipJson : RequestRelationship -> Json
+turbo.service.internal.requestRelationshipJson requestRelationship =
+  empty
+    |> addText "kind" (turbo.domain.requestRelationshipKindText requestRelationship)
+    |> addOptionalNat "requestCount" (turbo.domain.requestRelationshipRequestCount requestRelationship)
+
+turbo.service.internal.channelMembershipJson : ChannelMembershipView -> Json
+turbo.service.internal.channelMembershipJson membership =
+  empty
+    |> addText "kind" (turbo.domain.channelMembershipKindText membership)
+    |> addOptionalBoolean "peerDeviceConnected" (
+      if turbo.domain.channelMembershipHasPeerMembership membership
+      then Some (turbo.domain.channelMembershipPeerDeviceConnected membership)
+      else None
+    )
+
+turbo.service.contacts.internal.sessionStatus : UserId -> ChannelMembershipView -> RequestRelationship -> Boolean -> Optional UserId -> Text
+turbo.service.contacts.internal.sessionStatus currentUserId membership requestRelationship peerOnline = cases
+  Some activeUserId ->
+    if textEqual (UserId.toText activeUserId) (UserId.toText currentUserId) then "self-transmitting" else "peer-transmitting"
+  None ->
+    readyMembership =
+      turbo.domain.channelMembershipHasLocalMembership membership && turbo.domain.channelMembershipHasPeerMembership membership && turbo.domain.channelMembershipPeerDeviceConnected membership
+    if readyMembership then "ready"
+    else if turbo.domain.channelMembershipHasLocalMembership membership then "waiting-for-peer"
+    else if turbo.domain.requestRelationshipHasIncoming requestRelationship then "incoming-request"
+    else if turbo.domain.requestRelationshipHasOutgoing requestRelationship then "requested"
+    else if turbo.domain.channelMembershipHasPeerMembership membership || peerOnline then "connecting"
+    else "idle"
+
+turbo.service.contacts.internal.summaryStatus : UserId -> Boolean -> ChannelMembershipView -> RequestRelationship -> Optional UserId -> Text
+turbo.service.contacts.internal.summaryStatus currentUserId peerOnline membership requestRelationship = cases
+  Some activeUserId ->
+    if textEqual (UserId.toText activeUserId) (UserId.toText currentUserId) then "talking" else "receiving"
+  None ->
+    activeMembership =
+      turbo.domain.channelMembershipHasLocalMembership membership || turbo.domain.channelMembershipHasPeerMembership membership
+    readyMembership =
+      turbo.domain.channelMembershipHasLocalMembership membership && turbo.domain.channelMembershipHasPeerMembership membership && turbo.domain.channelMembershipPeerDeviceConnected membership
+    if activeMembership then
+      if readyMembership then "ready"
+      else "connecting"
+    else if turbo.domain.requestRelationshipHasIncoming requestRelationship then "incoming"
+    else if turbo.domain.requestRelationshipHasOutgoing requestRelationship then "requested"
+    else if peerOnline then "online"
+    else "offline"
+
+turbo.service.contacts.internal.canTransmit : UserId -> Boolean -> Boolean -> ChannelMembershipView -> Optional UserId -> Boolean
+turbo.service.contacts.internal.canTransmit currentUserId selfOnline peerOnline membership activeTransmitterUserId =
+  transmitReady =
+    selfOnline && peerOnline && turbo.domain.channelMembershipHasLocalMembership membership && turbo.domain.channelMembershipHasPeerMembership membership && turbo.domain.channelMembershipPeerDeviceConnected membership
+  if Boolean.not transmitReady then false
+  else
+    match activeTransmitterUserId with
+      None              -> true
+      Some activeUserId -> textEqual (UserId.toText activeUserId) (UserId.toText currentUserId)
+
+turbo.service.channels.state : Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.state db = do
+  use Optional map
+  use Parser / text
+  use UserId toText
+  (channelIdText, deviceIdText) = route GET (s "v1" / s "channels" / text / s "state" / text => Tuple.pair)
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      channelId = ChannelId.fromText channelIdText
+      deviceId = DeviceId.fromText deviceIdText
+      match OrderedTable.tryRead (channels.tables.byId db) channelId with
+        None                                          -> notFound.json (empty |> addText "error" "channel not found")
+        Some (DirectChannel _ lowUserId highUserId _) ->
+          peerUserId = if userIdEqual lowUserId currentUserId then highUserId else lowUserId
+          peerHandle = match users.getById db peerUserId () with
+            Some (User _ handleText _ _ _) -> handleText
+            None                           -> toText peerUserId
+          selfPresence = presence.get db deviceId ()
+          selfOnline = match selfPresence with
+            Some presence -> presenceMatches currentUserId presence
+            None          -> false
+          rawSelfJoined = selfJoinedChannel currentUserId channelId selfPresence
+          peerPresence = getForUser db peerUserId ()
+          peerOnline = isSome peerPresence
+          peerJoinedPresence = getForUserInChannel db peerUserId channelId ()
+          rawPeerJoined = isSome peerJoinedPresence
+          peerConnectedPresence = getConnectedForUserInChannel db peerUserId channelId ()
+          rawPeerDeviceConnected = isSome peerConnectedPresence
+          incomingInvite = incomingInviteForChannel db currentUserId peerUserId channelId ()
+          outgoingInvite = outgoingInviteForChannel db currentUserId peerUserId channelId ()
+          hasIncomingRequest = isSome incomingInvite
+          hasOutgoingRequest = isSome outgoingInvite
+          hasPendingRequest = hasIncomingRequest || hasOutgoingRequest
+          selfJoined = if hasPendingRequest then false else rawSelfJoined
+          peerJoined = if hasPendingRequest then false else rawPeerJoined
+          peerDeviceConnected = if hasPendingRequest then false else rawPeerDeviceConnected
+          requestCount = pendingCount incomingInvite outgoingInvite
+          requestRelationship =
+            turbo.domain.requestRelationshipFromFlags hasIncomingRequest hasOutgoingRequest requestCount
+          membership = turbo.domain.channelMembershipFromFlags selfJoined peerJoined peerDeviceConnected
+          activeTransmit = currentTransmit db channelId ()
+          activeTransmitterUserId = map transmitUserId activeTransmit
+          activeTransmitExpiresAt = map transmitExpiresAtText activeTransmit
+          ok.json (
+            empty
+              |> addText "channelId" channelIdText
+              |> addText "selfUserId" (toText currentUserId)
+              |> addText "peerUserId" (toText peerUserId)
+              |> addText "peerHandle" peerHandle
+              |> addBoolean "selfOnline" selfOnline
+              |> addBoolean "peerOnline" peerOnline
+              |> addBoolean "selfJoined" selfJoined
+              |> addBoolean "peerJoined" peerJoined
+              |> addBoolean "peerDeviceConnected" peerDeviceConnected
+              |> addBoolean "hasIncomingRequest" hasIncomingRequest
+              |> addBoolean "hasOutgoingRequest" hasOutgoingRequest
+              |> addNat "requestCount" requestCount
+              |> add "membership" (turbo.service.internal.channelMembershipJson membership)
+              |> add "requestRelationship" (turbo.service.internal.requestRelationshipJson requestRelationship)
+              |> addOptionalText "activeTransmitterUserId" (map toText activeTransmitterUserId)
+              |> addOptionalText "transmitLeaseExpiresAt" activeTransmitExpiresAt
+              |> addText "status" (
+                turbo.service.contacts.internal.sessionStatus
+                  currentUserId
+                  membership
+                  requestRelationship
+                  peerOnline
+                  activeTransmitterUserId
+              )
+              |> addBoolean "canTransmit" (
+                turbo.service.contacts.internal.canTransmit
+                  currentUserId
+                  selfOnline
+                  peerOnline
+                  membership
+                  activeTransmitterUserId
+              )
+          )
+
+turbo.service.contacts.internal.summaryJson : Database -> UserId -> Optional DevicePresence -> User -> '{Exception, Storage, Remote, Random} Optional Json
+turbo.service.contacts.internal.summaryJson db currentUserId selfPresence user = do
+  (User otherUserId handleText displayName _ _) = user
+  if userIdEqual currentUserId otherUserId then None
+  else
+    directChannelOpt = directChannel db currentUserId otherUserId ()
+    peerPresence = getForUser db otherUserId ()
+    peerOnline = isSome peerPresence
+    channelFacts = match directChannelOpt with
+      None                                 -> (None, false, false, false, None, None, None)
+      Some (DirectChannel channelId _ _ _) ->
+        rawSelfJoined = selfJoinedChannel currentUserId channelId selfPresence
+        rawPeerDeviceConnected = isSome (getConnectedForUserInChannel db otherUserId channelId ())
+        incomingInvite = incomingInviteForChannel db currentUserId otherUserId channelId ()
+        outgoingInvite = outgoingInviteForChannel db currentUserId otherUserId channelId ()
+        hasPendingRequest = isSome incomingInvite || isSome outgoingInvite
+        selfJoined = if hasPendingRequest then false else rawSelfJoined
+        peerDeviceConnected = if hasPendingRequest then false else rawPeerDeviceConnected
+        peerJoined = peerDeviceConnected
+        activeTransmit = currentTransmit db channelId ()
+        activeTransmitterUserId = Optional.map transmitUserId activeTransmit
+        (Some (ChannelId.toText channelId), selfJoined, peerJoined, peerDeviceConnected, incomingInvite, outgoingInvite, activeTransmitterUserId)
+    (channelIdTextOpt, selfJoined, peerJoined, peerDeviceConnected, incomingInvite, outgoingInvite, activeTransmitterUserId) = channelFacts
+    hasIncomingRequest = isSome incomingInvite
+    hasOutgoingRequest = isSome outgoingInvite
+    requestCount = pendingCount incomingInvite outgoingInvite
+    requestRelationship =
+      turbo.domain.requestRelationshipFromFlags hasIncomingRequest hasOutgoingRequest requestCount
+    membership = turbo.domain.channelMembershipFromFlags selfJoined peerJoined peerDeviceConnected
+    badgeStatus =
+      turbo.service.contacts.internal.summaryStatus
+        currentUserId
+        peerOnline
+        membership
+        requestRelationship
+        activeTransmitterUserId
+    isActiveConversation =
+      turbo.domain.channelMembershipHasLocalMembership membership || turbo.domain.channelMembershipHasPeerMembership membership || isSome activeTransmitterUserId
+    Some (
+      empty
+        |> addText "userId" (UserId.toText otherUserId)
+        |> addText "handle" handleText
+        |> addText "displayName" displayName
+        |> addOptionalText "channelId" channelIdTextOpt
+        |> addBoolean "isOnline" peerOnline
+        |> addBoolean "hasIncomingRequest" hasIncomingRequest
+        |> addBoolean "hasOutgoingRequest" hasOutgoingRequest
+        |> addNat "requestCount" requestCount
+        |> add "membership" (turbo.service.internal.channelMembershipJson membership)
+        |> add "requestRelationship" (turbo.service.internal.requestRelationshipJson requestRelationship)
+        |> addBoolean "isActiveConversation" isActiveConversation
+        |> addText "badgeStatus" badgeStatus
+    )

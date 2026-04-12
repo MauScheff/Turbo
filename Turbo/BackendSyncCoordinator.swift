@@ -24,6 +24,7 @@ enum BackendSyncEvent: Equatable {
     case contactSummariesUpdated([BackendContactSummaryUpdate])
     case contactSummariesFailed(String)
     case channelStateUpdated(contactID: UUID, channelState: TurboChannelStateResponse)
+    case channelReadinessUpdated(contactID: UUID, readiness: TurboChannelReadinessResponse)
     case channelStateCleared(contactID: UUID)
     case channelStateFailed(contactID: UUID, message: String)
     case clearAllChannelStates
@@ -92,6 +93,9 @@ enum BackendSyncReducer {
         case .channelStateUpdated(let contactID, let channelState):
             nextState.syncState.applyChannelState(channelState, for: contactID)
 
+        case .channelReadinessUpdated(let contactID, let readiness):
+            nextState.syncState.applyChannelReadiness(readiness, for: contactID)
+
         case .channelStateCleared(let contactID):
             nextState.syncState.clearChannelState(for: contactID)
 
@@ -100,6 +104,7 @@ enum BackendSyncReducer {
 
         case .clearAllChannelStates:
             nextState.syncState.channelStates = [:]
+            nextState.syncState.channelReadiness = [:]
 
         case .invitesUpdated(let incoming, let outgoing, let now):
             let incomingMap = Dictionary(uniqueKeysWithValues: incoming.map { ($0.contactID, $0.invite) })

@@ -5,6 +5,7 @@ import OSLog
 struct SelectedSessionDiagnosticsSummary: Equatable {
     let selectedHandle: String?
     let selectedPhase: String
+    let selectedPhaseDetail: String
     let relationship: String
     let statusMessage: String
     let canTransmitNow: Bool
@@ -15,6 +16,9 @@ struct SelectedSessionDiagnosticsSummary: Equatable {
     let systemSession: String
     let mediaState: String
     let backendChannelStatus: String?
+    let backendReadiness: String?
+    let backendMembership: String?
+    let backendRequestRelationship: String?
     let backendSelfJoined: Bool?
     let backendPeerJoined: Bool?
     let backendPeerDeviceConnected: Bool?
@@ -23,8 +27,10 @@ struct SelectedSessionDiagnosticsSummary: Equatable {
 
 struct ContactDiagnosticsSummary: Equatable, Identifiable {
     let handle: String
+    let isOnline: Bool
     let listState: String
     let badgeStatus: String?
+    let requestRelationship: String
     let hasIncomingRequest: Bool
     let hasOutgoingRequest: Bool
     let requestCount: Int
@@ -32,6 +38,18 @@ struct ContactDiagnosticsSummary: Equatable, Identifiable {
     let outgoingInviteCount: Int?
 
     var id: String { handle }
+}
+
+struct StateMachineProjection: Equatable {
+    let selectedSession: SelectedSessionDiagnosticsSummary
+    let contacts: [ContactDiagnosticsSummary]
+    let isWebSocketConnected: Bool
+    let statusMessage: String
+    let backendStatusMessage: String
+
+    func contact(handle: String) -> ContactDiagnosticsSummary? {
+        contacts.first { $0.handle == handle }
+    }
 }
 
 enum DiagnosticsLevel: String, Codable, CaseIterable {
@@ -109,6 +127,7 @@ struct DiagnosticsStateCapture: Identifiable, Equatable {
             "transmitting=\(fields["isTransmitting"] ?? "false")",
             "system=\(fields["systemSession"] ?? "none")",
             "backendChannel=\(fields["backendChannelStatus"] ?? "none")",
+            "backendReadiness=\(fields["backendReadiness"] ?? "none")",
             "backendSelfJoined=\(fields["backendSelfJoined"] ?? "none")",
             "backendPeerJoined=\(fields["backendPeerJoined"] ?? "none")",
             "peerDevice=\(fields["backendPeerDeviceConnected"] ?? "none")",

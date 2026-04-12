@@ -48,8 +48,7 @@ struct ContentView: View {
         .sheet(isPresented: $isShowingDiagnostics) {
             TurboDiagnosticsSheet(
                 report: viewModel.latestSelfCheckReport,
-                selectedSession: viewModel.selectedSessionDiagnosticsSummary,
-                contacts: viewModel.contactDiagnosticsSummaries,
+                projection: viewModel.stateMachineProjection,
                 microphonePermissionStatus: viewModel.microphonePermissionStatusText,
                 needsMicrophonePermission: viewModel.needsMicrophonePermission,
                 logFilePath: viewModel.diagnostics.logFilePath,
@@ -74,7 +73,6 @@ struct ContentView: View {
                 backendStatusMessage: viewModel.backendStatusMessage,
                 selfCheckSummary: viewModel.latestSelfCheckReport?.summary,
                 selfCheckPassing: viewModel.latestSelfCheckReport?.isPassing,
-                logFilePath: viewModel.diagnostics.logFilePath,
                 latestErrorText: latestDiagnosticsErrorText,
                 currentDevUserHandle: viewModel.currentDevUserHandle,
                 diagnosticsHasError: viewModel.diagnostics.latestError != nil,

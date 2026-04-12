@@ -16,6 +16,9 @@ serve-local-http:
 serve-local:
   sh -c 'cd {{justfile_directory()}} && ucm run turbo/main:.turbo.serveLocal'
 
+deploy:
+  sh -c 'cd {{justfile_directory()}} && ucm run turbo/main:.turbo.deploy'
+
 prod-probe:
   .venv/bin/python scripts/prod_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
 
@@ -25,8 +28,12 @@ smoke-probe:
 route-probe:
   .venv/bin/python scripts/route_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
 
+route-probe-local base="http://localhost:8090/s/turbo" caller="@avery" callee="@blake":
+  .venv/bin/python scripts/route_probe.py --base-url "{{base}}" --caller "{{caller}}" --callee "{{callee}}"
+
 clean-scratch:
-  find . -maxdepth 1 -type f \( -name 'scratch_*.u' -o -name 'scratch-*.u' \) -print -delete
+  find . -maxdepth 1 -type f -name '*.u' | sort
+  find . -maxdepth 1 -type f -name '*.u' -delete
 
 seed base="https://beepbeep.to" handle="@avery":
   curl --fail-with-body -i -X POST \
@@ -92,33 +99,25 @@ ptt-apns-bridge base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" b
     {{insecure}}
 
 simulator-scenario scenario="" base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" insecure="--insecure":
-  rm -f .scenario-runtime-config.json
-  TURBO_SCENARIO_FILTER="{{scenario}}" TURBO_SCENARIO_BASE_URL="{{base}}" TURBO_SCENARIO_HANDLE_A="{{handle_a}}" TURBO_SCENARIO_HANDLE_B="{{handle_b}}" python3 -c 'import json, os, time; json.dump({"enabledUntilEpochSeconds": time.time() + 600, "filter": os.environ["TURBO_SCENARIO_FILTER"], "baseURL": os.environ["TURBO_SCENARIO_BASE_URL"], "handleA": os.environ["TURBO_SCENARIO_HANDLE_A"], "handleB": os.environ["TURBO_SCENARIO_HANDLE_B"], "deviceIDA": "sim-scenario-avery", "deviceIDB": "sim-scenario-blake"}, open(".scenario-runtime-config.json", "w", encoding="utf-8"))'
-  xcodebuild -project Turbo.xcodeproj -scheme BeepBeep \
-    -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.4' \
-    -only-testing:TurboTests \
-    -skip-testing:TurboUITests \
-    -derivedDataPath /tmp/turbo-dd-simulator-scenario \
-    test CODE_SIGNING_ALLOWED=NO
-  rm -f .scenario-runtime-config.json
+  python3 scripts/run_simulator_scenarios.py \
+    --scenario "{{scenario}}" \
+    --base-url "{{base}}" \
+    --handle-a "{{handle_a}}" \
+    --handle-b "{{handle_b}}"
 
 simulator-scenario-merge base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" insecure="--insecure":
   python3 scripts/merged_diagnostics.py --base-url "{{base}}" {{insecure}} \
     --device "{{handle_a}}=sim-scenario-avery" \
     --device "{{handle_b}}=sim-scenario-blake"
 
-simulator-scenario-local scenario="" base="http://localhost:8081/s/turbo" handle_a="@avery" handle_b="@blake":
-  rm -f .scenario-runtime-config.json
-  TURBO_SCENARIO_FILTER="{{scenario}}" TURBO_SCENARIO_BASE_URL="{{base}}" TURBO_SCENARIO_HANDLE_A="{{handle_a}}" TURBO_SCENARIO_HANDLE_B="{{handle_b}}" python3 -c 'import json, os, time; json.dump({"enabledUntilEpochSeconds": time.time() + 600, "filter": os.environ["TURBO_SCENARIO_FILTER"], "baseURL": os.environ["TURBO_SCENARIO_BASE_URL"], "handleA": os.environ["TURBO_SCENARIO_HANDLE_A"], "handleB": os.environ["TURBO_SCENARIO_HANDLE_B"], "deviceIDA": "sim-scenario-avery", "deviceIDB": "sim-scenario-blake"}, open(".scenario-runtime-config.json", "w", encoding="utf-8"))'
-  xcodebuild -project Turbo.xcodeproj -scheme BeepBeep \
-    -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.4' \
-    -only-testing:TurboTests \
-    -skip-testing:TurboUITests \
-    -derivedDataPath /tmp/turbo-dd-simulator-scenario \
-    test CODE_SIGNING_ALLOWED=NO
-  rm -f .scenario-runtime-config.json
+simulator-scenario-local scenario="" base="http://localhost:8090/s/turbo" handle_a="@avery" handle_b="@blake":
+  python3 scripts/run_simulator_scenarios.py \
+    --scenario "{{scenario}}" \
+    --base-url "{{base}}" \
+    --handle-a "{{handle_a}}" \
+    --handle-b "{{handle_b}}"
 
-simulator-scenario-merge-local base="http://localhost:8081/s/turbo" handle_a="@avery" handle_b="@blake":
+simulator-scenario-merge-local base="http://localhost:8090/s/turbo" handle_a="@avery" handle_b="@blake":
   python3 scripts/merged_diagnostics.py --base-url "{{base}}" \
     --device "{{handle_a}}=sim-scenario-avery" \
     --device "{{handle_b}}=sim-scenario-blake"
@@ -134,17 +133,15 @@ simulator-ptt-push channel_id event="transmit-start" active_speaker="@blake" sen
     --sender-device-id "{{sender_device_id}}"
 
 simulator-scenario-suite:
-  just simulator-scenario request_decline
-  just simulator-scenario request_cancel_before_accept
-  just simulator-scenario request_accept_ready
-  just simulator-scenario request_accept_ready_disconnect_initiator
-  just simulator-scenario request_accept_ready_disconnect_receiver
+  just simulator-scenario
+
+simulator-scenario-suite-hosted-smoke:
+  just simulator-scenario "presence_online_projection,request_accept_ready_refresh_stability"
 
 simulator-scenario-suite-local:
-  just simulator-scenario-local request_decline http://localhost:8080/s/turbo
-  just simulator-scenario-local request_cancel_before_accept http://localhost:8080/s/turbo
-  just simulator-scenario-local request_accept_ready http://localhost:8080/s/turbo
-  just simulator-scenario-local request_accept_ready_disconnect_initiator http://localhost:8080/s/turbo
-  just simulator-scenario-local request_accept_ready_disconnect_receiver http://localhost:8080/s/turbo
+  just simulator-scenario-local "" http://localhost:8090/s/turbo
+
+swift-test-target name:
+  python3 scripts/run_targeted_swift_tests.py --name "{{name}}"
 
 backend-check: venv prod-probe

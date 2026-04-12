@@ -1,0 +1,121 @@
+{
+  "name": "backend_reconnect_ready_session_recovery",
+  "baseURL": "https://beepbeep.to",
+  "participants": {
+    "a": {
+      "handle": "@avery",
+      "deviceId": "sim-scenario-avery"
+    },
+    "b": {
+      "handle": "@blake",
+      "deviceId": "sim-scenario-blake"
+    }
+  },
+  "steps": [
+    {
+      "description": "both peers open each other",
+      "actions": [
+        { "actor": "a", "type": "openPeer", "peer": "b" },
+        { "actor": "b", "type": "openPeer", "peer": "a" }
+      ]
+    },
+    {
+      "description": "request propagates to recipient",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "requested", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "incomingRequest", "isJoined": false }
+      }
+    },
+    {
+      "description": "recipient joins and requester becomes peerReady",
+      "actions": [
+        { "actor": "b", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "peerReady", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "waitingForPeer", "isJoined": true }
+      }
+    },
+    {
+      "description": "both sides become ready",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": {
+          "selectedHandle": "@blake",
+          "phase": "ready",
+          "isJoined": true,
+          "canTransmitNow": true,
+          "backend": {
+            "channelStatus": "ready",
+            "readiness": "ready",
+            "membership": "both(peerDeviceConnected: true)",
+            "requestRelationship": "none",
+            "canTransmit": true
+          }
+        },
+        "b": {
+          "selectedHandle": "@avery",
+          "phase": "ready",
+          "isJoined": true,
+          "canTransmitNow": true,
+          "backend": {
+            "channelStatus": "ready",
+            "readiness": "ready",
+            "membership": "both(peerDeviceConnected: true)",
+            "requestRelationship": "none",
+            "canTransmit": true
+          }
+        }
+      }
+    },
+    {
+      "description": "initiator reconnects backend and both sides reconverge to ready",
+      "actions": [
+        { "actor": "a", "type": "reconnectBackend" },
+        { "actor": "a", "type": "refreshContactSummaries" },
+        { "actor": "a", "type": "refreshInvites" },
+        { "actor": "a", "type": "refreshChannelState" },
+        { "actor": "a", "type": "reconcileSelectedSession" },
+        { "actor": "b", "type": "refreshContactSummaries" },
+        { "actor": "b", "type": "refreshInvites" },
+        { "actor": "b", "type": "refreshChannelState" },
+        { "actor": "b", "type": "reconcileSelectedSession" }
+      ],
+      "expectEventually": {
+        "a": {
+          "selectedHandle": "@blake",
+          "phase": "ready",
+          "isJoined": true,
+          "canTransmitNow": true,
+          "backend": {
+            "channelStatus": "ready",
+            "readiness": "ready",
+            "membership": "both(peerDeviceConnected: true)",
+            "requestRelationship": "none",
+            "canTransmit": true,
+            "webSocketConnected": true
+          }
+        },
+        "b": {
+          "selectedHandle": "@avery",
+          "phase": "ready",
+          "isJoined": true,
+          "canTransmitNow": true,
+          "backend": {
+            "channelStatus": "ready",
+            "readiness": "ready",
+            "membership": "both(peerDeviceConnected: true)",
+            "requestRelationship": "none",
+            "canTransmit": true,
+            "webSocketConnected": true
+          }
+        }
+      }
+    }
+  ]
+}

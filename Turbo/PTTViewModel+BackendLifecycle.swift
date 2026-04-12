@@ -9,6 +9,40 @@ import Foundation
 import UIKit
 
 extension PTTViewModel {
+    func disconnectBackendWebSocket() {
+        guard let backend = backendServices, backend.supportsWebSocket else { return }
+        diagnostics.record(.websocket, message: "Disconnecting WebSocket for control-plane test")
+        backend.suspendWebSocket()
+        captureDiagnosticsState("websocket:forced-disconnect")
+    }
+
+    func reconnectBackendControlPlane() async {
+        diagnostics.record(.backend, message: "Reconnecting backend control plane")
+        resetBackendRuntimeForReconnect()
+        captureDiagnosticsState("backend:reconnect-start")
+        await configureBackendIfNeeded()
+        if let selectedContact = selectedContact {
+            let localSessionAppearsActive =
+                systemSessionMatches(selectedContact.id)
+                || (isJoined && activeChannelId == selectedContact.id)
+                || pttCoordinator.state.systemChannelUUID == selectedContact.channelId
+
+            if localSessionAppearsActive {
+                diagnostics.record(
+                    .backend,
+                    message: "Reasserting backend join after control-plane reconnect",
+                    metadata: ["contactId": selectedContact.id.uuidString, "handle": selectedContact.handle]
+                )
+                await reassertBackendJoin(for: selectedContact)
+            }
+        }
+        if let selectedContactId {
+            await refreshChannelState(for: selectedContactId)
+            await reconcileSelectedSessionIfNeeded()
+        }
+        captureDiagnosticsState("backend:reconnect-finished")
+    }
+
     func shouldResetTransmitSessionOnWebSocketIdle(
         hasPendingBeginOrActiveTransmit: Bool,
         systemIsTransmitting: Bool
@@ -53,7 +87,7 @@ extension PTTViewModel {
         }
         let client = TurboBackendClient(config: backendConfig)
         client.onSignal = { [weak self] envelope in
-            self?.handleIncomingSignal(envelope)
+            self?.scheduleIncomingSignalDelivery(envelope)
         }
         client.onServerNotice = { [weak self] message in
             self?.backendStatusMessage = message
@@ -211,6 +245,7 @@ extension PTTViewModel {
         pttSystemPolicyCoordinator.send(.reset)
         pttWakeRuntime.clearAll()
         clearTrackedContacts()
+        resetTransportFaults()
         contacts = []
         statusMessage = "Initializing..."
         captureDiagnosticsState("local-state-reset")

@@ -4,6 +4,7 @@ import PushToTalk
 import AVFAudio
 @testable import BeepBeep
 
+@MainActor
 struct TurboTests {
 
     @Test func audioOutputPreferenceCyclesBetweenSpeakerAndPhone() {
@@ -31,7 +32,26 @@ struct TurboTests {
         coordinator.markExplicitLeave(contactID: contactID)
         coordinator.queueJoin(contactID: contactID)
 
-        #expect(coordinator.pendingAction == .explicitLeave(contactID: contactID))
+        #expect(coordinator.pendingAction == .leave(.explicit(contactID: contactID)))
+    }
+
+    @Test func globalExplicitLeaveBlocksAutoRejoin() {
+        var coordinator = SessionCoordinatorState()
+
+        coordinator.markExplicitLeave(contactID: nil)
+
+        #expect(coordinator.pendingAction == .leave(.explicit(contactID: nil)))
+        #expect(coordinator.autoRejoinContactID(afterLeaving: nil) == nil)
+    }
+
+    @Test func selectingContactDoesNotClearGlobalExplicitLeave() {
+        var coordinator = SessionCoordinatorState()
+        let selectedContactID = UUID()
+
+        coordinator.markExplicitLeave(contactID: nil)
+        coordinator.select(contactID: selectedContactID)
+
+        #expect(coordinator.pendingAction == .leave(.explicit(contactID: nil)))
     }
 
     @Test func reconciledTeardownBlocksAutoRejoinUntilLeaveCompletes() {
@@ -41,7 +61,7 @@ struct TurboTests {
         coordinator.queueConnect(contactID: contactID)
         coordinator.markReconciledTeardown(contactID: contactID)
 
-        #expect(coordinator.pendingAction == .teardown(contactID: contactID))
+        #expect(coordinator.pendingAction == .leave(.reconciledTeardown(contactID: contactID)))
         #expect(coordinator.autoRejoinContactID(afterLeaving: contactID) == nil)
     }
 
@@ -88,7 +108,7 @@ struct TurboTests {
             localSessionCleared: false
         )
 
-        #expect(coordinator.pendingAction == .explicitLeave(contactID: contactID))
+        #expect(coordinator.pendingAction == .leave(.explicit(contactID: contactID)))
     }
 
     @Test func nonJoinedChannelRefreshClearsExplicitLeave() {
@@ -234,7 +254,7 @@ struct TurboTests {
             activeChannelID: nil,
             systemSessionMatchesContact: false,
             systemSessionState: .none,
-            pendingAction: .explicitLeave(contactID: contactID),
+            pendingAction: .leave(.explicit(contactID: contactID)),
             localJoinFailure: nil,
             channel: nil
         )
@@ -255,7 +275,7 @@ struct TurboTests {
                 activeChannelID: contactID,
                 systemSessionMatchesContact: false,
                 systemSessionState: .none,
-                pendingAction: .explicitLeave(contactID: contactID),
+                pendingAction: .leave(.explicit(contactID: contactID)),
                 localJoinFailure: nil,
                 channel: ChannelReadinessSnapshot(
                     channelState: makeChannelState(status: .ready, canTransmit: true)
@@ -426,7 +446,7 @@ struct TurboTests {
         )
     }
 
-    @Test func alignedSessionTearsDownWhenPeerLeavesChannel() {
+    @Test func alignedSessionDoesNotTearDownOnTransientPeerDeparture() {
         let contactID = UUID()
         let channelUUID = UUID()
         let context = ConversationDerivationContext(
@@ -463,10 +483,7 @@ struct TurboTests {
             )
         )
 
-        #expect(
-            ConversationStateMachine.reconciliationAction(for: context)
-            == .teardownSelectedSession(contactID: contactID)
-        )
+        #expect(ConversationStateMachine.reconciliationAction(for: context) == .none)
     }
 
     @Test func alignedWaitingForPeerWithPendingRequestDoesNotTearDown() {
@@ -511,7 +528,7 @@ struct TurboTests {
             activeChannelID: contactID,
             systemSessionMatchesContact: false,
             systemSessionState: .none,
-            pendingAction: .explicitLeave(contactID: contactID),
+            pendingAction: .leave(.explicit(contactID: contactID)),
             localJoinFailure: nil,
             channel: ChannelReadinessSnapshot(
                 channelState: TurboChannelStateResponse(
@@ -554,7 +571,7 @@ struct TurboTests {
             activeChannelID: contactID,
             systemSessionMatchesContact: true,
             systemSessionState: .active(contactID: contactID, channelUUID: channelUUID),
-            pendingAction: .join(contactID: contactID),
+            pendingAction: .connect(.joiningLocal(contactID: contactID)),
             localJoinFailure: nil,
             channel: ChannelReadinessSnapshot(
                 channelState: TurboChannelStateResponse(
@@ -622,6 +639,65 @@ struct TurboTests {
             pendingAction: .none,
             localJoinFailure: nil,
             channel: ChannelReadinessSnapshot(channelState: makeChannelState(status: .ready, canTransmit: true))
+        )
+
+        #expect(ConversationStateMachine.reconciliationAction(for: context) == .none)
+    }
+
+    @Test func localTransmitSuppressesDriftTeardownDuringBackendWaitingForPeer() {
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .transmitting,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: true,
+            localIsTransmitting: true,
+            activeChannelID: contactID,
+            systemSessionMatchesContact: true,
+            systemSessionState: .active(contactID: contactID, channelUUID: channelUUID),
+            pendingAction: .none,
+            localJoinFailure: nil,
+            mediaState: .preparing,
+            channel: ChannelReadinessSnapshot(
+                channelState: makeChannelState(
+                    status: .waitingForPeer,
+                    canTransmit: false,
+                    peerJoined: false,
+                    peerDeviceConnected: false
+                )
+            )
+        )
+
+        #expect(ConversationStateMachine.reconciliationAction(for: context) == .none)
+    }
+
+    @Test func peerTransmitSnapshotDoesNotTearDownAlignedLocalSession() {
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .receiving,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: true,
+            activeChannelID: contactID,
+            systemSessionMatchesContact: true,
+            systemSessionState: .active(contactID: contactID, channelUUID: channelUUID),
+            pendingAction: .none,
+            localJoinFailure: nil,
+            channel: ChannelReadinessSnapshot(
+                channelState: makeChannelState(
+                    status: .receiving,
+                    canTransmit: false,
+                    selfJoined: false,
+                    peerJoined: true,
+                    peerDeviceConnected: true
+                )
+            )
         )
 
         #expect(ConversationStateMachine.reconciliationAction(for: context) == .none)
@@ -792,7 +868,7 @@ struct TurboTests {
             activeChannelID: nil,
             systemSessionMatchesContact: false,
             systemSessionState: .none,
-            pendingAction: .join(contactID: contactID),
+            pendingAction: .connect(.joiningLocal(contactID: contactID)),
             localJoinFailure: nil,
             channel: nil
         )
@@ -848,7 +924,7 @@ struct TurboTests {
             activeChannelID: nil,
             systemSessionMatchesContact: false,
             systemSessionState: .none,
-            pendingAction: .connect(contactID: contactID),
+            pendingAction: .connect(.requestingBackend(contactID: contactID)),
             localJoinFailure: nil,
             channel: nil
         )
@@ -919,7 +995,7 @@ struct TurboTests {
         #expect(state.canTransmitNow)
     }
 
-    @Test func selectedPeerStateShowsReadyWhenPeerDeviceConnectivityLags() {
+    @Test func selectedPeerStateShowsWakeReadyWhenPeerDeviceConnectivityLags() {
         let contactID = UUID()
         let channelUUID = UUID()
         let context = ConversationDerivationContext(
@@ -950,10 +1026,60 @@ struct TurboTests {
             relationship: .none
         )
 
-        #expect(state.phase == .ready)
+        #expect(state.phase == .wakeReady)
         #expect(state.conversationState == .ready)
-        #expect(state.statusMessage == "Connected")
+        #expect(state.statusMessage == "Hold to talk to wake Avery")
         #expect(state.canTransmitNow == false)
+    }
+
+    @Test func ensureContactClearsStaleBackendChannelMetadataWhenRefreshedWithoutChannel() {
+        let staleChannelID = "channel-stale"
+        let existing = [
+            Contact(
+                id: Contact.stableID(for: "@blake"),
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: ContactDirectory.stableChannelUUID(for: staleChannelID),
+                backendChannelId: staleChannelID,
+                remoteUserId: "user-blake"
+            )
+        ]
+
+        let result = ContactDirectory.ensureContact(
+            handle: "@blake",
+            remoteUserId: "user-blake-2",
+            channelId: "",
+            existingContacts: existing
+        )
+
+        let refreshed = try! #require(result.contacts.first)
+        #expect(refreshed.remoteUserId == "user-blake-2")
+        #expect(refreshed.backendChannelId == nil)
+        #expect(refreshed.channelId != ContactDirectory.stableChannelUUID(for: staleChannelID))
+    }
+
+    @Test func backendSyncStateClearsStaleChannelStateWhenContactSummaryHasNoChannel() {
+        let contactID = UUID()
+        var state = BackendSyncState()
+        state.channelStates[contactID] = makeChannelState(status: .ready, canTransmit: true)
+
+        state.applyContactSummaries([
+            contactID: TurboContactSummaryResponse(
+                userId: "user-blake",
+                handle: "@blake",
+                displayName: "Blake",
+                channelId: nil,
+                isOnline: true,
+                hasIncomingRequest: false,
+                hasOutgoingRequest: false,
+                requestCount: 0,
+                isActiveConversation: false,
+                badgeStatus: "online"
+            )
+        ])
+
+        #expect(state.channelStates[contactID] == nil)
     }
 
     @Test func selectedPeerReducerKeepsOutgoingRequestRequestedUntilRealTransitionStarts() {
@@ -993,7 +1119,7 @@ struct TurboTests {
             .relationshipUpdated(.none),
             .baseStateUpdated(.idle),
             .channelUpdated(nil),
-            .localSessionUpdated(isJoined: false, activeChannelID: nil, pendingAction: .join(contactID: contactID), localJoinFailure: nil),
+            .localSessionUpdated(isJoined: false, activeChannelID: nil, pendingAction: .connect(.joiningLocal(contactID: contactID)), localJoinFailure: nil),
             .systemSessionUpdated(.none, matchesSelectedContact: false)
         ]
 
@@ -1056,7 +1182,39 @@ struct TurboTests {
 
         let transition = SelectedPeerReducer.reduce(state: seededState, event: .joinRequested)
 
-        #expect(transition.effects == [.connect(contactID: contactID)])
+        #expect(transition.effects == [.requestConnection(contactID: contactID)])
+    }
+
+    @Test func selectedPeerReducerJoinRequestEmitsJoinReadyPeerForPeerReadySelection() {
+        let contactID = UUID()
+        let selection = SelectedPeerSelection(
+            contactID: contactID,
+            contactName: "Blake",
+            contactIsOnline: true
+        )
+
+        let seededState = reduceSelectedPeerState([
+            .selectedContactChanged(selection),
+            .relationshipUpdated(.none),
+            .baseStateUpdated(.idle),
+            .channelUpdated(
+                ChannelReadinessSnapshot(
+                    channelState: makeChannelState(
+                        status: .waitingForPeer,
+                        canTransmit: false,
+                        selfJoined: false,
+                        peerJoined: true,
+                        peerDeviceConnected: false
+                    )
+                )
+            ),
+            .localSessionUpdated(isJoined: false, activeChannelID: nil, pendingAction: .none, localJoinFailure: nil),
+            .systemSessionUpdated(.none, matchesSelectedContact: false)
+        ])
+
+        let transition = SelectedPeerReducer.reduce(state: seededState, event: .joinRequested)
+
+        #expect(transition.effects == [.joinReadyPeer(contactID: contactID)])
     }
 
     @Test func selectedPeerReducerDisconnectRequestEmitsDisconnectForPendingJoin() {
@@ -1072,7 +1230,7 @@ struct TurboTests {
             .relationshipUpdated(.none),
             .baseStateUpdated(.idle),
             .channelUpdated(nil),
-            .localSessionUpdated(isJoined: false, activeChannelID: nil, pendingAction: .join(contactID: contactID), localJoinFailure: nil),
+            .localSessionUpdated(isJoined: false, activeChannelID: nil, pendingAction: .connect(.joiningLocal(contactID: contactID)), localJoinFailure: nil),
             .systemSessionUpdated(.none, matchesSelectedContact: false)
         ])
 
@@ -1097,7 +1255,7 @@ struct TurboTests {
             .localSessionUpdated(
                 isJoined: true,
                 activeChannelID: contactID,
-                pendingAction: .explicitLeave(contactID: contactID),
+                pendingAction: .leave(.explicit(contactID: contactID)),
                 localJoinFailure: nil
             ),
             .systemSessionUpdated(.none, matchesSelectedContact: false)
@@ -1169,7 +1327,7 @@ struct TurboTests {
             .localSessionUpdated(
                 isJoined: true,
                 activeChannelID: contactID,
-                pendingAction: .explicitLeave(contactID: contactID),
+                pendingAction: .leave(.explicit(contactID: contactID)),
                 localJoinFailure: nil
             ),
             .systemSessionUpdated(.none, matchesSelectedContact: false)
@@ -1206,7 +1364,7 @@ struct TurboTests {
             .localSessionUpdated(
                 isJoined: true,
                 activeChannelID: contactID,
-                pendingAction: .teardown(contactID: contactID),
+                pendingAction: .leave(.reconciledTeardown(contactID: contactID)),
                 localJoinFailure: nil
             ),
             .systemSessionUpdated(.active(contactID: contactID, channelUUID: UUID()), matchesSelectedContact: true)
@@ -1292,6 +1450,452 @@ struct TurboTests {
         )
 
         #expect(ConversationStateMachine.listConversationState(for: summary) == .incomingRequest)
+    }
+
+    @Test func relationshipStateRepresentsSimultaneousIncomingAndOutgoingRequests() {
+        let relationship = ConversationStateMachine.relationshipState(
+            hasIncomingRequest: true,
+            hasOutgoingRequest: true,
+            requestCount: 2
+        )
+
+        #expect(relationship == .mutualRequest(requestCount: 2))
+        #expect(relationship.isIncomingRequest)
+        #expect(relationship.isOutgoingRequest)
+        #expect(relationship.fallbackConversationState == .incomingRequest)
+    }
+
+    @Test func selectedPeerStateTreatsMutualRequestsAsAcceptableIncomingRequest() {
+        let contactID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .incomingRequest,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: false,
+            activeChannelID: nil,
+            systemSessionMatchesContact: false,
+            systemSessionState: .none,
+            pendingAction: .none,
+            localJoinFailure: nil,
+            channel: nil
+        )
+
+        let state = ConversationStateMachine.selectedPeerState(
+            for: context,
+            relationship: .mutualRequest(requestCount: 2)
+        )
+
+        #expect(state.phase == .incomingRequest)
+        #expect(state.relationship == .mutualRequest(requestCount: 2))
+        #expect(state.conversationState == .incomingRequest)
+        #expect(state.statusMessage == "Blake wants to talk")
+    }
+
+    @Test func contactSummaryTypedProjectionExposesMutualRequestRelationshipAndBadgeState() {
+        let summary = TurboContactSummaryResponse(
+            userId: "peer",
+            handle: "@blake",
+            displayName: "Blake",
+            channelId: "channel",
+            isOnline: true,
+            hasIncomingRequest: true,
+            hasOutgoingRequest: true,
+            requestCount: 2,
+            isActiveConversation: true,
+            badgeStatus: ConversationState.ready.rawValue
+        )
+
+        #expect(summary.requestRelationship == .mutual(requestCount: 2))
+        #expect(summary.badge == .ready)
+        #expect(summary.badge.conversationState == .ready)
+    }
+
+    @Test func channelStateTypedProjectionExposesMembershipAndRequestRelationship() {
+        let channelState = TurboChannelStateResponse(
+            channelId: "channel",
+            selfUserId: "self",
+            peerUserId: "peer",
+            peerHandle: "@blake",
+            selfOnline: true,
+            peerOnline: true,
+            selfJoined: true,
+            peerJoined: true,
+            peerDeviceConnected: false,
+            hasIncomingRequest: false,
+            hasOutgoingRequest: true,
+            requestCount: 1,
+            activeTransmitterUserId: nil,
+            transmitLeaseExpiresAt: nil,
+            status: ConversationState.waitingForPeer.rawValue,
+            canTransmit: false
+        )
+
+        #expect(channelState.membership == .both(peerDeviceConnected: false))
+        #expect(channelState.requestRelationship == .outgoing(requestCount: 1))
+        #expect(channelState.conversationStatus == .waitingForPeer)
+    }
+
+    @Test func contactSummaryDecodesNestedRequestRelationshipProjection() throws {
+        let data = Data(
+            """
+            {
+              "userId": "peer",
+              "handle": "@blake",
+              "displayName": "Blake",
+              "channelId": "channel",
+              "isOnline": true,
+              "hasIncomingRequest": false,
+              "hasOutgoingRequest": false,
+              "requestCount": 0,
+              "requestRelationship": {
+                "kind": "mutual",
+                "requestCount": 3
+              },
+              "summaryStatus": {
+                "kind": "incoming",
+                "activeTransmitterUserId": null
+              },
+              "membership": {
+                "kind": "peer-only",
+                "peerDeviceConnected": true
+              },
+              "isActiveConversation": true,
+              "badgeStatus": "ready"
+            }
+            """.utf8
+        )
+
+        let summary = try JSONDecoder().decode(TurboContactSummaryResponse.self, from: data)
+
+        #expect(summary.requestRelationship == .mutual(requestCount: 3))
+        #expect(summary.membership == .peerOnly(peerDeviceConnected: true))
+        #expect(summary.badge == .incoming)
+        #expect(summary.badgeKind == "incoming")
+        #expect(summary.badge.conversationState == .incomingRequest)
+    }
+
+    @Test func contactSummaryDecodeFailsWithoutNestedContract() {
+        let data = Data(
+            """
+            {
+              "userId": "peer",
+              "handle": "@blake",
+              "displayName": "Blake",
+              "channelId": "channel",
+              "isOnline": true,
+              "hasIncomingRequest": false,
+              "hasOutgoingRequest": false,
+              "requestCount": 0,
+              "isActiveConversation": true,
+              "badgeStatus": "ready"
+            }
+            """.utf8
+        )
+
+        do {
+            _ = try JSONDecoder().decode(TurboContactSummaryResponse.self, from: data)
+            Issue.record("Expected TurboContactSummaryResponse decode to fail without nested contract")
+        } catch {
+        }
+    }
+
+    @Test func contactSummaryDecodeFailsForInvalidNestedRelationshipKind() {
+        let data = Data(
+            """
+            {
+              "userId": "peer",
+              "handle": "@blake",
+              "displayName": "Blake",
+              "channelId": "channel",
+              "isOnline": true,
+              "hasIncomingRequest": false,
+              "hasOutgoingRequest": false,
+              "requestCount": 0,
+              "requestRelationship": {
+                "kind": "sideways",
+                "requestCount": 3
+              },
+              "summaryStatus": {
+                "kind": "incoming",
+                "activeTransmitterUserId": null
+              },
+              "membership": {
+                "kind": "peer-only",
+                "peerDeviceConnected": true
+              },
+              "isActiveConversation": true,
+              "badgeStatus": "ready"
+            }
+            """.utf8
+        )
+
+        do {
+            _ = try JSONDecoder().decode(TurboContactSummaryResponse.self, from: data)
+            Issue.record("Expected TurboContactSummaryResponse decode to fail for invalid requestRelationship kind")
+        } catch {
+        }
+    }
+
+    @Test func channelStateDecodesNestedMembershipAndRequestRelationshipProjection() throws {
+        let data = Data(
+            """
+            {
+              "channelId": "channel",
+              "selfUserId": "self",
+              "peerUserId": "peer",
+              "peerHandle": "@blake",
+              "selfOnline": true,
+              "peerOnline": true,
+              "selfJoined": false,
+              "peerJoined": false,
+              "peerDeviceConnected": false,
+              "hasIncomingRequest": false,
+              "hasOutgoingRequest": false,
+              "requestCount": 0,
+              "membership": {
+                "kind": "both",
+                "peerDeviceConnected": true
+              },
+              "requestRelationship": {
+                "kind": "incoming",
+                "requestCount": 4
+              },
+              "conversationStatus": {
+                "kind": "self-transmitting",
+                "activeTransmitterUserId": "self"
+              },
+              "activeTransmitterUserId": null,
+              "transmitLeaseExpiresAt": null,
+              "status": "ready",
+              "canTransmit": true
+            }
+            """.utf8
+        )
+
+        let channelState = try JSONDecoder().decode(TurboChannelStateResponse.self, from: data)
+
+        #expect(channelState.membership == .both(peerDeviceConnected: true))
+        #expect(channelState.requestRelationship == .incoming(requestCount: 4))
+        #expect(channelState.statusView == .selfTransmitting(activeTransmitterUserId: "self"))
+        #expect(channelState.statusKind == "self-transmitting")
+        #expect(channelState.conversationStatus == .transmitting)
+    }
+
+    @Test func channelStateDecodeFailsWithoutNestedContract() {
+        let data = Data(
+            """
+            {
+              "channelId": "channel",
+              "selfUserId": "self",
+              "peerUserId": "peer",
+              "peerHandle": "@blake",
+              "selfOnline": true,
+              "peerOnline": true,
+              "selfJoined": false,
+              "peerJoined": false,
+              "peerDeviceConnected": false,
+              "hasIncomingRequest": false,
+              "hasOutgoingRequest": false,
+              "requestCount": 0,
+              "activeTransmitterUserId": null,
+              "transmitLeaseExpiresAt": null,
+              "status": "ready",
+              "canTransmit": true
+            }
+            """.utf8
+        )
+
+        do {
+            _ = try JSONDecoder().decode(TurboChannelStateResponse.self, from: data)
+            Issue.record("Expected TurboChannelStateResponse decode to fail without nested contract")
+        } catch {
+        }
+    }
+
+    @Test func channelStateDecodeFailsForInvalidMembershipPayload() {
+        let data = Data(
+            """
+            {
+              "channelId": "channel",
+              "selfUserId": "self",
+              "peerUserId": "peer",
+              "peerHandle": "@blake",
+              "selfOnline": true,
+              "peerOnline": true,
+              "selfJoined": false,
+              "peerJoined": false,
+              "peerDeviceConnected": false,
+              "hasIncomingRequest": false,
+              "hasOutgoingRequest": false,
+              "requestCount": 0,
+              "membership": {
+                "kind": "both"
+              },
+              "requestRelationship": {
+                "kind": "incoming",
+                "requestCount": 4
+              },
+              "conversationStatus": {
+                "kind": "self-transmitting",
+                "activeTransmitterUserId": "self"
+              },
+              "activeTransmitterUserId": null,
+              "transmitLeaseExpiresAt": null,
+              "status": "ready",
+              "canTransmit": true
+            }
+            """.utf8
+        )
+
+        do {
+            _ = try JSONDecoder().decode(TurboChannelStateResponse.self, from: data)
+            Issue.record("Expected TurboChannelStateResponse decode to fail for invalid membership payload")
+        } catch {
+        }
+    }
+
+    @Test func channelReadinessDecodesNestedReadinessProjection() throws {
+        let data = Data(
+            """
+            {
+              "channelId": "channel",
+              "peerUserId": "peer",
+              "selfHasActiveDevice": true,
+              "peerHasActiveDevice": true,
+              "readiness": {
+                "kind": "peer-transmitting",
+                "activeTransmitterUserId": "peer"
+              },
+              "activeTransmitterUserId": "peer",
+              "activeTransmitExpiresAt": null,
+              "status": "ready"
+            }
+            """.utf8
+        )
+
+        let readiness = try JSONDecoder().decode(TurboChannelReadinessResponse.self, from: data)
+
+        #expect(readiness.statusView == .peerTransmitting(activeTransmitterUserId: "peer"))
+        #expect(readiness.statusKind == "peer-transmitting")
+        #expect(readiness.canTransmit == false)
+    }
+
+    @Test func channelReadinessDecodeFailsWithoutNestedContract() {
+        let data = Data(
+            """
+            {
+              "channelId": "channel",
+              "peerUserId": "peer",
+              "selfHasActiveDevice": true,
+              "peerHasActiveDevice": true,
+              "activeTransmitterUserId": "peer",
+              "activeTransmitExpiresAt": null,
+              "status": "ready"
+            }
+            """.utf8
+        )
+
+        do {
+            _ = try JSONDecoder().decode(TurboChannelReadinessResponse.self, from: data)
+            Issue.record("Expected TurboChannelReadinessResponse decode to fail without readiness contract")
+        } catch {
+        }
+    }
+
+    @Test func contactSummaryPrefersNestedContractOverLegacyFields() throws {
+        let data = Data(
+            """
+            {
+              "userId": "peer",
+              "handle": "@peer",
+              "displayName": "Peer",
+              "channelId": "channel",
+              "isOnline": true,
+              "hasIncomingRequest": false,
+              "hasOutgoingRequest": true,
+              "requestCount": 2,
+              "isActiveConversation": true,
+              "badgeStatus": "requested",
+              "requestRelationship": {
+                "kind": "incoming",
+                "requestCount": 2
+              },
+              "membership": {
+                "kind": "peer-only",
+                "peerDeviceConnected": true
+              },
+              "summaryStatus": {
+                "kind": "requested"
+              }
+            }
+            """.utf8
+        )
+
+        let summary = try JSONDecoder().decode(TurboContactSummaryResponse.self, from: data)
+
+        #expect(summary.requestRelationship == .incoming(requestCount: 2))
+        #expect(summary.hasIncomingRequest == true)
+        #expect(summary.hasOutgoingRequest == false)
+        #expect(summary.requestCount == 2)
+        #expect(summary.badge == .requested)
+        #expect(summary.badgeStatus == "requested")
+    }
+
+    @Test func channelStatePrefersNestedContractOverLegacyFields() throws {
+        let data = Data(
+            """
+            {
+              "channelId": "channel",
+              "selfUserId": "self",
+              "peerUserId": "peer",
+              "peerHandle": "@peer",
+              "selfOnline": true,
+              "peerOnline": true,
+              "selfJoined": true,
+              "peerJoined": true,
+              "peerDeviceConnected": true,
+              "hasIncomingRequest": false,
+              "hasOutgoingRequest": false,
+              "requestCount": 0,
+              "activeTransmitterUserId": null,
+              "transmitLeaseExpiresAt": null,
+              "status": "ready",
+              "canTransmit": true,
+              "membership": {
+                "kind": "self-only"
+              },
+              "requestRelationship": {
+                "kind": "none"
+              },
+              "conversationStatus": {
+                "kind": "ready"
+              }
+            }
+            """.utf8
+        )
+
+        let channelState = try JSONDecoder().decode(TurboChannelStateResponse.self, from: data)
+
+        #expect(channelState.membership == .selfOnly)
+        #expect(channelState.selfJoined == true)
+        #expect(channelState.peerJoined == false)
+        #expect(channelState.peerDeviceConnected == false)
+        #expect(channelState.requestRelationship == .none)
+        #expect(channelState.statusView == .ready)
+        #expect(channelState.status == "ready")
+    }
+
+    @Test func channelSnapshotPrefersBackendReadinessProjection() {
+        let channelState = makeChannelState(status: .ready, canTransmit: true)
+        let readiness = makeChannelReadiness(status: .waitingForSelf)
+
+        let snapshot = ChannelReadinessSnapshot(channelState: channelState, readiness: readiness)
+
+        #expect(snapshot.readinessStatus == .waitingForSelf)
+        #expect(snapshot.status == .waitingForPeer)
+        #expect(snapshot.canTransmit == false)
     }
 
     @Test func listConversationStateMapsBackendReadyBadge() {
@@ -1945,6 +2549,48 @@ struct TurboTests {
         #expect(payloads == ["chunk-1", "chunk-2"])
     }
 
+    @Test func audioChunkSenderWaitsBrieflyForLateTransportHandler() async {
+        actor Recorder {
+            var payloads: [String] = []
+
+            func append(_ payload: String) {
+                payloads.append(payload)
+            }
+        }
+
+        actor FailureRecorder {
+            var messages: [String] = []
+
+            func append(_ message: String) {
+                messages.append(message)
+            }
+        }
+
+        let recorder = Recorder()
+        let failures = FailureRecorder()
+        let sender = AudioChunkSender(
+            sendChunk: nil,
+            reportFailure: { message in
+                await failures.append(message)
+            }
+        )
+
+        let enqueueTask = Task {
+            await sender.enqueue("chunk-late")
+        }
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        await sender.updateSendChunk { payload in
+            await recorder.append(payload)
+        }
+        await enqueueTask.value
+
+        let payloads = await recorder.payloads
+        let failureMessages = await failures.messages
+        #expect(payloads == ["chunk-late"])
+        #expect(failureMessages.isEmpty)
+    }
+
     @MainActor
     @Test func incomingAudioChunkWaitsForPTTAudioActivationBeforeCreatingMediaSession() async throws {
         let viewModel = PTTViewModel()
@@ -2431,6 +3077,65 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func trackedPresenceFallbackTargetsIncludeTrackedContactsWithoutSummaries() {
+        let viewModel = PTTViewModel()
+        let trackedContactID = UUID()
+        let summarizedContactID = UUID()
+
+        viewModel.contacts = [
+            Contact(
+                id: trackedContactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: false,
+                channelId: UUID(),
+                backendChannelId: nil,
+                remoteUserId: "user-blake"
+            ),
+            Contact(
+                id: summarizedContactID,
+                name: "Casey",
+                handle: "@casey",
+                isOnline: false,
+                channelId: UUID(),
+                backendChannelId: "channel-casey",
+                remoteUserId: "user-casey"
+            )
+        ]
+        viewModel.trackContact(trackedContactID)
+        viewModel.trackContact(summarizedContactID)
+
+        let targets = viewModel.trackedPresenceFallbackTargets(
+            excluding: [
+                summarizedContactID: TurboContactSummaryResponse(
+                    userId: "user-casey",
+                    handle: "@casey",
+                    displayName: "Casey",
+                    channelId: "channel-casey",
+                    isOnline: true,
+                    hasIncomingRequest: false,
+                    hasOutgoingRequest: false,
+                    requestCount: 0,
+                    isActiveConversation: false,
+                    badgeStatus: "online"
+                )
+            ]
+        )
+
+        #expect(targets.count == 1)
+        #expect(targets.first?.contactID == trackedContactID)
+        #expect(targets.first?.handle == "@blake")
+    }
+
+    @Test func backendClientPresenceLookupUsesCanonicalPresenceEndpoint() {
+        let path = TurboBackendClient.presenceLookupPath(for: "@blake")
+
+        #expect(path == "/v1/users/by-handle/@blake/presence")
+        #expect(path.contains("/presence"))
+        #expect(path.contains("/presence/") == false)
+    }
+
+    @MainActor
     @Test func refreshInvitesFailurePreservesExistingSelectedContactState() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -2464,6 +3169,36 @@ struct TurboTests {
         #expect(viewModel.backendSyncCoordinator.state.syncState.incomingInvites[contactID] == incomingInvite)
     }
 
+    @MainActor
+    @Test func selectedPeerStateIgnoresCachedChannelStateWithoutMatchingSummary() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: "channel-stale",
+                remoteUserId: "user-blake"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(status: .ready, canTransmit: false)
+            )
+        )
+
+        let state = viewModel.selectedPeerState(for: contactID)
+
+        #expect(state.phase == .idle)
+        #expect(state.conversationState == .idle)
+        #expect(state.canTransmitNow == false)
+    }
+
     @Test func backendSyncReducerRetainsChannelStateOnRefreshFailure() {
         let contactID = UUID()
         let existingChannelState = makeChannelState(status: .ready, canTransmit: true)
@@ -2479,7 +3214,7 @@ struct TurboTests {
         #expect(transition.state.syncState.statusMessage == "Channel sync failed: timeout")
     }
 
-    @Test func backendSyncStatePreservesJoinedMembershipAcrossConnectingRegression() {
+    @Test func backendSyncStateAcceptsBackendConnectingRegression() {
         let contactID = UUID()
         var syncState = BackendSyncState()
         let joinedChannelState = makeChannelState(
@@ -2511,10 +3246,10 @@ struct TurboTests {
         syncState.applyChannelState(joinedChannelState, for: contactID)
         syncState.applyChannelState(regressedChannelState, for: contactID)
 
-        #expect(syncState.channelStates[contactID] == joinedChannelState)
+        #expect(syncState.channelStates[contactID] == regressedChannelState)
     }
 
-    @Test func backendSyncStatePreservesJoinedMembershipAcrossIncomingRequestRegression() {
+    @Test func backendSyncStateAcceptsBackendIncomingRequestRegression() {
         let contactID = UUID()
         var syncState = BackendSyncState()
         let joinedChannelState = makeChannelState(
@@ -2546,10 +3281,10 @@ struct TurboTests {
         syncState.applyChannelState(joinedChannelState, for: contactID)
         syncState.applyChannelState(regressedChannelState, for: contactID)
 
-        #expect(syncState.channelStates[contactID] == joinedChannelState)
+        #expect(syncState.channelStates[contactID] == regressedChannelState)
     }
 
-    @Test func backendSyncStatePreservesPeerReadyAcrossIncomingRequestRegression() {
+    @Test func backendSyncStateAcceptsBackendPeerRegression() {
         let contactID = UUID()
         var syncState = BackendSyncState()
         let peerReadyChannelState = TurboChannelStateResponse(
@@ -2592,10 +3327,10 @@ struct TurboTests {
         syncState.applyChannelState(peerReadyChannelState, for: contactID)
         syncState.applyChannelState(regressedChannelState, for: contactID)
 
-        #expect(syncState.channelStates[contactID] == peerReadyChannelState)
+        #expect(syncState.channelStates[contactID] == regressedChannelState)
     }
 
-    @Test func backendSyncStatePreservesJoinedMembershipAcrossPeerJoinedConnectingRegression() {
+    @Test func backendSyncStateAcceptsBackendPeerJoinedConnectingRegression() {
         let contactID = UUID()
         var syncState = BackendSyncState()
         let joinedChannelState = makeChannelState(
@@ -2627,10 +3362,10 @@ struct TurboTests {
         syncState.applyChannelState(joinedChannelState, for: contactID)
         syncState.applyChannelState(regressedChannelState, for: contactID)
 
-        #expect(syncState.channelStates[contactID] == joinedChannelState)
+        #expect(syncState.channelStates[contactID] == regressedChannelState)
     }
 
-    @Test func backendSyncStatePreservesJoinedMembershipWhenPeerJoinsBeforeBackendCatchesUp() {
+    @Test func backendSyncStateReplacesStaleJoinedMembershipWhenBackendResetsChannel() {
         let contactID = UUID()
         var syncState = BackendSyncState()
         let joinedChannelState = makeChannelState(
@@ -2662,7 +3397,7 @@ struct TurboTests {
         syncState.applyChannelState(joinedChannelState, for: contactID)
         syncState.applyChannelState(regressedChannelState, for: contactID)
 
-        #expect(syncState.channelStates[contactID] == joinedChannelState)
+        #expect(syncState.channelStates[contactID] == regressedChannelState)
     }
 
     @Test func backendCommandReducerOpenPeerEmitsLookupEffect() {
@@ -2680,6 +3415,7 @@ struct TurboTests {
         let request = BackendJoinRequest(
             contactID: contactID,
             handle: "@avery",
+            intent: .requestConnection,
             relationship: .none,
             existingRemoteUserID: nil,
             existingBackendChannelID: nil,
@@ -2703,6 +3439,7 @@ struct TurboTests {
         let inFlightRequest = BackendJoinRequest(
             contactID: contactID,
             handle: "@avery",
+            intent: .requestConnection,
             relationship: .outgoingRequest(requestCount: 1),
             existingRemoteUserID: "user-avery",
             existingBackendChannelID: "channel-avery",
@@ -2714,6 +3451,7 @@ struct TurboTests {
         let queuedRequest = BackendJoinRequest(
             contactID: contactID,
             handle: "@avery",
+            intent: .requestConnection,
             relationship: .outgoingRequest(requestCount: 1),
             existingRemoteUserID: "user-avery",
             existingBackendChannelID: "channel-avery",
@@ -2738,6 +3476,7 @@ struct TurboTests {
         let inFlightRequest = BackendJoinRequest(
             contactID: contactID,
             handle: "@avery",
+            intent: .requestConnection,
             relationship: .outgoingRequest(requestCount: 1),
             existingRemoteUserID: nil,
             existingBackendChannelID: nil,
@@ -2749,6 +3488,7 @@ struct TurboTests {
         let queuedRequest = BackendJoinRequest(
             contactID: contactID,
             handle: "@avery",
+            intent: .requestConnection,
             relationship: .outgoingRequest(requestCount: 1),
             existingRemoteUserID: "user-avery",
             existingBackendChannelID: "channel-avery",
@@ -2779,6 +3519,7 @@ struct TurboTests {
         let request = BackendJoinRequest(
             contactID: contactID,
             handle: "@avery",
+            intent: .requestConnection,
             relationship: .outgoingRequest(requestCount: 1),
             existingRemoteUserID: "user-avery",
             existingBackendChannelID: "channel-avery",
@@ -2804,6 +3545,7 @@ struct TurboTests {
         let request = BackendJoinRequest(
             contactID: contactID,
             handle: "@avery",
+            intent: .requestConnection,
             relationship: .incomingRequest(requestCount: 1),
             existingRemoteUserID: "user-avery",
             existingBackendChannelID: "channel-avery",
@@ -2829,6 +3571,7 @@ struct TurboTests {
         let request = BackendJoinRequest(
             contactID: contactID,
             handle: "@avery",
+            intent: .requestConnection,
             relationship: .outgoingRequest(requestCount: 1),
             existingRemoteUserID: "user-avery",
             existingBackendChannelID: "channel-avery",
@@ -2868,12 +3611,59 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func backendJoinExecutionPlanPromotesPeerReadyChannelWithoutInviteRelationship() {
+    @Test func backendJoinExecutionPlanPromotesOutgoingInviteWhenPeerIsJoinedButDeviceNotConnected() {
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let request = BackendJoinRequest(
             contactID: contactID,
             handle: "@avery",
+            intent: .requestConnection,
+            relationship: .outgoingRequest(requestCount: 1),
+            existingRemoteUserID: "user-avery",
+            existingBackendChannelID: "channel-avery",
+            incomingInvite: nil,
+            outgoingInvite: makeInvite(direction: "outgoing"),
+            requestCooldownRemaining: nil,
+            usesLocalHTTPBackend: false
+        )
+        let currentChannel = ChannelReadinessSnapshot(
+            channelState: TurboChannelStateResponse(
+                channelId: "channel-avery",
+                selfUserId: "self",
+                peerUserId: "user-avery",
+                peerHandle: "@avery",
+                selfOnline: true,
+                peerOnline: true,
+                selfJoined: false,
+                peerJoined: true,
+                peerDeviceConnected: false,
+                hasIncomingRequest: false,
+                hasOutgoingRequest: true,
+                requestCount: 1,
+                activeTransmitterUserId: nil,
+                transmitLeaseExpiresAt: nil,
+                status: ConversationState.requested.rawValue,
+                canTransmit: false
+            )
+        )
+
+        let plan = viewModel.backendJoinExecutionPlan(
+            request: request,
+            createdInvite: nil,
+            currentChannel: currentChannel
+        )
+
+        #expect(plan == .joinSession)
+    }
+
+    @MainActor
+    @Test func backendJoinExecutionPlanPromotesPeerReadyChannelWhenPeerHasJoined() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let request = BackendJoinRequest(
+            contactID: contactID,
+            handle: "@avery",
+            intent: .requestConnection,
             relationship: .none,
             existingRemoteUserID: "user-avery",
             existingBackendChannelID: "channel-avery",
@@ -2918,6 +3708,7 @@ struct TurboTests {
         let request = BackendJoinRequest(
             contactID: UUID(),
             handle: "@avery",
+            intent: .requestConnection,
             relationship: .incomingRequest(requestCount: 1),
             existingRemoteUserID: "user-avery",
             existingBackendChannelID: "channel-avery",
@@ -3027,6 +3818,7 @@ struct TurboTests {
         let request = BackendJoinRequest(
             contactID: UUID(),
             handle: "@avery",
+            intent: .requestConnection,
             relationship: .incomingRequest(requestCount: 1),
             existingRemoteUserID: "user-avery",
             existingBackendChannelID: "channel-avery",
@@ -3155,7 +3947,23 @@ struct TurboTests {
         #expect(outcome.contactUpdate == nil)
         #expect(outcome.channelStateUpdate == nil)
         #expect(outcome.report.isPassing)
-        #expect(outcome.report.steps.map(\.id) == [.backendConfig, .runtimeConfig, .authSession, .deviceHeartbeat, .websocket, .peerLookup, .directChannel, .channelState, .sessionAlignment])
+        #expect(
+            outcome.report.steps.map(\.id)
+                == [
+                    .backendConfig,
+                    .microphonePermission,
+                    .runtimeConfig,
+                    .authSession,
+                    .deviceHeartbeat,
+                    .websocket,
+                    .peerLookup,
+                    .directChannel,
+                    .channelState,
+                    .sessionAlignment
+                ]
+        )
+        #expect(outcome.report.steps.first(where: { $0.id == .microphonePermission })?.status == .passed)
+        #expect(outcome.report.steps.first(where: { $0.id == .websocket })?.status == .skipped)
         #expect(outcome.report.steps.suffix(4).allSatisfy { $0.status == .skipped })
     }
 
@@ -3431,6 +4239,48 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func diagnosticsSnapshotIncludesMachineReadableContactProjection() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: false,
+                channelId: UUID(),
+                backendChannelId: "channel-1",
+                remoteUserId: "user-blake"
+            )
+        ]
+        viewModel.backendSyncCoordinator.send(
+            .contactSummariesUpdated([
+                BackendContactSummaryUpdate(
+                    contactID: contactID,
+                    summary: TurboContactSummaryResponse(
+                        userId: "user-blake",
+                        handle: "@blake",
+                        displayName: "Blake",
+                        channelId: "channel-1",
+                        isOnline: true,
+                        hasIncomingRequest: false,
+                        hasOutgoingRequest: false,
+                        requestCount: 0,
+                        isActiveConversation: false,
+                        badgeStatus: "online"
+                    )
+                )
+            ])
+        )
+
+        let snapshot = viewModel.diagnosticsSnapshot
+
+        #expect(snapshot.contains("contact[@blake].isOnline=true"))
+        #expect(snapshot.contains("contact[@blake].listState=idle"))
+        #expect(snapshot.contains("contact[@blake].badgeStatus=online"))
+    }
+
+    @MainActor
     @Test func simulatorPTTClientJoinsAndTransmits() async throws {
         let recorder = TestPTTCallbackRecorder()
         let client = SimulatorPTTSystemClient()
@@ -3446,10 +4296,12 @@ struct TurboTests {
         try client.beginTransmitting(channelUUID: channelID)
         try await Task.sleep(nanoseconds: 50_000_000)
         #expect(recorder.didBeginTransmittingChannelIDs == [channelID])
+        #expect(recorder.activatedAudioSessionCategories == [.playAndRecord])
 
         try client.stopTransmitting(channelUUID: channelID)
         try await Task.sleep(nanoseconds: 50_000_000)
         #expect(recorder.didEndTransmittingChannelIDs == [channelID])
+        #expect(recorder.deactivatedAudioSessionCategories == [.playAndRecord])
 
         try client.leaveChannel(channelUUID: channelID)
         try await Task.sleep(nanoseconds: 150_000_000)
@@ -3487,7 +4339,10 @@ struct TurboTests {
         #endif
     }
 
-    @MainActor
+}
+
+@MainActor
+struct SimulatorScenarioTests {
     @Test func simulatorDistributedJoinScenario() async throws {
         guard let runtimeConfig = loadSimulatorScenarioRuntimeConfig() else {
             return
@@ -3496,6 +4351,148 @@ struct TurboTests {
         for spec in specs {
             try await executeSimulatorScenario(spec)
         }
+    }
+}
+
+struct SimulatorScenarioPlannerTests {
+    @Test func scenarioPlannerSupportsDelayDropAndDuplicateDelivery() throws {
+        let scheduled = try scheduledScenarioActions(
+            for: [
+                SimulatorScenarioAction(
+                    actor: "a",
+                    type: "connect",
+                    peer: nil,
+                    route: nil,
+                    signalKind: nil,
+                    milliseconds: nil,
+                    count: nil,
+                    delayMilliseconds: 400,
+                    repeatCount: nil,
+                    repeatIntervalMilliseconds: nil,
+                    reorderIndex: nil,
+                    drop: nil
+                ),
+                SimulatorScenarioAction(
+                    actor: "b",
+                    type: "refreshContactSummaries",
+                    peer: nil,
+                    route: nil,
+                    signalKind: nil,
+                    milliseconds: nil,
+                    count: nil,
+                    delayMilliseconds: nil,
+                    repeatCount: 2,
+                    repeatIntervalMilliseconds: 150,
+                    reorderIndex: nil,
+                    drop: nil
+                ),
+                SimulatorScenarioAction(
+                    actor: "a",
+                    type: "refreshInvites",
+                    peer: nil,
+                    route: nil,
+                    signalKind: nil,
+                    milliseconds: nil,
+                    count: nil,
+                    delayMilliseconds: 50,
+                    repeatCount: nil,
+                    repeatIntervalMilliseconds: nil,
+                    reorderIndex: nil,
+                    drop: true
+                ),
+            ]
+        )
+
+        #expect(scheduled.count == 3)
+        #expect(scheduled.map { $0.actor } == ["b", "b", "a"])
+        #expect(scheduled.map { $0.scheduledDelayMilliseconds } == [0, 150, 400])
+        #expect(scheduled.map { $0.deliveryIndex } == [0, 1, 0])
+        #expect(scheduled.map { $0.action.type } == ["refreshContactSummaries", "refreshContactSummaries", "connect"])
+    }
+
+    @Test func scenarioPlannerRejectsNegativeDelay() throws {
+        #expect(throws: ScenarioFailure.self) {
+            _ = try scheduledScenarioActions(
+                for: [
+                    SimulatorScenarioAction(
+                        actor: "a",
+                        type: "connect",
+                        peer: nil,
+                        route: nil,
+                        signalKind: nil,
+                        milliseconds: nil,
+                        count: nil,
+                        delayMilliseconds: -1,
+                        repeatCount: nil,
+                        repeatIntervalMilliseconds: nil,
+                        reorderIndex: nil,
+                        drop: nil
+                    )
+                ]
+            )
+        }
+    }
+
+    @Test func transportFaultRuntimeConsumesHTTPAndSignalRulesDeterministically() {
+        let faults = TransportFaultRuntimeState()
+
+        faults.setHTTPDelay(route: .contactSummaries, milliseconds: 250, count: 2)
+        #expect(faults.consumeHTTPDelay(for: .contactSummaries) == 250)
+        #expect(faults.consumeHTTPDelay(for: .contactSummaries) == 250)
+        #expect(faults.consumeHTTPDelay(for: .contactSummaries) == 0)
+
+        faults.setWebSocketSignalDelay(kind: .transmitStart, milliseconds: 400, count: 1)
+        faults.duplicateNextWebSocketSignals(kind: .transmitStart, count: 1)
+        faults.dropNextWebSocketSignals(kind: .transmitStop, count: 1)
+        faults.reorderNextWebSocketSignals(kind: nil, count: 2)
+
+        let startEnvelope = TurboSignalEnvelope(
+            type: .transmitStart,
+            channelId: "channel",
+            fromUserId: "a",
+            fromDeviceId: "device-a",
+            toUserId: "b",
+            toDeviceId: "device-b",
+            payload: "{}"
+        )
+        let stopEnvelope = TurboSignalEnvelope(
+            type: .transmitStop,
+            channelId: "channel",
+            fromUserId: "a",
+            fromDeviceId: "device-a",
+            toUserId: "b",
+            toDeviceId: "device-b",
+            payload: "{}"
+        )
+
+        switch faults.consumeWebSocketReorderResult(for: startEnvelope) {
+        case .buffered:
+            break
+        case .deliver:
+            Issue.record("Expected first reordered websocket signal to be buffered")
+        }
+
+        switch faults.consumeWebSocketReorderResult(for: stopEnvelope) {
+        case .buffered:
+            Issue.record("Expected reordered websocket fault to flush on the second signal")
+        case .deliver(let envelopes):
+            #expect(envelopes.map(\.type.rawValue) == ["transmit-stop", "transmit-start"])
+        }
+
+        let firstTransmitStartPlan = faults.consumeWebSocketSignalDeliveryPlan(for: .transmitStart)
+        #expect(firstTransmitStartPlan.delayMilliseconds == 400)
+        #expect(firstTransmitStartPlan.duplicateDeliveries == 1)
+        #expect(firstTransmitStartPlan.shouldDrop == false)
+
+        let secondTransmitStartPlan = faults.consumeWebSocketSignalDeliveryPlan(for: .transmitStart)
+        #expect(secondTransmitStartPlan.delayMilliseconds == 0)
+        #expect(secondTransmitStartPlan.duplicateDeliveries == 0)
+        #expect(secondTransmitStartPlan.shouldDrop == false)
+
+        let transmitStopPlan = faults.consumeWebSocketSignalDeliveryPlan(for: .transmitStop)
+        #expect(transmitStopPlan.delayMilliseconds == 0)
+        #expect(transmitStopPlan.duplicateDeliveries == 0)
+        #expect(transmitStopPlan.shouldDrop == true)
     }
 }
 
@@ -3510,6 +4507,8 @@ private final class TestPTTCallbackRecorder {
     var leftChannelIDs: [UUID] = []
     var didBeginTransmittingChannelIDs: [UUID] = []
     var didEndTransmittingChannelIDs: [UUID] = []
+    var activatedAudioSessionCategories: [AVAudioSession.Category] = []
+    var deactivatedAudioSessionCategories: [AVAudioSession.Category] = []
     var joinFailures: [JoinFailure] = []
     var incomingPushes: [(UUID, TurboPTTPushPayload)] = []
 
@@ -3537,8 +4536,12 @@ private final class TestPTTCallbackRecorder {
             },
             failedToBeginTransmitting: { _, _ in },
             failedToStopTransmitting: { _, _ in },
-            didActivateAudioSession: { _ in },
-            didDeactivateAudioSession: { _ in },
+            didActivateAudioSession: { [weak self] session in
+                self?.activatedAudioSessionCategories.append(session.category)
+            },
+            didDeactivateAudioSession: { [weak self] session in
+                self?.deactivatedAudioSessionCategories.append(session.category)
+            },
             descriptorForRestoredChannel: { _ in
                 PTChannelDescriptor(name: "Restored", image: nil)
             },
@@ -3556,6 +4559,7 @@ private struct ScenarioFailure: Error, CustomStringConvertible {
 private struct SimulatorScenarioConfig: Decodable {
     let name: String
     let baseURL: URL
+    let requiresLocalBackend: Bool?
     let participants: [String: SimulatorScenarioParticipant]
     let steps: [SimulatorScenarioStep]
 }
@@ -3575,14 +4579,84 @@ private struct SimulatorScenarioAction: Decodable {
     let actor: String
     let type: String
     let peer: String?
+    let route: String?
+    let signalKind: String?
+    let milliseconds: Int?
+    let count: Int?
+    let delayMilliseconds: Int?
+    let repeatCount: Int?
+    let repeatIntervalMilliseconds: Int?
+    let reorderIndex: Int?
+    let drop: Bool?
 }
 
 private struct SimulatorScenarioExpectation: Decodable {
     let selectedHandle: String?
     let phase: String?
+    let selectedStatus: String?
     let isJoined: Bool?
     let isTransmitting: Bool?
     let canTransmitNow: Bool?
+    let selected: SimulatorScenarioSelectedExpectation?
+    let contacts: [SimulatorScenarioContactExpectation]?
+    let backend: SimulatorScenarioBackendExpectation?
+
+    var selectedExpectation: SimulatorScenarioSelectedExpectation? {
+        if let selected {
+            return selected
+        }
+
+        if selectedHandle != nil
+            || phase != nil
+            || selectedStatus != nil
+            || isJoined != nil
+            || isTransmitting != nil
+            || canTransmitNow != nil
+        {
+            return SimulatorScenarioSelectedExpectation(
+                handle: selectedHandle,
+                phase: phase,
+                status: selectedStatus,
+                isJoined: isJoined,
+                isTransmitting: isTransmitting,
+                canTransmitNow: canTransmitNow
+            )
+        }
+
+        return nil
+    }
+}
+
+private struct SimulatorScenarioSelectedExpectation: Decodable {
+    let handle: String?
+    let phase: String?
+    let status: String?
+    let isJoined: Bool?
+    let isTransmitting: Bool?
+    let canTransmitNow: Bool?
+}
+
+private struct SimulatorScenarioContactExpectation: Decodable {
+    let handle: String
+    let isOnline: Bool?
+    let listState: String?
+    let badgeStatus: String?
+    let requestRelationship: String?
+    let hasIncomingRequest: Bool?
+    let hasOutgoingRequest: Bool?
+    let requestCount: Int?
+}
+
+private struct SimulatorScenarioBackendExpectation: Decodable {
+    let channelStatus: String?
+    let readiness: String?
+    let membership: String?
+    let requestRelationship: String?
+    let selfJoined: Bool?
+    let peerJoined: Bool?
+    let peerDeviceConnected: Bool?
+    let canTransmit: Bool?
+    let webSocketConnected: Bool?
 }
 
 private enum SimulatorScenarioPhaseMatch {
@@ -3599,6 +4673,14 @@ private struct SimulatorScenarioDiagnosticsArtifact: Codable {
     let appVersion: String
     let snapshot: String
     let transcript: String
+}
+
+private struct ScheduledSimulatorScenarioAction {
+    let actor: String
+    let action: SimulatorScenarioAction
+    let scheduledDelayMilliseconds: Int
+    let declarationIndex: Int
+    let deliveryIndex: Int
 }
 
 private struct SimulatorScenarioRuntimeConfig: Decodable {
@@ -3619,6 +4701,7 @@ private let simulatorScenarioRuntimeConfigURL = URL(fileURLWithPath: #filePath)
 @MainActor
 private func makeSimulatorScenarioViewModel(baseURL: URL, handle: String, deviceID: String) -> PTTViewModel {
     let viewModel = PTTViewModel()
+    viewModel.automaticDiagnosticsPublishEnabled = false
     viewModel.replaceBackendConfig(
         with: TurboBackendConfig(
             baseURL: baseURL,
@@ -3670,15 +4753,21 @@ private func loadSimulatorScenarioSpecs(runtimeConfig: SimulatorScenarioRuntimeC
         .filter { !$0.isEmpty }
 
     guard let filter, !filter.isEmpty else {
-        return allSpecs
+        return try runnableScenarioSpecs(
+            allSpecs,
+            filter: nil,
+            baseURLOverride: runtimeConfig.baseURL
+        )
     }
 
-    let filtered = allSpecs.filter { spec in
-        filter.contains(spec.name)
-    }
+    let filtered = try runnableScenarioSpecs(
+        allSpecs,
+        filter: filter,
+        baseURLOverride: runtimeConfig.baseURL
+    )
     guard !filtered.isEmpty else {
         throw ScenarioFailure(
-            message: "No simulator scenarios matched filter \(filter.joined(separator: ",")) in \(scenariosDirectory.path)"
+            message: "No runnable simulator scenarios matched filter \(filter.joined(separator: ",")) in \(scenariosDirectory.path)"
         )
     }
     return filtered
@@ -3715,9 +4804,51 @@ private func applyScenarioRuntimeConfig(
     return SimulatorScenarioConfig(
         name: spec.name,
         baseURL: overriddenBaseURL,
+        requiresLocalBackend: spec.requiresLocalBackend,
         participants: overriddenParticipants,
         steps: spec.steps
     )
+}
+
+private func runnableScenarioSpecs(
+    _ specs: [SimulatorScenarioConfig],
+    filter: [String]?,
+    baseURLOverride: URL?
+) throws -> [SimulatorScenarioConfig] {
+    let requestedSpecs: [SimulatorScenarioConfig]
+    if let filter, !filter.isEmpty {
+        requestedSpecs = specs.filter { filter.contains($0.name) }
+        guard !requestedSpecs.isEmpty else {
+            throw ScenarioFailure(message: "No simulator scenarios matched filter \(filter.joined(separator: ","))")
+        }
+    } else {
+        requestedSpecs = specs
+    }
+
+    var runnable: [SimulatorScenarioConfig] = []
+    var localOnlyMismatches: [String] = []
+
+    for spec in requestedSpecs {
+        let effectiveBaseURL = baseURLOverride ?? spec.baseURL
+        if spec.requiresLocalBackend == true && !scenarioBaseURLIsLocal(effectiveBaseURL) {
+            localOnlyMismatches.append(spec.name)
+            continue
+        }
+        runnable.append(spec)
+    }
+
+    if let filter, !filter.isEmpty, !localOnlyMismatches.isEmpty {
+        throw ScenarioFailure(
+            message: "Scenario(s) require a local backend: \(localOnlyMismatches.joined(separator: ", "))"
+        )
+    }
+
+    return runnable
+}
+
+private func scenarioBaseURLIsLocal(_ url: URL) -> Bool {
+    guard let host = url.host?.lowercased() else { return false }
+    return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 @MainActor
@@ -3726,7 +4857,7 @@ private func executeSimulatorScenario(_ spec: SimulatorScenarioConfig) async thr
         try await resetAllDevelopmentState(baseURL: spec.baseURL, handle: participant.handle)
     }
 
-    let viewModels = Dictionary(uniqueKeysWithValues: spec.participants.map { actor, participant in
+    var viewModels = Dictionary(uniqueKeysWithValues: spec.participants.map { actor, participant in
         (
             actor,
             makeSimulatorScenarioViewModel(
@@ -3737,22 +4868,35 @@ private func executeSimulatorScenario(_ spec: SimulatorScenarioConfig) async thr
         )
     })
 
-    let participants = Array(viewModels.values)
+    func currentParticipants() -> [PTTViewModel] {
+        Array(viewModels.values)
+    }
+
     do {
-        for participant in participants {
+        for participant in currentParticipants() {
             await participant.initializeIfNeeded()
         }
-        try await stabilizeScenario(participants)
+        try await stabilizeScenario(currentParticipants())
         try await waitForScenario(
             "participants become mutually discoverable",
-            participants: participants,
+            participants: currentParticipants(),
             timeoutNanoseconds: 60_000_000_000
         ) {
             await scenarioParticipantsAreDiscoverable(spec: spec, viewModels: viewModels)
         }
 
         for step in spec.steps {
-            for action in step.actions {
+            let scheduledActions = try scheduledScenarioActions(for: step.actions)
+            var elapsedMilliseconds = 0
+
+            for scheduledAction in scheduledActions {
+                let delayBeforeDelivery = scheduledAction.scheduledDelayMilliseconds - elapsedMilliseconds
+                if delayBeforeDelivery > 0 {
+                    try await Task.sleep(nanoseconds: UInt64(delayBeforeDelivery) * 1_000_000)
+                    elapsedMilliseconds = scheduledAction.scheduledDelayMilliseconds
+                }
+
+                let action = scheduledAction.action
                 guard let participant = viewModels[action.actor] else {
                     throw ScenarioFailure(message: "Scenario references unknown actor \(action.actor)")
                 }
@@ -3776,28 +4920,219 @@ private func executeSimulatorScenario(_ spec: SimulatorScenarioConfig) async thr
                     participant.beginTransmit()
                 case "endTransmit":
                     participant.endTransmit()
+                case "ensureDirectChannel":
+                    guard let peerActor = action.peer,
+                          let peer = spec.participants[peerActor],
+                          let backend = participant.backendServices else {
+                        throw ScenarioFailure(message: "ensureDirectChannel requires a known peer actor and backend")
+                    }
+                    _ = try await backend.directChannel(otherHandle: peer.handle)
+                    await participant.refreshContactSummaries()
+                    if let selectedContactID = participant.selectedContact?.id {
+                        await participant.refreshChannelState(for: selectedContactID)
+                    }
+                case "heartbeatPresence":
+                    guard let backend = participant.backendServices else {
+                        throw ScenarioFailure(message: "heartbeatPresence requires an initialized backend")
+                    }
+                    _ = try await backend.heartbeatPresence()
+                case "refreshContactSummaries":
+                    await participant.refreshContactSummaries()
+                case "refreshInvites":
+                    await participant.refreshInvites()
+                case "refreshChannelState":
+                    guard let selectedContactID = participant.selectedContact?.id else {
+                        throw ScenarioFailure(message: "refreshChannelState requires a selected contact")
+                    }
+                    await participant.refreshChannelState(for: selectedContactID)
+                case "resetTransportFaults":
+                    participant.resetTransportFaults()
+                case "setHTTPDelay":
+                    guard let routeText = action.route,
+                          let route = TransportFaultHTTPRoute(rawValue: routeText) else {
+                        throw ScenarioFailure(message: "setHTTPDelay requires a known route")
+                    }
+                    let milliseconds = action.milliseconds ?? 0
+                    guard milliseconds >= 0 else {
+                        throw ScenarioFailure(message: "setHTTPDelay requires a non-negative milliseconds value")
+                    }
+                    let count = action.count ?? 1
+                    guard count >= 1 else {
+                        throw ScenarioFailure(message: "setHTTPDelay requires count >= 1")
+                    }
+                    participant.setHTTPTransportDelay(route: route, milliseconds: milliseconds, count: count)
+                case "setWebSocketSignalDelay":
+                    guard let signalKindText = action.signalKind,
+                          let signalKind = TurboSignalKind(rawValue: signalKindText) else {
+                        throw ScenarioFailure(message: "setWebSocketSignalDelay requires a known signalKind")
+                    }
+                    let milliseconds = action.milliseconds ?? 0
+                    guard milliseconds >= 0 else {
+                        throw ScenarioFailure(
+                            message: "setWebSocketSignalDelay requires a non-negative milliseconds value"
+                        )
+                    }
+                    let count = action.count ?? 1
+                    guard count >= 1 else {
+                        throw ScenarioFailure(message: "setWebSocketSignalDelay requires count >= 1")
+                    }
+                    participant.setIncomingWebSocketSignalDelay(
+                        kind: signalKind,
+                        milliseconds: milliseconds,
+                        count: count
+                    )
+                case "dropNextWebSocketSignals":
+                    guard let signalKindText = action.signalKind,
+                          let signalKind = TurboSignalKind(rawValue: signalKindText) else {
+                        throw ScenarioFailure(message: "dropNextWebSocketSignals requires a known signalKind")
+                    }
+                    let count = action.count ?? 1
+                    guard count >= 1 else {
+                        throw ScenarioFailure(message: "dropNextWebSocketSignals requires count >= 1")
+                    }
+                    participant.dropNextIncomingWebSocketSignals(kind: signalKind, count: count)
+                case "duplicateNextWebSocketSignals":
+                    guard let signalKindText = action.signalKind,
+                          let signalKind = TurboSignalKind(rawValue: signalKindText) else {
+                        throw ScenarioFailure(message: "duplicateNextWebSocketSignals requires a known signalKind")
+                    }
+                    let count = action.count ?? 1
+                    guard count >= 1 else {
+                        throw ScenarioFailure(message: "duplicateNextWebSocketSignals requires count >= 1")
+                    }
+                    participant.duplicateNextIncomingWebSocketSignals(kind: signalKind, count: count)
+                case "reorderNextWebSocketSignals":
+                    let signalKind: TurboSignalKind?
+                    if let signalKindText = action.signalKind {
+                        guard let parsedKind = TurboSignalKind(rawValue: signalKindText) else {
+                            throw ScenarioFailure(message: "reorderNextWebSocketSignals requires a known signalKind")
+                        }
+                        signalKind = parsedKind
+                    } else {
+                        signalKind = nil
+                    }
+                    let count = action.count ?? 2
+                    guard count >= 2 else {
+                        throw ScenarioFailure(message: "reorderNextWebSocketSignals requires count >= 2")
+                    }
+                    participant.reorderNextIncomingWebSocketSignals(kind: signalKind, count: count)
+                case "disconnectWebSocket":
+                    participant.disconnectBackendWebSocket()
+                case "reconnectWebSocket":
+                    guard let backend = participant.backendServices, backend.supportsWebSocket else {
+                        throw ScenarioFailure(message: "reconnectWebSocket requires an initialized websocket backend")
+                    }
+                    backend.resumeWebSocket()
+                    try await backend.waitForWebSocketConnection()
+                case "reconnectBackend":
+                    await participant.reconnectBackendControlPlane()
+                case "reconcileSelectedSession":
+                    await participant.reconcileSelectedSessionIfNeeded()
+                case "restartApp":
+                    guard let scenarioParticipant = spec.participants[action.actor] else {
+                        throw ScenarioFailure(message: "restartApp requires a known participant")
+                    }
+                    participant.resetLocalDevState(backendStatus: "Scenario restart")
+                    let replacement = makeSimulatorScenarioViewModel(
+                        baseURL: spec.baseURL,
+                        handle: scenarioParticipant.handle,
+                        deviceID: scenarioParticipant.deviceId
+                    )
+                    viewModels[action.actor] = replacement
+                    await replacement.initializeIfNeeded()
+                    try await stabilizeScenario(currentParticipants())
+                    try await waitForScenario(
+                        "\(action.actor) restarts and becomes discoverable",
+                        participants: currentParticipants(),
+                        timeoutNanoseconds: 60_000_000_000
+                    ) {
+                        await scenarioParticipantsAreDiscoverable(spec: spec, viewModels: viewModels)
+                    }
+                case "wait":
+                    let milliseconds = action.milliseconds ?? 0
+                    guard milliseconds >= 0 else {
+                        throw ScenarioFailure(message: "wait requires a non-negative milliseconds value")
+                    }
+                    try await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
                 default:
                     throw ScenarioFailure(message: "Unknown scenario action type \(action.type)")
                 }
             }
 
             if scenarioStepRequiresImmediateStabilization(step) {
-                try await stabilizeScenario(participants)
+                try await stabilizeScenario(currentParticipants())
             }
 
             if let expectations = step.expectEventually {
-                try await waitForScenario(step.description, participants: participants) {
+                try await waitForScenario(step.description, participants: currentParticipants()) {
                     scenarioExpectationsMatch(expectations, viewModels: viewModels)
                 }
             }
         }
 
         try await publishScenarioDiagnosticsArtifacts(spec: spec, viewModels: viewModels)
-        await tearDownSimulatorScenarioParticipants(participants)
+        await tearDownSimulatorScenarioParticipants(currentParticipants())
     } catch {
         try? await publishScenarioDiagnosticsArtifacts(spec: spec, viewModels: viewModels)
-        await tearDownSimulatorScenarioParticipants(participants)
+        await tearDownSimulatorScenarioParticipants(currentParticipants())
         throw error
+    }
+}
+
+private func scheduledScenarioActions(
+    for actions: [SimulatorScenarioAction]
+) throws -> [ScheduledSimulatorScenarioAction] {
+    var scheduled: [ScheduledSimulatorScenarioAction] = []
+
+    for (declarationIndex, action) in actions.enumerated() {
+        let isDropped = action.drop ?? false
+        if isDropped {
+            continue
+        }
+
+        let initialDelayMilliseconds = action.delayMilliseconds ?? 0
+        guard initialDelayMilliseconds >= 0 else {
+            throw ScenarioFailure(message: "Scenario action \(action.type) requires a non-negative delayMilliseconds value")
+        }
+
+        let repeatCount = action.repeatCount ?? 1
+        guard repeatCount >= 1 else {
+            throw ScenarioFailure(message: "Scenario action \(action.type) requires repeatCount >= 1")
+        }
+
+        let repeatIntervalMilliseconds = action.repeatIntervalMilliseconds ?? 0
+        guard repeatIntervalMilliseconds >= 0 else {
+            throw ScenarioFailure(
+                message: "Scenario action \(action.type) requires a non-negative repeatIntervalMilliseconds value"
+            )
+        }
+
+        for deliveryIndex in 0..<repeatCount {
+            scheduled.append(
+                ScheduledSimulatorScenarioAction(
+                    actor: action.actor,
+                    action: action,
+                    scheduledDelayMilliseconds: initialDelayMilliseconds + (deliveryIndex * repeatIntervalMilliseconds),
+                    declarationIndex: declarationIndex,
+                    deliveryIndex: deliveryIndex
+                )
+            )
+        }
+    }
+
+    return scheduled.sorted { lhs, rhs in
+        if lhs.scheduledDelayMilliseconds != rhs.scheduledDelayMilliseconds {
+            return lhs.scheduledDelayMilliseconds < rhs.scheduledDelayMilliseconds
+        }
+        if lhs.declarationIndex != rhs.declarationIndex {
+            let lhsOrder = lhs.action.reorderIndex ?? lhs.declarationIndex
+            let rhsOrder = rhs.action.reorderIndex ?? rhs.declarationIndex
+            if lhsOrder != rhsOrder {
+                return lhsOrder < rhsOrder
+            }
+            return lhs.declarationIndex < rhs.declarationIndex
+        }
+        return lhs.deliveryIndex < rhs.deliveryIndex
     }
 }
 
@@ -3812,6 +5147,7 @@ private func publishScenarioDiagnosticsArtifacts(
     spec: SimulatorScenarioConfig,
     viewModels: [String: PTTViewModel]
 ) async throws {
+    let scenarioRunID = UUID().uuidString.lowercased()
     for (actor, participant) in viewModels {
         let expectedDeviceID = spec.participants[actor]?.deviceId ?? "<missing>"
         let expectedHandle = spec.participants[actor]?.handle ?? participant.currentDevUserHandle
@@ -3821,7 +5157,7 @@ private func publishScenarioDiagnosticsArtifacts(
             deviceId: expectedDeviceID,
             baseURL: spec.baseURL.absoluteString,
             selectedHandle: participant.selectedContact?.handle,
-            appVersion: "scenario:\(spec.name)",
+            appVersion: "scenario:\(spec.name):\(scenarioRunID):\(expectedDeviceID)",
             snapshot: participant.diagnosticsSnapshot,
             transcript: participant.diagnosticsTranscript
         )
@@ -3829,7 +5165,8 @@ private func publishScenarioDiagnosticsArtifacts(
         try await verifyScenarioDiagnosticsArtifactPublished(
             baseURL: spec.baseURL,
             handle: artifact.handle,
-            deviceID: artifact.deviceId
+            deviceID: artifact.deviceId,
+            expectedAppVersion: artifact.appVersion
         )
     }
 }
@@ -3867,49 +5204,163 @@ private func scenarioExpectationsMatch(
 ) -> Bool {
     for (actor, expected) in expectations {
         guard let participant = viewModels[actor] else { return false }
+        let projection = participant.stateMachineProjection
 
-        if let selectedHandle = expected.selectedHandle {
-            guard participant.selectedContact?.handle == selectedHandle else { return false }
+        if let selected = expected.selectedExpectation,
+           !scenarioSelectedExpectationMatches(selected, projection: projection)
+        {
+            return false
         }
 
-        var phaseMatch: SimulatorScenarioPhaseMatch = .exact
-        if let phase = expected.phase {
-            guard let selectedContact = participant.selectedContact else { return false }
-            let actualPhase = participant.selectedPeerState(for: selectedContact.id).phase
-            guard let matched = simulatorScenarioPhaseMatch(expected: phase, actual: actualPhase) else {
-                return false
-            }
-            phaseMatch = matched
+        if let contacts = expected.contacts,
+           !scenarioContactExpectationsMatch(contacts, projection: projection)
+        {
+            return false
         }
 
-        if let isJoined = expected.isJoined {
-            if !(phaseMatch == .progressed && isJoined == false) && participant.isJoined != isJoined {
-                return false
-            }
-        }
-
-        if let isTransmitting = expected.isTransmitting {
-            if !(phaseMatch == .progressed && isTransmitting == false) && participant.isTransmitting != isTransmitting {
-                return false
-            }
-        }
-
-        if let canTransmitNow = expected.canTransmitNow {
-            guard let selectedContact = participant.selectedContact else { return false }
-            if !(phaseMatch == .progressed && canTransmitNow == false)
-                && participant.canTransmitNow(for: selectedContact.id) != canTransmitNow
-            {
-                return false
-            }
+        if let backend = expected.backend,
+           !scenarioBackendExpectationMatches(backend, projection: projection)
+        {
+            return false
         }
     }
 
     return true
 }
 
-private func simulatorScenarioPhaseMatch(
+private func scenarioSelectedExpectationMatches(
+    _ expected: SimulatorScenarioSelectedExpectation,
+    projection: StateMachineProjection
+) -> Bool {
+    let selected = projection.selectedSession
+
+    if let handle = expected.handle,
+       selected.selectedHandle != handle {
+        return false
+    }
+
+    var phaseMatch: SimulatorScenarioPhaseMatch = .exact
+    if let phase = expected.phase {
+        guard let matched = simulatorScenarioPhaseMatch(expected: phase, actual: selected.selectedPhase) else {
+            return false
+        }
+        phaseMatch = matched
+    }
+
+    if let status = expected.status,
+       selected.statusMessage != status {
+        return false
+    }
+
+    if let isJoined = expected.isJoined,
+       !(phaseMatch == .progressed && isJoined == false) && selected.isJoined != isJoined {
+        return false
+    }
+
+    if let isTransmitting = expected.isTransmitting,
+       !(phaseMatch == .progressed && isTransmitting == false) && selected.isTransmitting != isTransmitting {
+        return false
+    }
+
+    if let canTransmitNow = expected.canTransmitNow,
+       !(phaseMatch == .progressed && canTransmitNow == false) && selected.canTransmitNow != canTransmitNow {
+        return false
+    }
+
+    return true
+}
+
+private func scenarioContactExpectationsMatch(
+    _ expectedContacts: [SimulatorScenarioContactExpectation],
+    projection: StateMachineProjection
+) -> Bool {
+    for expected in expectedContacts {
+        guard let contact = projection.contact(handle: expected.handle) else {
+            return false
+        }
+
+        if let isOnline = expected.isOnline,
+           contact.isOnline != isOnline {
+            return false
+        }
+        if let listState = expected.listState,
+           contact.listState != listState {
+            return false
+        }
+        if let badgeStatus = expected.badgeStatus,
+           contact.badgeStatus != badgeStatus {
+            return false
+        }
+        if let requestRelationship = expected.requestRelationship,
+           contact.requestRelationship != requestRelationship {
+            return false
+        }
+        if let hasIncomingRequest = expected.hasIncomingRequest,
+           contact.hasIncomingRequest != hasIncomingRequest {
+            return false
+        }
+        if let hasOutgoingRequest = expected.hasOutgoingRequest,
+           contact.hasOutgoingRequest != hasOutgoingRequest {
+            return false
+        }
+        if let requestCount = expected.requestCount,
+           contact.requestCount != requestCount {
+            return false
+        }
+    }
+
+    return true
+}
+
+private func scenarioBackendExpectationMatches(
+    _ expected: SimulatorScenarioBackendExpectation,
+    projection: StateMachineProjection
+) -> Bool {
+    let selected = projection.selectedSession
+
+    if let channelStatus = expected.channelStatus,
+       selected.backendChannelStatus != channelStatus {
+        return false
+    }
+    if let readiness = expected.readiness,
+       selected.backendReadiness != readiness {
+        return false
+    }
+    if let membership = expected.membership,
+       selected.backendMembership != membership {
+        return false
+    }
+    if let requestRelationship = expected.requestRelationship,
+       selected.backendRequestRelationship != requestRelationship {
+        return false
+    }
+    if let selfJoined = expected.selfJoined,
+       selected.backendSelfJoined != selfJoined {
+        return false
+    }
+    if let peerJoined = expected.peerJoined,
+       selected.backendPeerJoined != peerJoined {
+        return false
+    }
+    if let peerDeviceConnected = expected.peerDeviceConnected,
+       selected.backendPeerDeviceConnected != peerDeviceConnected {
+        return false
+    }
+    if let canTransmit = expected.canTransmit,
+       selected.backendCanTransmit != canTransmit {
+        return false
+    }
+    if let webSocketConnected = expected.webSocketConnected,
+       projection.isWebSocketConnected != webSocketConnected {
+        return false
+    }
+
+    return true
+}
+
+private func simulatorScenarioPhaseMatch<Phase: CustomStringConvertible>(
     expected expectedPhase: String,
-    actual actualPhase: SelectedPeerPhase
+    actual actualPhase: Phase
 ) -> SimulatorScenarioPhaseMatch? {
     let actual = String(describing: actualPhase)
     if actual == expectedPhase {
@@ -4104,25 +5555,26 @@ private func waitForScenario(
 @MainActor
 private func scenarioSnapshotSummary(_ participants: [PTTViewModel]) -> String {
     participants.map { participant in
-        let selectedContact = participant.selectedContact
-        let selectedPeerState = selectedContact.map { participant.selectedPeerState(for: $0.id) }
-        let selectedChannelState = selectedContact.flatMap { participant.channelStateByContactID[$0.id] }
+        let projection = participant.stateMachineProjection
         let fields = [
             "devUserHandle=\(participant.currentDevUserHandle)",
-            "selectedContact=\(selectedContact?.handle ?? "none")",
-            "selectedPeerPhase=\(selectedPeerState.map { String(describing: $0.phase) } ?? "idle")",
-            "selectedPeerStatus=\(selectedPeerState?.statusMessage ?? "Ready to connect")",
+            "selectedContact=\(projection.selectedSession.selectedHandle ?? "none")",
+            "selectedPeerPhase=\(projection.selectedSession.selectedPhase)",
+            "selectedPeerStatus=\(projection.selectedSession.statusMessage)",
             "pendingAction=\(String(describing: participant.sessionCoordinator.pendingAction))",
-            "isJoined=\(participant.isJoined)",
-            "isTransmitting=\(participant.isTransmitting)",
-            "backendChannelStatus=\(selectedChannelState?.status ?? "none")",
-            "backendSelfJoined=\(selectedChannelState.map { String($0.selfJoined) } ?? "none")",
-            "backendPeerJoined=\(selectedChannelState.map { String($0.peerJoined) } ?? "none")",
-            "backendPeerDeviceConnected=\(selectedChannelState.map { String($0.peerDeviceConnected) } ?? "none")",
+            "isJoined=\(projection.selectedSession.isJoined)",
+            "isTransmitting=\(projection.selectedSession.isTransmitting)",
+            "backendChannelStatus=\(projection.selectedSession.backendChannelStatus ?? "none")",
+            "backendSelfJoined=\(projection.selectedSession.backendSelfJoined.map(String.init(describing:)) ?? "none")",
+            "backendPeerJoined=\(projection.selectedSession.backendPeerJoined.map(String.init(describing:)) ?? "none")",
+            "backendPeerDeviceConnected=\(projection.selectedSession.backendPeerDeviceConnected.map(String.init(describing:)) ?? "none")",
             "systemSession=\(String(describing: participant.systemSessionState))",
             "localJoinFailure=\(participant.pttCoordinator.state.lastJoinFailure.map { String(describing: $0) } ?? "none")",
         ]
-        return fields.joined(separator: " ")
+        let contactDetails = projection.contacts.map { contact in
+            "contact[\(contact.handle)]={online:\(contact.isOnline),list:\(contact.listState),badge:\(contact.badgeStatus ?? "none")}"
+        }
+        return (fields + contactDetails).joined(separator: " ")
     }
     .joined(separator: "\n")
 }
@@ -4157,36 +5609,58 @@ private func publishScenarioDiagnosticsArtifact(_ artifact: SimulatorScenarioDia
     let responsePayload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
     let report = responsePayload?["report"] as? [String: Any]
     let reportedDeviceID = report?["deviceId"] as? String
-    guard reportedDeviceID == artifact.deviceId else {
+    let reportedAppVersion = report?["appVersion"] as? String
+    guard reportedDeviceID == artifact.deviceId,
+          reportedAppVersion == artifact.appVersion else {
         let body = String(data: data, encoding: .utf8) ?? "<non-utf8>"
         throw ScenarioFailure(
-            message: "Scenario diagnostics upload returned unexpected report for \(artifact.handle) expected \(artifact.deviceId) got \(reportedDeviceID ?? "none"): \(body)"
+            message: "Scenario diagnostics upload returned unexpected report for \(artifact.handle) expected device \(artifact.deviceId) appVersion \(artifact.appVersion) got device \(reportedDeviceID ?? "none") appVersion \(reportedAppVersion ?? "none"): \(body)"
         )
     }
 }
 
-private func verifyScenarioDiagnosticsArtifactPublished(baseURL: URL, handle: String, deviceID: String) async throws {
+private func verifyScenarioDiagnosticsArtifactPublished(
+    baseURL: URL,
+    handle: String,
+    deviceID: String,
+    expectedAppVersion: String,
+    maxAttempts: Int = 10
+) async throws {
     let endpointURL = baseURL.appending(path: "/v1/dev/diagnostics/latest/\(deviceID)/")
-    var request = URLRequest(url: endpointURL)
-    request.httpMethod = "GET"
-    request.setValue(handle, forHTTPHeaderField: "x-turbo-user-handle")
-    request.setValue("Bearer \(handle)", forHTTPHeaderField: "Authorization")
+    for attempt in 1...maxAttempts {
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "GET"
+        request.setValue(handle, forHTTPHeaderField: "x-turbo-user-handle")
+        request.setValue("Bearer \(handle)", forHTTPHeaderField: "Authorization")
 
-    let (data, _) = try await performScenarioDiagnosticsRequest(
-        request,
-        label: "verification",
-        handle: handle,
-        deviceID: deviceID
-    )
-    let responsePayload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-    let report = responsePayload?["report"] as? [String: Any]
-    let reportedDeviceID = report?["deviceId"] as? String
-    guard reportedDeviceID == deviceID else {
+        let (data, _) = try await performScenarioDiagnosticsRequest(
+            request,
+            label: "verification",
+            handle: handle,
+            deviceID: deviceID
+        )
+        let responsePayload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let report = responsePayload?["report"] as? [String: Any]
+        let reportedDeviceID = report?["deviceId"] as? String
+        let reportedAppVersion = report?["appVersion"] as? String
+        if reportedDeviceID == deviceID,
+           reportedAppVersion == expectedAppVersion {
+            return
+        }
+        if attempt < maxAttempts {
+            try await Task.sleep(nanoseconds: UInt64(attempt) * 300_000_000)
+            continue
+        }
+
         let body = String(data: data, encoding: .utf8) ?? "<non-utf8>"
         throw ScenarioFailure(
-            message: "Scenario diagnostics verification returned unexpected report for \(handle) expected \(deviceID) got \(reportedDeviceID ?? "none"): \(body)"
+            message: "Scenario diagnostics verification returned unexpected report for \(handle) expected device \(deviceID) appVersion \(expectedAppVersion) got device \(reportedDeviceID ?? "none") appVersion \(reportedAppVersion ?? "none"): \(body)"
         )
     }
+
+    throw ScenarioFailure(
+        message: "Scenario diagnostics verification failed for \(handle) \(deviceID) after \(maxAttempts) attempts"
+    )
 }
 
 private func performScenarioDiagnosticsRequest(
@@ -4260,6 +5734,22 @@ private func makeChannelState(
         transmitLeaseExpiresAt: nil,
         status: status.rawValue,
         canTransmit: canTransmit
+    )
+}
+
+private func makeChannelReadiness(
+    status: TurboChannelReadinessStatus,
+    selfHasActiveDevice: Bool = true,
+    peerHasActiveDevice: Bool = true
+) -> TurboChannelReadinessResponse {
+    TurboChannelReadinessResponse(
+        channelId: "channel",
+        peerUserId: "peer",
+        selfHasActiveDevice: selfHasActiveDevice,
+        peerHasActiveDevice: peerHasActiveDevice,
+        activeTransmitterUserId: status.activeTransmitterUserId,
+        activeTransmitExpiresAt: nil,
+        status: status.kind
     )
 }
 

@@ -5,6 +5,8 @@ actor AudioChunkSender {
     private var sendChunk: (@Sendable (String) async throws -> Void)?
     private let reportFailure: @Sendable (String) async -> Void
     private let maximumPendingPayloads = 8
+    private let transportAvailabilityPollNanoseconds: UInt64 = 50_000_000
+    private let transportAvailabilityMaxAttempts = 20
     private var pendingPayloads: [String] = []
     private var isDraining = false
 
@@ -38,7 +40,7 @@ actor AudioChunkSender {
     private func drain() async {
         while !pendingPayloads.isEmpty {
             let payload = pendingPayloads.removeFirst()
-            guard let sendChunk else {
+            guard let sendChunk = await waitForTransportIfNeeded() else {
                 await reportFailure("audio send failed: websocket transport is not configured")
                 pendingPayloads.removeAll(keepingCapacity: false)
                 break
@@ -52,6 +54,21 @@ actor AudioChunkSender {
             }
         }
         isDraining = false
+    }
+
+    private func waitForTransportIfNeeded() async -> (@Sendable (String) async throws -> Void)? {
+        if let sendChunk {
+            return sendChunk
+        }
+
+        for _ in 0 ..< transportAvailabilityMaxAttempts {
+            try? await Task.sleep(nanoseconds: transportAvailabilityPollNanoseconds)
+            if let sendChunk {
+                return sendChunk
+            }
+        }
+
+        return nil
     }
 }
 
@@ -119,6 +136,12 @@ final class PCMWebSocketMediaSession: MediaSession {
         currentSendAudioChunk = handler
         Task {
             await audioChunkSender.updateSendChunk(handler)
+        }
+        Task {
+            await report(
+                "Updated media session audio transport",
+                metadata: ["configured": String(handler != nil)]
+            )
         }
     }
 
@@ -203,6 +226,10 @@ final class PCMWebSocketMediaSession: MediaSession {
             try await start(activationMode: .appManaged, startupMode: .interactive)
         }
         await audioChunkSender.updateSendChunk(currentSendAudioChunk)
+        await report(
+            "Starting audio capture with transport state",
+            metadata: ["configured": String(currentSendAudioChunk != nil)]
+        )
         resetPlaybackForTransmit()
         setSendingAudio(true)
     }

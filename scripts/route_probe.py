@@ -72,6 +72,166 @@ def require(condition: bool, message: str) -> None:
         raise RouteProbeFailure(message)
 
 
+def is_local_base_url(base_url: str) -> bool:
+    hostname = urllib.parse.urlparse(base_url).hostname
+    return hostname in {"localhost", "127.0.0.1"}
+
+
+def require_request_relationship_contract(payload: dict[str, Any], *, label: str) -> None:
+    relationship = payload.get("requestRelationship")
+    require(isinstance(relationship, dict), f"{label} missing requestRelationship contract: {payload}")
+    kind = relationship.get("kind")
+    require(
+        kind in {"none", "incoming", "outgoing", "mutual"},
+        f"{label} requestRelationship kind invalid: {relationship}",
+    )
+    has_incoming = payload.get("hasIncomingRequest")
+    has_outgoing = payload.get("hasOutgoingRequest")
+    expected_kind = (
+        "mutual" if has_incoming and has_outgoing
+        else "incoming" if has_incoming
+        else "outgoing" if has_outgoing
+        else "none"
+    )
+    require(kind == expected_kind, f"{label} requestRelationship disagrees with legacy flags: {payload}")
+    if expected_kind == "none":
+        require(relationship.get("requestCount") in (None, 0), f"{label} none relationship carried a requestCount: {relationship}")
+    else:
+        require(
+            relationship.get("requestCount") == payload.get("requestCount"),
+            f"{label} requestRelationship count disagrees with legacy count: {payload}",
+        )
+
+
+def require_membership_contract(payload: dict[str, Any], *, label: str) -> None:
+    membership = payload.get("membership")
+    require(isinstance(membership, dict), f"{label} missing membership contract: {payload}")
+    kind = membership.get("kind")
+    require(
+        kind in {"absent", "self-only", "peer-only", "both"},
+        f"{label} membership kind invalid: {membership}",
+    )
+    self_joined = payload.get("selfJoined")
+    peer_joined = payload.get("peerJoined")
+    expected_kind = (
+        "both" if self_joined and peer_joined
+        else "self-only" if self_joined
+        else "peer-only" if peer_joined
+        else "absent"
+    )
+    require(kind == expected_kind, f"{label} membership disagrees with legacy join flags: {payload}")
+    if expected_kind in {"peer-only", "both"}:
+        require(
+            membership.get("peerDeviceConnected") == payload.get("peerDeviceConnected"),
+            f"{label} membership peerDeviceConnected disagrees with legacy field: {payload}",
+        )
+    else:
+        require(
+            membership.get("peerDeviceConnected") in (None, False),
+            f"{label} membership unexpectedly carried peerDeviceConnected: {membership}",
+        )
+
+
+def require_summary_status_contract(payload: dict[str, Any], *, label: str) -> None:
+    summary_status = payload.get("summaryStatus")
+    require(isinstance(summary_status, dict), f"{label} missing summaryStatus contract: {payload}")
+    kind = summary_status.get("kind")
+    require(
+        kind in {"offline", "online", "requested", "incoming", "connecting", "ready", "talking", "receiving"},
+        f"{label} summaryStatus kind invalid: {summary_status}",
+    )
+    require(kind == payload.get("badgeStatus"), f"{label} summaryStatus disagrees with legacy badgeStatus: {payload}")
+    active_transmitter = summary_status.get("activeTransmitterUserId")
+    if kind in {"talking", "receiving"}:
+        require(
+            isinstance(active_transmitter, str) and active_transmitter,
+            f"{label} missing active transmitter for talking/receiving: {summary_status}",
+        )
+    else:
+        require(
+            active_transmitter in (None, ""),
+            f"{label} unexpected active transmitter for non-transmitting summary state: {summary_status}",
+        )
+
+
+def require_conversation_status_contract(payload: dict[str, Any], *, label: str) -> None:
+    conversation_status = payload.get("conversationStatus")
+    require(isinstance(conversation_status, dict), f"{label} missing conversationStatus contract: {payload}")
+    kind = conversation_status.get("kind")
+    require(
+        kind in {"idle", "requested", "incoming-request", "connecting", "waiting-for-peer", "ready", "self-transmitting", "peer-transmitting"},
+        f"{label} conversationStatus kind invalid: {conversation_status}",
+    )
+    require(kind == payload.get("status"), f"{label} conversationStatus disagrees with legacy status: {payload}")
+    active_transmitter = conversation_status.get("activeTransmitterUserId")
+    if kind in {"self-transmitting", "peer-transmitting"}:
+        require(
+            isinstance(active_transmitter, str) and active_transmitter,
+            f"{label} missing active transmitter for transmitting conversation state: {conversation_status}",
+        )
+        require(
+            active_transmitter == payload.get("activeTransmitterUserId"),
+            f"{label} conversationStatus active transmitter disagrees with legacy field: {payload}",
+        )
+    else:
+        require(
+            active_transmitter in (None, ""),
+            f"{label} unexpected active transmitter for non-transmitting conversation state: {conversation_status}",
+        )
+
+
+def require_readiness_contract(payload: dict[str, Any], *, label: str) -> None:
+    readiness = payload.get("readiness")
+    require(isinstance(readiness, dict), f"{label} missing readiness contract: {payload}")
+    kind = readiness.get("kind")
+    require(
+        kind in {"waiting-for-self", "waiting-for-peer", "ready", "self-transmitting", "peer-transmitting"},
+        f"{label} readiness kind invalid: {readiness}",
+    )
+    require(kind == payload.get("status"), f"{label} readiness contract disagrees with legacy status: {payload}")
+    active_transmitter = readiness.get("activeTransmitterUserId")
+    if kind == "waiting-for-self":
+        require(payload.get("selfHasActiveDevice") is False, f"{label} readiness expected self device to be inactive: {payload}")
+    if kind == "waiting-for-peer":
+        require(payload.get("selfHasActiveDevice") is True, f"{label} readiness expected self device to be active: {payload}")
+        require(payload.get("peerHasActiveDevice") is False, f"{label} readiness expected peer device to be inactive: {payload}")
+    if kind == "ready":
+        require(payload.get("selfHasActiveDevice") is True, f"{label} readiness expected self device to be active: {payload}")
+        require(payload.get("peerHasActiveDevice") is True, f"{label} readiness expected peer device to be active: {payload}")
+    if kind in {"self-transmitting", "peer-transmitting"}:
+        require(
+            isinstance(active_transmitter, str) and active_transmitter,
+            f"{label} readiness missing active transmitter for transmitting state: {readiness}",
+        )
+        require(
+            active_transmitter == payload.get("activeTransmitterUserId"),
+            f"{label} readiness active transmitter disagrees with legacy field: {payload}",
+        )
+    else:
+        require(
+            active_transmitter in (None, ""),
+            f"{label} readiness unexpectedly carried active transmitter: {readiness}",
+        )
+
+
+def require_diagnostics_report(
+    response: dict[str, Any],
+    *,
+    expected_status: str,
+    expected_device_id: str,
+    expected_app_version: str,
+    expected_selected_handle: str,
+) -> dict[str, Any]:
+    require(response.get("status") == expected_status, f"unexpected diagnostics payload: {response}")
+    report = response.get("report")
+    require(isinstance(report, dict), f"diagnostics response missing report: {response}")
+    require(report.get("deviceId") == expected_device_id, f"diagnostics latest mismatched device: {report}")
+    require(report.get("appVersion") == expected_app_version, f"diagnostics latest mismatched appVersion: {report}")
+    require(report.get("selectedHandle") == expected_selected_handle, f"diagnostics latest mismatched selected handle: {report}")
+    require(bool(report.get("uploadedAt")), f"diagnostics latest missing uploadedAt: {report}")
+    return report
+
+
 async def receive_json_or_timeout(connection, timeout_seconds: int) -> dict:
     try:
         raw = await asyncio.wait_for(connection.recv(), timeout=timeout_seconds)
@@ -88,6 +248,7 @@ async def connected_websocket_pair(
     insecure: bool,
 ):
     ws_base = base_url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
+    websocket_scheme = urllib.parse.urlparse(ws_base).scheme
     caller_url = f"{ws_base}/v1/ws?deviceId={urllib.parse.quote(caller['device_id'])}"
     callee_url = f"{ws_base}/v1/ws?deviceId={urllib.parse.quote(callee['device_id'])}"
     caller_headers = {
@@ -98,7 +259,9 @@ async def connected_websocket_pair(
         "x-turbo-user-handle": callee["handle"],
         "Authorization": f"Bearer {callee['handle']}",
     }
-    ssl_context = ssl._create_unverified_context() if insecure else ssl.create_default_context()
+    ssl_context = None
+    if websocket_scheme == "wss":
+        ssl_context = ssl._create_unverified_context() if insecure else ssl.create_default_context()
     async with websockets.connect(
         callee_url,
         additional_headers=callee_headers,
@@ -187,6 +350,7 @@ async def main() -> int:
         )
 
         for current in (caller, callee):
+            peer = callee if current is caller else caller
             session = run_check(
                 results,
                 f"auth-session:{current['handle']}",
@@ -219,16 +383,23 @@ async def main() -> int:
                     method="POST",
                     body={
                         "deviceId": current["device_id"],
-                        "appVersion": "route-probe",
+                        "appVersion": f"route-probe:{current['device_id']}",
                         "backendBaseURL": args.base_url,
-                        "selectedHandle": callee["handle"] if current is caller else caller["handle"],
+                        "selectedHandle": peer["handle"],
                         "snapshot": f"snapshot for {current['handle']}",
                         "transcript": f"transcript for {current['handle']}",
                     },
                     insecure=args.insecure,
                 ),
             )
-            require(diagnostics_upload.get("status") == "uploaded", f"diagnostics upload failed: {diagnostics_upload}")
+            expected_app_version = f"route-probe:{current['device_id']}"
+            require_diagnostics_report(
+                diagnostics_upload,
+                expected_status="uploaded",
+                expected_device_id=current["device_id"],
+                expected_app_version=expected_app_version,
+                expected_selected_handle=peer["handle"],
+            )
 
             diagnostics_latest = run_check(
                 results,
@@ -240,7 +411,13 @@ async def main() -> int:
                     insecure=args.insecure,
                 ),
             )
-            require(diagnostics_latest.get("status") == "ok", f"diagnostics latest failed: {diagnostics_latest}")
+            require_diagnostics_report(
+                diagnostics_latest,
+                expected_status="ok",
+                expected_device_id=current["device_id"],
+                expected_app_version=expected_app_version,
+                expected_selected_handle=peer["handle"],
+            )
 
             diagnostics_latest_for_user = run_check(
                 results,
@@ -252,9 +429,76 @@ async def main() -> int:
                     insecure=args.insecure,
                 ),
             )
-            require(
-                diagnostics_latest_for_user.get("status") == "ok",
-                f"diagnostics latest current-user failed: {diagnostics_latest_for_user}",
+            require_diagnostics_report(
+                diagnostics_latest_for_user,
+                expected_status="ok",
+                expected_device_id=current["device_id"],
+                expected_app_version=expected_app_version,
+                expected_selected_handle=peer["handle"],
+            )
+
+            overwrite_app_version = f"{expected_app_version}:overwrite"
+            diagnostics_overwrite = run_check(
+                results,
+                f"diagnostics-overwrite:{current['handle']}",
+                lambda current=current: request(
+                    args.base_url,
+                    "/v1/dev/diagnostics",
+                    current["handle"],
+                    method="POST",
+                    body={
+                        "deviceId": current["device_id"],
+                        "appVersion": overwrite_app_version,
+                        "backendBaseURL": args.base_url,
+                        "selectedHandle": peer["handle"],
+                        "snapshot": f"overwrite snapshot for {current['handle']}",
+                        "transcript": f"overwrite transcript for {current['handle']}",
+                    },
+                    insecure=args.insecure,
+                ),
+            )
+            require_diagnostics_report(
+                diagnostics_overwrite,
+                expected_status="uploaded",
+                expected_device_id=current["device_id"],
+                expected_app_version=overwrite_app_version,
+                expected_selected_handle=peer["handle"],
+            )
+
+            diagnostics_latest_after_overwrite = run_check(
+                results,
+                f"diagnostics-latest-after-overwrite:{current['handle']}",
+                lambda current=current: request(
+                    args.base_url,
+                    f"/v1/dev/diagnostics/latest/{urllib.parse.quote(current['device_id'])}",
+                    current["handle"],
+                    insecure=args.insecure,
+                ),
+            )
+            require_diagnostics_report(
+                diagnostics_latest_after_overwrite,
+                expected_status="ok",
+                expected_device_id=current["device_id"],
+                expected_app_version=overwrite_app_version,
+                expected_selected_handle=peer["handle"],
+            )
+
+            diagnostics_latest_for_user_after_overwrite = run_check(
+                results,
+                f"diagnostics-latest-current-after-overwrite:{current['handle']}",
+                lambda current=current: request(
+                    args.base_url,
+                    "/v1/dev/diagnostics/latest",
+                    current["handle"],
+                    insecure=args.insecure,
+                ),
+            )
+            require_diagnostics_report(
+                diagnostics_latest_for_user_after_overwrite,
+                expected_status="ok",
+                expected_device_id=current["device_id"],
+                expected_app_version=overwrite_app_version,
+                expected_selected_handle=peer["handle"],
             )
 
             heartbeat = run_check(
@@ -319,6 +563,23 @@ async def main() -> int:
                 insecure=args.insecure,
             ),
         )
+        prejoin_state = run_check(
+            results,
+            "channel-state:prejoin-requested",
+            lambda: request(
+                args.base_url,
+                f"/v1/channels/{invite_cancel['channelId']}/state/{urllib.parse.quote(caller['device_id'])}",
+                caller["handle"],
+                insecure=args.insecure,
+            ),
+        )
+        require(prejoin_state.get("status") == "requested", f"prejoin state should be requested: {prejoin_state}")
+        require(prejoin_state.get("selfJoined") is False, f"prejoin state should not show caller joined: {prejoin_state}")
+        require(prejoin_state.get("peerJoined") is False, f"prejoin state should not show peer joined: {prejoin_state}")
+        if is_local_base_url(args.base_url):
+            require_request_relationship_contract(prejoin_state, label="channel-state:prejoin-requested")
+            require_membership_contract(prejoin_state, label="channel-state:prejoin-requested")
+            require_conversation_status_contract(prejoin_state, label="channel-state:prejoin-requested")
         run_check(
             results,
             "invite-outgoing:list",
@@ -408,6 +669,25 @@ async def main() -> int:
         )
         require(direct.get("channelId") == accepted_channel_id, f"direct channel disagreed with accepted invite channel: {direct}")
         channel_id = direct["channelId"]
+        post_direct_summaries = run_check(
+            results,
+            "contact-summaries:caller:post-direct",
+            lambda: request(
+                args.base_url,
+                f"/v1/contacts/summaries/{urllib.parse.quote(caller['device_id'])}",
+                caller["handle"],
+                insecure=args.insecure,
+            ),
+        )
+        require(isinstance(post_direct_summaries, list), f"post-direct contact summaries returned unexpected payload: {post_direct_summaries}")
+        caller_summary = next(
+            (summary for summary in post_direct_summaries if summary.get("handle") == callee["handle"]),
+            None,
+        )
+        require(isinstance(caller_summary, dict), f"callee summary missing after direct channel creation: {post_direct_summaries}")
+        require_request_relationship_contract(caller_summary, label="contact-summaries:caller:post-direct")
+        require(isinstance(caller_summary.get("membership"), dict), f"contact-summaries:caller:post-direct missing membership contract: {caller_summary}")
+        require_summary_status_contract(caller_summary, label="contact-summaries:caller:post-direct")
 
         for current in (caller, callee):
             join_payload = run_check(
@@ -456,6 +736,13 @@ async def main() -> int:
             )
             require(caller_state.get("canTransmit") is True, f"caller cannot transmit after websocket registration: {caller_state}")
             require(callee_state.get("canTransmit") is True, f"callee cannot transmit after websocket registration: {callee_state}")
+            if is_local_base_url(args.base_url):
+                require_request_relationship_contract(caller_state, label="channel-state:caller")
+                require_membership_contract(caller_state, label="channel-state:caller")
+                require_conversation_status_contract(caller_state, label="channel-state:caller")
+                require_request_relationship_contract(callee_state, label="channel-state:callee")
+                require_membership_contract(callee_state, label="channel-state:callee")
+                require_conversation_status_contract(callee_state, label="channel-state:callee")
 
             caller_readiness = run_check(
                 results,
@@ -468,6 +755,8 @@ async def main() -> int:
                 ),
             )
             require(isinstance(caller_readiness, dict), f"readiness returned unexpected payload: {caller_readiness}")
+            if is_local_base_url(args.base_url):
+                require_readiness_contract(caller_readiness, label="channel-readiness:caller")
 
             run_check(
                 results,
@@ -495,6 +784,76 @@ async def main() -> int:
                 ),
             )
             require(begin_payload.get("status") == "transmitting", f"begin-transmit returned unexpected payload: {begin_payload}")
+            if is_local_base_url(args.base_url):
+                caller_state_transmitting = run_check(
+                    results,
+                    "channel-state:caller:transmitting",
+                    lambda: request(
+                        args.base_url,
+                        f"/v1/channels/{channel_id}/state/{urllib.parse.quote(caller['device_id'])}",
+                        caller["handle"],
+                        insecure=args.insecure,
+                    ),
+                )
+                callee_state_receiving = run_check(
+                    results,
+                    "channel-state:callee:receiving",
+                    lambda: request(
+                        args.base_url,
+                        f"/v1/channels/{channel_id}/state/{urllib.parse.quote(callee['device_id'])}",
+                        callee["handle"],
+                        insecure=args.insecure,
+                    ),
+                )
+                require_conversation_status_contract(caller_state_transmitting, label="channel-state:caller:transmitting")
+                require_conversation_status_contract(callee_state_receiving, label="channel-state:callee:receiving")
+                require(
+                    caller_state_transmitting.get("conversationStatus", {}).get("kind") == "self-transmitting",
+                    f"caller state should show self-transmitting after begin-transmit: {caller_state_transmitting}",
+                )
+                require(
+                    callee_state_receiving.get("conversationStatus", {}).get("kind") == "peer-transmitting",
+                    f"callee state should show peer-transmitting after begin-transmit: {callee_state_receiving}",
+                )
+                require(
+                    caller_state_transmitting.get("conversationStatus", {}).get("activeTransmitterUserId") == caller["user_id"],
+                    f"caller transmitting state should carry caller as active transmitter: {caller_state_transmitting}",
+                )
+                require(
+                    callee_state_receiving.get("conversationStatus", {}).get("activeTransmitterUserId") == caller["user_id"],
+                    f"callee receiving state should carry caller as active transmitter: {callee_state_receiving}",
+                )
+
+                caller_readiness_transmitting = run_check(
+                    results,
+                    "channel-readiness:caller:transmitting",
+                    lambda: request(
+                        args.base_url,
+                        f"/v1/channels/{channel_id}/readiness/{urllib.parse.quote(caller['device_id'])}",
+                        caller["handle"],
+                        insecure=args.insecure,
+                    ),
+                )
+                callee_readiness_receiving = run_check(
+                    results,
+                    "channel-readiness:callee:receiving",
+                    lambda: request(
+                        args.base_url,
+                        f"/v1/channels/{channel_id}/readiness/{urllib.parse.quote(callee['device_id'])}",
+                        callee["handle"],
+                        insecure=args.insecure,
+                    ),
+                )
+                require_readiness_contract(caller_readiness_transmitting, label="channel-readiness:caller:transmitting")
+                require_readiness_contract(callee_readiness_receiving, label="channel-readiness:callee:receiving")
+                require(
+                    caller_readiness_transmitting.get("readiness", {}).get("kind") == "self-transmitting",
+                    f"caller readiness should show self-transmitting after begin-transmit: {caller_readiness_transmitting}",
+                )
+                require(
+                    callee_readiness_receiving.get("readiness", {}).get("kind") == "peer-transmitting",
+                    f"callee readiness should show peer-transmitting after begin-transmit: {callee_readiness_receiving}",
+                )
 
             push_target = run_check(
                 results,
@@ -535,6 +894,22 @@ async def main() -> int:
                 ),
             )
             require(end_payload.get("status") == "idle", f"end-transmit returned unexpected payload: {end_payload}")
+            if is_local_base_url(args.base_url):
+                caller_state_after_end = run_check(
+                    results,
+                    "channel-state:caller:post-transmit",
+                    lambda: request(
+                        args.base_url,
+                        f"/v1/channels/{channel_id}/state/{urllib.parse.quote(caller['device_id'])}",
+                        caller["handle"],
+                        insecure=args.insecure,
+                    ),
+                )
+                require_conversation_status_contract(caller_state_after_end, label="channel-state:caller:post-transmit")
+                require(
+                    caller_state_after_end.get("conversationStatus", {}).get("kind") == "ready",
+                    f"caller state should return to ready after end-transmit: {caller_state_after_end}",
+                )
 
         for current in (caller, callee):
             leave_payload = run_check(

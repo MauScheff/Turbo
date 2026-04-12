@@ -11,15 +11,21 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     private let config: TurboBackendConfig
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.default
-        configuration.waitsForConnectivity = true
+        // Control-plane requests should fail fast; reconnection is handled explicitly.
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 10
+        configuration.timeoutIntervalForResource = 10
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
     private var webSocketTask: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var connectTimeoutTask: Task<Void, Never>?
     private var runtimeConfig: TurboBackendRuntimeConfig?
     private var webSocketConnectionState: WebSocketConnectionState = .idle
     private var shouldMaintainWebSocket = false
+    private var isWebSocketSuspended = false
+    private let webSocketConnectTimeoutNanoseconds: UInt64 = 5_000_000_000
 
     var onSignal: (@MainActor (TurboSignalEnvelope) -> Void)?
     var onServerNotice: (@MainActor (String) -> Void)?
@@ -78,6 +84,10 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         try await request(path: "/v1/users/by-handle/\(handle.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? handle)")
     }
 
+    func lookupPresence(handle: String) async throws -> TurboUserPresenceResponse {
+        try await request(path: Self.presenceLookupPath(for: handle))
+    }
+
     func heartbeatPresence() async throws -> TurboPresenceHeartbeatResponse {
         try await request(
             path: "/v1/presence/heartbeat",
@@ -119,6 +129,12 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     func channelState(channelId: String) async throws -> TurboChannelStateResponse {
         try await request(
             path: "/v1/channels/\(channelId)/state/\(config.deviceID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? config.deviceID)"
+        )
+    }
+
+    func channelReadiness(channelId: String) async throws -> TurboChannelReadinessResponse {
+        try await request(
+            path: "/v1/channels/\(channelId)/readiness/\(config.deviceID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? config.deviceID)"
         )
     }
 
@@ -184,6 +200,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
 
     func connectWebSocket() {
         guard supportsWebSocket else { return }
+        guard !isWebSocketSuspended else { return }
         shouldMaintainWebSocket = true
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -205,6 +222,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         let task = session.webSocketTask(with: request)
         setWebSocketConnectionState(.connecting)
         webSocketTask = task
+        scheduleConnectTimeout(for: task)
         task.resume()
     }
 
@@ -212,6 +230,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         shouldMaintainWebSocket = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
         receiveTask?.cancel()
         receiveTask = nil
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
@@ -219,8 +239,19 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         setWebSocketConnectionState(.idle)
     }
 
+    func suspendWebSocket() {
+        isWebSocketSuspended = true
+        disconnectWebSocket()
+    }
+
+    func resumeWebSocket() {
+        isWebSocketSuspended = false
+        ensureWebSocketConnected()
+    }
+
     func ensureWebSocketConnected() {
         guard supportsWebSocket else { return }
+        guard !isWebSocketSuspended else { return }
         if webSocketConnectionState == .connected || webSocketConnectionState == .connecting {
             return
         }
@@ -286,6 +317,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             }
         } catch {
             guard !Task.isCancelled else { return }
+            self.connectTimeoutTask?.cancel()
+            self.connectTimeoutTask = nil
             self.receiveTask = nil
             self.webSocketTask = nil
             self.setWebSocketConnectionState(.idle)
@@ -303,6 +336,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard self.webSocketTask === webSocketTask else { return }
+            self.connectTimeoutTask?.cancel()
+            self.connectTimeoutTask = nil
             self.reconnectTask?.cancel()
             self.reconnectTask = nil
             self.setWebSocketConnectionState(.connected)
@@ -323,6 +358,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard self.webSocketTask === webSocketTask else { return }
+            self.connectTimeoutTask?.cancel()
+            self.connectTimeoutTask = nil
             self.receiveTask?.cancel()
             self.receiveTask = nil
             self.webSocketTask = nil
@@ -355,6 +392,30 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
+    private func scheduleConnectTimeout(for task: URLSessionWebSocketTask) {
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: self.webSocketConnectTimeoutNanoseconds)
+            guard !Task.isCancelled else { return }
+            guard self.webSocketTask === task else { return }
+            guard self.webSocketConnectionState == .connecting else { return }
+            self.receiveTask?.cancel()
+            self.receiveTask = nil
+            self.webSocketTask = nil
+            self.setWebSocketConnectionState(.idle)
+            task.cancel(with: .goingAway, reason: nil)
+            self.onServerNotice?("WebSocket connect timed out")
+            self.connectTimeoutTask = nil
+            self.scheduleReconnect(reason: "WebSocket connect timed out")
+        }
+    }
+
+    static func presenceLookupPath(for handle: String) -> String {
+        let escapedHandle = handle.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? handle
+        return "/v1/users/by-handle/\(escapedHandle)/presence"
+    }
+
     private func request<Response: Decodable, Body: Encodable>(
         path: String,
         method: String = "GET",
@@ -379,7 +440,11 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             do {
                 return try JSONDecoder().decode(Response.self, from: data)
             } catch {
-                throw TurboBackendError.invalidResponse
+                let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+                onServerNotice?("Invalid response for \(method) \(path): \(error.localizedDescription) body=\(body)")
+                throw TurboBackendError.invalidResponseDetails(
+                    "\(method) \(path) decode failed: \(error.localizedDescription) body=\(body)"
+                )
             }
         }
 

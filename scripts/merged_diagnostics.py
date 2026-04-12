@@ -12,6 +12,7 @@ from typing import Iterable
 
 SECTION_HEADER_RE = re.compile(r"^(STATE SNAPSHOT|STATE TIMELINE|DIAGNOSTICS)$")
 TIMELINE_RE = re.compile(r"^\[(?P<timestamp>[^\]]+)\] \[(?P<label>[^\]]+)\] (?P<body>.*)$")
+CONTACT_FIELD_RE = re.compile(r"^contact\[(?P<handle>[^\]]+)\]\.(?P<field>.+)$")
 
 
 @dataclass
@@ -173,6 +174,7 @@ def render_snapshot(report: Report) -> str:
     keys = [
         "selectedContact",
         "selectedPeerPhase",
+        "selectedPeerPhaseDetail",
         "selectedPeerRelationship",
         "selectedPeerStatus",
         "pendingAction",
@@ -187,7 +189,25 @@ def render_snapshot(report: Report) -> str:
         "backendStatus",
     ]
     details = " ".join(f"{key}={report.snapshot.get(key, 'none')}" for key in keys)
-    return f"{report.handle} deviceId={report.device_id} uploadedAt={report.uploaded_at} {details}"
+    contact_summaries = []
+    for handle, fields in sorted(parse_contact_snapshot(report.snapshot).items()):
+        contact_summaries.append(
+            f"{handle} online={fields.get('isOnline', 'none')} listState={fields.get('listState', 'none')} badge={fields.get('badgeStatus', 'none')}"
+        )
+    contact_details = "" if not contact_summaries else " contacts=[" + "; ".join(contact_summaries) + "]"
+    return f"{report.handle} deviceId={report.device_id} uploadedAt={report.uploaded_at} {details}{contact_details}"
+
+
+def parse_contact_snapshot(snapshot: dict[str, str]) -> dict[str, dict[str, str]]:
+    contacts: dict[str, dict[str, str]] = {}
+    for key, value in snapshot.items():
+        match = CONTACT_FIELD_RE.match(key)
+        if not match:
+            continue
+        handle = match.group("handle")
+        field = match.group("field")
+        contacts.setdefault(handle, {})[field] = value
+    return contacts
 
 
 def parse_device_mapping(raw_value: str) -> tuple[str, str]:
@@ -208,6 +228,7 @@ def merged_events(reports: Iterable[Report]) -> list[tuple[datetime, str]]:
 def analyze_report(report: Report) -> list[str]:
     snapshot = report.snapshot
     anomalies: list[str] = []
+    contacts = parse_contact_snapshot(snapshot)
 
     phase = snapshot.get("selectedPeerPhase", "none")
     backend_self_joined = snapshot_bool(snapshot, "backendSelfJoined")
@@ -240,6 +261,15 @@ def analyze_report(report: Report) -> list[str]:
         anomalies.append(
             f"{report.handle}: localJoinFailure={local_join_failure} systemSession={system_session}"
         )
+
+    selected_contact = snapshot.get("selectedContact", "none")
+    selected_contact_projection = contacts.get(selected_contact) if selected_contact != "none" else None
+    if phase == "idle" and selected_contact_projection is not None:
+        contact_online = snapshot_bool(selected_contact_projection, "isOnline")
+        if contact_online and "online" not in snapshot.get("selectedPeerStatus", "").lower():
+            anomalies.append(
+                f"{report.handle}: selected contact {selected_contact} is online in contact projection, but selectedPeerStatus={snapshot.get('selectedPeerStatus', 'none')}"
+            )
 
     return anomalies
 

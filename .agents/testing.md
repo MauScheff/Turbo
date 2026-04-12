@@ -41,6 +41,16 @@
 - Prefer pure tests unless the function requires `IO`.
 - Typecheck each test as it’s written.
 - Keep tests small and focused; use `labeled` for multi-assertion tests.
+- When docs describe preconditions, postconditions, or invariants, derive tests from those contracts.
+- Prefer property-based tests for core pure functions, reducers, and validators when the behavior can be stated as a reusable law.
+- Typical property targets:
+  - invariant preservation across transitions
+  - postconditions that should hold for every valid generated input
+  - boundary behavior around documented edge cases
+- If a precondition is required, test one of these explicitly:
+  - generators that only produce valid inputs, so the property checks the guaranteed postcondition/invariant space
+  - example tests showing how invalid inputs are rejected or modeled when that behavior is part of the API
+- If a function is too effectful or integration-heavy for property testing, document that and add the strongest deterministic example or I/O tests available.
 
 ## Flutter testing guidelines
 
@@ -48,4 +58,3 @@
 - Prefer unit tests for pure helpers, DTO parsing, and business rules.
 - Avoid golden tests and widget tests unless explicitly requested.
 - Keep tests fast and deterministic.
-

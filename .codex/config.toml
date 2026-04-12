@@ -1,0 +1,11 @@
+# Repo-scoped Codex overrides.
+# Keep Turbo focused on the local Unison MCP and avoid loading unrelated global MCPs here.
+
+[mcp_servers.unison]
+enabled = true
+
+[mcp_servers.posthog]
+enabled = false
+
+[mcp_servers.chrome-devtools]
+enabled = false

@@ -1,0 +1,83 @@
+{
+  "name": "duplicate_connect_request_deduplicates",
+  "baseURL": "https://beepbeep.to",
+  "participants": {
+    "a": {
+      "handle": "@avery",
+      "deviceId": "sim-scenario-avery"
+    },
+    "b": {
+      "handle": "@blake",
+      "deviceId": "sim-scenario-blake"
+    }
+  },
+  "steps": [
+    {
+      "description": "both peers open each other",
+      "actions": [
+        { "actor": "a", "type": "openPeer", "peer": "b" },
+        { "actor": "b", "type": "openPeer", "peer": "a" }
+      ]
+    },
+    {
+      "description": "duplicate connect intents still produce a single outstanding request",
+      "actions": [
+        { "actor": "a", "type": "connect", "repeatCount": 2, "repeatIntervalMilliseconds": 150 }
+      ],
+      "expectEventually": {
+        "a": {
+          "selectedHandle": "@blake",
+          "phase": "requested",
+          "isJoined": false,
+          "contacts": [
+            { "handle": "@blake", "requestRelationship": "outgoing(requestCount: 1)", "requestCount": 1 }
+          ],
+          "backend": {
+            "requestRelationship": "outgoing(requestCount: 1)"
+          }
+        },
+        "b": {
+          "selectedHandle": "@avery",
+          "phase": "incomingRequest",
+          "isJoined": false,
+          "contacts": [
+            { "handle": "@avery", "requestRelationship": "incoming(requestCount: 1)", "requestCount": 1 }
+          ],
+          "backend": {
+            "requestRelationship": "incoming(requestCount: 1)"
+          }
+        }
+      }
+    },
+    {
+      "description": "recipient joins and requester becomes peerReady",
+      "actions": [
+        { "actor": "b", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "peerReady", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "waitingForPeer", "isJoined": true }
+      }
+    },
+    {
+      "description": "requester joins and both sides become ready",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "ready", "isJoined": true, "canTransmitNow": true },
+        "b": { "selectedHandle": "@avery", "phase": "ready", "isJoined": true, "canTransmitNow": true }
+      }
+    },
+    {
+      "description": "disconnect clears both joined states",
+      "actions": [
+        { "actor": "a", "type": "disconnect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "isJoined": false, "isTransmitting": false },
+        "b": { "selectedHandle": "@avery", "isJoined": false, "isTransmitting": false }
+      }
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "name": "duplicate_transmit_stop_delivery_recovers",
+  "baseURL": "https://beepbeep.to",
+  "requiresLocalBackend": true,
+  "participants": {
+    "a": {
+      "handle": "@avery",
+      "deviceId": "sim-scenario-avery"
+    },
+    "b": {
+      "handle": "@blake",
+      "deviceId": "sim-scenario-blake"
+    }
+  },
+  "steps": [
+    {
+      "description": "both peers open each other",
+      "actions": [
+        { "actor": "a", "type": "openPeer", "peer": "b" },
+        { "actor": "b", "type": "openPeer", "peer": "a" }
+      ]
+    },
+    {
+      "description": "request propagates to recipient",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "requested", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "incomingRequest", "isJoined": false }
+      }
+    },
+    {
+      "description": "recipient joins and requester becomes peerReady",
+      "actions": [
+        { "actor": "b", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "peerReady", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "waitingForPeer", "isJoined": true }
+      }
+    },
+    {
+      "description": "both sides become ready",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "ready", "isJoined": true, "canTransmitNow": true },
+        "b": { "selectedHandle": "@avery", "phase": "ready", "isJoined": true, "canTransmitNow": true }
+      }
+    },
+    {
+      "description": "requester begins transmitting",
+      "actions": [
+        { "actor": "a", "type": "beginTransmit" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "transmitting", "isJoined": true, "isTransmitting": true },
+        "b": { "selectedHandle": "@avery", "phase": "receiving", "isJoined": true }
+      }
+    },
+    {
+      "description": "duplicated transmit-stop websocket delivery still converges to ready",
+      "actions": [
+        { "actor": "b", "type": "duplicateNextWebSocketSignals", "signalKind": "transmit-stop", "count": 1 },
+        { "actor": "a", "type": "endTransmit" }
+      ],
+      "expectEventually": {
+        "a": {
+          "selectedHandle": "@blake",
+          "phase": "ready",
+          "isJoined": true,
+          "isTransmitting": false,
+          "backend": {
+            "readiness": "ready",
+            "canTransmit": true
+          }
+        },
+        "b": {
+          "selectedHandle": "@avery",
+          "phase": "ready",
+          "isJoined": true,
+          "contacts": [
+            { "handle": "@avery", "listState": "ready", "badgeStatus": "ready" }
+          ],
+          "backend": {
+            "readiness": "ready",
+            "canTransmit": true
+          }
+        }
+      }
+    }
+  ]
+}

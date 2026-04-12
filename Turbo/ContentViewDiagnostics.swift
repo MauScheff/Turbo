@@ -3,8 +3,7 @@ import UIKit
 
 struct TurboDiagnosticsView: View {
     let report: DevSelfCheckReport?
-    let selectedSession: SelectedSessionDiagnosticsSummary
-    let contacts: [ContactDiagnosticsSummary]
+    let projection: StateMachineProjection
     let microphonePermissionStatus: String
     let needsMicrophonePermission: Bool
     let logFilePath: String?
@@ -64,22 +63,26 @@ struct TurboDiagnosticsView: View {
             }
 
             Section("Selected session") {
-                diagnosticsRow("Selected", selectedSession.selectedHandle ?? "none")
-                diagnosticsRow("Phase", selectedSession.selectedPhase)
-                diagnosticsRow("Relationship", selectedSession.relationship)
-                diagnosticsRow("Status", selectedSession.statusMessage)
-                diagnosticsRow("Can transmit", selectedSession.canTransmitNow ? "yes" : "no")
-                diagnosticsRow("Joined locally", selectedSession.isJoined ? "yes" : "no")
-                diagnosticsRow("Transmitting", selectedSession.isTransmitting ? "yes" : "no")
-                diagnosticsRow("Pending action", selectedSession.pendingAction)
-                diagnosticsRow("System session", selectedSession.systemSession)
-                diagnosticsRow("Media state", selectedSession.mediaState)
-                diagnosticsRow("Backend channel status", selectedSession.backendChannelStatus ?? "none")
-                diagnosticsRow("Backend self joined", boolText(selectedSession.backendSelfJoined))
-                diagnosticsRow("Backend peer joined", boolText(selectedSession.backendPeerJoined))
-                diagnosticsRow("Peer device connected", boolText(selectedSession.backendPeerDeviceConnected))
-                diagnosticsRow("Backend can transmit", boolText(selectedSession.backendCanTransmit))
-                diagnosticsRow("Active channel", selectedSession.activeChannelID ?? "none")
+                diagnosticsRow("Selected", projection.selectedSession.selectedHandle ?? "none")
+                diagnosticsRow("Phase", projection.selectedSession.selectedPhase)
+                diagnosticsRow("Relationship", projection.selectedSession.relationship)
+                diagnosticsRow("Status", projection.selectedSession.statusMessage)
+                diagnosticsRow("Can transmit", projection.selectedSession.canTransmitNow ? "yes" : "no")
+                diagnosticsRow("Joined locally", projection.selectedSession.isJoined ? "yes" : "no")
+                diagnosticsRow("Transmitting", projection.selectedSession.isTransmitting ? "yes" : "no")
+                diagnosticsRow("Pending action", projection.selectedSession.pendingAction)
+                diagnosticsRow("System session", projection.selectedSession.systemSession)
+                diagnosticsRow("Media state", projection.selectedSession.mediaState)
+                diagnosticsRow("Backend channel status", projection.selectedSession.backendChannelStatus ?? "none")
+                diagnosticsRow("Backend readiness", projection.selectedSession.backendReadiness ?? "none")
+                diagnosticsRow("Backend membership", projection.selectedSession.backendMembership ?? "none")
+                diagnosticsRow("Backend request relationship", projection.selectedSession.backendRequestRelationship ?? "none")
+                diagnosticsRow("Backend self joined", boolText(projection.selectedSession.backendSelfJoined))
+                diagnosticsRow("Backend peer joined", boolText(projection.selectedSession.backendPeerJoined))
+                diagnosticsRow("Peer device connected", boolText(projection.selectedSession.backendPeerDeviceConnected))
+                diagnosticsRow("Backend can transmit", boolText(projection.selectedSession.backendCanTransmit))
+                diagnosticsRow("Active channel", projection.selectedSession.activeChannelID ?? "none")
+                diagnosticsRow("WebSocket", projection.isWebSocketConnected ? "connected" : "disconnected")
             }
 
             Section("Audio") {
@@ -92,15 +95,15 @@ struct TurboDiagnosticsView: View {
                 }
             }
 
-            if !contacts.isEmpty {
+            if !projection.contacts.isEmpty {
                 Section("Contacts") {
-                    ForEach(contacts) { contact in
+                    ForEach(projection.contacts) { contact in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(contact.handle)
                                 .font(.caption.weight(.semibold))
-                            Text("listState=\(contact.listState)")
+                            Text("online=\(contact.isOnline ? "yes" : "no") listState=\(contact.listState)")
                                 .font(.caption.monospaced())
-                            Text("badge=\(contact.badgeStatus ?? "none") incoming=\(contact.hasIncomingRequest ? "yes" : "no") outgoing=\(contact.hasOutgoingRequest ? "yes" : "no") requestCount=\(contact.requestCount)")
+                            Text("badge=\(contact.badgeStatus ?? "none") relationship=\(contact.requestRelationship) incoming=\(contact.hasIncomingRequest ? "yes" : "no") outgoing=\(contact.hasOutgoingRequest ? "yes" : "no") requestCount=\(contact.requestCount)")
                                 .font(.caption2.monospaced())
                                 .foregroundStyle(.secondary)
                             Text("incomingInviteCount=\(contact.incomingInviteCount.map(String.init(describing:)) ?? "none") outgoingInviteCount=\(contact.outgoingInviteCount.map(String.init(describing:)) ?? "none")")
@@ -236,8 +239,7 @@ struct TurboDevIdentitySheet: View {
 
 struct TurboDiagnosticsSheet: View {
     let report: DevSelfCheckReport?
-    let selectedSession: SelectedSessionDiagnosticsSummary
-    let contacts: [ContactDiagnosticsSummary]
+    let projection: StateMachineProjection
     let microphonePermissionStatus: String
     let needsMicrophonePermission: Bool
     let logFilePath: String?
@@ -255,8 +257,7 @@ struct TurboDiagnosticsSheet: View {
         NavigationStack {
             TurboDiagnosticsView(
                 report: report,
-                selectedSession: selectedSession,
-                contacts: contacts,
+                projection: projection,
                 microphonePermissionStatus: microphonePermissionStatus,
                 needsMicrophonePermission: needsMicrophonePermission,
                 logFilePath: logFilePath,

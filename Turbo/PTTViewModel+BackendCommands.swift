@@ -18,6 +18,56 @@ struct ResolvedBackendJoinContact {
 }
 
 extension PTTViewModel {
+    func waitForAcceptedIncomingInviteToDisappear(
+        _ acceptedInvite: TurboInviteResponse,
+        request: BackendJoinRequest,
+        backend: BackendServices
+    ) async {
+        for attempt in 1 ... 20 {
+            do {
+                let incomingInvites = try await backend.incomingInvites()
+                let stillPending = incomingInvites.contains { $0.inviteId == acceptedInvite.inviteId }
+                if !stillPending {
+                    diagnostics.record(
+                        .backend,
+                        message: "Incoming invite acceptance became visible",
+                        metadata: [
+                            "contactId": request.contactID.uuidString,
+                            "handle": request.handle,
+                            "attempt": "\(attempt)",
+                        ]
+                    )
+                    return
+                }
+            } catch {
+                diagnostics.record(
+                    .backend,
+                    level: .error,
+                    message: "Incoming invite acceptance visibility check failed",
+                    metadata: [
+                        "contactId": request.contactID.uuidString,
+                        "handle": request.handle,
+                        "attempt": "\(attempt)",
+                        "error": error.localizedDescription,
+                    ]
+                )
+                return
+            }
+
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+
+        diagnostics.record(
+            .backend,
+            message: "Incoming invite acceptance still pending after visibility wait",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "handle": request.handle,
+                "inviteId": acceptedInvite.inviteId,
+            ]
+        )
+    }
+
     func shouldIgnoreInviteNotFoundFailure(_ error: Error) -> Bool {
         guard case let TurboBackendError.server(message) = error else { return false }
         return message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "invite not found"
@@ -25,6 +75,60 @@ extension PTTViewModel {
 
     func shouldIgnoreIncomingInviteAcceptFailure(_ error: Error) -> Bool {
         shouldIgnoreInviteNotFoundFailure(error)
+    }
+
+    func waitForInviteToDisappear(
+        inviteID: String,
+        contactID: UUID,
+        handle: String,
+        label: String,
+        fetchInvites: @escaping () async throws -> [TurboInviteResponse]
+    ) async {
+        for attempt in 1 ... 20 {
+            do {
+                let invites = try await fetchInvites()
+                let stillPresent = invites.contains { $0.inviteId == inviteID }
+                if !stillPresent {
+                    diagnostics.record(
+                        .backend,
+                        message: "\(label) became visible",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "handle": handle,
+                            "attempt": "\(attempt)",
+                            "inviteId": inviteID
+                        ]
+                    )
+                    return
+                }
+            } catch {
+                diagnostics.record(
+                    .backend,
+                    level: .error,
+                    message: "\(label) visibility check failed",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "handle": handle,
+                        "attempt": "\(attempt)",
+                        "inviteId": inviteID,
+                        "error": error.localizedDescription
+                    ]
+                )
+                return
+            }
+
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+
+        diagnostics.record(
+            .backend,
+            message: "\(label) still pending after visibility wait",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "handle": handle,
+                "inviteId": inviteID
+            ]
+        )
     }
 
     func shouldTreatBackendJoinChannelNotFoundAsRecoverable(_ error: Error) -> Bool {
@@ -54,6 +158,13 @@ extension PTTViewModel {
 
         do {
             _ = try await backend.declineInvite(inviteId: invite.inviteId)
+            await waitForInviteToDisappear(
+                inviteID: invite.inviteId,
+                contactID: contact.id,
+                handle: contact.handle,
+                label: "Incoming invite decline",
+                fetchInvites: { try await backend.incomingInvites() }
+            )
             await refreshInvites()
             await refreshChannelState(for: contact.id)
             await refreshContactSummaries()
@@ -91,6 +202,13 @@ extension PTTViewModel {
 
         do {
             _ = try await backend.cancelInvite(inviteId: invite.inviteId)
+            await waitForInviteToDisappear(
+                inviteID: invite.inviteId,
+                contactID: contact.id,
+                handle: contact.handle,
+                label: "Outgoing invite cancel",
+                fetchInvites: { try await backend.outgoingInvites() }
+            )
             await refreshInvites()
             await refreshChannelState(for: contact.id)
             await refreshContactSummaries()
@@ -116,14 +234,19 @@ extension PTTViewModel {
         createdInvite: TurboInviteResponse?,
         currentChannel: ChannelReadinessSnapshot?
     ) -> BackendJoinExecutionPlan {
+        let peerReadyForJoin = currentChannel?.membership.hasPeerMembership == true
+
         if request.relationship.isIncomingRequest {
             return .joinSession
         }
-        if currentChannel?.peerJoined == true {
+        if request.intent == .joinReadyPeer {
+            return .joinSession
+        }
+        if peerReadyForJoin {
             return .joinSession
         }
         if request.relationship.isOutgoingRequest,
-           currentChannel?.peerJoined != true {
+           !peerReadyForJoin {
             return .requestOnly
         }
         if request.outgoingInvite != nil {
@@ -140,15 +263,28 @@ extension PTTViewModel {
         backend: BackendServices
     ) async -> ChannelReadinessSnapshot? {
         guard let backendChannelId = contact.backendChannelId else {
-            return channelStateByContactID[contact.id].map(ChannelReadinessSnapshot.init(channelState:))
+            return channelStateByContactID[contact.id].map {
+                ChannelReadinessSnapshot(
+                    channelState: $0,
+                    readiness: channelReadinessByContactID[contact.id]
+                )
+            }
         }
 
         do {
-            let channelState = try await backend.channelState(channelId: backendChannelId)
+            async let channelStateTask = backend.channelState(channelId: backendChannelId)
+            async let channelReadinessTask = backend.channelReadiness(channelId: backendChannelId)
+            let channelState = try await channelStateTask
+            let channelReadiness = try? await channelReadinessTask
             backendSyncCoordinator.send(
                 .channelStateUpdated(contactID: contact.id, channelState: channelState)
             )
-            return ChannelReadinessSnapshot(channelState: channelState)
+            if let channelReadiness {
+                backendSyncCoordinator.send(
+                    .channelReadinessUpdated(contactID: contact.id, readiness: channelReadiness)
+                )
+            }
+            return ChannelReadinessSnapshot(channelState: channelState, readiness: channelReadiness)
         } catch {
             diagnostics.record(
                 .backend,
@@ -160,7 +296,12 @@ extension PTTViewModel {
                     "error": error.localizedDescription,
                 ]
             )
-            return channelStateByContactID[contact.id].map(ChannelReadinessSnapshot.init(channelState:))
+            return channelStateByContactID[contact.id].map {
+                ChannelReadinessSnapshot(
+                    channelState: $0,
+                    readiness: channelReadinessByContactID[contact.id]
+                )
+            }
         }
     }
 
@@ -197,7 +338,7 @@ extension PTTViewModel {
         updateStatusForSelectedContact()
     }
 
-    func requestBackendJoin(for contact: Contact) {
+    func requestBackendJoin(for contact: Contact, intent: BackendJoinIntent = .requestConnection) {
         guard backendServices != nil else {
             joinPTTChannel(for: contact)
             return
@@ -205,6 +346,7 @@ extension PTTViewModel {
         let request = BackendJoinRequest(
             contactID: contact.id,
             handle: contact.handle,
+            intent: intent,
             relationship: relationshipState(for: contact.id),
             existingRemoteUserID: contact.remoteUserId,
             existingBackendChannelID: contact.backendChannelId,
@@ -216,6 +358,23 @@ extension PTTViewModel {
         Task {
             await backendCommandCoordinator.handle(.joinRequested(request))
         }
+    }
+
+    func reassertBackendJoin(for contact: Contact) async {
+        guard backendServices != nil else { return }
+        let request = BackendJoinRequest(
+            contactID: contact.id,
+            handle: contact.handle,
+            intent: .joinReadyPeer,
+            relationship: relationshipState(for: contact.id),
+            existingRemoteUserID: contact.remoteUserId,
+            existingBackendChannelID: contact.backendChannelId,
+            incomingInvite: incomingInviteByContactID[contact.id],
+            outgoingInvite: outgoingInviteByContactID[contact.id],
+            requestCooldownRemaining: requestCooldownRemaining(for: contact.id),
+            usesLocalHTTPBackend: usesLocalHTTPBackend
+        )
+        await backendCommandCoordinator.handle(.joinRequested(request))
     }
 
     private func applyInviteMetadata(_ invite: TurboInviteResponse, to contact: inout Contact) {
@@ -251,10 +410,20 @@ extension PTTViewModel {
         do {
             let remoteUser = try await backend.lookupUser(handle: handle)
             let contactID = ensureContactExists(handle: handle, remoteUserId: remoteUser.userId, channelId: "")
+            // Make the new peer authoritative before any further awaits so background sync
+            // cannot prune the selection candidate out from under the open-peer flow.
             trackContact(contactID)
             if let contact = contacts.first(where: { $0.id == contactID }) {
                 selectContact(contact)
             }
+            if let presence = try? await backend.lookupPresence(handle: handle) {
+                updateContact(contactID) { contact in
+                    contact.isOnline = presence.isOnline
+                    contact.remoteUserId = presence.userId
+                }
+            }
+            await refreshContactSummaries()
+            await refreshInvites()
             backendCommandCoordinator.send(.operationFinished)
             diagnostics.record(.state, message: "Opened peer handle", metadata: ["handle": handle])
         } catch {
@@ -347,6 +516,7 @@ extension PTTViewModel {
         }
 
         if request.relationship.isIncomingRequest,
+           request.relationship.isOutgoingRequest,
            let outgoingInvite = try await resolveOutgoingInvite(for: request, backend: backend) {
             do {
                 _ = try await backend.cancelInvite(inviteId: outgoingInvite.inviteId)
@@ -375,7 +545,12 @@ extension PTTViewModel {
 
         if let invite = try await resolveIncomingInvite(for: request, backend: backend) {
             do {
-                _ = try await backend.acceptInvite(inviteId: invite.inviteId)
+                let acceptedInvite = try await backend.acceptInvite(inviteId: invite.inviteId)
+                await waitForAcceptedIncomingInviteToDisappear(
+                    acceptedInvite,
+                    request: request,
+                    backend: backend
+                )
             } catch {
                 guard shouldIgnoreIncomingInviteAcceptFailure(error) else {
                     throw error
@@ -393,9 +568,21 @@ extension PTTViewModel {
                 message: "Proceeding without incoming invite metadata",
                 metadata: ["contactId": request.contactID.uuidString, "handle": request.handle]
             )
-        } else if let invite = try await resolveOutgoingInvite(for: request, backend: backend) {
+        }
+
+        if contact.backendChannelId == nil || request.relationship.isIncomingRequest {
+            let channel = try await backend.directChannel(otherHandle: request.handle)
+            applyDirectChannelMetadata(channel, currentUserID: backend.currentUserID, to: &contact)
+        }
+
+        let currentChannel = await liveJoinChannelSnapshot(for: contact, backend: backend)
+
+        if let invite = try await resolveOutgoingInvite(for: request, backend: backend) {
             applyInviteMetadata(invite, to: &contact)
-        } else if request.requestCooldownRemaining == nil {
+        } else if !request.relationship.isIncomingRequest,
+                  request.intent != .joinReadyPeer,
+                  currentChannel?.membership.hasPeerMembership != true,
+                  request.requestCooldownRemaining == nil {
             let invite = try await backend.createInvite(otherHandle: request.handle)
             createdInvite = invite
             applyInviteMetadata(invite, to: &contact)
@@ -410,13 +597,7 @@ extension PTTViewModel {
             }
         }
 
-        if contact.backendChannelId == nil || request.relationship.isIncomingRequest {
-            let channel = try await backend.directChannel(otherHandle: request.handle)
-            applyDirectChannelMetadata(channel, currentUserID: backend.currentUserID, to: &contact)
-        }
-
         contacts[index] = contact
-        let currentChannel = await liveJoinChannelSnapshot(for: contact, backend: backend)
         return ResolvedBackendJoinContact(
             contact: contact,
             executionPlan: backendJoinExecutionPlan(
@@ -489,6 +670,7 @@ extension PTTViewModel {
         return BackendJoinRequest(
             contactID: refreshedContact.id,
             handle: refreshedContact.handle,
+            intent: request.intent,
             relationship: relationshipState(for: refreshedContact.id),
             existingRemoteUserID: refreshedContact.remoteUserId,
             existingBackendChannelID: refreshedContact.backendChannelId,
@@ -510,7 +692,9 @@ extension PTTViewModel {
 
         do {
             _ = try await backend.joinChannel(channelId: backendChannelId)
-            return contact
+            if try await waitForBackendJoinVisibility(for: contact, request: request, backend: backend) {
+                return contact
+            }
         } catch {
             guard shouldTreatBackendJoinChannelNotFoundAsRecoverable(error) else {
                 throw error
@@ -531,8 +715,31 @@ extension PTTViewModel {
                 throw TurboBackendError.invalidResponse
             }
             _ = try await backend.joinChannel(channelId: refreshedChannelId)
+            guard try await waitForBackendJoinVisibility(for: refreshedContact, request: request, backend: backend) else {
+                throw TurboBackendError.server("backend join visibility timed out")
+            }
             return refreshedContact
         }
+
+        diagnostics.record(
+            .backend,
+            message: "Retrying backend join after stale visibility",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "handle": request.handle,
+                "channelId": backendChannelId,
+            ]
+        )
+
+        let refreshedContact = try await refreshJoinChannelMetadata(for: contact, request: request, backend: backend)
+        guard let refreshedChannelId = refreshedContact.backendChannelId else {
+            throw TurboBackendError.invalidResponse
+        }
+        _ = try await backend.joinChannel(channelId: refreshedChannelId)
+        guard try await waitForBackendJoinVisibility(for: refreshedContact, request: request, backend: backend) else {
+            throw TurboBackendError.server("backend join visibility timed out")
+        }
+        return refreshedContact
     }
 
     private func refreshBackendJoinVisibility(for contactID: UUID) async {
@@ -540,6 +747,49 @@ extension PTTViewModel {
         await refreshContactSummaries()
         await refreshInvites()
         updateStatusForSelectedContact()
+    }
+
+    private func waitForBackendJoinVisibility(
+        for contact: Contact,
+        request: BackendJoinRequest,
+        backend: BackendServices
+    ) async throws -> Bool {
+        guard let backendChannelId = contact.backendChannelId else {
+            throw TurboBackendError.invalidResponse
+        }
+
+        for attempt in 1...20 {
+            let channelState = try await backend.channelState(channelId: backendChannelId)
+            backendSyncCoordinator.send(.channelStateUpdated(contactID: contact.id, channelState: channelState))
+            if channelState.membership.hasLocalMembership {
+                if attempt > 1 {
+                    diagnostics.record(
+                        .backend,
+                        message: "Backend join visibility converged after retry",
+                        metadata: [
+                            "contactId": request.contactID.uuidString,
+                            "handle": request.handle,
+                            "attempt": "\(attempt)",
+                            "status": channelState.status,
+                        ]
+                    )
+                }
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+
+        diagnostics.record(
+            .backend,
+            level: .error,
+            message: "Backend join visibility timed out",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "handle": request.handle,
+                "channelId": backendChannelId,
+            ]
+        )
+        return false
     }
 
     private func executeBackendJoin(_ request: BackendJoinRequest) async throws {

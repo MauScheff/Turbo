@@ -15,6 +15,7 @@ final class BackendRuntimeState {
     var isReady: Bool = false
     var mode: String = "unknown"
     var trackedContactIDs: Set<UUID> = []
+    var transportFaults = TransportFaultRuntimeState()
 
     var hasClient: Bool {
         client != nil
@@ -64,6 +65,151 @@ final class BackendRuntimeState {
 
     func clearTrackedContacts() {
         trackedContactIDs = []
+    }
+}
+
+enum TransportFaultHTTPRoute: String, CaseIterable {
+    case contactSummaries = "contact-summaries"
+    case incomingInvites = "incoming-invites"
+    case outgoingInvites = "outgoing-invites"
+    case channelState = "channel-state"
+    case channelReadiness = "channel-readiness"
+}
+
+struct TransportFaultSignalDeliveryPlan: Equatable {
+    let delayMilliseconds: Int
+    let duplicateDeliveries: Int
+    let shouldDrop: Bool
+}
+
+enum TransportFaultWebSocketReorderResult {
+    case deliver([TurboSignalEnvelope])
+    case buffered
+}
+
+final class TransportFaultRuntimeState {
+    private struct DelayRule: Equatable {
+        let milliseconds: Int
+        var remainingMatches: Int
+    }
+
+    private struct WebSocketReorderRule {
+        let kind: TurboSignalKind?
+        let count: Int
+        var buffered: [TurboSignalEnvelope] = []
+    }
+
+    private var httpDelayRules: [TransportFaultHTTPRoute: DelayRule] = [:]
+    private var webSocketDelayRules: [TurboSignalKind: DelayRule] = [:]
+    private var webSocketDropCounts: [TurboSignalKind: Int] = [:]
+    private var webSocketDuplicateCounts: [TurboSignalKind: Int] = [:]
+    private var webSocketReorderRule: WebSocketReorderRule?
+
+    func reset() {
+        httpDelayRules = [:]
+        webSocketDelayRules = [:]
+        webSocketDropCounts = [:]
+        webSocketDuplicateCounts = [:]
+        webSocketReorderRule = nil
+    }
+
+    func setHTTPDelay(route: TransportFaultHTTPRoute, milliseconds: Int, count: Int) {
+        precondition(milliseconds >= 0, "HTTP delay must be non-negative")
+        precondition(count >= 1, "HTTP delay count must be at least 1")
+        httpDelayRules[route] = DelayRule(milliseconds: milliseconds, remainingMatches: count)
+    }
+
+    func consumeHTTPDelay(for route: TransportFaultHTTPRoute) -> Int {
+        consumeDelay(from: &httpDelayRules, key: route)
+    }
+
+    func setWebSocketSignalDelay(kind: TurboSignalKind, milliseconds: Int, count: Int) {
+        precondition(milliseconds >= 0, "WebSocket signal delay must be non-negative")
+        precondition(count >= 1, "WebSocket signal delay count must be at least 1")
+        webSocketDelayRules[kind] = DelayRule(milliseconds: milliseconds, remainingMatches: count)
+    }
+
+    func dropNextWebSocketSignals(kind: TurboSignalKind, count: Int) {
+        precondition(count >= 1, "Dropped signal count must be at least 1")
+        webSocketDropCounts[kind] = count
+    }
+
+    func duplicateNextWebSocketSignals(kind: TurboSignalKind, count: Int) {
+        precondition(count >= 1, "Duplicated signal count must be at least 1")
+        webSocketDuplicateCounts[kind] = count
+    }
+
+    func reorderNextWebSocketSignals(kind: TurboSignalKind?, count: Int) {
+        precondition(count >= 2, "Reordered signal count must be at least 2")
+        webSocketReorderRule = WebSocketReorderRule(kind: kind, count: count)
+    }
+
+    func consumeWebSocketReorderResult(for envelope: TurboSignalEnvelope) -> TransportFaultWebSocketReorderResult {
+        guard var rule = webSocketReorderRule else {
+            return .deliver([envelope])
+        }
+
+        if let kind = rule.kind, envelope.type != kind {
+            return .deliver([envelope])
+        }
+
+        rule.buffered.append(envelope)
+        if rule.buffered.count < rule.count {
+            webSocketReorderRule = rule
+            return .buffered
+        }
+
+        webSocketReorderRule = nil
+        return .deliver(rule.buffered.reversed())
+    }
+
+    func consumeWebSocketSignalDeliveryPlan(for kind: TurboSignalKind) -> TransportFaultSignalDeliveryPlan {
+        if consumeCount(from: &webSocketDropCounts, key: kind) {
+            return TransportFaultSignalDeliveryPlan(
+                delayMilliseconds: 0,
+                duplicateDeliveries: 0,
+                shouldDrop: true
+            )
+        }
+
+        let delayMilliseconds = consumeDelay(from: &webSocketDelayRules, key: kind)
+        let duplicateDeliveries = consumeCount(from: &webSocketDuplicateCounts, key: kind) ? 1 : 0
+
+        return TransportFaultSignalDeliveryPlan(
+            delayMilliseconds: delayMilliseconds,
+            duplicateDeliveries: duplicateDeliveries,
+            shouldDrop: false
+        )
+    }
+
+    private func consumeDelay<Key: Hashable>(
+        from rules: inout [Key: DelayRule],
+        key: Key
+    ) -> Int {
+        guard var rule = rules[key] else { return 0 }
+        let milliseconds = rule.milliseconds
+        rule.remainingMatches -= 1
+        if rule.remainingMatches <= 0 {
+            rules.removeValue(forKey: key)
+        } else {
+            rules[key] = rule
+        }
+        return milliseconds
+    }
+
+    private func consumeCount<Key: Hashable>(
+        from counts: inout [Key: Int],
+        key: Key
+    ) -> Bool {
+        guard let remaining = counts[key], remaining > 0 else {
+            return false
+        }
+        if remaining == 1 {
+            counts.removeValue(forKey: key)
+        } else {
+            counts[key] = remaining - 1
+        }
+        return true
     }
 }
 
@@ -415,6 +561,10 @@ struct BackendServices {
         try await client.lookupUser(handle: handle)
     }
 
+    func lookupPresence(handle: String) async throws -> TurboUserPresenceResponse {
+        try await client.lookupPresence(handle: handle)
+    }
+
     func contactSummaries() async throws -> [TurboContactSummaryResponse] {
         try await client.contactSummaries()
     }
@@ -433,6 +583,10 @@ struct BackendServices {
 
     func channelState(channelId: String) async throws -> TurboChannelStateResponse {
         try await client.channelState(channelId: channelId)
+    }
+
+    func channelReadiness(channelId: String) async throws -> TurboChannelReadinessResponse {
+        try await client.channelReadiness(channelId: channelId)
     }
 
     func createInvite(otherHandle: String) async throws -> TurboInviteResponse {
@@ -477,6 +631,18 @@ struct BackendServices {
 
     func connectWebSocket() {
         client.connectWebSocket()
+    }
+
+    func disconnectWebSocket() {
+        client.disconnectWebSocket()
+    }
+
+    func suspendWebSocket() {
+        client.suspendWebSocket()
+    }
+
+    func resumeWebSocket() {
+        client.resumeWebSocket()
     }
 
     func ensureWebSocketConnected() {

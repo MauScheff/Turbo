@@ -15,9 +15,9 @@ extension PTTViewModel {
 
     func shouldRecreateMediaSession(connectionState: MediaConnectionState) -> Bool {
         switch connectionState {
-        case .closed:
+        case .closed, .failed:
             return true
-        case .idle, .preparing, .connected, .failed:
+        case .idle, .preparing, .connected:
             return false
         }
     }
@@ -251,11 +251,13 @@ extension PTTViewModel {
 
         do {
             try await backend.waitForWebSocketConnection()
+            configureOutgoingAudioRoute(target: target)
             await ensureMediaSession(
                 for: target.contactID,
                 activationMode: .systemActivated,
                 startupMode: .interactive
             )
+            configureOutgoingAudioRoute(target: target)
             try await mediaServices.session()?.startSendingAudio()
             try await backend.sendSignal(
                 TurboSignalEnvelope(
@@ -287,6 +289,19 @@ extension PTTViewModel {
         applyPreferredAudioOutputRoute(to: audioSession)
         let activeSystemChannelUUID = pttCoordinator.state.systemChannelUUID
         let activeTarget = activeSystemChannelUUID.flatMap(activeTransmitTarget(for:))
+        if let activeTarget,
+           audioSession.category != .playAndRecord {
+            diagnostics.record(
+                .media,
+                message: "Continuing system transmit activation from initial audio session category",
+                metadata: [
+                    "contactId": activeTarget.contactID.uuidString,
+                    "channelUUID": activeSystemChannelUUID?.uuidString ?? "none",
+                    "category": audioSession.category.rawValue,
+                    "mode": audioSession.mode.rawValue,
+                ]
+            )
+        }
         let pendingWake = pttWakeRuntime.pendingIncomingPush
         if let wake = pendingWake {
             pttWakeRuntime.replacePlaybackFallbackTask(for: wake.contactID, with: nil)
@@ -335,6 +350,26 @@ extension PTTViewModel {
                     metadata: ["contactId": contactID.uuidString]
                 )
             }
+        }
+
+        if activeTarget == nil,
+           pendingWake == nil,
+           let activeSystemChannelUUID,
+           let receiveContactID = contactId(for: activeSystemChannelUUID),
+           remoteTransmittingContactIDs.contains(receiveContactID) {
+            diagnostics.record(
+                .media,
+                message: "Preparing receive media session after PTT audio activation",
+                metadata: [
+                    "contactId": receiveContactID.uuidString,
+                    "channelUUID": activeSystemChannelUUID.uuidString
+                ]
+            )
+            await ensureMediaSession(
+                for: receiveContactID,
+                activationMode: .systemActivated,
+                startupMode: .playbackOnly
+            )
         }
 
         if let activeSystemChannelUUID,
@@ -470,6 +505,12 @@ extension PTTViewModel {
         guard let backend = backendServices else {
             mediaServices.replaceSendAudioChunk(nil)
             mediaServices.session()?.updateSendAudioChunk(nil)
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Cleared outgoing audio transport because backend services are unavailable",
+                metadata: ["contactId": target.contactID.uuidString, "channelId": target.channelID]
+            )
             return
         }
 
@@ -493,6 +534,15 @@ extension PTTViewModel {
         }
         mediaServices.replaceSendAudioChunk(sendAudioChunk)
         mediaServices.session()?.updateSendAudioChunk(sendAudioChunk)
+        diagnostics.record(
+            .media,
+            message: "Configured outgoing audio transport",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "deviceId": target.deviceID
+            ]
+        )
     }
 
     private func performStopTransmit(_ target: TransmitTarget) async {

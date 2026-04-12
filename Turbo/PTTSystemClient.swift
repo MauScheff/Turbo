@@ -188,6 +188,7 @@ final class SimulatorPTTSystemClient: PTTSystemClientProtocol {
     private var callbacks: PTTSystemClientCallbacks?
     private var activeChannelUUID: UUID?
     private var isTransmitting: Bool = false
+    private let audioSession = AVAudioSession.sharedInstance()
 
     var isReady: Bool {
         callbacks != nil
@@ -244,7 +245,9 @@ final class SimulatorPTTSystemClient: PTTSystemClientProtocol {
         }
         isTransmitting = true
         Task { @MainActor in
+            try? audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
             callbacks.didBeginTransmitting(channelUUID, "simulator")
+            callbacks.didActivateAudioSession(audioSession)
         }
     }
 
@@ -260,6 +263,7 @@ final class SimulatorPTTSystemClient: PTTSystemClientProtocol {
         isTransmitting = false
         Task { @MainActor in
             callbacks.didEndTransmitting(channelUUID, "simulator")
+            callbacks.didDeactivateAudioSession(audioSession)
         }
     }
 

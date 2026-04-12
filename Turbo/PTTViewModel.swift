@@ -69,6 +69,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var remoteTransmittingContactIDs: Set<UUID> = []
     var remoteAudioSilenceTasks: [UUID: Task<Void, Never>] = [:]
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
+    var automaticDiagnosticsPublishEnabled: Bool = true
     var microphonePermission: AVAudioApplication.recordPermission = AVAudioApplication.shared.recordPermission
     var audioOutputPreference: AudioOutputPreference = .loadStored()
 
@@ -159,6 +160,60 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func trackContact(_ contactID: UUID) {
         backendRuntime.track(contactID: contactID)
+    }
+
+    func resetTransportFaults() {
+        backendRuntime.transportFaults.reset()
+        diagnostics.record(.backend, message: "Reset transport fault injection state")
+    }
+
+    func setHTTPTransportDelay(route: TransportFaultHTTPRoute, milliseconds: Int, count: Int) {
+        backendRuntime.transportFaults.setHTTPDelay(route: route, milliseconds: milliseconds, count: count)
+        diagnostics.record(
+            .backend,
+            message: "Configured HTTP transport delay",
+            metadata: ["route": route.rawValue, "milliseconds": "\(milliseconds)", "count": "\(count)"]
+        )
+    }
+
+    func setIncomingWebSocketSignalDelay(kind: TurboSignalKind, milliseconds: Int, count: Int) {
+        backendRuntime.transportFaults.setWebSocketSignalDelay(
+            kind: kind,
+            milliseconds: milliseconds,
+            count: count
+        )
+        diagnostics.record(
+            .websocket,
+            message: "Configured websocket signal delay",
+            metadata: ["type": kind.rawValue, "milliseconds": "\(milliseconds)", "count": "\(count)"]
+        )
+    }
+
+    func dropNextIncomingWebSocketSignals(kind: TurboSignalKind, count: Int) {
+        backendRuntime.transportFaults.dropNextWebSocketSignals(kind: kind, count: count)
+        diagnostics.record(
+            .websocket,
+            message: "Configured websocket signal drop",
+            metadata: ["type": kind.rawValue, "count": "\(count)"]
+        )
+    }
+
+    func duplicateNextIncomingWebSocketSignals(kind: TurboSignalKind, count: Int) {
+        backendRuntime.transportFaults.duplicateNextWebSocketSignals(kind: kind, count: count)
+        diagnostics.record(
+            .websocket,
+            message: "Configured websocket signal duplication",
+            metadata: ["type": kind.rawValue, "count": "\(count)"]
+        )
+    }
+
+    func reorderNextIncomingWebSocketSignals(kind: TurboSignalKind?, count: Int) {
+        backendRuntime.transportFaults.reorderNextWebSocketSignals(kind: kind, count: count)
+        diagnostics.record(
+            .websocket,
+            message: "Configured websocket signal reorder",
+            metadata: ["type": kind?.rawValue ?? "any", "count": "\(count)"]
+        )
     }
 
     func cancelPendingTransmitWork() {
@@ -338,8 +393,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     var selectedSessionDiagnosticsSummary: SelectedSessionDiagnosticsSummary {
         let selectedState: SelectedPeerState
+        let selectedChannelProjection: ChannelReadinessSnapshot?
         if let selectedContactId {
             selectedState = selectedPeerState(for: selectedContactId)
+            selectedChannelProjection = self.selectedChannelSnapshot(for: selectedContactId)
         } else {
             selectedState = SelectedPeerState(
                 relationship: .none,
@@ -347,11 +404,13 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                 statusMessage: "Ready to connect",
                 canTransmitNow: false
             )
+            selectedChannelProjection = nil
         }
 
         return SelectedSessionDiagnosticsSummary(
             selectedHandle: selectedContact?.handle,
             selectedPhase: String(describing: selectedState.phase),
+            selectedPhaseDetail: String(describing: selectedState.detail),
             relationship: String(describing: selectedState.relationship),
             statusMessage: selectedState.statusMessage,
             canTransmitNow: selectedState.canTransmitNow,
@@ -361,11 +420,14 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             pendingAction: String(describing: sessionCoordinator.pendingAction),
             systemSession: String(describing: systemSessionState),
             mediaState: String(describing: mediaRuntime.connectionState),
-            backendChannelStatus: selectedChannelState?.status,
-            backendSelfJoined: selectedChannelState?.selfJoined,
-            backendPeerJoined: selectedChannelState?.peerJoined,
-            backendPeerDeviceConnected: selectedChannelState?.peerDeviceConnected,
-            backendCanTransmit: selectedChannelState?.canTransmit
+            backendChannelStatus: selectedChannelProjection?.status?.rawValue,
+            backendReadiness: selectedChannelProjection?.readinessStatus?.kind,
+            backendMembership: selectedChannelProjection.map { String(describing: $0.membership) },
+            backendRequestRelationship: selectedChannelProjection.map { String(describing: $0.requestRelationship) },
+            backendSelfJoined: selectedChannelProjection.map { $0.membership.hasLocalMembership },
+            backendPeerJoined: selectedChannelProjection.map { $0.membership.hasPeerMembership },
+            backendPeerDeviceConnected: selectedChannelProjection.map { $0.membership.peerDeviceConnected },
+            backendCanTransmit: selectedChannelProjection.map(\.canTransmit)
         )
     }
 
@@ -377,23 +439,37 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                 let summary = contactSummaryByContactID[contact.id]
                 return ContactDiagnosticsSummary(
                     handle: contact.handle,
+                    isOnline: summary?.isOnline ?? contact.isOnline,
                     listState: listConversationState(for: contact.id).rawValue,
-                    badgeStatus: summary?.badgeStatus,
-                    hasIncomingRequest: summary?.hasIncomingRequest ?? false,
-                    hasOutgoingRequest: summary?.hasOutgoingRequest ?? false,
-                    requestCount: summary?.requestCount ?? 0,
+                    badgeStatus: summary?.badgeKind,
+                    requestRelationship: String(describing: summary?.requestRelationship ?? .none),
+                    hasIncomingRequest: summary?.requestRelationship.hasIncomingRequest ?? false,
+                    hasOutgoingRequest: summary?.requestRelationship.hasOutgoingRequest ?? false,
+                    requestCount: summary?.requestRelationship.requestCount ?? 0,
                     incomingInviteCount: incomingInviteByContactID[contact.id]?.requestCount,
                     outgoingInviteCount: outgoingInviteByContactID[contact.id]?.requestCount
                 )
             }
     }
 
+    var stateMachineProjection: StateMachineProjection {
+        StateMachineProjection(
+            selectedSession: selectedSessionDiagnosticsSummary,
+            contacts: contactDiagnosticsSummaries,
+            isWebSocketConnected: backendRuntime.isWebSocketConnected,
+            statusMessage: statusMessage,
+            backendStatusMessage: backendStatusMessage
+        )
+    }
+
     var diagnosticsStateFields: [String: String] {
-        let selectedSession = selectedSessionDiagnosticsSummary
+        let projection = stateMachineProjection
+        let selectedSession = projection.selectedSession
         return [
             "identity": currentDevUserHandle,
             "selectedContact": selectedContact?.handle ?? "none",
             "selectedPeerPhase": selectedSession.selectedPhase,
+            "selectedPeerPhaseDetail": selectedSession.selectedPhaseDetail,
             "selectedPeerRelationship": selectedSession.relationship,
             "selectedPeerStatus": selectedSession.statusMessage,
             "selectedPeerCanTransmit": String(selectedSession.canTransmitNow),
@@ -415,6 +491,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "websocket": backendRuntime.isWebSocketConnected ? "connected" : "disconnected",
             "mediaState": String(describing: mediaRuntime.connectionState),
             "backendChannelStatus": selectedSession.backendChannelStatus ?? "none",
+            "backendReadiness": selectedSession.backendReadiness ?? "none",
+            "backendMembership": selectedSession.backendMembership ?? "none",
+            "backendRequestRelationship": selectedSession.backendRequestRelationship ?? "none",
             "backendSelfJoined": selectedSession.backendSelfJoined.map(String.init(describing:)) ?? "none",
             "backendPeerJoined": selectedSession.backendPeerJoined.map(String.init(describing:)) ?? "none",
             "backendPeerDeviceConnected": selectedSession.backendPeerDeviceConnected.map(String.init(describing:)) ?? "none",
@@ -425,12 +504,20 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     var diagnosticsSnapshot: String {
-        let contactLines =
-            contactDiagnosticsSummaries.map { summary in
-                "contact=\(summary.handle) listState=\(summary.listState) badge=\(summary.badgeStatus ?? "none") incoming=\(summary.hasIncomingRequest) outgoing=\(summary.hasOutgoingRequest) requestCount=\(summary.requestCount) incomingInviteCount=\(summary.incomingInviteCount.map(String.init(describing:)) ?? "none") outgoingInviteCount=\(summary.outgoingInviteCount.map(String.init(describing:)) ?? "none")"
-            }
-
         let coreLines = diagnosticsStateFields.keys.sorted().map { "\($0)=\(diagnosticsStateFields[$0] ?? "")" }
+        let contactLines = stateMachineProjection.contacts.flatMap { summary in
+            [
+                "contact[\(summary.handle)].isOnline=\(summary.isOnline)",
+                "contact[\(summary.handle)].listState=\(summary.listState)",
+                "contact[\(summary.handle)].badgeStatus=\(summary.badgeStatus ?? "none")",
+                "contact[\(summary.handle)].requestRelationship=\(summary.requestRelationship)",
+                "contact[\(summary.handle)].hasIncomingRequest=\(summary.hasIncomingRequest)",
+                "contact[\(summary.handle)].hasOutgoingRequest=\(summary.hasOutgoingRequest)",
+                "contact[\(summary.handle)].requestCount=\(summary.requestCount)",
+                "contact[\(summary.handle)].incomingInviteCount=\(summary.incomingInviteCount.map(String.init(describing:)) ?? "none")",
+                "contact[\(summary.handle)].outgoingInviteCount=\(summary.outgoingInviteCount.map(String.init(describing:)) ?? "none")",
+            ]
+        }
         return (coreLines + contactLines).joined(separator: "\n")
     }
 
@@ -445,6 +532,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func scheduleAutomaticDiagnosticsPublish(trigger: String) {
 #if DEBUG
+        guard automaticDiagnosticsPublishEnabled else { return }
         guard backendServices != nil, backendConfig != nil else { return }
         diagnosticsAutoPublishTask?.cancel()
         diagnosticsAutoPublishTask = Task { @MainActor [weak self] in

@@ -162,14 +162,14 @@ extension PTTViewModel {
         captureDiagnosticsState("session-disconnect:ptt-leave-requested")
     }
 
-    func performConnect(to contact: Contact) {
+    func performConnect(to contact: Contact, intent: BackendJoinIntent) {
         if usesLocalHTTPBackend {
             if isJoined, activeChannelId == contact.id {
                 return
             }
             sessionCoordinator.queueConnect(contactID: contact.id)
             captureDiagnosticsState("session-connect:queued-local")
-            requestBackendJoin(for: contact)
+            requestBackendJoin(for: contact, intent: intent)
             return
         }
 
@@ -188,7 +188,7 @@ extension PTTViewModel {
             statusMessage = "Connecting..."
             captureDiagnosticsState("session-connect:switching-channel")
         } else {
-            requestBackendJoin(for: contact)
+            requestBackendJoin(for: contact, intent: intent)
         }
     }
 
@@ -212,10 +212,14 @@ extension PTTViewModel {
 
     func runSelectedPeerEffect(_ effect: SelectedPeerEffect) async {
         switch effect {
-        case .connect(let contactID):
+        case .requestConnection(let contactID):
             guard let contact = contacts.first(where: { $0.id == contactID }) else { return }
-            captureDiagnosticsState("selected-peer-effect:connect")
-            performConnect(to: contact)
+            captureDiagnosticsState("selected-peer-effect:request-connection")
+            performConnect(to: contact, intent: .requestConnection)
+        case .joinReadyPeer(let contactID):
+            guard let contact = contacts.first(where: { $0.id == contactID }) else { return }
+            captureDiagnosticsState("selected-peer-effect:join-ready-peer")
+            performConnect(to: contact, intent: .joinReadyPeer)
         case .disconnect:
             captureDiagnosticsState("selected-peer-effect:disconnect")
             performDisconnect()

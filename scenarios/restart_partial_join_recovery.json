@@ -1,0 +1,104 @@
+{
+  "name": "restart_partial_join_recovery",
+  "baseURL": "https://beepbeep.to",
+  "participants": {
+    "a": {
+      "handle": "@avery",
+      "deviceId": "sim-scenario-avery"
+    },
+    "b": {
+      "handle": "@blake",
+      "deviceId": "sim-scenario-blake"
+    }
+  },
+  "steps": [
+    {
+      "description": "both peers open each other",
+      "actions": [
+        { "actor": "a", "type": "openPeer", "peer": "b" },
+        { "actor": "b", "type": "openPeer", "peer": "a" }
+      ]
+    },
+    {
+      "description": "request propagates to recipient",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "requested", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "incomingRequest", "isJoined": false }
+      }
+    },
+    {
+      "description": "recipient joins and requester becomes peerReady",
+      "actions": [
+        { "actor": "b", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": {
+          "selectedHandle": "@blake",
+          "phase": "peerReady",
+          "isJoined": false,
+          "backend": {
+            "readiness": "waiting-for-self",
+            "selfJoined": false,
+            "peerJoined": true,
+            "peerDeviceConnected": true
+          }
+        },
+        "b": { "selectedHandle": "@avery", "phase": "waitingForPeer", "isJoined": true }
+      }
+    },
+    {
+      "description": "requester restarts during the partial join window and reopens the peer",
+      "actions": [
+        { "actor": "a", "type": "restartApp" },
+        { "actor": "a", "type": "openPeer", "peer": "b" }
+      ]
+    },
+    {
+      "description": "refresh and reconciliation restore peerReady after restart",
+      "actions": [
+        { "actor": "a", "type": "refreshContactSummaries" },
+        { "actor": "a", "type": "refreshInvites" },
+        { "actor": "a", "type": "refreshChannelState" },
+        { "actor": "a", "type": "reconcileSelectedSession" },
+        { "actor": "b", "type": "refreshContactSummaries" },
+        { "actor": "b", "type": "refreshInvites" },
+        { "actor": "b", "type": "refreshChannelState" },
+        { "actor": "b", "type": "reconcileSelectedSession" }
+      ],
+      "expectEventually": {
+        "a": {
+          "selectedHandle": "@blake",
+          "phase": "peerReady",
+          "isJoined": false,
+          "contacts": [
+            { "handle": "@blake", "listState": "waiting-for-peer", "badgeStatus": "waiting-for-peer" }
+          ],
+          "backend": {
+            "readiness": "waiting-for-self",
+            "selfJoined": false,
+            "peerJoined": true,
+            "peerDeviceConnected": true
+          }
+        },
+        "b": {
+          "selectedHandle": "@avery",
+          "phase": "waitingForPeer",
+          "isJoined": true
+        }
+      }
+    },
+    {
+      "description": "requester finishes the second join and both sides converge to ready",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "ready", "isJoined": true, "canTransmitNow": true },
+        "b": { "selectedHandle": "@avery", "phase": "ready", "isJoined": true, "canTransmitNow": true }
+      }
+    }
+  ]
+}

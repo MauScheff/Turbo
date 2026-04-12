@@ -6,9 +6,15 @@ enum BackendCommandOperation: Equatable {
     case leave(contactID: UUID)
 }
 
+enum BackendJoinIntent: Equatable {
+    case requestConnection
+    case joinReadyPeer
+}
+
 struct BackendJoinRequest: Equatable {
     let contactID: UUID
     let handle: String
+    let intent: BackendJoinIntent
     let relationship: PairRelationshipState
     let existingRemoteUserID: String?
     let existingBackendChannelID: String?

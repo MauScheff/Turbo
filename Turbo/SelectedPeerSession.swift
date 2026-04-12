@@ -43,7 +43,8 @@ enum SelectedPeerEvent: Equatable {
 }
 
 enum SelectedPeerEffect: Equatable {
-    case connect(contactID: UUID)
+    case requestConnection(contactID: UUID)
+    case joinReadyPeer(contactID: UUID)
     case disconnect(contactID: UUID)
     case restoreLocalSession(contactID: UUID)
     case teardownLocalSession(contactID: UUID)
@@ -143,8 +144,10 @@ enum SelectedPeerReducer {
         guard let contactID = state.selection?.contactID else { return nil }
 
         switch state.selectedPeerState.phase {
-        case .idle, .requested, .incomingRequest, .peerReady:
-            return .connect(contactID: contactID)
+        case .idle, .requested, .incomingRequest:
+            return .requestConnection(contactID: contactID)
+        case .peerReady:
+            return .joinReadyPeer(contactID: contactID)
         case .wakeReady, .waitingForPeer, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
             return nil
         }

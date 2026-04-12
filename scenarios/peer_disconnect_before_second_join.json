@@ -1,0 +1,67 @@
+{
+  "name": "peer_disconnect_before_second_join",
+  "baseURL": "https://beepbeep.to",
+  "participants": {
+    "a": {
+      "handle": "@avery",
+      "deviceId": "sim-scenario-avery"
+    },
+    "b": {
+      "handle": "@blake",
+      "deviceId": "sim-scenario-blake"
+    }
+  },
+  "steps": [
+    {
+      "description": "both peers open each other",
+      "actions": [
+        { "actor": "a", "type": "openPeer", "peer": "b" },
+        { "actor": "b", "type": "openPeer", "peer": "a" }
+      ]
+    },
+    {
+      "description": "request propagates to recipient",
+      "actions": [
+        { "actor": "a", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "requested", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "incomingRequest", "isJoined": false }
+      }
+    },
+    {
+      "description": "recipient joins and requester becomes peerReady",
+      "actions": [
+        { "actor": "b", "type": "connect" }
+      ],
+      "expectEventually": {
+        "a": { "selectedHandle": "@blake", "phase": "peerReady", "isJoined": false },
+        "b": { "selectedHandle": "@avery", "phase": "waitingForPeer", "isJoined": true }
+      }
+    },
+    {
+      "description": "joined peer disconnects before requester finishes joining",
+      "actions": [
+        { "actor": "b", "type": "disconnect" }
+      ],
+      "expectEventually": {
+        "a": {
+          "selectedHandle": "@blake",
+          "phase": "idle",
+          "isJoined": false,
+          "contacts": [
+            { "handle": "@blake", "listState": "idle", "isOnline": true }
+          ]
+        },
+        "b": {
+          "selectedHandle": "@avery",
+          "phase": "idle",
+          "isJoined": false,
+          "contacts": [
+            { "handle": "@avery", "listState": "idle", "isOnline": true }
+          ]
+        }
+      }
+    }
+  ]
+}

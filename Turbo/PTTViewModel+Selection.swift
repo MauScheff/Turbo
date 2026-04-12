@@ -16,6 +16,10 @@ extension PTTViewModel {
         backendSyncCoordinator.state.syncState.channelStates
     }
 
+    var channelReadinessByContactID: [UUID: TurboChannelReadinessResponse] {
+        backendSyncCoordinator.state.syncState.channelReadiness
+    }
+
     var incomingInviteByContactID: [UUID: TurboInviteResponse] {
         backendSyncCoordinator.state.syncState.incomingInvites
     }
@@ -60,30 +64,36 @@ extension PTTViewModel {
             pendingAction: sessionCoordinator.pendingAction,
             localJoinFailure: pttCoordinator.state.lastJoinFailure,
             mediaState: mediaConnectionState,
-            channel: channelStateByContactID[contact.id].map(ChannelReadinessSnapshot.init(channelState:))
+            channel: selectedChannelSnapshot(for: contact.id)
         )
     }
 
     func relationshipState(for contactID: UUID) -> PairRelationshipState {
-        if let invite = incomingInviteByContactID[contactID] {
-            return .incomingRequest(requestCount: invite.requestCount)
-        }
-        if let invite = outgoingInviteByContactID[contactID] {
-            return .outgoingRequest(requestCount: invite.requestCount)
-        }
-        if let summary = contactSummaryByContactID[contactID] {
-            return ConversationStateMachine.relationshipState(
-                hasIncomingRequest: summary.hasIncomingRequest,
-                hasOutgoingRequest: summary.hasOutgoingRequest,
-                requestCount: summary.requestCount
-            )
-        }
-        return .none
+        let incomingInviteCount = incomingInviteByContactID[contactID]?.requestCount
+        let outgoingInviteCount = outgoingInviteByContactID[contactID]?.requestCount
+        let summary = contactSummaryByContactID[contactID]
+        let summaryRelationship = summary?.requestRelationship ?? .none
+
+        let hasIncomingRequest = incomingInviteCount != nil || summaryRelationship.hasIncomingRequest
+        let hasOutgoingRequest = outgoingInviteCount != nil || summaryRelationship.hasOutgoingRequest
+        let requestCount =
+            [
+                incomingInviteCount,
+                outgoingInviteCount,
+                summaryRelationship.requestCount,
+            ]
+            .compactMap { $0 }
+            .max() ?? 0
+
+        return ConversationStateMachine.relationshipState(
+            hasIncomingRequest: hasIncomingRequest,
+            hasOutgoingRequest: hasOutgoingRequest,
+            requestCount: requestCount
+        )
     }
 
     func selectedPeerBaseState(for contactID: UUID, relationship: PairRelationshipState) -> ConversationState {
-        if let status = channelStateByContactID[contactID]?.status,
-           let state = ConversationState(rawValue: status) {
+        if let state = selectedChannelState(for: contactID)?.conversationStatus {
             return state
         }
         return relationship.fallbackConversationState
@@ -107,7 +117,7 @@ extension PTTViewModel {
         )
         selectedPeerCoordinator.send(.relationshipUpdated(relationship))
         selectedPeerCoordinator.send(.baseStateUpdated(selectedPeerBaseState(for: contact.id, relationship: relationship)))
-        selectedPeerCoordinator.send(.channelUpdated(channelStateByContactID[contact.id].map(ChannelReadinessSnapshot.init(channelState:))))
+        selectedPeerCoordinator.send(.channelUpdated(selectedChannelSnapshot(for: contact.id)))
         selectedPeerCoordinator.send(
             .localSessionUpdated(
                 isJoined: isJoined,
@@ -203,7 +213,7 @@ extension PTTViewModel {
         contacts.compactMap { contact in
             guard contact.handle != currentDevUserHandle else { return nil }
             guard contact.id != selectedContactId else { return nil }
-            guard contactSummaryByContactID[contact.id]?.hasIncomingRequest == true,
+            guard contactSummaryByContactID[contact.id]?.requestRelationship.hasIncomingRequest == true,
                   let invite = incomingInviteByContactID[contact.id] else { return nil }
             return (contact, invite)
         }
@@ -213,7 +223,7 @@ extension PTTViewModel {
         contacts.compactMap { contact in
             guard contact.handle != currentDevUserHandle else { return nil }
             guard contact.id != selectedContactId else { return nil }
-            guard contactSummaryByContactID[contact.id]?.hasOutgoingRequest == true,
+            guard contactSummaryByContactID[contact.id]?.requestRelationship.hasOutgoingRequest == true,
                   let invite = outgoingInviteByContactID[contact.id] else { return nil }
             return (contact, invite)
         }
@@ -228,6 +238,36 @@ extension PTTViewModel {
         )
         contacts = result.contacts
         return result.contactID
+    }
+
+    func selectedChannelState(for contactID: UUID) -> TurboChannelStateResponse? {
+        guard let channelState = channelStateByContactID[contactID] else { return nil }
+
+        let localSessionAligned =
+            systemSessionMatches(contactID)
+            || (isJoined && activeChannelId == contactID)
+
+        if localSessionAligned {
+            return channelState
+        }
+
+        guard let summary = contactSummaryByContactID[contactID],
+              let summaryChannelID = summary.channelId,
+              !summaryChannelID.isEmpty,
+              summaryChannelID == channelState.channelId else {
+            return nil
+        }
+
+        return channelState
+    }
+
+    func selectedChannelSnapshot(for contactID: UUID) -> ChannelReadinessSnapshot? {
+        selectedChannelState(for: contactID).map { channelState in
+            ChannelReadinessSnapshot(
+                channelState: channelState,
+                readiness: channelReadinessByContactID[contactID]
+            )
+        }
     }
 
     func selectContact(_ contact: Contact) {
