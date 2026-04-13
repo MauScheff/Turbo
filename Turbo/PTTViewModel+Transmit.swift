@@ -13,6 +13,38 @@ extension PTTViewModel {
     private var wakePlaybackFallbackDelayNanoseconds: UInt64 { 1_500_000_000 }
     private var mediaSessionRetryCooldown: TimeInterval { 0.75 }
 
+    func prewarmLocalMediaIfNeeded(for contactID: UUID) async {
+        guard isJoined, activeChannelId == contactID else { return }
+        guard systemSessionMatches(contactID) else { return }
+        guard !isTransmitting else { return }
+
+        let startupContext = MediaSessionStartupContext(
+            contactID: contactID,
+            activationMode: .appManaged,
+            startupMode: .interactive
+        )
+        let media = mediaServices
+
+        if media.contactID() == contactID, mediaConnectionState == .connected {
+            return
+        }
+        if media.isStartupInFlight(startupContext) {
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Prewarming interactive audio for joined session",
+            metadata: ["contactId": contactID.uuidString]
+        )
+        await ensureMediaSession(
+            for: contactID,
+            activationMode: .appManaged,
+            startupMode: .interactive
+        )
+        updateStatusForSelectedContact()
+    }
+
     func shouldRecreateMediaSession(connectionState: MediaConnectionState) -> Bool {
         switch connectionState {
         case .closed, .failed:
@@ -110,6 +142,12 @@ extension PTTViewModel {
     func endTransmit() {
         guard isJoined else { return }
         diagnostics.record(.media, message: "End transmit requested")
+        // Clear the local press latch immediately so a system-end callback racing
+        // with release does not look like an unexpected end that should be retried.
+        transmitRuntime.sync(
+            activeTarget: transmitCoordinator.state.activeTarget,
+            isPressingTalk: false
+        )
         Task {
             await transmitCoordinator.handle(.releaseRequested)
             syncTransmitState()
@@ -457,6 +495,15 @@ extension PTTViewModel {
             try? await mediaServices.session()?.stopSendingAudio()
         }
         pttWakeRuntime.clearAll()
+        if let contactID = mediaRuntime.takePendingInteractivePrewarmAfterAudioDeactivationContactID() {
+            diagnostics.record(
+                .media,
+                message: "Resuming deferred interactive audio prewarm after PTT audio deactivation",
+                metadata: ["contactId": contactID.uuidString]
+            )
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            await prewarmLocalMediaIfNeeded(for: contactID)
+        }
     }
 
     func scheduleWakePlaybackFallback(for contactID: UUID) {
@@ -675,6 +722,7 @@ extension PTTViewModel {
         case .connected, .closed, .idle, .preparing:
             break
         }
+        updateStatusForSelectedContact()
     }
 
     func ensureMediaSession(

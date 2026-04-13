@@ -39,6 +39,7 @@ enum TransmitEvent: Equatable {
     case beginSucceeded(TransmitTarget, TransmitRequestContext)
     case beginFailed(String)
     case releaseRequested
+    case systemEnded
     case stopCompleted
     case stopFailed(String)
     case renewalFailed(String)
@@ -100,6 +101,24 @@ enum TransmitReducer {
             if let activeTarget = nextState.activeTarget {
                 nextState.phase = .stopping(contactID: activeTarget.contactID)
                 effects.append(.stopTransmit(activeTarget))
+            }
+
+        case .systemEnded:
+            nextState.isPressingTalk = false
+            nextState.pendingRequest = nil
+            switch nextState.phase {
+            case .active:
+                if let activeTarget = nextState.activeTarget {
+                    nextState.phase = .stopping(contactID: activeTarget.contactID)
+                    effects.append(.stopTransmit(activeTarget))
+                } else {
+                    nextState.phase = .idle
+                }
+            case .requesting:
+                nextState.phase = .idle
+                nextState.activeTarget = nil
+            case .stopping, .idle:
+                break
             }
 
         case .renewalFailed(let message):

@@ -302,8 +302,16 @@ enum SelectedPeerWaitingReason: Equatable {
     case pendingJoin
     case disconnecting
     case localSessionTransition
+    case localAudioPrewarm
     case backendSessionTransition
     case peerReadyToConnect
+}
+
+enum LocalMediaWarmupState: Equatable {
+    case cold
+    case prewarming
+    case ready
+    case failed
 }
 
 enum SelectedPeerDetail: Equatable {
@@ -580,6 +588,7 @@ struct ConversationDerivationContext: Equatable {
     let pendingAction: PendingSessionAction
     let localJoinFailure: PTTJoinFailure?
     let mediaState: MediaConnectionState
+    let localMediaWarmupState: LocalMediaWarmupState
     let channel: ChannelReadinessSnapshot?
 
     init(
@@ -597,6 +606,7 @@ struct ConversationDerivationContext: Equatable {
         pendingAction: PendingSessionAction,
         localJoinFailure: PTTJoinFailure?,
         mediaState: MediaConnectionState = .idle,
+        localMediaWarmupState: LocalMediaWarmupState = .cold,
         channel: ChannelReadinessSnapshot?
     ) {
         self.contactID = contactID
@@ -613,6 +623,7 @@ struct ConversationDerivationContext: Equatable {
         self.pendingAction = pendingAction
         self.localJoinFailure = localJoinFailure
         self.mediaState = mediaState
+        self.localMediaWarmupState = localMediaWarmupState
         self.channel = channel
     }
 }
@@ -912,7 +923,23 @@ enum ConversationStateMachine {
                 isEnabled: selectedPeerState.allowsHoldToTalk,
                 style: .accent
             )
-        case .idle, .requested, .incomingRequest, .waitingForPeer, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving:
+        case .waitingForPeer:
+            if case .waitingForPeer(reason: .localAudioPrewarm) = selectedPeerState.detail {
+                return ConversationPrimaryAction(
+                    kind: .holdToTalk,
+                    label: "Hold To Talk",
+                    isEnabled: false,
+                    style: .muted
+                )
+            }
+            return primaryAction(
+                conversationState: selectedPeerState.conversationState,
+                isSelectedChannelJoined: isSelectedChannelJoined,
+                canTransmitNow: selectedPeerState.canTransmitNow,
+                isTransmitting: isTransmitting,
+                requestCooldownRemaining: requestCooldownRemaining
+            )
+        case .idle, .requested, .incomingRequest, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving:
             return primaryAction(
                 conversationState: selectedPeerState.conversationState,
                 isSelectedChannelJoined: isSelectedChannelJoined,
@@ -1030,6 +1057,17 @@ private extension ConversationStateMachine {
             return (.receiving, "\(context.contactName) is talking")
         }
 
+        if sessionTransmitReady && canTransmit {
+            switch context.localMediaWarmupState {
+            case .cold, .prewarming:
+                return (.waitingForPeer(reason: .localAudioPrewarm), "Preparing audio...")
+            case .failed:
+                return (.waitingForPeer(reason: .localAudioPrewarm), "Audio unavailable")
+            case .ready:
+                break
+            }
+        }
+
         if !peerDeviceConnected {
             return (.wakeReady, "Hold to talk to wake \(context.contactName)")
         }
@@ -1112,7 +1150,7 @@ private extension ConversationDerivationContext {
               peerDeviceConnected else {
             return false
         }
-        return canTransmit
+        return canTransmit && localMediaWarmupState == .ready
     }
 }
 

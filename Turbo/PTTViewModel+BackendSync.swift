@@ -316,6 +316,11 @@ extension PTTViewModel {
             } else {
                 pttWakeRuntime.clear(for: contactID)
                 clearRemoteAudioActivity(for: contactID)
+                let shouldRestoreInteractivePrewarm =
+                    isJoined
+                    && activeChannelId == contactID
+                    && systemSessionMatches(contactID)
+                    && !isTransmitting
                 if mediaSessionContactID == contactID && !isTransmitting {
                     closeMediaSession()
                     if backendStatusMessage.hasPrefix("Media ") {
@@ -326,6 +331,14 @@ extension PTTViewModel {
                         message: "Closed receive media session after transmit stop",
                         metadata: ["contactId": contactID.uuidString]
                     )
+                    if shouldRestoreInteractivePrewarm {
+                        mediaRuntime.requestInteractivePrewarmAfterAudioDeactivation(for: contactID)
+                        diagnostics.record(
+                            .media,
+                            message: "Deferred interactive audio prewarm until PTT audio deactivation",
+                            metadata: ["contactId": contactID.uuidString]
+                        )
+                    }
                 }
             }
             diagnostics.record(

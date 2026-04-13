@@ -218,6 +218,7 @@ struct TransmitRuntimeState {
     var beginTask: Task<Void, Never>?
     var renewTask: Task<Void, Never>?
     var isPressingTalk: Bool = false
+    var unexpectedSystemEndRetryCount: Int = 0
 
     var hasPendingBeginOrActiveTarget: Bool {
         beginTask != nil || activeTarget != nil
@@ -226,6 +227,9 @@ struct TransmitRuntimeState {
     mutating func sync(activeTarget: TransmitTarget?, isPressingTalk: Bool) {
         self.activeTarget = activeTarget
         self.isPressingTalk = isPressingTalk
+        if activeTarget == nil || !isPressingTalk {
+            unexpectedSystemEndRetryCount = 0
+        }
     }
 
     mutating func replaceBeginTask(with task: Task<Void, Never>?) {
@@ -243,9 +247,22 @@ struct TransmitRuntimeState {
         replaceRenewTask(with: nil)
     }
 
+    func shouldRetryUnexpectedSystemEnd(maxRetries: Int) -> Bool {
+        isPressingTalk && activeTarget != nil && unexpectedSystemEndRetryCount < maxRetries
+    }
+
+    mutating func markUnexpectedSystemEndRetry() {
+        unexpectedSystemEndRetryCount += 1
+    }
+
+    mutating func clearUnexpectedSystemEndRetry() {
+        unexpectedSystemEndRetryCount = 0
+    }
+
     mutating func reset() {
         isPressingTalk = false
         activeTarget = nil
+        unexpectedSystemEndRetryCount = 0
         clearPendingWork()
     }
 }
@@ -406,6 +423,7 @@ final class MediaRuntimeState {
     var connectionState: MediaConnectionState = .idle
     var sendAudioChunk: (@Sendable (String) async throws -> Void)?
     var startupState: MediaSessionStartupState = .idle
+    var pendingInteractivePrewarmAfterAudioDeactivationContactID: UUID?
 
     var hasSession: Bool {
         session != nil
@@ -490,6 +508,15 @@ final class MediaRuntimeState {
         connectionState = .idle
         sendAudioChunk = nil
         startupState = .idle
+    }
+
+    func requestInteractivePrewarmAfterAudioDeactivation(for contactID: UUID) {
+        pendingInteractivePrewarmAfterAudioDeactivationContactID = contactID
+    }
+
+    func takePendingInteractivePrewarmAfterAudioDeactivationContactID() -> UUID? {
+        defer { pendingInteractivePrewarmAfterAudioDeactivationContactID = nil }
+        return pendingInteractivePrewarmAfterAudioDeactivationContactID
     }
 }
 

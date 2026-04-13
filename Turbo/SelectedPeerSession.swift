@@ -130,6 +130,18 @@ enum SelectedPeerReducer {
             pendingAction: state.pendingAction,
             localJoinFailure: state.localJoinFailure,
             mediaState: state.mediaState,
+            localMediaWarmupState: {
+                switch state.mediaState {
+                case .idle, .closed:
+                    return .cold
+                case .preparing:
+                    return .prewarming
+                case .connected:
+                    return .ready
+                case .failed:
+                    return .failed
+                }
+            }(),
             channel: state.channel
         )
 

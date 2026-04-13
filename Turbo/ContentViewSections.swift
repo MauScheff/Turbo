@@ -238,14 +238,17 @@ struct TurboTalkControlsView: View {
                         .simultaneousGesture(
                             DragGesture(minimumDistance: 0)
                                 .onChanged { _ in
+                                    guard primaryAction.isEnabled else { return }
                                     if !isTransmitting {
                                         beginTransmit()
                                     }
                                 }
                                 .onEnded { _ in
+                                    guard primaryAction.isEnabled else { return }
                                     endTransmit()
                                 }
                         )
+                        .disabled(!primaryAction.isEnabled)
                     } else {
                         Button(action: joinChannel) {
                             Text(primaryAction.label)

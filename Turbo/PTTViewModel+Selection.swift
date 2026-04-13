@@ -64,6 +64,7 @@ extension PTTViewModel {
             pendingAction: sessionCoordinator.pendingAction,
             localJoinFailure: pttCoordinator.state.lastJoinFailure,
             mediaState: mediaConnectionState,
+            localMediaWarmupState: localMediaWarmupState(for: contact.id),
             channel: selectedChannelSnapshot(for: contact.id)
         )
     }
@@ -277,6 +278,9 @@ extension PTTViewModel {
         diagnostics.record(.state, message: "Selected contact", metadata: ["handle": contact.handle])
         updateStatusForSelectedContact()
         captureDiagnosticsState("selected-contact")
+        Task {
+            await prewarmLocalMediaIfNeeded(for: contact.id)
+        }
     }
 
     func resetSelection() {
@@ -302,11 +306,26 @@ extension PTTViewModel {
                     systemSessionState: systemSessionState,
                     pendingAction: sessionCoordinator.pendingAction,
                     localJoinFailure: pttCoordinator.state.lastJoinFailure,
+                    localMediaWarmupState: .cold,
                     channel: nil
                 )
             )
         }
         captureDiagnosticsState("selected-status-refresh")
+    }
+
+    func localMediaWarmupState(for contactID: UUID) -> LocalMediaWarmupState {
+        guard mediaSessionContactID == contactID else { return .cold }
+        switch mediaConnectionState {
+        case .idle, .closed:
+            return .cold
+        case .preparing:
+            return .prewarming
+        case .connected:
+            return .ready
+        case .failed:
+            return .failed
+        }
     }
 
     func updateContact(_ id: UUID, mutate: (inout Contact) -> Void) {

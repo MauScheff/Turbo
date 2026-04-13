@@ -112,6 +112,9 @@ final class PCMWebSocketMediaSession: MediaSession {
     private let maximumPendingRemoteAudioChunks = 24
     private let initialSendAudioChunk: (@Sendable (String) async throws -> Void)?
     private var currentSendAudioChunk: (@Sendable (String) async throws -> Void)?
+    private var capturedBufferReportBudget = 3
+    private var convertedBufferReportBudget = 3
+    private var enqueuedPayloadReportBudget = 3
 
     init(
         sendAudioChunk: (@Sendable (String) async throws -> Void)?,
@@ -225,6 +228,8 @@ final class PCMWebSocketMediaSession: MediaSession {
         if !isPlaybackReady || !isCaptureReady {
             try await start(activationMode: .appManaged, startupMode: .interactive)
         }
+        resetCaptureReportingBudgets()
+        try refreshCapturePathForCurrentRoute()
         await audioChunkSender.updateSendChunk(currentSendAudioChunk)
         await report(
             "Starting audio capture with transport state",
@@ -339,6 +344,26 @@ final class PCMWebSocketMediaSession: MediaSession {
         }
     }
 
+    private func refreshCapturePathForCurrentRoute() throws {
+        let inputNode = captureEngine.inputNode
+        let wasRunning = captureEngine.isRunning
+        if wasRunning {
+            captureEngine.stop()
+            captureEngine.reset()
+        }
+        if inputTapInstalled {
+            inputNode.removeTap(onBus: 0)
+            inputTapInstalled = false
+        }
+        captureConverter = nil
+        try prepareCapturePathIfNeeded()
+        try installInputTapIfNeeded()
+        if wasRunning || !captureEngine.isRunning {
+            try startCaptureEngineIfNeeded()
+        }
+        awaitReportCaptureRouteRefresh()
+    }
+
     private func preparePlaybackPathIfNeeded() throws {
         let outputFormat = playerNode.outputFormat(forBus: 0)
         if outputFormat != targetFormat && playbackConverter == nil {
@@ -357,17 +382,80 @@ final class PCMWebSocketMediaSession: MediaSession {
         inputTapInstalled = true
     }
 
+    private func awaitReportCaptureRouteRefresh() {
+        let inputFormat = captureEngine.inputNode.inputFormat(forBus: 0)
+        Task {
+            await report(
+                "Refreshed capture path for current audio route",
+                metadata: [
+                    "sampleRate": String(inputFormat.sampleRate),
+                    "channelCount": String(inputFormat.channelCount)
+                ]
+            )
+        }
+    }
+
     private func handleCapturedBuffer(_ buffer: AVAudioPCMBuffer) {
         stateLock.lock()
         let shouldSend = isSendingAudio
         stateLock.unlock()
         guard shouldSend, state == .connected else { return }
+        reportCapturedBufferIfNeeded(buffer)
         guard let convertedBuffer = convertCapturedBuffer(buffer) else { return }
+        reportConvertedBufferIfNeeded(convertedBuffer)
         guard let payload = payloadFromPCMBuffer(convertedBuffer) else { return }
+        reportEnqueuedPayloadIfNeeded(payload)
 
         Task {
             await audioChunkSender.enqueue(payload)
         }
+    }
+
+    private func reportCapturedBufferIfNeeded(_ buffer: AVAudioPCMBuffer) {
+        guard capturedBufferReportBudget > 0 else { return }
+        capturedBufferReportBudget -= 1
+        Task {
+            await report(
+                "Captured local audio buffer",
+                metadata: [
+                    "frameLength": String(buffer.frameLength),
+                    "sampleRate": String(buffer.format.sampleRate),
+                    "channelCount": String(buffer.format.channelCount)
+                ]
+            )
+        }
+    }
+
+    private func reportConvertedBufferIfNeeded(_ buffer: AVAudioPCMBuffer) {
+        guard convertedBufferReportBudget > 0 else { return }
+        convertedBufferReportBudget -= 1
+        Task {
+            await report(
+                "Converted local audio buffer",
+                metadata: [
+                    "frameLength": String(buffer.frameLength),
+                    "sampleRate": String(buffer.format.sampleRate),
+                    "channelCount": String(buffer.format.channelCount)
+                ]
+            )
+        }
+    }
+
+    private func reportEnqueuedPayloadIfNeeded(_ payload: String) {
+        guard enqueuedPayloadReportBudget > 0 else { return }
+        enqueuedPayloadReportBudget -= 1
+        Task {
+            await report(
+                "Enqueued outbound audio chunk",
+                metadata: ["base64Length": String(payload.count)]
+            )
+        }
+    }
+
+    private func resetCaptureReportingBudgets() {
+        capturedBufferReportBudget = 3
+        convertedBufferReportBudget = 3
+        enqueuedPayloadReportBudget = 3
     }
 
     private func convertCapturedBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {

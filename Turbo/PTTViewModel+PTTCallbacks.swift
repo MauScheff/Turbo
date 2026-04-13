@@ -193,6 +193,9 @@ extension PTTViewModel {
                 message: "Joined channel",
                 metadata: ["channelUUID": channelUUID.uuidString, "reason": reason]
             )
+            if let contactID {
+                await prewarmLocalMediaIfNeeded(for: contactID)
+            }
             captureDiagnosticsState("ptt-callback:joined")
         }
     }
@@ -284,6 +287,7 @@ extension PTTViewModel {
                 message: "System transmit began",
                 metadata: ["channelUUID": channelUUID.uuidString, "source": source]
             )
+            transmitRuntime.clearUnexpectedSystemEndRetry()
             captureDiagnosticsState("ptt-callback:transmit-began")
         }
     }
@@ -302,6 +306,39 @@ extension PTTViewModel {
                 message: "System transmit ended",
                 metadata: ["channelUUID": channelUUID.uuidString, "source": source]
             )
+            if transmitRuntime.shouldRetryUnexpectedSystemEnd(maxRetries: 1),
+               activeTransmitTarget(for: channelUUID) != nil {
+                transmitRuntime.markUnexpectedSystemEndRetry()
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Retrying unexpected system transmit end while press is still active",
+                    metadata: ["channelUUID": channelUUID.uuidString, "source": source]
+                )
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if transmitRuntime.isPressingTalk,
+                   activeTransmitTarget(for: channelUUID) != nil {
+                    do {
+                        try pttSystemClient.beginTransmitting(channelUUID: channelUUID)
+                        captureDiagnosticsState("ptt-callback:transmit-end-retry")
+                        return
+                    } catch {
+                        diagnostics.record(
+                            .pushToTalk,
+                            level: .error,
+                            message: "Failed to retry transmit after unexpected system end",
+                            metadata: [
+                                "channelUUID": channelUUID.uuidString,
+                                "source": source,
+                                "error": formatPTTError(error)
+                            ]
+                        )
+                    }
+                }
+            }
+            if activeTransmitTarget(for: channelUUID) != nil {
+                await transmitCoordinator.handle(.systemEnded)
+                syncTransmitState()
+            }
             captureDiagnosticsState("ptt-callback:transmit-ended")
         }
     }
@@ -367,8 +404,14 @@ extension PTTViewModel {
     }
 
     func handleRestoredChannel(_ channelUUID: UUID) {
-        pttCoordinator.send(.restoredChannel(channelUUID: channelUUID, contactID: contactId(for: channelUUID)))
+        let contactID = contactId(for: channelUUID)
+        pttCoordinator.send(.restoredChannel(channelUUID: channelUUID, contactID: contactID))
         syncPTTState()
+        if let contactID {
+            Task {
+                await prewarmLocalMediaIfNeeded(for: contactID)
+            }
+        }
         captureDiagnosticsState("ptt-callback:restored")
     }
 
