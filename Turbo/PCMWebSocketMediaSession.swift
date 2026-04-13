@@ -5,6 +5,8 @@ actor AudioChunkSender {
     private var sendChunk: (@Sendable (String) async throws -> Void)?
     private let reportFailure: @Sendable (String) async -> Void
     private let maximumPendingPayloads = 8
+    private let maximumPayloadsPerMessage = 4
+    private let payloadBatchCollectionNanoseconds: UInt64 = 220_000_000
     private let transportAvailabilityPollNanoseconds: UInt64 = 50_000_000
     private let transportAvailabilityMaxAttempts = 20
     private var pendingPayloads: [String] = []
@@ -39,7 +41,7 @@ actor AudioChunkSender {
 
     private func drain() async {
         while !pendingPayloads.isEmpty {
-            let payload = pendingPayloads.removeFirst()
+            let payload = await nextTransportPayload()
             guard let sendChunk = await waitForTransportIfNeeded() else {
                 await reportFailure("audio send failed: websocket transport is not configured")
                 pendingPayloads.removeAll(keepingCapacity: false)
@@ -56,6 +58,17 @@ actor AudioChunkSender {
         isDraining = false
     }
 
+    private func nextTransportPayload() async -> String {
+        if pendingPayloads.count < maximumPayloadsPerMessage {
+            try? await Task.sleep(nanoseconds: payloadBatchCollectionNanoseconds)
+        }
+
+        let batchCount = min(maximumPayloadsPerMessage, pendingPayloads.count)
+        let batch = Array(pendingPayloads.prefix(batchCount))
+        pendingPayloads.removeFirst(batchCount)
+        return AudioChunkPayloadCodec.encode(batch)
+    }
+
     private func waitForTransportIfNeeded() async -> (@Sendable (String) async throws -> Void)? {
         if let sendChunk {
             return sendChunk
@@ -69,6 +82,58 @@ actor AudioChunkSender {
         }
 
         return nil
+    }
+}
+
+struct CaptureRouteRefreshPlan: Equatable {
+    let shouldStopEngine: Bool
+    let shouldResetEngine: Bool
+    let shouldRemoveInputTap: Bool
+    let shouldRestartEngine: Bool
+
+    static func forLiveTransmitRoute(
+        engineIsRunning: Bool,
+        inputTapInstalled: Bool
+    ) -> CaptureRouteRefreshPlan {
+        CaptureRouteRefreshPlan(
+            shouldStopEngine: engineIsRunning,
+            shouldResetEngine: engineIsRunning,
+            shouldRemoveInputTap: inputTapInstalled,
+            shouldRestartEngine: engineIsRunning || !engineIsRunning
+        )
+    }
+}
+
+enum AudioChunkPayloadCodec {
+    private struct BatchEnvelope: Codable {
+        let kind: String
+        let chunks: [String]
+    }
+
+    private static let batchKind = "pcm-batch-v1"
+
+    nonisolated static func encode(_ chunks: [String]) -> String {
+        guard chunks.count > 1 else {
+            return chunks.first ?? ""
+        }
+
+        let envelope = BatchEnvelope(kind: batchKind, chunks: chunks)
+        guard let data = try? JSONEncoder().encode(envelope) else {
+            return chunks.first ?? ""
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    nonisolated static func decode(_ payload: String) -> [String] {
+        guard payload.first == "{",
+              let data = payload.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(BatchEnvelope.self, from: data),
+              envelope.kind == batchKind,
+              !envelope.chunks.isEmpty else {
+            return [payload]
+        }
+
+        return envelope.chunks
     }
 }
 
@@ -245,13 +310,25 @@ final class PCMWebSocketMediaSession: MediaSession {
     }
 
     func receiveRemoteAudioChunk(_ payload: String) async {
-        guard !payload.isEmpty else { return }
-        guard let data = Data(base64Encoded: payload) else {
-            state = .failed("received invalid audio chunk")
-            return
+        let payloads = AudioChunkPayloadCodec.decode(payload)
+        guard !payloads.isEmpty else { return }
+
+        var decodedChunks: [Data] = []
+        decodedChunks.reserveCapacity(payloads.count)
+        for payload in payloads {
+            guard !payload.isEmpty else { continue }
+            guard let data = Data(base64Encoded: payload) else {
+                state = .failed("received invalid audio chunk")
+                return
+            }
+            decodedChunks.append(data)
         }
+
+        guard !decodedChunks.isEmpty else { return }
         if !isPlaybackReady {
-            enqueuePendingRemoteAudioChunk(data)
+            for chunk in decodedChunks {
+                enqueuePendingRemoteAudioChunk(chunk)
+            }
             await report(
                 "Queued remote audio chunk until playback ready",
                 metadata: ["pendingChunkCount": String(pendingRemoteAudioChunkCount())]
@@ -259,7 +336,9 @@ final class PCMWebSocketMediaSession: MediaSession {
             return
         }
         do {
-            try schedulePlayback(for: data)
+            for chunk in decodedChunks {
+                try schedulePlayback(for: chunk)
+            }
         } catch {
             await report(
                 "Receive playback failed",
@@ -346,19 +425,24 @@ final class PCMWebSocketMediaSession: MediaSession {
 
     private func refreshCapturePathForCurrentRoute() throws {
         let inputNode = captureEngine.inputNode
-        let wasRunning = captureEngine.isRunning
-        if wasRunning {
+        let plan = CaptureRouteRefreshPlan.forLiveTransmitRoute(
+            engineIsRunning: captureEngine.isRunning,
+            inputTapInstalled: inputTapInstalled
+        )
+        if plan.shouldStopEngine {
             captureEngine.stop()
+        }
+        if plan.shouldResetEngine {
             captureEngine.reset()
         }
-        if inputTapInstalled {
+        if plan.shouldRemoveInputTap {
             inputNode.removeTap(onBus: 0)
             inputTapInstalled = false
         }
         captureConverter = nil
         try prepareCapturePathIfNeeded()
         try installInputTapIfNeeded()
-        if wasRunning || !captureEngine.isRunning {
+        if plan.shouldRestartEngine {
             try startCaptureEngineIfNeeded()
         }
         awaitReportCaptureRouteRefresh()

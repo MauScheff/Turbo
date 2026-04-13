@@ -87,6 +87,90 @@ Do not start with more device experimentation if the simulator scenario or probe
 
 The device is still essential when the boundary itself is the suspect, but it should no longer be the first or only proof surface for control-plane bugs.
 
+## Foreground audio smoke loop
+
+When the app is already joined on both devices and both apps are foregrounded, the stable foreground transmit loop should look like this:
+
+1. both sides converge to `ready`
+2. the local hold-to-talk button stays disabled while that device is still `Preparing audio...`
+3. once local prewarm finishes, hold-to-talk becomes enabled
+4. on first press, the transmitter should:
+   - play the Apple start beep
+   - move through `startingTransmit`
+   - quickly settle into `transmitting`
+5. the receiver should:
+   - move into `receiving`
+   - hear audio on that first transmit, not only on later retries
+6. on release, both sides should:
+   - play the Apple end beep on the transmitter
+   - converge back to `ready`
+
+That is the current known-good foreground device contract. If this breaks, treat it as an audio-boundary regression, not as a generic control-plane bug.
+
+### Current app-owned invariants behind that behavior
+
+- local interactive media is prewarmed before hold-to-talk becomes enabled on that device
+- first transmit rebinds the capture path against the real `PlayAndRecord` route instead of trusting the earlier prewarm route
+- remote `transmit-stop` does not immediately recreate interactive audio while the PTT audio session is still deactivating
+- unexpected system transmit end should clean up or retry cleanly instead of leaving stale transmit state behind
+
+### What to read in logs when it regresses
+
+For a healthy first foreground transmit, merged diagnostics should show this shape on the sender:
+
+- `System transmit began`
+- `PTT audio session activated`
+- `Configured outgoing audio transport`
+- `Refreshed capture path for current audio route`
+- `Starting audio capture with transport state configured=true`
+- `Captured local audio buffer`
+- `Converted local audio buffer`
+- `Enqueued outbound audio chunk`
+
+And on the receiver:
+
+- `Signal received ... type=transmit-start`
+- `PTT audio session activated`
+- `Preparing receive media session after PTT audio activation`
+- `Audio chunk received`
+- `Playback buffer scheduled`
+- `Playback node started`
+
+If the sender reaches `Starting audio capture...` but never logs `Captured local audio buffer`, suspect the sender capture engine / tap / route boundary first.
+
+If the receiver reaches `Preparing receive media session...` but never logs `Audio chunk received`, suspect sender capture or send-path failure first, not receiver playback.
+
+### Latest known-good foreground log shape
+
+The current stable reference run is the `@avery -> @blake` foreground transmit uploaded around `2026-04-13T16:52Z`.
+
+In that run, the important healthy sequence was:
+
+- sender already back at `ready`
+- `System transmit began`
+- sender logs:
+  - `Captured local audio buffer`
+  - `Converted local audio buffer`
+  - `Enqueued outbound audio chunk`
+- receiver logs:
+  - `Audio chunk received`
+  - `Playback node started`
+  - repeated `Playback buffer scheduled`
+- receiver selected conversation becomes `receiving`
+- on release:
+  - sender logs `System transmit ended`
+  - sender returns to `ready`
+  - receiver briefly returns through `Preparing audio...`
+  - receiver re-prewarms and returns to `Connected`
+
+The important part is not a specific internal branch name. The important part is that real audio chunks arrive and playback starts promptly during the same transmit window, rather than being buffered until long after release.
+
+### Current limitation
+
+The prewarm gate is currently local per device, not globally synchronized across both devices. One side may become ready before the other if its own local warmup finishes first.
+
+That is acceptable for now because the immediate problem was "no audio on first transmit." A stricter future model may require receiver-ready gating before the sender sees hold-to-talk as enabled.
+
 ## Background PTT wake loop
 
 Foreground signaling can still use the app websocket, but background receive needs the real PushToTalk wake contract:

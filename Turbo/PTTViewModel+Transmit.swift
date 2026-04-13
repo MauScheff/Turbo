@@ -394,7 +394,8 @@ extension PTTViewModel {
            pendingWake == nil,
            let activeSystemChannelUUID,
            let receiveContactID = contactId(for: activeSystemChannelUUID),
-           remoteTransmittingContactIDs.contains(receiveContactID) {
+           remoteTransmittingContactIDs.contains(receiveContactID),
+           shouldUseSystemActivatedReceivePlayback(for: receiveContactID) {
             diagnostics.record(
                 .media,
                 message: "Preparing receive media session after PTT audio activation",

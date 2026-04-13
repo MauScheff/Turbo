@@ -51,7 +51,37 @@ extension PTTViewModel {
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
     }
 
-    private func shouldUseSystemActivatedReceivePlayback(for contactID: UUID) -> Bool {
+    func prefersForegroundAppManagedReceivePlayback(for contactID: UUID) -> Bool {
+        prefersForegroundAppManagedReceivePlayback(
+            for: contactID,
+            applicationState: UIApplication.shared.applicationState
+        )
+    }
+
+    func prefersForegroundAppManagedReceivePlayback(
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState == .active else { return false }
+        guard isJoined, activeChannelId == contactID else { return false }
+        return systemSessionMatches(contactID)
+    }
+
+    func shouldUseSystemActivatedReceivePlayback(for contactID: UUID) -> Bool {
+        shouldUseSystemActivatedReceivePlayback(
+            for: contactID,
+            applicationState: UIApplication.shared.applicationState
+        )
+    }
+
+    func shouldUseSystemActivatedReceivePlayback(
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard !prefersForegroundAppManagedReceivePlayback(
+            for: contactID,
+            applicationState: applicationState
+        ) else { return false }
         guard remoteTransmittingContactIDs.contains(contactID) else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
@@ -394,8 +424,8 @@ extension PTTViewModel {
                     await receiveRemoteAudioChunk(envelope.payload)
                     return
                 }
-                let receiveActivationMode: MediaSessionActivationMode? =
-                    shouldUseSystemActivatedReceivePlayback(for: contactID) ? .systemActivated : nil
+                let receiveActivationMode: MediaSessionActivationMode =
+                    shouldUseSystemActivatedReceivePlayback(for: contactID) ? .systemActivated : .appManaged
                 await ensureMediaSession(
                     for: contactID,
                     activationMode: receiveActivationMode,

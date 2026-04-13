@@ -61,6 +61,22 @@ Physical devices are still required for:
 
 They are not the source of truth for core control-plane correctness.
 
+For foreground audio smoke verification, treat this as the current known-good boundary contract:
+
+- both devices converge to `ready`
+- local hold-to-talk remains disabled while that device is still `Preparing audio...`
+- first press plays the Apple start beep and reaches `transmitting` quickly
+- the receiver reaches `receiving` and hears audio on that first press
+- release returns both sides to `ready`
+
+When that breaks, use merged exact-device diagnostics to localize whether the failure is:
+
+- control-plane state
+- sender capture / route binding
+- receiver playback / activation
+
+The shared state-machine and scenario loop should still be used to prove any control-plane part of the fix, but the final proof for actual audio remains a physical-device boundary check.
+
 ## Scenario design
 
 Scenarios in [`scenarios/`](/Users/mau/Development/Turbo/scenarios) should model distributed event flows, not just UI taps.

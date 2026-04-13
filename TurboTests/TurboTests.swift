@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import PushToTalk
 import AVFAudio
+import UIKit
 @testable import BeepBeep
 
 @MainActor
@@ -2632,6 +2633,50 @@ struct TurboTests {
         #expect(runtime.shouldBufferAudioChunk(for: contactID))
     }
 
+    @MainActor
+    @Test func foregroundJoinedReceivePrefersAppManagedPlaybackOverSystemActivation() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.remoteTransmittingContactIDs.insert(contactID)
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+
+        #expect(
+            viewModel.prefersForegroundAppManagedReceivePlayback(
+                for: contactID,
+                applicationState: .active
+            )
+        )
+        #expect(
+            viewModel.shouldUseSystemActivatedReceivePlayback(
+                for: contactID,
+                applicationState: .active
+            ) == false
+        )
+        #expect(
+            viewModel.shouldUseSystemActivatedReceivePlayback(
+                for: contactID,
+                applicationState: .background
+            )
+        )
+    }
+
     @Test func interactiveMediaSessionAudioPolicyUsesPlayAndRecord() {
         let appManaged = MediaSessionAudioPolicy.configuration(
             activationMode: .appManaged,
@@ -2674,6 +2719,72 @@ struct TurboTests {
         #expect(systemActivated.shouldActivateSession == false)
     }
 
+    @Test func liveTransmitCaptureRouteRefreshRestartsRunningEngineAndTap() {
+        let plan = CaptureRouteRefreshPlan.forLiveTransmitRoute(
+            engineIsRunning: true,
+            inputTapInstalled: true
+        )
+
+        #expect(plan.shouldStopEngine)
+        #expect(plan.shouldResetEngine)
+        #expect(plan.shouldRemoveInputTap)
+        #expect(plan.shouldRestartEngine)
+    }
+
+    @Test func liveTransmitCaptureRouteRefreshStillReinstallsPathWhenEngineWasIdle() {
+        let plan = CaptureRouteRefreshPlan.forLiveTransmitRoute(
+            engineIsRunning: false,
+            inputTapInstalled: false
+        )
+
+        #expect(!plan.shouldStopEngine)
+        #expect(!plan.shouldResetEngine)
+        #expect(!plan.shouldRemoveInputTap)
+        #expect(plan.shouldRestartEngine)
+    }
+
+    @Test func audioChunkPayloadCodecPreservesLegacySingleChunkPayload() {
+        let decoded = AudioChunkPayloadCodec.decode("chunk-1")
+
+        #expect(decoded == ["chunk-1"])
+    }
+
+    @Test func audioChunkPayloadCodecRoundTripsBatchedPayloads() {
+        let encoded = AudioChunkPayloadCodec.encode(["chunk-1", "chunk-2", "chunk-3"])
+        let decoded = AudioChunkPayloadCodec.decode(encoded)
+
+        #expect(decoded == ["chunk-1", "chunk-2", "chunk-3"])
+    }
+
+    @Test func audioChunkSenderBatchesNearbyPayloadsIntoSingleTransportSend() async {
+        actor Recorder {
+            var payloads: [String] = []
+
+            func append(_ payload: String) {
+                payloads.append(payload)
+            }
+        }
+
+        let recorder = Recorder()
+        let sender = AudioChunkSender(
+            sendChunk: { payload in
+                await recorder.append(payload)
+            },
+            reportFailure: { _ in }
+        )
+
+        async let enqueue1: Void = sender.enqueue("chunk-1")
+        async let enqueue2: Void = sender.enqueue("chunk-2")
+        async let enqueue3: Void = sender.enqueue("chunk-3")
+        _ = await (enqueue1, enqueue2, enqueue3)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        let transportPayloads = await recorder.payloads
+        let deliveredPayloads = transportPayloads.flatMap(AudioChunkPayloadCodec.decode)
+        #expect(deliveredPayloads == ["chunk-1", "chunk-2", "chunk-3"])
+        #expect(transportPayloads.count < 3)
+    }
+
     @Test func audioChunkSenderUsesUpdatedTransportHandler() async {
         actor Recorder {
             var payloads: [String] = []
@@ -2694,9 +2805,11 @@ struct TurboTests {
         }
         await sender.enqueue("chunk-1")
         await sender.enqueue("chunk-2")
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
-        let payloads = await recorder.payloads
-        #expect(payloads == ["chunk-1", "chunk-2"])
+        let transportPayloads = await recorder.payloads
+        let deliveredPayloads = transportPayloads.flatMap(AudioChunkPayloadCodec.decode)
+        #expect(deliveredPayloads == ["chunk-1", "chunk-2"])
     }
 
     @Test func audioChunkSenderWaitsBrieflyForLateTransportHandler() async {

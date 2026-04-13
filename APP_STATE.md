@@ -349,6 +349,35 @@ Now the transmit state machine starts:
 
 At the same time, the peer's selected conversation becomes `receiving`.
 
+### Foreground audio boundary note
+
+For the current working foreground device path, `ready` does not mean "audio is already actively transmitting." It means:
+
+- backend readiness is aligned
+- local/system session alignment is correct
+- the local device has finished its own interactive media prewarm
+
+Then, at the real first transmit boundary, the app still does one important sender-side step: it rebinds the capture engine and input tap against the actual live `PlayAndRecord` route before capturing microphone audio.
+
+That detail matters. Earlier prototype behavior prewarmed the capture engine too early and then trusted that stale route during first transmit, which could produce a correct state-machine transition but no real audio on the wire.
+
+So the current model is:
+
+- prewarm enough locally that hold-to-talk only appears when the device is plausibly ready
+- still treat the actual transmit boundary as the moment when sender capture must bind to the live route
+
+This is why the selected conversation can be `ready`, yet the real "audio is now definitely capturable" moment still lives at transmit start rather than purely at join time.
+
+On the receive side, the stable foreground behavior is:
+
+- when the peer starts talking, the receiver should quickly move to `receiving`
+- real audio chunks should arrive during that same transmit window
+- playback should begin during that same transmit window
+- after remote `transmit-stop`, the receiver may briefly return to `Preparing audio...` while the local interactive session is re-prewarmed
+- then it should converge back to `ready`
+
+So the foreground receive contract is not just "peer state says receiving." It is "receiving plus prompt playback plus clean return to ready."
+
 ### Step 6. Initiator releases talk
 
 Transmit state moves:
@@ -460,6 +489,26 @@ Derived UI:
 - not `ready`
 
 The app does this deliberately to avoid showing hold-to-talk before the local device is actually prepared.
+
+### Example 3b. Session is ready, but transmit still needs the live route
+
+Inputs:
+
+- selected peer phase: `ready`
+- backend readiness aligned
+- local prewarm complete
+- user presses hold-to-talk
+
+Derived runtime behavior:
+
+- selected peer phase: `startingTransmit`
+- sender capture path is rebound to the live `PlayAndRecord` route
+- only then does microphone capture produce outbound audio chunks
+
+This preserves a useful distinction:
+
+- `ready` means "the session is joined and locally prewarmed"
+- `transmitting` means "the live transmit route is active and audio is actually flowing"
 
 ### Example 4. Local PTT join failed because the system channel limit was reached
 

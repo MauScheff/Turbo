@@ -76,6 +76,13 @@ Use `websocket_ready_session_recovery` and `backend_reconnect_ready_session_reco
 
 For scenarios that lead into transmit, the `ready` step should mean `phase=ready` and `canTransmitNow=true`. That keeps the suite aligned with the actual user journey instead of allowing a transient "Connected" label to pass before hold-to-talk is really available.
 
+For physical-device foreground smoke tests, also keep this distinction clear:
+
+- scenario `ready` proves shared readiness and local gating semantics
+- real device smoke must still prove actual first-press audio, which depends on the Apple audio boundary and the sender/receiver media route setup
+
+In other words, simulator scenarios prove "hold-to-talk is enabled at the right time," while device smoke still proves "the first real transmit produced audible audio."
+
 ## Operating rule
 
 When smoke testing finds a new distributed regression, prefer adding a checked-in scenario here if the behavior is reproducible in simulator. Add lower-level property or reducer tests underneath it for the invariant that should prevent recurrence.
