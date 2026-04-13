@@ -13,6 +13,95 @@ extension PTTViewModel {
     private var wakePlaybackFallbackDelayNanoseconds: UInt64 { 1_500_000_000 }
     private var mediaSessionRetryCooldown: TimeInterval { 0.75 }
 
+    func desiredLocalReceiverAudioReadiness(for contactID: UUID) -> Bool {
+        guard isJoined, activeChannelId == contactID else { return false }
+        guard systemSessionMatches(contactID) else { return false }
+        guard !isTransmitting else { return false }
+        guard mediaSessionContactID == contactID else { return false }
+        guard mediaConnectionState == .connected else { return false }
+        guard let channel = selectedChannelSnapshot(for: contactID),
+              channel.membership.hasLocalMembership else {
+            return false
+        }
+        return true
+    }
+
+    func peerIsRoutableForReceiverAudioReadiness(for contactID: UUID) -> Bool {
+        guard let channel = selectedChannelSnapshot(for: contactID) else { return false }
+        return channel.membership.hasPeerMembership && channel.membership.peerDeviceConnected
+    }
+
+    func syncLocalReceiverAudioReadinessSignal(for contactID: UUID, reason: String) async {
+        guard let contact = contacts.first(where: { $0.id == contactID }),
+              let backend = backendServices,
+              backend.supportsWebSocket,
+              let backendChannelId = contact.backendChannelId,
+              let remoteUserId = contact.remoteUserId else {
+            localReceiverAudioReadinessPublications[contactID] = nil
+            return
+        }
+
+        let isReady = desiredLocalReceiverAudioReadiness(for: contactID)
+        let peerWasRoutable = peerIsRoutableForReceiverAudioReadiness(for: contactID)
+
+        if !peerWasRoutable {
+            localReceiverAudioReadinessPublications[contactID] = ReceiverAudioReadinessPublication(
+                isReady: isReady,
+                peerWasRoutable: false
+            )
+            return
+        }
+
+        if let publication = localReceiverAudioReadinessPublications[contactID],
+           publication.isReady == isReady,
+           publication.peerWasRoutable {
+            return
+        }
+
+        do {
+            try await backend.waitForWebSocketConnection()
+            try await backend.sendSignal(
+                TurboSignalEnvelope(
+                    type: isReady ? .receiverReady : .receiverNotReady,
+                    channelId: backendChannelId,
+                    fromUserId: backend.currentUserID ?? "",
+                    fromDeviceId: backend.deviceID,
+                    toUserId: remoteUserId,
+                    toDeviceId: backend.deviceID,
+                    payload: reason
+                )
+            )
+            diagnostics.record(
+                .websocket,
+                message: "Published receiver audio readiness",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "handle": contact.handle,
+                    "state": isReady ? "ready" : "not-ready",
+                    "reason": reason,
+                ]
+            )
+            localReceiverAudioReadinessPublications[contactID] = ReceiverAudioReadinessPublication(
+                isReady: isReady,
+                peerWasRoutable: true
+            )
+            captureDiagnosticsState("receiver-audio-readiness:published")
+        } catch {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Receiver audio readiness publish failed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "handle": contact.handle,
+                    "state": isReady ? "ready" : "not-ready",
+                    "reason": reason,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
+    }
+
     func prewarmLocalMediaIfNeeded(for contactID: UUID) async {
         guard isJoined, activeChannelId == contactID else { return }
         guard systemSessionMatches(contactID) else { return }
@@ -724,6 +813,14 @@ extension PTTViewModel {
             break
         }
         updateStatusForSelectedContact()
+        if let contactID = media.contactID() {
+            Task {
+                await syncLocalReceiverAudioReadinessSignal(
+                    for: contactID,
+                    reason: "media-\(String(describing: state))"
+                )
+            }
+        }
     }
 
     func ensureMediaSession(

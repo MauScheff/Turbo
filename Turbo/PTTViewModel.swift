@@ -66,6 +66,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var transmitRuntime = TransmitRuntimeState()
     var pttWakeRuntime = PTTWakeRuntimeState()
     var mediaRuntime = MediaRuntimeState()
+    var localReceiverAudioReadinessPublications: [UUID: ReceiverAudioReadinessPublication] = [:]
     var remoteTransmittingContactIDs: Set<UUID> = []
     var remoteAudioSilenceTasks: [UUID: Task<Void, Never>] = [:]
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
@@ -107,10 +108,19 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     func syncPTTState() {
+        let previousActiveChannelID = activeChannelId
         activeChannelId = pttCoordinator.state.activeContactID
         isJoined = pttCoordinator.state.isJoined
         isTransmitting = pttCoordinator.state.isTransmitting
         captureDiagnosticsState("ptt-sync")
+        let readinessContactIDs = Set(
+            [previousActiveChannelID, activeChannelId, mediaSessionContactID].compactMap { $0 }
+        )
+        for contactID in readinessContactIDs {
+            Task {
+                await syncLocalReceiverAudioReadinessSignal(for: contactID, reason: "ptt-sync")
+            }
+        }
     }
 
     var pendingJoinContactId: UUID? {
@@ -427,6 +437,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             backendSelfJoined: selectedChannelProjection.map { $0.membership.hasLocalMembership },
             backendPeerJoined: selectedChannelProjection.map { $0.membership.hasPeerMembership },
             backendPeerDeviceConnected: selectedChannelProjection.map { $0.membership.peerDeviceConnected },
+            remoteAudioReadiness: selectedChannelProjection.map { String(describing: $0.remoteAudioReadiness) },
             backendCanTransmit: selectedChannelProjection.map(\.canTransmit)
         )
     }
@@ -497,6 +508,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "backendSelfJoined": selectedSession.backendSelfJoined.map(String.init(describing:)) ?? "none",
             "backendPeerJoined": selectedSession.backendPeerJoined.map(String.init(describing:)) ?? "none",
             "backendPeerDeviceConnected": selectedSession.backendPeerDeviceConnected.map(String.init(describing:)) ?? "none",
+            "remoteAudioReadiness": selectedSession.remoteAudioReadiness ?? "unknown",
             "backendCanTransmit": selectedSession.backendCanTransmit.map(String.init(describing:)) ?? "none",
             "status": statusMessage,
             "backendStatus": backendStatusMessage

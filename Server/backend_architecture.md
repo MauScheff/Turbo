@@ -313,6 +313,8 @@ Supported `type` values in v1:
 - `hangup`
 - `transmit-start`
 - `transmit-stop`
+- `receiver-ready`
+- `receiver-not-ready`
 
 The backend treats `payload` as opaque text in v1. That keeps the signaling contract transport-agnostic and avoids baking SDP or ICE structure into backend logic.
 
@@ -370,6 +372,8 @@ Client opens an authenticated websocket and identifies:
 - `hangup`
 - `transmit-start`
 - `transmit-stop`
+- `receiver-ready`
+- `receiver-not-ready`
 
 ### server checks
 
@@ -379,6 +383,8 @@ For every message:
 - sender must be a member of the channel
 - target must be the intended peer device in that channel
 - malformed or unauthorized messages are rejected
+
+For `receiver-ready` and `receiver-not-ready`, the websocket signal is not the source of truth by itself. The backend persists the sender's current-session audio readiness and exposes the authoritative merged view on `/v1/channels/:channelId/readiness/:deviceId` under `audioReadiness`.
 
 ### envelope shape
 
@@ -407,7 +413,7 @@ The backend enforces the Push-to-Talk invariant:
 1. sender calls `begin-transmit`
 2. backend verifies membership and device ownership
 3. backend rejects if another transmitter is already active
-4. backend selects the target receiving device
+4. backend selects the target receiving device and verifies that target's current-session receiver audio readiness
 5. backend writes runtime state
 6. backend later triggers push delivery
 7. sender proceeds with signaling

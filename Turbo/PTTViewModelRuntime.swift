@@ -538,6 +538,11 @@ enum MediaSessionStartupState: Equatable {
     case failed(MediaSessionStartupFailure)
 }
 
+struct ReceiverAudioReadinessPublication: Equatable {
+    let isReady: Bool
+    let peerWasRoutable: Bool
+}
+
 struct BackendServices {
     let client: TurboBackendClient
     let currentUserID: String?

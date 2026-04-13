@@ -1,0 +1,31 @@
+namespace turbo.store.receiverAudioReadiness
+
+upsert : Database -> ChannelId -> UserId -> DeviceId -> Text -> Boolean -> '{Exception, Storage, Remote, Random} ReceiverAudioReadinessRecord
+upsert db channelId userId deviceId sessionId isReady = do
+  use OrderedTable write.tx
+  table = receiverAudioReadiness.tables.byChannelUserDevice db
+  now = now!
+  record = ReceiverAudioReadinessRecord channelId userId deviceId sessionId isReady now
+  transact (OrderedTable.database table) do
+    _ = write.tx table (channelId, userId, deviceId) record
+    record
+
+getForCurrentSession : Database -> ChannelId -> UserId -> DeviceId -> '{Exception, Remote} Optional ReceiverAudioReadinessRecord
+getForCurrentSession db channelId userId deviceId = do
+  recordOpt = OrderedTable.tryRead (receiverAudioReadiness.tables.byChannelUserDevice db) (channelId, userId, deviceId)
+  sessionOpt = sessions.get db deviceId ()
+  match (recordOpt, sessionOpt) with
+    (Some record, Some session) ->
+      if textEqual (receiverAudioReadinessRecordSessionId record) (sessions.internal.sessionId session) then Some record
+      else None
+    _                          -> None
+
+isReadyForCurrentSession : Database -> ChannelId -> UserId -> DeviceId -> '{Exception, Remote} Boolean
+isReadyForCurrentSession db channelId userId deviceId = do
+  match getForCurrentSession db channelId userId deviceId () with
+    Some record -> receiverAudioReadinessRecordIsReady record
+    None        -> false
+
+clear : Database -> ChannelId -> UserId -> DeviceId -> '{Exception, Storage, Remote} ()
+clear db channelId userId deviceId = do
+  OrderedTable.delete (receiverAudioReadiness.tables.byChannelUserDevice db) (channelId, userId, deviceId)

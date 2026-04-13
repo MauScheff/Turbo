@@ -165,11 +165,16 @@ In that run, the important healthy sequence was:
 
 The important part is not a specific internal branch name. The important part is that real audio chunks arrive and playback starts promptly during the same transmit window, rather than being buffered until long after release.
 
-### Current limitation
+### Receiver-ready gate
 
-The prewarm gate is currently local per device, not globally synchronized across both devices. One side may become ready before the other if its own local warmup finishes first.
+The prewarm gate is now globally receiver-ready for joined foreground sessions:
 
-That is acceptable for now because the immediate problem was "no audio on first transmit." A stricter future model may require receiver-ready gating before the sender sees hold-to-talk as enabled.
+- each device publishes `receiver-ready` only after its own receive path is actually prewarmed
+- each device publishes `receiver-not-ready` when that readiness is lost
+- the backend stores that readiness per joined device/session and exposes it through `/readiness.audioReadiness`
+- the sender only gets enabled hold-to-talk when backend readiness, local warmup, and the backend's authoritative peer audio-readiness view all agree
+
+So for the normal joined foreground path, `Connected` plus enabled hold-to-talk now means "the backend currently believes the other joined device can hear you right now", not just "this device finished local prewarm first".
 
 ## Background PTT wake loop
 

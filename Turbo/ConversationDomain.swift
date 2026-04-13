@@ -303,6 +303,7 @@ enum SelectedPeerWaitingReason: Equatable {
     case disconnecting
     case localSessionTransition
     case localAudioPrewarm
+    case remoteAudioPrewarm
     case backendSessionTransition
     case peerReadyToConnect
 }
@@ -312,6 +313,12 @@ enum LocalMediaWarmupState: Equatable {
     case prewarming
     case ready
     case failed
+}
+
+enum RemoteAudioReadinessState: Equatable {
+    case unknown
+    case waiting
+    case ready
 }
 
 enum SelectedPeerDetail: Equatable {
@@ -485,10 +492,15 @@ struct ChannelReadinessSnapshot: Equatable {
     let status: ConversationState?
     let readinessStatus: TurboChannelReadinessStatus?
     let activeTransmitterUserId: String?
+    let remoteAudioReadiness: RemoteAudioReadinessState
 
-    init(channelState: TurboChannelStateResponse, readiness: TurboChannelReadinessResponse? = nil) {
+    init(
+        channelState: TurboChannelStateResponse,
+        readiness: TurboChannelReadinessResponse? = nil
+    ) {
         membership = channelState.membership
         requestRelationship = channelState.requestRelationship
+        self.remoteAudioReadiness = readiness?.remoteAudioReadiness ?? .unknown
         if let readiness {
             canTransmit = readiness.canTransmit
             status = readiness.statusView.conversationState
@@ -625,6 +637,10 @@ struct ConversationDerivationContext: Equatable {
         self.mediaState = mediaState
         self.localMediaWarmupState = localMediaWarmupState
         self.channel = channel
+    }
+
+    var remoteAudioReadinessState: RemoteAudioReadinessState {
+        channel?.remoteAudioReadiness ?? .unknown
     }
 }
 
@@ -1066,6 +1082,9 @@ private extension ConversationStateMachine {
             case .ready:
                 break
             }
+            if context.remoteAudioReadinessState != .ready {
+                return (.waitingForPeer(reason: .remoteAudioPrewarm), "Waiting for \(context.contactName)'s audio...")
+            }
         }
 
         if !peerDeviceConnected {
@@ -1150,7 +1169,9 @@ private extension ConversationDerivationContext {
               peerDeviceConnected else {
             return false
         }
-        return canTransmit && localMediaWarmupState == .ready
+        return canTransmit
+            && localMediaWarmupState == .ready
+            && remoteAudioReadinessState == .ready
     }
 }
 

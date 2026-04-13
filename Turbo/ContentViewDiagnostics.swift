@@ -80,6 +80,7 @@ struct TurboDiagnosticsView: View {
                 diagnosticsRow("Backend self joined", boolText(projection.selectedSession.backendSelfJoined))
                 diagnosticsRow("Backend peer joined", boolText(projection.selectedSession.backendPeerJoined))
                 diagnosticsRow("Peer device connected", boolText(projection.selectedSession.backendPeerDeviceConnected))
+                diagnosticsRow("Remote audio readiness", projection.selectedSession.remoteAudioReadiness ?? "unknown")
                 diagnosticsRow("Backend can transmit", boolText(projection.selectedSession.backendCanTransmit))
                 diagnosticsRow("Active channel", projection.selectedSession.activeChannelID ?? "none")
                 diagnosticsRow("WebSocket", projection.isWebSocketConnected ? "connected" : "disconnected")

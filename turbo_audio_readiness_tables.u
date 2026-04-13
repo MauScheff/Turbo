@@ -1,0 +1,5 @@
+namespace turbo.store.receiverAudioReadiness.tables
+
+byChannelUserDevice : Database -> OrderedTable (ChannelId, UserId, DeviceId) domain.ReceiverAudioReadinessRecord
+byChannelUserDevice db =
+  OrderedTable.named db "turboReceiverAudioReadinessByChannelUserDevice_v1" Universal.ordering

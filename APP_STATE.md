@@ -356,6 +356,7 @@ For the current working foreground device path, `ready` does not mean "audio is 
 - backend readiness is aligned
 - local/system session alignment is correct
 - the local device has finished its own interactive media prewarm
+- the backend's authoritative `audioReadiness.peer` view says the peer device is `ready`, which means its receive path is prewarmed too
 
 Then, at the real first transmit boundary, the app still does one important sender-side step: it rebinds the capture engine and input tap against the actual live `PlayAndRecord` route before capturing microphone audio.
 
@@ -363,7 +364,8 @@ That detail matters. Earlier prototype behavior prewarmed the capture engine too
 
 So the current model is:
 
-- prewarm enough locally that hold-to-talk only appears when the device is plausibly ready
+- prewarm enough locally that the device can honestly publish receiver-readiness to the backend
+- only enable hold-to-talk once both devices are ready for immediate foreground audio
 - still treat the actual transmit boundary as the moment when sender capture must bind to the live route
 
 This is why the selected conversation can be `ready`, yet the real "audio is now definitely capturable" moment still lives at transmit start rather than purely at join time.

@@ -1,0 +1,12 @@
+namespace turbo.service.internal
+
+audioReadinessStatusJson : domain.AudioReadinessStatus -> Json
+audioReadinessStatusJson status =
+  object.empty |> addText "kind" (domain.audioReadinessStatusKindText status)
+
+channelAudioReadinessJson : domain.ChannelAudioReadiness -> Json
+channelAudioReadinessJson audioReadiness =
+  object.empty
+    |> object.add "self" (audioReadinessStatusJson (domain.channelAudioReadinessSelf audioReadiness))
+    |> object.add "peer" (audioReadinessStatusJson (domain.channelAudioReadinessPeer audioReadiness))
+    |> addOptionalText "peerTargetDeviceId" (Optional.map DeviceId.toText (domain.channelAudioReadinessPeerTargetDeviceId audioReadiness))

@@ -244,6 +244,7 @@ extension PTTViewModel {
         selfCheckCoordinator.send(.reset)
         pttSystemPolicyCoordinator.send(.reset)
         pttWakeRuntime.clearAll()
+        localReceiverAudioReadinessPublications = [:]
         clearTrackedContacts()
         resetTransportFaults()
         contacts = []
@@ -288,6 +289,13 @@ extension PTTViewModel {
             captureDiagnosticsState("websocket:connected")
             Task {
                 await backendSyncCoordinator.handle(.webSocketStateChanged(state, selectedContactID: selectedContactId))
+                let readinessContactIDs = Set([selectedContactId, activeChannelId, mediaSessionContactID].compactMap { $0 })
+                for contactID in readinessContactIDs {
+                    await syncLocalReceiverAudioReadinessSignal(
+                        for: contactID,
+                        reason: "websocket-connected"
+                    )
+                }
             }
         }
     }

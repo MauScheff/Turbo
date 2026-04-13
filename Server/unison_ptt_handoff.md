@@ -85,7 +85,10 @@ Responsible for:
   - `hangup`
   - `transmit-start`
   - `transmit-stop`
+  - `receiver-ready`
+  - `receiver-not-ready`
 - routing messages only to authorized channel members
+- persisting current-session receiver audio readiness so `/readiness.audioReadiness` is authoritative after reconnects, retries, or stale signals
 
 ### 7. Presence / session state service
 Responsible for:
@@ -588,4 +591,3 @@ The backend should manage:
 The backend should **not** relay media.
 
 The design should be simple, clean, and intentionally structured so that a future version can replace P2P audio with TURN-heavy routing or an SFU without rewriting identity, channels, push, or signaling semantics.
-

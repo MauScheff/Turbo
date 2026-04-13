@@ -214,6 +214,56 @@ def require_readiness_contract(payload: dict[str, Any], *, label: str) -> None:
         )
 
 
+def require_audio_readiness_contract(payload: dict[str, Any], *, label: str) -> None:
+    audio_readiness = payload.get("audioReadiness")
+    require(isinstance(audio_readiness, dict), f"{label} missing audioReadiness contract: {payload}")
+
+    self_readiness = audio_readiness.get("self")
+    peer_readiness = audio_readiness.get("peer")
+    require(isinstance(self_readiness, dict), f"{label} audioReadiness missing self readiness: {audio_readiness}")
+    require(isinstance(peer_readiness, dict), f"{label} audioReadiness missing peer readiness: {audio_readiness}")
+
+    self_kind = self_readiness.get("kind")
+    peer_kind = peer_readiness.get("kind")
+    valid_kinds = {"unknown", "waiting", "ready"}
+    require(self_kind in valid_kinds, f"{label} invalid self audio readiness kind: {audio_readiness}")
+    require(peer_kind in valid_kinds, f"{label} invalid peer audio readiness kind: {audio_readiness}")
+
+    self_has_active_device = payload.get("selfHasActiveDevice")
+    peer_has_active_device = payload.get("peerHasActiveDevice")
+
+    if self_has_active_device:
+        require(
+            self_kind in {"waiting", "ready"},
+            f"{label} self audio readiness should not be unknown when self has an active device: {audio_readiness}",
+        )
+    else:
+        require(
+            self_kind == "unknown",
+            f"{label} self audio readiness should be unknown without an active device: {audio_readiness}",
+        )
+
+    peer_target_device_id = audio_readiness.get("peerTargetDeviceId")
+    if peer_has_active_device:
+        require(
+            peer_kind in {"waiting", "ready"},
+            f"{label} peer audio readiness should not be unknown when peer has an active device: {audio_readiness}",
+        )
+        require(
+            isinstance(peer_target_device_id, str) and peer_target_device_id,
+            f"{label} peer audio readiness missing peerTargetDeviceId for active peer device: {audio_readiness}",
+        )
+    else:
+        require(
+            peer_kind == "unknown",
+            f"{label} peer audio readiness should be unknown without an active device: {audio_readiness}",
+        )
+        require(
+            peer_target_device_id in (None, ""),
+            f"{label} peer audio readiness unexpectedly carried peerTargetDeviceId: {audio_readiness}",
+        )
+
+
 def require_diagnostics_report(
     response: dict[str, Any],
     *,
@@ -238,6 +288,48 @@ async def receive_json_or_timeout(connection, timeout_seconds: int) -> dict:
         return json.loads(raw)
     except Exception as exc:
         return {"error": repr(exc)}
+
+
+async def send_signal(
+    connection,
+    *,
+    type: str,
+    channel_id: str,
+    from_user_id: str,
+    from_device_id: str,
+    to_user_id: str,
+    to_device_id: str,
+    payload: str,
+) -> None:
+    await connection.send(json.dumps({
+        "type": type,
+        "channelId": channel_id,
+        "fromUserId": from_user_id,
+        "fromDeviceId": from_device_id,
+        "toUserId": to_user_id,
+        "toDeviceId": to_device_id,
+        "payload": payload,
+    }))
+
+
+async def expect_forwarded_signal(
+    connection,
+    *,
+    expected_type: str,
+    expected_channel_id: str,
+    expected_from_user_id: str,
+    expected_from_device_id: str,
+    expected_to_user_id: str,
+    expected_to_device_id: str,
+) -> dict[str, Any]:
+    envelope = await receive_json_or_timeout(connection, timeout_seconds=10)
+    require(envelope.get("type") == expected_type, f"unexpected forwarded signal type: {envelope}")
+    require(envelope.get("channelId") == expected_channel_id, f"unexpected forwarded channel id: {envelope}")
+    require(envelope.get("fromUserId") == expected_from_user_id, f"unexpected forwarded fromUserId: {envelope}")
+    require(envelope.get("fromDeviceId") == expected_from_device_id, f"unexpected forwarded fromDeviceId: {envelope}")
+    require(envelope.get("toUserId") == expected_to_user_id, f"unexpected forwarded toUserId: {envelope}")
+    require(envelope.get("toDeviceId") == expected_to_device_id, f"unexpected forwarded toDeviceId: {envelope}")
+    return envelope
 
 
 @contextlib.asynccontextmanager
@@ -291,6 +383,16 @@ async def connected_websocket_pair(
 def run_check(results: list[CheckResult], name: str, fn) -> Any:
     try:
         payload = fn()
+        results.append(CheckResult(name=name, ok=True, detail="ok", payload=payload))
+        return payload
+    except Exception as exc:
+        results.append(CheckResult(name=name, ok=False, detail=str(exc)))
+        raise
+
+
+async def run_async_check(results: list[CheckResult], name: str, fn) -> Any:
+    try:
+        payload = await fn()
         results.append(CheckResult(name=name, ok=True, detail="ok", payload=payload))
         return payload
     except Exception as exc:
@@ -757,6 +859,96 @@ async def main() -> int:
             require(isinstance(caller_readiness, dict), f"readiness returned unexpected payload: {caller_readiness}")
             if is_local_base_url(args.base_url):
                 require_readiness_contract(caller_readiness, label="channel-readiness:caller")
+                require_audio_readiness_contract(caller_readiness, label="channel-readiness:caller")
+
+            await run_async_check(
+                results,
+                "signal:receiver-ready:callee-to-caller",
+                lambda: send_signal(
+                    websocket_pair["callee"],
+                    type="receiver-ready",
+                    channel_id=channel_id,
+                    from_user_id=callee["user_id"],
+                    from_device_id=callee["device_id"],
+                    to_user_id=caller["user_id"],
+                    to_device_id=caller["device_id"],
+                    payload="receiver-ready",
+                ),
+            )
+            await run_async_check(
+                results,
+                "signal:receiver-ready-forwarded:caller",
+                lambda: expect_forwarded_signal(
+                    websocket_pair["caller"],
+                    expected_type="receiver-ready",
+                    expected_channel_id=channel_id,
+                    expected_from_user_id=callee["user_id"],
+                    expected_from_device_id=callee["device_id"],
+                    expected_to_user_id=caller["user_id"],
+                    expected_to_device_id=caller["device_id"],
+                ),
+            )
+            await run_async_check(
+                results,
+                "signal:receiver-ready:caller-to-callee",
+                lambda: send_signal(
+                    websocket_pair["caller"],
+                    type="receiver-ready",
+                    channel_id=channel_id,
+                    from_user_id=caller["user_id"],
+                    from_device_id=caller["device_id"],
+                    to_user_id=callee["user_id"],
+                    to_device_id=callee["device_id"],
+                    payload="receiver-ready",
+                ),
+            )
+            await run_async_check(
+                results,
+                "signal:receiver-ready-forwarded:callee",
+                lambda: expect_forwarded_signal(
+                    websocket_pair["callee"],
+                    expected_type="receiver-ready",
+                    expected_channel_id=channel_id,
+                    expected_from_user_id=caller["user_id"],
+                    expected_from_device_id=caller["device_id"],
+                    expected_to_user_id=callee["user_id"],
+                    expected_to_device_id=callee["device_id"],
+                ),
+            )
+
+            caller_readiness_after_signal = run_check(
+                results,
+                "channel-readiness:caller:receiver-ready",
+                lambda: request(
+                    args.base_url,
+                    f"/v1/channels/{channel_id}/readiness/{urllib.parse.quote(caller['device_id'])}",
+                    caller["handle"],
+                    insecure=args.insecure,
+                ),
+            )
+            callee_readiness_after_signal = run_check(
+                results,
+                "channel-readiness:callee:receiver-ready",
+                lambda: request(
+                    args.base_url,
+                    f"/v1/channels/{channel_id}/readiness/{urllib.parse.quote(callee['device_id'])}",
+                    callee["handle"],
+                    insecure=args.insecure,
+                ),
+            )
+            if is_local_base_url(args.base_url):
+                require_readiness_contract(caller_readiness_after_signal, label="channel-readiness:caller:receiver-ready")
+                require_readiness_contract(callee_readiness_after_signal, label="channel-readiness:callee:receiver-ready")
+                require_audio_readiness_contract(caller_readiness_after_signal, label="channel-readiness:caller:receiver-ready")
+                require_audio_readiness_contract(callee_readiness_after_signal, label="channel-readiness:callee:receiver-ready")
+                require(
+                    caller_readiness_after_signal.get("audioReadiness", {}).get("peer", {}).get("kind") == "ready",
+                    f"caller readiness should show ready peer audio after receiver-ready signal: {caller_readiness_after_signal}",
+                )
+                require(
+                    callee_readiness_after_signal.get("audioReadiness", {}).get("peer", {}).get("kind") == "ready",
+                    f"callee readiness should show ready peer audio after receiver-ready signal: {callee_readiness_after_signal}",
+                )
 
             run_check(
                 results,
@@ -846,6 +1038,8 @@ async def main() -> int:
                 )
                 require_readiness_contract(caller_readiness_transmitting, label="channel-readiness:caller:transmitting")
                 require_readiness_contract(callee_readiness_receiving, label="channel-readiness:callee:receiving")
+                require_audio_readiness_contract(caller_readiness_transmitting, label="channel-readiness:caller:transmitting")
+                require_audio_readiness_contract(callee_readiness_receiving, label="channel-readiness:callee:receiving")
                 require(
                     caller_readiness_transmitting.get("readiness", {}).get("kind") == "self-transmitting",
                     f"caller readiness should show self-transmitting after begin-transmit: {caller_readiness_transmitting}",

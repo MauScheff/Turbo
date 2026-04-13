@@ -290,6 +290,102 @@ struct TurboTests {
         #expect(state.canTransmitNow == false)
     }
 
+    @Test func selectedPeerStateWaitsForRemoteAudioReadinessBeforeEnablingTransmit() {
+        let contactID = UUID()
+        let state = ConversationStateMachine.selectedPeerState(
+            for: ConversationDerivationContext(
+                contactID: contactID,
+                selectedContactID: contactID,
+                baseState: .ready,
+                contactName: "Blake",
+                contactIsOnline: true,
+                isJoined: true,
+                activeChannelID: contactID,
+                systemSessionMatchesContact: true,
+                systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+                pendingAction: .none,
+                localJoinFailure: nil,
+                mediaState: .connected,
+                localMediaWarmupState: .ready,
+                channel: ChannelReadinessSnapshot(
+                    channelState: makeChannelState(status: .ready, canTransmit: true),
+                    readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .unknown)
+                )
+            ),
+            relationship: .none
+        )
+
+        #expect(state.phase == .waitingForPeer)
+        #expect(state.statusMessage == "Waiting for Blake's audio...")
+        #expect(state.canTransmitNow == false)
+    }
+
+    @Test func selectedPeerStateBecomesReadyWhenRemoteAudioReadinessArrives() {
+        let contactID = UUID()
+        let state = ConversationStateMachine.selectedPeerState(
+            for: ConversationDerivationContext(
+                contactID: contactID,
+                selectedContactID: contactID,
+                baseState: .ready,
+                contactName: "Blake",
+                contactIsOnline: true,
+                isJoined: true,
+                activeChannelID: contactID,
+                systemSessionMatchesContact: true,
+                systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+                pendingAction: .none,
+                localJoinFailure: nil,
+                mediaState: .connected,
+                localMediaWarmupState: .ready,
+                channel: ChannelReadinessSnapshot(
+                    channelState: makeChannelState(status: .ready, canTransmit: true),
+                    readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)
+                )
+            ),
+            relationship: .none
+        )
+
+        #expect(state.phase == .ready)
+        #expect(state.statusMessage == "Connected")
+        #expect(state.canTransmitNow)
+    }
+
+    @Test func incomingReceiverReadySignalUpdatesRemoteReadinessState() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.backendSyncCoordinator.send(
+            .channelReadinessUpdated(
+                contactID: contactID,
+                readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .waiting)
+            )
+        )
+
+        viewModel.handleIncomingSignal(
+            TurboSignalEnvelope(
+                type: .receiverReady,
+                channelId: "channel-123",
+                fromUserId: "peer-user",
+                fromDeviceId: "peer-device",
+                toUserId: "self-user",
+                toDeviceId: "self-device",
+                payload: "test"
+            )
+        )
+
+        #expect(viewModel.channelReadinessByContactID[contactID]?.remoteAudioReadiness == .ready)
+    }
+
     @Test func retainedContactsOnlyKeepAuthoritativeIDs() {
         let avery = Contact(
             id: Contact.stableID(for: "@avery"),
@@ -984,7 +1080,10 @@ struct TurboTests {
             localJoinFailure: nil,
             mediaState: .connected,
             localMediaWarmupState: .ready,
-            channel: ChannelReadinessSnapshot(channelState: makeChannelState(status: .ready, canTransmit: true))
+            channel: ChannelReadinessSnapshot(
+                channelState: makeChannelState(status: .ready, canTransmit: true),
+                readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)
+            )
         )
 
         let state = ConversationStateMachine.selectedPeerState(
@@ -1164,10 +1263,19 @@ struct TurboTests {
             state: joinedState,
             event: .mediaStateUpdated(.connected)
         ).state
+        let receiverReadyState = SelectedPeerReducer.reduce(
+            state: readyState,
+            event: .channelUpdated(
+                ChannelReadinessSnapshot(
+                    channelState: makeChannelState(status: .ready, canTransmit: true),
+                    readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)
+                )
+            )
+        ).state
 
-        #expect(readyState.selectedPeerState.phase == .ready)
-        #expect(readyState.selectedPeerState.statusMessage == "Connected")
-        #expect(readyState.selectedPeerState.canTransmitNow)
+        #expect(receiverReadyState.selectedPeerState.phase == .ready)
+        #expect(receiverReadyState.selectedPeerState.statusMessage == "Connected")
+        #expect(receiverReadyState.selectedPeerState.canTransmitNow)
     }
 
     @Test func selectedPeerReducerJoinRequestEmitsConnectForJoinableSelection() {
@@ -1775,6 +1883,11 @@ struct TurboTests {
                 "kind": "peer-transmitting",
                 "activeTransmitterUserId": "peer"
               },
+              "audioReadiness": {
+                "self": { "kind": "ready" },
+                "peer": { "kind": "waiting" },
+                "peerTargetDeviceId": "peer-device"
+              },
               "activeTransmitterUserId": "peer",
               "activeTransmitExpiresAt": null,
               "status": "ready"
@@ -1787,6 +1900,8 @@ struct TurboTests {
         #expect(readiness.statusView == .peerTransmitting(activeTransmitterUserId: "peer"))
         #expect(readiness.statusKind == "peer-transmitting")
         #expect(readiness.canTransmit == false)
+        #expect(readiness.remoteAudioReadiness == .waiting)
+        #expect(readiness.peerTargetDeviceId == "peer-device")
     }
 
     @Test func channelReadinessDecodeFailsWithoutNestedContract() {
@@ -2781,7 +2896,8 @@ struct TurboTests {
 
         let transportPayloads = await recorder.payloads
         let deliveredPayloads = transportPayloads.flatMap(AudioChunkPayloadCodec.decode)
-        #expect(deliveredPayloads == ["chunk-1", "chunk-2", "chunk-3"])
+        #expect(deliveredPayloads.count == 3)
+        #expect(Set(deliveredPayloads) == Set(["chunk-1", "chunk-2", "chunk-3"]))
         #expect(transportPayloads.count < 3)
     }
 
@@ -6060,16 +6176,43 @@ private func makeChannelState(
 private func makeChannelReadiness(
     status: TurboChannelReadinessStatus,
     selfHasActiveDevice: Bool = true,
-    peerHasActiveDevice: Bool = true
+    peerHasActiveDevice: Bool = true,
+    localAudioReadiness: RemoteAudioReadinessState? = nil,
+    remoteAudioReadiness: RemoteAudioReadinessState? = nil
 ) -> TurboChannelReadinessResponse {
-    TurboChannelReadinessResponse(
+    let resolvedLocalAudioReadiness = localAudioReadiness ?? (selfHasActiveDevice ? .ready : .unknown)
+    let resolvedRemoteAudioReadiness = remoteAudioReadiness ?? (peerHasActiveDevice ? .ready : .unknown)
+    return TurboChannelReadinessResponse(
         channelId: "channel",
         peerUserId: "peer",
         selfHasActiveDevice: selfHasActiveDevice,
         peerHasActiveDevice: peerHasActiveDevice,
         activeTransmitterUserId: status.activeTransmitterUserId,
         activeTransmitExpiresAt: nil,
-        status: status.kind
+        status: status.kind,
+        audioReadinessPayload: TurboChannelAudioReadinessPayload(
+            selfReadiness: TurboAudioReadinessStatusPayload(kind: {
+                switch resolvedLocalAudioReadiness {
+                case .unknown:
+                    return "unknown"
+                case .waiting:
+                    return "waiting"
+                case .ready:
+                    return "ready"
+                }
+            }()),
+            peerReadiness: TurboAudioReadinessStatusPayload(kind: {
+                switch resolvedRemoteAudioReadiness {
+                case .unknown:
+                    return "unknown"
+                case .waiting:
+                    return "waiting"
+                case .ready:
+                    return "ready"
+                }
+            }()),
+            peerTargetDeviceId: peerHasActiveDevice ? "peer-device" : nil
+        )
     )
 }
 

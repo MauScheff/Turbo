@@ -22,6 +22,7 @@ struct SelectedSessionDiagnosticsSummary: Equatable {
     let backendSelfJoined: Bool?
     let backendPeerJoined: Bool?
     let backendPeerDeviceConnected: Bool?
+    let remoteAudioReadiness: String?
     let backendCanTransmit: Bool?
 }
 
@@ -131,6 +132,7 @@ struct DiagnosticsStateCapture: Identifiable, Equatable {
             "backendSelfJoined=\(fields["backendSelfJoined"] ?? "none")",
             "backendPeerJoined=\(fields["backendPeerJoined"] ?? "none")",
             "peerDevice=\(fields["backendPeerDeviceConnected"] ?? "none")",
+            "peerAudio=\(fields["remoteAudioReadiness"] ?? "unknown")",
             "status=\(fields["selectedPeerStatus"] ?? fields["status"] ?? "none")"
         ]
         return parts.joined(separator: " ")

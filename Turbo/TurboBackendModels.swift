@@ -575,6 +575,95 @@ struct TurboChannelReadinessPayload: Decodable, Equatable {
     }
 }
 
+struct TurboAudioReadinessStatusPayload: Decodable, Equatable {
+    let kind: String
+
+    init(kind: String) {
+        self.kind = kind
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .kind)
+        guard Self.validKinds.contains(kind) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind,
+                in: container,
+                debugDescription: "Unsupported audio readiness kind \(kind)"
+            )
+        }
+        self.kind = kind
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+    }
+
+    private static let validKinds: Set<String> = [
+        "unknown",
+        "waiting",
+        "ready",
+    ]
+
+    var status: RemoteAudioReadinessState {
+        switch kind {
+        case "ready":
+            return .ready
+        case "waiting":
+            return .waiting
+        default:
+            return .unknown
+        }
+    }
+}
+
+struct TurboChannelAudioReadinessPayload: Decodable, Equatable {
+    let selfReadiness: TurboAudioReadinessStatusPayload
+    let peerReadiness: TurboAudioReadinessStatusPayload
+    let peerTargetDeviceId: String?
+
+    init(
+        selfReadiness: TurboAudioReadinessStatusPayload,
+        peerReadiness: TurboAudioReadinessStatusPayload,
+        peerTargetDeviceId: String?
+    ) {
+        self.selfReadiness = selfReadiness
+        self.peerReadiness = peerReadiness
+        self.peerTargetDeviceId = peerTargetDeviceId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case selfReadiness = "self"
+        case peerReadiness = "peer"
+        case peerTargetDeviceId
+    }
+
+    var localStatus: RemoteAudioReadinessState {
+        selfReadiness.status
+    }
+
+    var remoteStatus: RemoteAudioReadinessState {
+        peerReadiness.status
+    }
+
+    func settingRemoteStatus(_ status: RemoteAudioReadinessState) -> TurboChannelAudioReadinessPayload {
+        TurboChannelAudioReadinessPayload(
+            selfReadiness: selfReadiness,
+            peerReadiness: TurboAudioReadinessStatusPayload(kind: {
+                switch status {
+                case .unknown:
+                    return "unknown"
+                case .waiting:
+                    return "waiting"
+                case .ready:
+                    return "ready"
+                }
+            }()),
+            peerTargetDeviceId: peerTargetDeviceId
+        )
+    }
+}
+
 struct TurboBackendConfig {
     let baseURL: URL
     let devUserHandle: String
@@ -635,6 +724,8 @@ enum TurboSignalKind: String, Codable {
     case transmitStart = "transmit-start"
     case transmitStop = "transmit-stop"
     case audioChunk = "audio-chunk"
+    case receiverReady = "receiver-ready"
+    case receiverNotReady = "receiver-not-ready"
 }
 
 enum TurboPTTPushEvent: String, Codable, Equatable {
@@ -1186,6 +1277,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
     let peerHasActiveDevice: Bool
     let activeTransmitExpiresAt: String?
     private let readinessPayload: TurboChannelReadinessPayload
+    private let audioReadinessPayload: TurboChannelAudioReadinessPayload
 
     init(
         channelId: String,
@@ -1195,7 +1287,8 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         activeTransmitterUserId: String?,
         activeTransmitExpiresAt: String?,
         status: String,
-        readinessPayload: TurboChannelReadinessPayload? = nil
+        readinessPayload: TurboChannelReadinessPayload? = nil,
+        audioReadinessPayload: TurboChannelAudioReadinessPayload? = nil
     ) {
         self.channelId = channelId
         self.peerUserId = peerUserId
@@ -1205,6 +1298,11 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         self.readinessPayload = readinessPayload ?? TurboChannelReadinessPayload(
             kind: status,
             activeTransmitterUserId: activeTransmitterUserId
+        )
+        self.audioReadinessPayload = audioReadinessPayload ?? TurboChannelAudioReadinessPayload(
+            selfReadiness: TurboAudioReadinessStatusPayload(kind: selfHasActiveDevice ? "waiting" : "unknown"),
+            peerReadiness: TurboAudioReadinessStatusPayload(kind: peerHasActiveDevice ? "waiting" : "unknown"),
+            peerTargetDeviceId: nil
         )
     }
 
@@ -1217,6 +1315,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         case activeTransmitExpiresAt
         case status
         case readiness
+        case audioReadiness
     }
 
     init(from decoder: Decoder) throws {
@@ -1227,6 +1326,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         peerHasActiveDevice = try container.decode(Bool.self, forKey: .peerHasActiveDevice)
         activeTransmitExpiresAt = try container.decodeIfPresent(String.self, forKey: .activeTransmitExpiresAt)
         readinessPayload = try container.decode(TurboChannelReadinessPayload.self, forKey: .readiness)
+        audioReadinessPayload = try container.decode(TurboChannelAudioReadinessPayload.self, forKey: .audioReadiness)
     }
 
     var statusView: TurboChannelReadinessStatus {
@@ -1247,6 +1347,32 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
 
     var canTransmit: Bool {
         statusView.canTransmit
+    }
+
+    var remoteAudioReadiness: RemoteAudioReadinessState {
+        audioReadinessPayload.remoteStatus
+    }
+
+    var localAudioReadiness: RemoteAudioReadinessState {
+        audioReadinessPayload.localStatus
+    }
+
+    var peerTargetDeviceId: String? {
+        audioReadinessPayload.peerTargetDeviceId
+    }
+
+    func settingRemoteAudioReadiness(_ status: RemoteAudioReadinessState) -> TurboChannelReadinessResponse {
+        TurboChannelReadinessResponse(
+            channelId: channelId,
+            peerUserId: peerUserId,
+            selfHasActiveDevice: selfHasActiveDevice,
+            peerHasActiveDevice: peerHasActiveDevice,
+            activeTransmitterUserId: activeTransmitterUserId,
+            activeTransmitExpiresAt: activeTransmitExpiresAt,
+            status: statusKind,
+            readinessPayload: readinessPayload,
+            audioReadinessPayload: audioReadinessPayload.settingRemoteStatus(status)
+        )
     }
 }
 

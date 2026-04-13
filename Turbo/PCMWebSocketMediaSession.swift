@@ -105,35 +105,35 @@ struct CaptureRouteRefreshPlan: Equatable {
 }
 
 enum AudioChunkPayloadCodec {
-    private struct BatchEnvelope: Codable {
-        let kind: String
-        let chunks: [String]
-    }
-
-    private static let batchKind = "pcm-batch-v1"
-
     nonisolated static func encode(_ chunks: [String]) -> String {
         guard chunks.count > 1 else {
             return chunks.first ?? ""
         }
 
-        let envelope = BatchEnvelope(kind: batchKind, chunks: chunks)
-        guard let data = try? JSONEncoder().encode(envelope) else {
+        let envelope: [String: Any] = [
+            "kind": "pcm-batch-v1",
+            "chunks": chunks,
+        ]
+        guard JSONSerialization.isValidJSONObject(envelope),
+              let data = try? JSONSerialization.data(withJSONObject: envelope),
+              let string = String(data: data, encoding: .utf8) else {
             return chunks.first ?? ""
         }
-        return String(decoding: data, as: UTF8.self)
+        return string
     }
 
     nonisolated static func decode(_ payload: String) -> [String] {
         guard payload.first == "{",
               let data = payload.data(using: .utf8),
-              let envelope = try? JSONDecoder().decode(BatchEnvelope.self, from: data),
-              envelope.kind == batchKind,
-              !envelope.chunks.isEmpty else {
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let kind = object["kind"] as? String,
+              kind == "pcm-batch-v1",
+              let chunks = object["chunks"] as? [String],
+              !chunks.isEmpty else {
             return [payload]
         }
 
-        return envelope.chunks
+        return chunks
     }
 }
 

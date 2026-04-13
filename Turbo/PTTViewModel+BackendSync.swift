@@ -388,6 +388,36 @@ extension PTTViewModel {
                 await refreshContactSummaries()
                 await refreshChannelState(for: contactID)
             }
+        case .receiverReady, .receiverNotReady:
+            let readiness: RemoteAudioReadinessState =
+                envelope.type == .receiverReady ? .ready : .waiting
+            if let existing = channelReadinessByContactID[contactID] {
+                backendSyncCoordinator.send(
+                    .channelReadinessUpdated(
+                        contactID: contactID,
+                        readiness: existing.settingRemoteAudioReadiness(readiness)
+                    )
+                )
+            }
+            diagnostics.record(
+                .websocket,
+                message: "Receiver audio readiness signal received",
+                metadata: [
+                    "type": envelope.type.rawValue,
+                    "channelId": envelope.channelId,
+                    "contactId": contactID.uuidString,
+                ]
+            )
+            if backendStatusMessage.hasPrefix("signaling ") {
+                backendStatusMessage = "Connected"
+            }
+            if selectedContactId == contactID {
+                updateStatusForSelectedContact()
+                captureDiagnosticsState("backend-signal:\(envelope.type.rawValue)")
+            }
+            Task {
+                await refreshChannelState(for: contactID)
+            }
         case .audioChunk:
             diagnostics.record(
                 .media,
@@ -588,6 +618,11 @@ extension PTTViewModel {
                 contact.isOnline = effectiveChannelState.peerOnline
                 contact.remoteUserId = effectiveChannelState.peerUserId
             }
+            if backendStatusMessage.hasPrefix("signaling "),
+               let effectiveChannelReadiness,
+               !effectiveChannelReadiness.statusKind.isEmpty {
+                backendStatusMessage = "Connected"
+            }
             if selectedContactId == contactID {
                 let backendChannelSnapshot = ChannelReadinessSnapshot(
                     channelState: effectiveChannelState,
@@ -608,6 +643,7 @@ extension PTTViewModel {
                 updateStatusForSelectedContact()
             }
             captureDiagnosticsState("backend-sync:channel-state")
+            await syncLocalReceiverAudioReadinessSignal(for: contactID, reason: "channel-refresh")
             await reconcileSelectedSessionIfNeeded()
         } catch {
             guard !isExpectedBackendSyncCancellation(error) else { return }

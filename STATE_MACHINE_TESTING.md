@@ -65,6 +65,7 @@ For foreground audio smoke verification, treat this as the current known-good bo
 
 - both devices converge to `ready`
 - local hold-to-talk remains disabled while that device is still `Preparing audio...`
+- local hold-to-talk also remains disabled until backend `audioReadiness.peer.kind == ready`
 - first press plays the Apple start beep and reaches `transmitting` quickly
 - the receiver reaches `receiving` and hears audio on that first press
 - release returns both sides to `ready`
@@ -188,10 +189,14 @@ Current examples:
 - `readiness`
   - `kind: waiting-for-self | waiting-for-peer | ready | self-transmitting | peer-transmitting`
   - `activeTransmitterUserId`
+- `audioReadiness`
+  - `self.kind: unknown | waiting | ready`
+  - `peer.kind: unknown | waiting | ready`
+  - `peerTargetDeviceId`
 
 The canonical nested contract is now required by the client. Flat compatibility fields may still be present on the wire for diagnostics or redundancy, but Swift no longer derives behavior from them when the nested ADTs are missing or malformed. That is a contract failure.
 
-For readiness-sensitive bugs, scenarios and probes should assert the backend `readiness` contract directly. Do not rely only on older `channel-state` booleans when the backend already exposes the stronger readiness ADT the app consumes in production.
+For readiness-sensitive bugs, scenarios and probes should assert the backend `readiness` and `audioReadiness` contracts directly. Do not rely only on older `channel-state` booleans or ephemeral websocket delivery when the backend already exposes the stronger readiness ADTs the app consumes in production.
 
 Transport-fault scenarios should stay typed too. If the harness is delaying or dropping something, that should be a known route or a known signal kind, not an arbitrary string bag.
 
