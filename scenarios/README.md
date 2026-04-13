@@ -55,13 +55,13 @@ For the repo-wide workflow and architectural intent behind these scenarios, read
 - `reordered_transmit_signals_refresh_recovery`
   - local-only transport-fault regression: the receiver reorders the next `transmit-start` and `transmit-stop` websocket notices; explicit refresh and reconciliation must still restore both peers to `ready`
 - `backend_reconnect_ready_session_recovery`
-  - one participant reconnects the full backend control plane while already `ready`; both sides must refresh, reconcile, and recover the same ready session without drifting off the backend `readiness` contract
+  - one participant reconnects the full backend control plane while already `ready`; both sides must refresh, reconcile, and recover the same ready session without drifting off the backend `readiness` or `audioReadiness` contract
 - `restart_ready_session_recovery`
-  - one participant restarts after a ready session is established, reopens the peer, refreshes control-plane state, and must restore the ready local session deterministically
+  - one participant restarts after a ready session is established, reopens the peer, refreshes control-plane state, and must restore the ready local session deterministically with backend `audioReadiness` back at `ready`
 - `restart_partial_join_recovery`
   - the requester restarts during the partial-join window; refresh and reconciliation must restore the requester to `peerReady`, preserve the recipient in `waitingForPeer`, and still allow the second join to converge to `ready`
 - `websocket_ready_session_recovery`
-  - one participant loses only the websocket transport while already `ready`; the disconnected side must remain locally usable, while the remote side degrades to `wakeReady` because `peerDeviceConnected` dropped, and an explicit websocket reconnect plus refresh must restore full readiness convergence
+  - one participant loses only the websocket transport while already `ready`; the disconnected side must remain locally usable, while the remote side degrades to `wakeReady` because `peerDeviceConnected` dropped and backend peer `audioReadiness` falls back, and an explicit websocket reconnect plus refresh must restore full readiness convergence
 
 Use `websocket_ready_session_recovery` and `backend_reconnect_ready_session_recovery` to prove two different invariants:
 
@@ -92,6 +92,7 @@ Scenarios should increasingly assert typed machine projections instead of only s
 - selected-session state
 - contact-list state
 - backend-derived readiness
+- backend-derived audio readiness
 - effect-safe convergence after retries or delays
 
 ## Running a scenario
@@ -186,7 +187,7 @@ For full ready/transmit flows and control-plane convergence scenarios, prefer th
 - run `just simulator-scenario-local <scenario>`
 - inspect `just simulator-scenario-merge-local`
 - run `just route-probe-local` when you also changed backend route composition or websocket semantics; the local probe now also checks the nested `requestRelationship` and `membership` contract fields exposed by the backend routes
-  - it also verifies `summaryStatus`, `conversationStatus`, and `readiness` through a real request -> ready -> transmit -> ready control-plane flow
+  - it also verifies `summaryStatus`, `conversationStatus`, `readiness`, and `audioReadiness` through a real request -> receiver-ready -> ready -> transmit -> ready control-plane flow
   - the app now consumes `/readiness` directly when deriving selected-peer state, so readiness regressions should be asserted against that route rather than inferred only from `/channel-state`
 
 `just simulator-scenario-suite-local` assumes `just serve-local` is already running on `http://localhost:8090/s/turbo`. If the backend is not up, the suite fails with connection-refused errors instead of scenario assertions.

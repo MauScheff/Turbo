@@ -76,6 +76,8 @@
           "canTransmitNow": true,
           "backend": {
             "channelStatus": "ready",
+            "readiness": "ready",
+            "remoteAudioReadiness": "ready",
             "selfJoined": true,
             "peerJoined": true,
             "peerDeviceConnected": true,
@@ -86,7 +88,12 @@
           "selectedHandle": "@avery",
           "phase": "ready",
           "isJoined": true,
-          "canTransmitNow": true
+          "canTransmitNow": true,
+          "backend": {
+            "channelStatus": "ready",
+            "readiness": "ready",
+            "remoteAudioReadiness": "ready"
+          }
         }
       }
     }

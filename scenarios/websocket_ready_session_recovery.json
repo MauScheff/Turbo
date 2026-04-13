@@ -63,6 +63,7 @@
           "backend": {
             "channelStatus": "ready",
             "readiness": "ready",
+            "remoteAudioReadiness": "ready",
             "membership": "both(peerDeviceConnected: true)",
             "requestRelationship": "none",
             "canTransmit": true,
@@ -77,7 +78,8 @@
             { "handle": "@avery", "listState": "waiting-for-peer", "badgeStatus": "waiting-for-peer" }
           ],
           "backend": {
-            "peerDeviceConnected": false
+            "peerDeviceConnected": false,
+            "remoteAudioReadiness": "unknown"
           }
         }
       }
@@ -104,6 +106,7 @@
           "backend": {
             "channelStatus": "ready",
             "readiness": "ready",
+            "remoteAudioReadiness": "ready",
             "membership": "both(peerDeviceConnected: true)",
             "requestRelationship": "none",
             "canTransmit": true,
@@ -117,7 +120,8 @@
           "canTransmitNow": true,
           "backend": {
             "channelStatus": "ready",
-            "readiness": "ready"
+            "readiness": "ready",
+            "remoteAudioReadiness": "ready"
           }
         }
       }

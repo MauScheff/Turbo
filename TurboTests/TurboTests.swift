@@ -5086,6 +5086,7 @@ private struct SimulatorScenarioContactExpectation: Decodable {
 private struct SimulatorScenarioBackendExpectation: Decodable {
     let channelStatus: String?
     let readiness: String?
+    let remoteAudioReadiness: String?
     let membership: String?
     let requestRelationship: String?
     let selfJoined: Bool?
@@ -5760,6 +5761,10 @@ private func scenarioBackendExpectationMatches(
     }
     if let readiness = expected.readiness,
        selected.backendReadiness != readiness {
+        return false
+    }
+    if let remoteAudioReadiness = expected.remoteAudioReadiness,
+       selected.remoteAudioReadiness != remoteAudioReadiness {
         return false
     }
     if let membership = expected.membership,

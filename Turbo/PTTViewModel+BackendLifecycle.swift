@@ -39,6 +39,10 @@ extension PTTViewModel {
         if let selectedContactId {
             await refreshChannelState(for: selectedContactId)
             await reconcileSelectedSessionIfNeeded()
+            await syncLocalReceiverAudioReadinessSignal(
+                for: selectedContactId,
+                reason: "backend-reconnect"
+            )
         }
         captureDiagnosticsState("backend:reconnect-finished")
     }

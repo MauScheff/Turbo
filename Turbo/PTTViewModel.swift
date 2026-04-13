@@ -154,6 +154,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func resetBackendRuntimeForReconnect() {
         backendRuntime.disconnectForReconnect()
+        localReceiverAudioReadinessPublications = [:]
     }
 
     func replaceBackendConfig(with config: TurboBackendConfig?) {

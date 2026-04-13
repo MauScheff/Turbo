@@ -53,6 +53,7 @@
           "backend": {
             "channelStatus": "ready",
             "readiness": "ready",
+            "remoteAudioReadiness": "ready",
             "membership": "both(peerDeviceConnected: true)",
             "requestRelationship": "none",
             "canTransmit": true
@@ -66,6 +67,7 @@
           "backend": {
             "channelStatus": "ready",
             "readiness": "ready",
+            "remoteAudioReadiness": "ready",
             "membership": "both(peerDeviceConnected: true)",
             "requestRelationship": "none",
             "canTransmit": true
@@ -95,6 +97,7 @@
           "backend": {
             "channelStatus": "ready",
             "readiness": "ready",
+            "remoteAudioReadiness": "ready",
             "membership": "both(peerDeviceConnected: true)",
             "requestRelationship": "none",
             "canTransmit": true,
@@ -109,6 +112,7 @@
           "backend": {
             "channelStatus": "ready",
             "readiness": "ready",
+            "remoteAudioReadiness": "ready",
             "membership": "both(peerDeviceConnected: true)",
             "requestRelationship": "none",
             "canTransmit": true,
