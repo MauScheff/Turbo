@@ -113,11 +113,28 @@ extension PTTViewModel {
                             contactID: contactID,
                             channelUUID: channelUUID,
                             payload: payload,
-                            hasConfirmedIncomingPush: true
+                            hasConfirmedIncomingPush: true,
+                            activationState: .awaitingSystemActivation
                         )
                     )
                 }
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Awaiting system PTT audio activation",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                        "event": payload.event.rawValue,
+                    ]
+                )
                 scheduleWakePlaybackFallback(for: contactID)
+                Task { [weak self] in
+                    await self?.reinforceIncomingPushRemoteParticipant(
+                        channelUUID: channelUUID,
+                        contactID: contactID,
+                        payload: payload
+                    )
+                }
             } else {
                 diagnostics.record(
                     .pushToTalk,
@@ -174,6 +191,53 @@ extension PTTViewModel {
                 await refreshContactSummaries()
                 await refreshChannelState(for: contactID)
             }
+        }
+    }
+
+    private func reinforceIncomingPushRemoteParticipant(
+        channelUUID: UUID,
+        contactID: UUID,
+        payload: TurboPTTPushPayload
+    ) async {
+        do {
+            try await pttSystemClient.setActiveRemoteParticipant(
+                name: payload.participantName,
+                channelUUID: channelUUID
+            )
+            diagnostics.record(
+                .pushToTalk,
+                message: "Reinforced active remote participant from incoming push",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "participant": payload.participantName,
+                ]
+            )
+        } catch {
+            if isRecoverablePTTChannelUnavailable(error) {
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Deferred incoming-push participant reinforcement until system channel is available",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                        "participant": payload.participantName,
+                        "error": error.localizedDescription,
+                    ]
+                )
+                return
+            }
+            diagnostics.record(
+                .pushToTalk,
+                level: .error,
+                message: "Failed to reinforce active remote participant from incoming push",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "participant": payload.participantName,
+                    "error": error.localizedDescription,
+                ]
+            )
         }
     }
 

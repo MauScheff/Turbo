@@ -66,6 +66,7 @@ For foreground audio smoke verification, treat this as the current known-good bo
 - both devices converge to `ready`
 - local hold-to-talk remains disabled while that device is still `Preparing audio...`
 - local hold-to-talk also remains disabled until backend `audioReadiness.peer.kind == ready`
+- `wakeReady` should only appear when backend `wakeReadiness.peer.kind == wake-capable`
 - first press plays the Apple start beep and reaches `transmitting` quickly
 - the receiver reaches `receiving` and hears audio on that first press
 - release returns both sides to `ready`
@@ -75,6 +76,23 @@ When that breaks, use merged exact-device diagnostics to localize whether the fa
 - control-plane state
 - sender capture / route binding
 - receiver playback / activation
+
+For background and lock-screen wake work, the current proof split is:
+
+- backend/probe proof should establish wake-capable targeting and incoming push delivery
+- Swift tests should establish the local wake-activation state machine and fallback rules
+- physical-device testing is still required for the final Apple boundary:
+  - incoming push
+  - `PTT audio session activated`
+  - lock-screen playback
+
+That means a wake failure is now expected to be classified more precisely:
+
+- no wake target
+- no push sent
+- no incoming push received
+- incoming push received but no system activation
+- system activation succeeded but playback still failed
 
 The shared state-machine and scenario loop should still be used to prove any control-plane part of the fix, but the final proof for actual audio remains a physical-device boundary check.
 
@@ -190,13 +208,14 @@ Current examples:
   - `kind: waiting-for-self | waiting-for-peer | ready | self-transmitting | peer-transmitting`
   - `activeTransmitterUserId`
 - `audioReadiness`
+- `wakeReadiness`
   - `self.kind: unknown | waiting | ready`
   - `peer.kind: unknown | waiting | ready`
   - `peerTargetDeviceId`
 
 The canonical nested contract is now required by the client. Flat compatibility fields may still be present on the wire for diagnostics or redundancy, but Swift no longer derives behavior from them when the nested ADTs are missing or malformed. That is a contract failure.
 
-For readiness-sensitive bugs, scenarios and probes should assert the backend `readiness` and `audioReadiness` contracts directly. Do not rely only on older `channel-state` booleans or ephemeral websocket delivery when the backend already exposes the stronger readiness ADTs the app consumes in production.
+For readiness-sensitive bugs, scenarios and probes should assert the backend `readiness`, `audioReadiness`, and `wakeReadiness` contracts directly. Do not rely only on older `channel-state` booleans, token presence, or ephemeral websocket delivery when the backend already exposes the stronger readiness ADTs the app consumes in production.
 
 Transport-fault scenarios should stay typed too. If the harness is delaying or dropping something, that should be a known route or a known signal kind, not an arbitrary string bag.
 

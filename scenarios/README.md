@@ -187,7 +187,7 @@ For full ready/transmit flows and control-plane convergence scenarios, prefer th
 - run `just simulator-scenario-local <scenario>`
 - inspect `just simulator-scenario-merge-local`
 - run `just route-probe-local` when you also changed backend route composition or websocket semantics; the local probe now also checks the nested `requestRelationship` and `membership` contract fields exposed by the backend routes
-  - it also verifies `summaryStatus`, `conversationStatus`, `readiness`, and `audioReadiness` through a real request -> receiver-ready -> ready -> transmit -> ready control-plane flow
+  - it also verifies `summaryStatus`, `conversationStatus`, `readiness`, `audioReadiness`, and `wakeReadiness` through a real request -> receiver-ready -> token upload -> ready -> transmit -> ready control-plane flow
   - the app now consumes `/readiness` directly when deriving selected-peer state, so readiness regressions should be asserted against that route rather than inferred only from `/channel-state`
 
 `just simulator-scenario-suite-local` assumes `just serve-local` is already running on `http://localhost:8090/s/turbo`. If the backend is not up, the suite fails with connection-refused errors instead of scenario assertions.

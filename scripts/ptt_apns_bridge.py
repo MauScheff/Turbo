@@ -93,6 +93,8 @@ def main() -> int:
                 continue
             if status == 403:
                 continue
+            if status == 401 and payload.get("error") == "not a channel member":
+                continue
             if status == 401 and payload.get("error") == "active transmit not owned by caller":
                 continue
             if status < 200 or status >= 300:

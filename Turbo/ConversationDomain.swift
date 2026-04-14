@@ -303,7 +303,10 @@ enum SelectedPeerWaitingReason: Equatable {
     case disconnecting
     case localSessionTransition
     case localAudioPrewarm
+    case systemWakeActivation
+    case wakePlaybackDeferredUntilForeground
     case remoteAudioPrewarm
+    case remoteWakeUnavailable
     case backendSessionTransition
     case peerReadyToConnect
 }
@@ -318,7 +321,13 @@ enum LocalMediaWarmupState: Equatable {
 enum RemoteAudioReadinessState: Equatable {
     case unknown
     case waiting
+    case wakeCapable
     case ready
+}
+
+enum RemoteWakeCapabilityState: Equatable {
+    case unavailable
+    case wakeCapable(targetDeviceId: String)
 }
 
 enum SelectedPeerDetail: Equatable {
@@ -493,6 +502,7 @@ struct ChannelReadinessSnapshot: Equatable {
     let readinessStatus: TurboChannelReadinessStatus?
     let activeTransmitterUserId: String?
     let remoteAudioReadiness: RemoteAudioReadinessState
+    let remoteWakeCapability: RemoteWakeCapabilityState
 
     init(
         channelState: TurboChannelStateResponse,
@@ -501,6 +511,7 @@ struct ChannelReadinessSnapshot: Equatable {
         membership = channelState.membership
         requestRelationship = channelState.requestRelationship
         self.remoteAudioReadiness = readiness?.remoteAudioReadiness ?? .unknown
+        self.remoteWakeCapability = readiness?.remoteWakeCapability ?? .unavailable
         if let readiness {
             canTransmit = readiness.canTransmit
             status = readiness.statusView.conversationState
@@ -601,6 +612,7 @@ struct ConversationDerivationContext: Equatable {
     let localJoinFailure: PTTJoinFailure?
     let mediaState: MediaConnectionState
     let localMediaWarmupState: LocalMediaWarmupState
+    let incomingWakeActivationState: IncomingWakeActivationState?
     let channel: ChannelReadinessSnapshot?
 
     init(
@@ -619,6 +631,7 @@ struct ConversationDerivationContext: Equatable {
         localJoinFailure: PTTJoinFailure?,
         mediaState: MediaConnectionState = .idle,
         localMediaWarmupState: LocalMediaWarmupState = .cold,
+        incomingWakeActivationState: IncomingWakeActivationState? = nil,
         channel: ChannelReadinessSnapshot?
     ) {
         self.contactID = contactID
@@ -636,11 +649,16 @@ struct ConversationDerivationContext: Equatable {
         self.localJoinFailure = localJoinFailure
         self.mediaState = mediaState
         self.localMediaWarmupState = localMediaWarmupState
+        self.incomingWakeActivationState = incomingWakeActivationState
         self.channel = channel
     }
 
     var remoteAudioReadinessState: RemoteAudioReadinessState {
         channel?.remoteAudioReadiness ?? .unknown
+    }
+
+    var remoteWakeCapabilityState: RemoteWakeCapabilityState {
+        channel?.remoteWakeCapability ?? .unavailable
     }
 }
 
@@ -1058,6 +1076,24 @@ private extension ConversationStateMachine {
 
         let sessionTransmitReady = peerDeviceConnected
 
+        if context.peerSignalIsTransmitting,
+           let incomingWakeActivationState = context.incomingWakeActivationState {
+            switch incomingWakeActivationState {
+            case .signalBuffered, .awaitingSystemActivation:
+                return (
+                    .waitingForPeer(reason: .systemWakeActivation),
+                    "Waiting for system audio activation..."
+                )
+            case .fallbackDeferredUntilForeground:
+                return (
+                    .waitingForPeer(reason: .wakePlaybackDeferredUntilForeground),
+                    "Wake received. Unlock to resume audio."
+                )
+            case .appManagedFallback, .systemActivated:
+                break
+            }
+        }
+
         if sessionTransmitReady && context.localIsTransmitting {
             switch context.mediaState {
             case .connected:
@@ -1082,13 +1118,23 @@ private extension ConversationStateMachine {
             case .ready:
                 break
             }
-            if context.remoteAudioReadinessState != .ready {
+            switch context.remoteAudioReadinessState {
+            case .ready:
+                break
+            case .wakeCapable:
+                return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+            case .waiting, .unknown:
                 return (.waitingForPeer(reason: .remoteAudioPrewarm), "Waiting for \(context.contactName)'s audio...")
             }
         }
 
         if !peerDeviceConnected {
-            return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+            switch context.remoteWakeCapabilityState {
+            case .wakeCapable:
+                return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+            case .unavailable:
+                return (.waitingForPeer(reason: .remoteWakeUnavailable), "Waiting for \(context.contactName) to reconnect")
+            }
         }
 
         switch readinessStatus {

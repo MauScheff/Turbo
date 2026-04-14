@@ -66,6 +66,15 @@ For background / lock-screen PushToTalk work, treat the loop as:
 2. `direnv exec . just ptt-apns-bridge` to prove real wake pushes are being sent
 3. only then use physical-device diagnostics to debug post-wake playback or Apple PTT behavior
 
+At the moment, hosted real-device wake still depends on `ptt-apns-bridge` for the actual APNs send. The backend owns target selection and wake-capability truth, but it does not yet send the production PushToTalk APNs request by itself.
+
 `ptt-push-target` returning a real token means the token-upload/backend-send boundary is healthy. If wake still fails after that, the bug is in app wake handling or playback, not in Apple Developer credential setup.
 
 Wake-ready transmit also requires the backend transmit-target selector to accept a token-backed receiver device when websocket presence is absent; otherwise the app will show `Hold to talk to wake ...` but `beginTransmit` will still fail server-side.
+
+For current architecture work, treat `/v1/channels/{channelId}/readiness/{deviceId}` as the canonical wake-capability view too:
+
+- `audioReadiness` answers "can the connected peer hear right now?"
+- `wakeReadiness` answers "if the peer is disconnected, does the backend currently know a wake-capable device target for this channel?"
+
+Do not make the app infer wake capability only from disconnected presence plus local token assumptions.

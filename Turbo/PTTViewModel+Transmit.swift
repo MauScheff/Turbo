@@ -8,10 +8,53 @@
 import Foundation
 import PushToTalk
 import AVFAudio
+import UIKit
 
 extension PTTViewModel {
     private var wakePlaybackFallbackDelayNanoseconds: UInt64 { 1_500_000_000 }
     private var mediaSessionRetryCooldown: TimeInterval { 0.75 }
+
+    func shouldUseAppManagedWakePlaybackFallback(
+        applicationState: UIApplication.State
+    ) -> Bool {
+        applicationState == .active
+    }
+
+    func shouldSuspendForegroundMediaForBackgroundTransition(
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState != .active else { return false }
+        guard mediaServices.hasSession() else { return false }
+        guard !isTransmitting else { return false }
+        guard !transmitCoordinator.state.isPressingTalk else { return false }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
+        return true
+    }
+
+    func suspendForegroundMediaForBackgroundTransition(
+        reason: String,
+        applicationState: UIApplication.State
+    ) async {
+        guard shouldSuspendForegroundMediaForBackgroundTransition(
+            applicationState: applicationState
+        ) else { return }
+        guard let contactID = mediaSessionContactID else { return }
+        diagnostics.record(
+            .media,
+            message: "Suspending foreground media for background transition",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "reason": reason,
+                "applicationState": String(describing: applicationState)
+            ]
+        )
+        closeMediaSession()
+        await syncLocalReceiverAudioReadinessSignal(
+            for: contactID,
+            reason: "app-background-media-closed"
+        )
+        updateStatusForSelectedContact()
+    }
 
     func desiredLocalReceiverAudioReadiness(for contactID: UUID) -> Bool {
         guard isJoined, activeChannelId == contactID else { return false }
@@ -43,6 +86,15 @@ extension PTTViewModel {
 
         let isReady = desiredLocalReceiverAudioReadiness(for: contactID)
         let peerWasRoutable = peerIsRoutableForReceiverAudioReadiness(for: contactID)
+        let effectiveReason: String = {
+            guard !isReady else { return reason }
+            let appState = UIApplication.shared.applicationState
+            guard appState != .active else { return reason }
+            if reason == "app-background-media-closed" || reason.hasPrefix("media-") {
+                return "app-background-media-closed"
+            }
+            return reason
+        }()
 
         if !peerWasRoutable {
             localReceiverAudioReadinessPublications[contactID] = ReceiverAudioReadinessPublication(
@@ -68,7 +120,7 @@ extension PTTViewModel {
                     fromDeviceId: backend.deviceID,
                     toUserId: remoteUserId,
                     toDeviceId: backend.deviceID,
-                    payload: reason
+                    payload: effectiveReason
                 )
             )
             diagnostics.record(
@@ -78,7 +130,7 @@ extension PTTViewModel {
                     "contactId": contactID.uuidString,
                     "handle": contact.handle,
                     "state": isReady ? "ready" : "not-ready",
-                    "reason": reason,
+                    "reason": effectiveReason,
                 ]
             )
             localReceiverAudioReadinessPublications[contactID] = ReceiverAudioReadinessPublication(
@@ -477,6 +529,7 @@ extension PTTViewModel {
                     metadata: ["contactId": contactID.uuidString]
                 )
             }
+            captureDiagnosticsState("ptt-wake:audio-activated")
         }
 
         if activeTarget == nil,
@@ -608,7 +661,33 @@ extension PTTViewModel {
         pttWakeRuntime.replacePlaybackFallbackTask(for: contactID, with: task)
     }
 
+    func resumeBufferedWakePlaybackIfNeeded(
+        reason: String,
+        applicationState: UIApplication.State
+    ) async {
+        guard let pendingWake = pttWakeRuntime.pendingIncomingPush else { return }
+        guard pttWakeRuntime.shouldBufferAudioChunk(for: pendingWake.contactID) else { return }
+        guard pttWakeRuntime.bufferedAudioChunkCount(for: pendingWake.contactID) > 0 else { return }
+        await runWakePlaybackFallbackIfNeeded(
+            for: pendingWake.contactID,
+            reason: reason,
+            applicationState: applicationState
+        )
+    }
+
     func runWakePlaybackFallbackIfNeeded(for contactID: UUID) async {
+        await runWakePlaybackFallbackIfNeeded(
+            for: contactID,
+            reason: "ptt-activation-timeout",
+            applicationState: UIApplication.shared.applicationState
+        )
+    }
+
+    func runWakePlaybackFallbackIfNeeded(
+        for contactID: UUID,
+        reason: String,
+        applicationState: UIApplication.State
+    ) async {
         defer {
             pttWakeRuntime.replacePlaybackFallbackTask(for: contactID, with: nil)
         }
@@ -616,6 +695,21 @@ extension PTTViewModel {
         guard pttWakeRuntime.shouldBufferAudioChunk(for: contactID) else { return }
         let bufferedChunkCount = pttWakeRuntime.bufferedAudioChunkCount(for: contactID)
         guard bufferedChunkCount > 0 else { return }
+        guard shouldUseAppManagedWakePlaybackFallback(applicationState: applicationState) else {
+            pttWakeRuntime.markFallbackDeferredUntilForeground(for: contactID)
+            diagnostics.record(
+                .media,
+                message: "PTT activation fallback deferred until app is active",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "applicationState": String(describing: applicationState),
+                    "bufferedChunkCount": String(bufferedChunkCount)
+                ]
+            )
+            captureDiagnosticsState("ptt-wake:fallback-deferred")
+            return
+        }
 
         let bufferedAudioChunks = pttWakeRuntime.takeBufferedAudioChunks(for: contactID)
         pttWakeRuntime.markAppManagedFallbackStarted(for: contactID)
@@ -624,9 +718,11 @@ extension PTTViewModel {
             message: "PTT activation timed out; falling back to app-managed playback",
             metadata: [
                 "contactId": contactID.uuidString,
-                "bufferedChunkCount": String(bufferedChunkCount)
+                "bufferedChunkCount": String(bufferedChunkCount),
+                "reason": reason
             ]
         )
+        captureDiagnosticsState("ptt-wake:fallback-started")
 
         await ensureMediaSession(
             for: contactID,

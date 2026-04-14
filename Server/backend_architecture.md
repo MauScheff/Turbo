@@ -386,6 +386,12 @@ For every message:
 
 For `receiver-ready` and `receiver-not-ready`, the websocket signal is not the source of truth by itself. The backend persists the sender's current-session audio readiness and exposes the authoritative merged view on `/v1/channels/:channelId/readiness/:deviceId` under `audioReadiness`.
 
+Wake capability is modeled separately from connected audio readiness. The same readiness route now exposes token-backed wake capability under `wakeReadiness`, so the app can distinguish:
+
+- connected peer, audio path not yet ready
+- disconnected peer, wake-capable
+- disconnected peer, not wake-capable
+
 ### envelope shape
 
 Use a transport-agnostic envelope:

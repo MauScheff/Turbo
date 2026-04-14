@@ -116,6 +116,9 @@ Important operational commands:
 - `direnv exec . just ptt-push-target <channel_id> <backend> <sender>`
 - `direnv exec . just ptt-apns-bridge`
 
+For current real-device background/lock-screen wake testing, `ptt-apns-bridge` is still part of the required operational lane. The backend now resolves the authoritative wake target, but the actual APNs PushToTalk send is still driven by that helper.
+Before the devices have rejoined the same backend channel, the bridge may have no valid push target yet. Treat that as setup/idle state rather than a wake failure.
+
 ## Preferred app-side testing infrastructure
 
 For distributed app/backend flows that do not require a physical device, prefer this stack:

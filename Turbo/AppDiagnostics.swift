@@ -23,7 +23,10 @@ struct SelectedSessionDiagnosticsSummary: Equatable {
     let backendPeerJoined: Bool?
     let backendPeerDeviceConnected: Bool?
     let remoteAudioReadiness: String?
+    let remoteWakeCapability: String?
     let backendCanTransmit: Bool?
+    let incomingWakeActivationState: String?
+    let incomingWakeBufferedChunkCount: Int?
 }
 
 struct ContactDiagnosticsSummary: Equatable, Identifiable {
@@ -133,6 +136,8 @@ struct DiagnosticsStateCapture: Identifiable, Equatable {
             "backendPeerJoined=\(fields["backendPeerJoined"] ?? "none")",
             "peerDevice=\(fields["backendPeerDeviceConnected"] ?? "none")",
             "peerAudio=\(fields["remoteAudioReadiness"] ?? "unknown")",
+            "peerWake=\(fields["remoteWakeCapability"] ?? "unavailable")",
+            "wakeActivation=\(fields["incomingWakeActivationState"] ?? "none")",
             "status=\(fields["selectedPeerStatus"] ?? fields["status"] ?? "none")"
         ]
         return parts.joined(separator: " ")

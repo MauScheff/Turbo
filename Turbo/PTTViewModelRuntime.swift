@@ -273,12 +273,21 @@ enum IncomingWakePlaybackMode: Equatable {
     case systemActivated
 }
 
+enum IncomingWakeActivationState: Equatable {
+    case signalBuffered
+    case awaitingSystemActivation
+    case fallbackDeferredUntilForeground
+    case appManagedFallback
+    case systemActivated
+}
+
 struct PendingIncomingPTTPush: Equatable {
     let contactID: UUID
     let channelUUID: UUID
     let payload: TurboPTTPushPayload
     var hasConfirmedIncomingPush: Bool = false
     var playbackMode: IncomingWakePlaybackMode = .awaitingPTTActivation
+    var activationState: IncomingWakeActivationState = .signalBuffered
     var bufferedAudioChunks: [String] = []
 }
 
@@ -303,6 +312,7 @@ final class PTTWakeRuntimeState {
             payload: payload,
             hasConfirmedIncomingPush: true,
             playbackMode: pendingIncomingPush.playbackMode,
+            activationState: .awaitingSystemActivation,
             bufferedAudioChunks: pendingIncomingPush.bufferedAudioChunks
         )
         self.pendingIncomingPush = pendingIncomingPush
@@ -314,6 +324,7 @@ final class PTTWakeRuntimeState {
             return
         }
         pendingIncomingPush.playbackMode = .systemActivated
+        pendingIncomingPush.activationState = .systemActivated
         self.pendingIncomingPush = pendingIncomingPush
     }
 
@@ -323,6 +334,16 @@ final class PTTWakeRuntimeState {
             return
         }
         pendingIncomingPush.playbackMode = .appManagedFallback
+        pendingIncomingPush.activationState = .appManagedFallback
+        self.pendingIncomingPush = pendingIncomingPush
+    }
+
+    func markFallbackDeferredUntilForeground(for contactID: UUID) {
+        guard var pendingIncomingPush,
+              pendingIncomingPush.contactID == contactID else {
+            return
+        }
+        pendingIncomingPush.activationState = .fallbackDeferredUntilForeground
         self.pendingIncomingPush = pendingIncomingPush
     }
 
@@ -401,6 +422,14 @@ final class PTTWakeRuntimeState {
             replacePlaybackFallbackTask(for: contactID, with: nil)
         }
         pendingIncomingPush = nil
+    }
+
+    func incomingWakeActivationState(for contactID: UUID) -> IncomingWakeActivationState? {
+        guard let pendingIncomingPush,
+              pendingIncomingPush.contactID == contactID else {
+            return nil
+        }
+        return pendingIncomingPush.activationState
     }
 
     func mediaSessionActivationMode(for contactID: UUID) -> MediaSessionActivationMode {

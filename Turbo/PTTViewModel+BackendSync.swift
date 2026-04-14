@@ -9,6 +9,18 @@ import Foundation
 import UIKit
 
 extension PTTViewModel {
+    func mergedChannelReadinessPreservingWakeCapableFallback(
+        existing: TurboChannelReadinessResponse?,
+        fetched: TurboChannelReadinessResponse?
+    ) -> TurboChannelReadinessResponse? {
+        guard let fetched else { return existing }
+        guard let existing else { return fetched }
+        guard existing.remoteAudioReadiness == .wakeCapable else { return fetched }
+        guard fetched.remoteAudioReadiness == .waiting else { return fetched }
+        guard case .wakeCapable = fetched.remoteWakeCapability else { return fetched }
+        return fetched.settingRemoteAudioReadiness(.wakeCapable)
+    }
+
     func trackedPresenceFallbackTargets(
         excluding summaries: [UUID: TurboContactSummaryResponse]
     ) -> [(contactID: UUID, handle: String)] {
@@ -49,6 +61,15 @@ extension PTTViewModel {
         guard UIApplication.shared.applicationState != .active else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
+    }
+
+    func shouldRepairSystemRemoteParticipantFromSignalPath(
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState == .active else { return false }
+        guard let channelUUID = channelUUID(for: contactID) else { return false }
+        return pttCoordinator.state.systemChannelUUID == channelUUID
     }
 
     func prefersForegroundAppManagedReceivePlayback(for contactID: UUID) -> Bool {
@@ -381,16 +402,29 @@ extension PTTViewModel {
                 captureDiagnosticsState("backend-signal:\(envelope.type.rawValue)")
             }
             Task {
-                await updateSystemRemoteParticipant(
+                if shouldRepairSystemRemoteParticipantFromSignalPath(
                     for: contactID,
-                    isActive: envelope.type == .transmitStart
-                )
+                    applicationState: UIApplication.shared.applicationState
+                ) {
+                    await updateSystemRemoteParticipant(
+                        for: contactID,
+                        isActive: envelope.type == .transmitStart
+                    )
+                }
                 await refreshContactSummaries()
                 await refreshChannelState(for: contactID)
             }
         case .receiverReady, .receiverNotReady:
-            let readiness: RemoteAudioReadinessState =
-                envelope.type == .receiverReady ? .ready : .waiting
+            let readiness: RemoteAudioReadinessState = {
+                switch envelope.type {
+                case .receiverReady:
+                    return .ready
+                case .receiverNotReady:
+                    return envelope.payload == "app-background-media-closed" ? .wakeCapable : .waiting
+                default:
+                    return .unknown
+                }
+            }()
             if let existing = channelReadinessByContactID[contactID] {
                 backendSyncCoordinator.send(
                     .channelReadinessUpdated(
@@ -406,6 +440,7 @@ extension PTTViewModel {
                     "type": envelope.type.rawValue,
                     "channelId": envelope.channelId,
                     "contactId": contactID.uuidString,
+                    "payload": envelope.payload,
                 ]
             )
             if backendStatusMessage.hasPrefix("signaling ") {
@@ -425,7 +460,12 @@ extension PTTViewModel {
                 metadata: ["channelId": envelope.channelId, "fromDeviceId": envelope.fromDeviceId]
             )
             Task {
-                let shouldRepairRemoteParticipant = !remoteTransmittingContactIDs.contains(contactID)
+                let shouldRepairRemoteParticipant =
+                    !remoteTransmittingContactIDs.contains(contactID)
+                    && shouldRepairSystemRemoteParticipantFromSignalPath(
+                        for: contactID,
+                        applicationState: UIApplication.shared.applicationState
+                    )
                 if shouldTreatIncomingSignalAsWakeCandidate(for: contactID) {
                     ensurePendingWakeCandidate(
                         for: contactID,
@@ -587,7 +627,10 @@ extension PTTViewModel {
             let channelState = try await channelStateTask
             let fetchedChannelReadiness = try? await channelReadinessTask
             let existingChannelState = backendSyncCoordinator.state.syncState.channelStates[contactID]
-            let effectiveChannelReadiness = fetchedChannelReadiness ?? channelReadinessByContactID[contactID]
+            let effectiveChannelReadiness = mergedChannelReadinessPreservingWakeCapableFallback(
+                existing: channelReadinessByContactID[contactID],
+                fetched: fetchedChannelReadiness
+            )
             let effectiveChannelState =
                 shouldPreserveLiveChannelState(
                     contactID: contactID,

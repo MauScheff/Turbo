@@ -232,6 +232,15 @@ The preferred backend contract is now the nested ADT-shaped wire projection:
 - `readiness`
   - `kind`
   - `activeTransmitterUserId`
+- `audioReadiness`
+  - `self.kind`
+  - `peer.kind`
+  - `peerTargetDeviceId`
+- `wakeReadiness`
+  - `self.kind`
+  - `self.targetDeviceId`
+  - `peer.kind`
+  - `peer.targetDeviceId`
 
 `TurboContactSummaryResponse`, `TurboChannelStateResponse`, and `TurboChannelReadinessResponse` now require the nested contract at decode time. The flat `badgeStatus`, `status`, `selfJoined`, `peerJoined`, `peerDeviceConnected`, and `activeTransmitterUserId` fields may still be present on the wire for observability or redundancy, but Swift no longer falls back to them when the nested ADTs are missing or malformed.
 
@@ -240,8 +249,33 @@ The important implementation rule is:
 - `/contact-summaries` is the canonical backend input for relationship and badge projection
 - `/channel-state` is the canonical backend input for membership projection
 - `/readiness` is the canonical backend input for readiness and transmit authority
+- `/readiness.wakeReadiness` is the canonical backend input for whether a disconnected peer is actually wake-capable for this channel
 
 The selected-peer derivation now prefers `/readiness` directly instead of reconstructing readiness only from legacy join booleans.
+
+## Background wake activation state
+
+Background and lock-screen receive now track an explicit local wake-activation ADT, separate from backend `audioReadiness` and `wakeReadiness`:
+
+- `signalBuffered`
+  - websocket audio or transmit-start arrived before a confirmed incoming PTT push
+- `awaitingSystemActivation`
+  - the incoming PTT push was received and the app is now waiting for Apple PushToTalk to activate the audio session
+- `fallbackDeferredUntilForeground`
+  - wake audio exists, but the app is inactive/locked, so app-managed playback fallback must wait until foreground
+- `appManagedFallback`
+  - the app is active again and is draining buffered wake audio through the app-managed playback path
+- `systemActivated`
+  - PushToTalk activated the audio session and buffered wake audio can flush through the system-owned receive path
+
+This is intentionally local device state. It explains the handoff between:
+
+- backend/shared truth
+- incoming push delivery
+- Apple PushToTalk activation
+- app-managed fallback
+
+It should not be inferred from generic `waiting` alone.
 
 ## How the selected conversation is derived
 
@@ -358,6 +392,13 @@ For the current working foreground device path, `ready` does not mean "audio is 
 - the local device has finished its own interactive media prewarm
 - the backend's authoritative `audioReadiness.peer` view says the peer device is `ready`, which means its receive path is prewarmed too
 
+For background/lock-screen receive, `audioReadiness.peer` now has an important extra interpretation on the client side: a peer can be "not foreground-audio-ready" yet still be wake-capable. That should drive `wakeReady`, not the normal foreground `Waiting for <peer>'s audio...` gate.
+
+When a locked receiver has already accepted the incoming push but Apple has not yet activated the PTT audio session, the selected conversation should not pretend it is already `receiving`. It should stay in an explicit waiting state such as:
+
+- `Waiting for system audio activation...`
+- `Wake received. Unlock to resume audio.`
+
 Then, at the real first transmit boundary, the app still does one important sender-side step: it rebinds the capture engine and input tap against the actual live `PlayAndRecord` route before capturing microphone audio.
 
 That detail matters. Earlier prototype behavior prewarmed the capture engine too early and then trusted that stale route during first transmit, which could produce a correct state-machine transition but no real audio on the wire.
@@ -367,6 +408,7 @@ So the current model is:
 - prewarm enough locally that the device can honestly publish receiver-readiness to the backend
 - only enable hold-to-talk once both devices are ready for immediate foreground audio
 - still treat the actual transmit boundary as the moment when sender capture must bind to the live route
+- treat `wakeReady` separately from foreground `ready`: it now requires backend `wakeReadiness.peer.kind == wake-capable`, not just a disconnected peer
 
 This is why the selected conversation can be `ready`, yet the real "audio is now definitely capturable" moment still lives at transmit start rather than purely at join time.
 
@@ -379,6 +421,8 @@ On the receive side, the stable foreground behavior is:
 - then it should converge back to `ready`
 
 So the foreground receive contract is not just "peer state says receiving." It is "receiving plus prompt playback plus clean return to ready."
+
+For background and lock-screen receive, the app should not carry that idle foreground interactive prewarm across the lifecycle boundary. When the app resigns active or enters background, any idle app-managed interactive media session should be torn down so the subsequent wake path is driven by the PushToTalk-owned activation contract instead of a stale foreground `PlayAndRecord` shell.
 
 ### Step 6. Initiator releases talk
 

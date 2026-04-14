@@ -176,10 +176,26 @@ The prewarm gate is now globally receiver-ready for joined foreground sessions:
 
 So for the normal joined foreground path, `Connected` plus enabled hold-to-talk now means "the backend currently believes the other joined device can hear you right now", not just "this device finished local prewarm first".
 
+When a joined peer backgrounds or locks and deliberately tears down its idle foreground prewarm, that should no longer be modeled as ordinary `waiting` on the sender. The app now treats that `receiver-not-ready` transition as a wake-capable remote-audio state, so the sender can move into `wakeReady` instead of getting stuck in `Waiting for <peer>'s audio...`.
+
+### Wake-ready gate
+
+Wake is now modeled separately from foreground receiver readiness:
+
+- the app still uploads the ephemeral PushToTalk token after join
+- the backend exposes token-backed wake capability through `/readiness.wakeReadiness`
+- the selected conversation only enters `wakeReady` when the peer is disconnected **and** the backend says `wakeReadiness.peer.kind == wake-capable`
+- a disconnected peer without backend wake capability should stay in a waiting state, not show hold-to-talk optimistically
+
+That distinction matters for background and lock-screen work. "Peer is offline" is no longer enough to infer "wake is possible".
+
 ## Background PTT wake loop
 
 Foreground signaling can still use the app websocket, but background receive needs the real PushToTalk wake contract:
 
+- for current real-device smoke testing, you must run `direnv exec . just ptt-apns-bridge`
+- the backend now chooses the authoritative wake target on `/ptt-push-target` and `/readiness.wakeReadiness`, but the actual APNs send is still performed by that bridge helper
+- before the pair has an actually joined backend session, the bridge may see no active push target; that setup state should be treated as idle, not as a wake failure
 - the app uploads the ephemeral PushToTalk token it receives while joined
 - the backend uses that token to send a `pushtotalk` APNs push when a remote speaker starts
 - the app's `incomingPushResult(...)` returns the active remote participant quickly
@@ -187,3 +203,28 @@ Foreground signaling can still use the app websocket, but background receive nee
 - only after that activation should the app reconnect transport and start background playback
 
 For locked receive, prefer a playback-only media startup path under the PTT-owned activated audio session. Do not eagerly boot capture/input just to play remote audio after wake.
+If PTT activation does not arrive in time, keep buffering wake audio while the app is locked or backgrounded. Do not fall back to app-managed `AVAudioEngine` playback until the app is active again; otherwise CoreAudio can throw `player did not see an IO cycle`.
+Also, do not carry an idle foreground app-managed interactive media session into the background. On `willResignActive` / `didEnterBackground`, the app should suspend that foreground prewarm unless it is actively transmitting or already in a pending wake flow. Otherwise the lock-screen receive path can get stuck buffering websocket audio without ever letting the real PushToTalk activation own playback.
+
+The app now records the incoming wake handoff explicitly:
+
+- `signalBuffered`
+- `awaitingSystemActivation`
+- `fallbackDeferredUntilForeground`
+- `appManagedFallback`
+- `systemActivated`
+
+For the current background wake issue, the critical distinction is:
+
+- `Incoming PTT push received` but **no** `PTT audio session activated`
+
+That means APNs delivery worked, but the Apple PushToTalk activation boundary did not complete. Treat that as a device/PTT boundary failure, not a generic backend or websocket failure.
+
+The current expected log order for a good locked-screen receive wake is:
+
+1. bridge prints `sent wake push ... status=200`
+2. receiver logs `Incoming PTT push received`
+3. receiver logs `PTT audio session activated`
+4. buffered wake audio drains and playback begins
+
+If the receiver only reaches `awaitingSystemActivation`, the next debugging question is why Apple never promoted the incoming push into the activated PTT audio session.

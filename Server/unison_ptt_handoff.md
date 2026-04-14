@@ -89,6 +89,7 @@ Responsible for:
   - `receiver-not-ready`
 - routing messages only to authorized channel members
 - persisting current-session receiver audio readiness so `/readiness.audioReadiness` is authoritative after reconnects, retries, or stale signals
+- exposing token-backed wake capability on `/readiness.wakeReadiness` so wake is backend-authoritative too instead of inferred only from disconnected presence
 
 ### 7. Presence / session state service
 Responsible for:

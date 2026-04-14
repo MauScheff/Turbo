@@ -225,7 +225,7 @@ def require_audio_readiness_contract(payload: dict[str, Any], *, label: str) -> 
 
     self_kind = self_readiness.get("kind")
     peer_kind = peer_readiness.get("kind")
-    valid_kinds = {"unknown", "waiting", "ready"}
+    valid_kinds = {"unknown", "waiting", "wake-capable", "ready"}
     require(self_kind in valid_kinds, f"{label} invalid self audio readiness kind: {audio_readiness}")
     require(peer_kind in valid_kinds, f"{label} invalid peer audio readiness kind: {audio_readiness}")
 
@@ -234,7 +234,7 @@ def require_audio_readiness_contract(payload: dict[str, Any], *, label: str) -> 
 
     if self_has_active_device:
         require(
-            self_kind in {"waiting", "ready"},
+            self_kind in {"waiting", "wake-capable", "ready"},
             f"{label} self audio readiness should not be unknown when self has an active device: {audio_readiness}",
         )
     else:
@@ -246,7 +246,7 @@ def require_audio_readiness_contract(payload: dict[str, Any], *, label: str) -> 
     peer_target_device_id = audio_readiness.get("peerTargetDeviceId")
     if peer_has_active_device:
         require(
-            peer_kind in {"waiting", "ready"},
+            peer_kind in {"waiting", "wake-capable", "ready"},
             f"{label} peer audio readiness should not be unknown when peer has an active device: {audio_readiness}",
         )
         require(
@@ -262,6 +262,37 @@ def require_audio_readiness_contract(payload: dict[str, Any], *, label: str) -> 
             peer_target_device_id in (None, ""),
             f"{label} peer audio readiness unexpectedly carried peerTargetDeviceId: {audio_readiness}",
         )
+
+
+def require_wake_readiness_contract(payload: dict[str, Any], *, label: str) -> None:
+    wake_readiness = payload.get("wakeReadiness")
+    require(isinstance(wake_readiness, dict), f"{label} missing wakeReadiness contract: {payload}")
+
+    self_wake = wake_readiness.get("self")
+    peer_wake = wake_readiness.get("peer")
+    require(isinstance(self_wake, dict), f"{label} wakeReadiness missing self readiness: {wake_readiness}")
+    require(isinstance(peer_wake, dict), f"{label} wakeReadiness missing peer readiness: {wake_readiness}")
+
+    valid_kinds = {"unavailable", "wake-capable"}
+    self_kind = self_wake.get("kind")
+    peer_kind = peer_wake.get("kind")
+    require(self_kind in valid_kinds, f"{label} invalid self wake readiness kind: {wake_readiness}")
+    require(peer_kind in valid_kinds, f"{label} invalid peer wake readiness kind: {wake_readiness}")
+
+    def require_target(kind: Any, target: Any, *, side: str) -> None:
+        if kind == "wake-capable":
+            require(
+                isinstance(target, str) and target,
+                f"{label} {side} wake readiness missing targetDeviceId: {wake_readiness}",
+            )
+        else:
+            require(
+                target in (None, ""),
+                f"{label} {side} wake readiness unexpectedly carried targetDeviceId: {wake_readiness}",
+            )
+
+    require_target(self_kind, self_wake.get("targetDeviceId"), side="self")
+    require_target(peer_kind, peer_wake.get("targetDeviceId"), side="peer")
 
 
 def require_diagnostics_report(
@@ -941,6 +972,8 @@ async def main() -> int:
                 require_readiness_contract(callee_readiness_after_signal, label="channel-readiness:callee:receiver-ready")
                 require_audio_readiness_contract(caller_readiness_after_signal, label="channel-readiness:caller:receiver-ready")
                 require_audio_readiness_contract(callee_readiness_after_signal, label="channel-readiness:callee:receiver-ready")
+                require_wake_readiness_contract(caller_readiness_after_signal, label="channel-readiness:caller:receiver-ready")
+                require_wake_readiness_contract(callee_readiness_after_signal, label="channel-readiness:callee:receiver-ready")
                 require(
                     caller_readiness_after_signal.get("audioReadiness", {}).get("peer", {}).get("kind") == "ready",
                     f"caller readiness should show ready peer audio after receiver-ready signal: {caller_readiness_after_signal}",
@@ -961,6 +994,45 @@ async def main() -> int:
                     body={"deviceId": callee["device_id"], "token": "route-probe-token"},
                     insecure=args.insecure,
                 ),
+            )
+
+            caller_readiness_after_token = run_check(
+                results,
+                "channel-readiness:caller:wake-ready",
+                lambda: request(
+                    args.base_url,
+                    f"/v1/channels/{channel_id}/readiness/{urllib.parse.quote(caller['device_id'])}",
+                    caller["handle"],
+                    insecure=args.insecure,
+                ),
+            )
+            callee_readiness_after_token = run_check(
+                results,
+                "channel-readiness:callee:wake-ready",
+                lambda: request(
+                    args.base_url,
+                    f"/v1/channels/{channel_id}/readiness/{urllib.parse.quote(callee['device_id'])}",
+                    callee["handle"],
+                    insecure=args.insecure,
+                ),
+            )
+            require_wake_readiness_contract(caller_readiness_after_token, label="channel-readiness:caller:wake-ready")
+            require_wake_readiness_contract(callee_readiness_after_token, label="channel-readiness:callee:wake-ready")
+            require(
+                caller_readiness_after_token.get("wakeReadiness", {}).get("peer", {}).get("kind") == "wake-capable",
+                f"caller readiness should expose wake-capable peer after token upload: {caller_readiness_after_token}",
+            )
+            require(
+                caller_readiness_after_token.get("wakeReadiness", {}).get("peer", {}).get("targetDeviceId") == callee["device_id"],
+                f"caller readiness should expose callee wake target after token upload: {caller_readiness_after_token}",
+            )
+            require(
+                callee_readiness_after_token.get("wakeReadiness", {}).get("self", {}).get("kind") == "wake-capable",
+                f"callee readiness should expose self wake capability after token upload: {callee_readiness_after_token}",
+            )
+            require(
+                callee_readiness_after_token.get("wakeReadiness", {}).get("self", {}).get("targetDeviceId") == callee["device_id"],
+                f"callee readiness should expose local wake target after token upload: {callee_readiness_after_token}",
             )
 
             begin_payload = run_check(

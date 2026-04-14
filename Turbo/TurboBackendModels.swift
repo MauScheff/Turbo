@@ -602,6 +602,7 @@ struct TurboAudioReadinessStatusPayload: Decodable, Equatable {
     private static let validKinds: Set<String> = [
         "unknown",
         "waiting",
+        "wake-capable",
         "ready",
     ]
 
@@ -609,6 +610,8 @@ struct TurboAudioReadinessStatusPayload: Decodable, Equatable {
         switch kind {
         case "ready":
             return .ready
+        case "wake-capable":
+            return .wakeCapable
         case "waiting":
             return .waiting
         default:
@@ -655,12 +658,97 @@ struct TurboChannelAudioReadinessPayload: Decodable, Equatable {
                     return "unknown"
                 case .waiting:
                     return "waiting"
+                case .wakeCapable:
+                    return "wake-capable"
                 case .ready:
                     return "ready"
                 }
             }()),
             peerTargetDeviceId: peerTargetDeviceId
         )
+    }
+}
+
+enum TurboWakeCapabilityStatus: Equatable {
+    case unavailable
+    case wakeCapable(targetDeviceId: String)
+
+    init(rawKind: String, targetDeviceId: String?) {
+        switch (rawKind, targetDeviceId) {
+        case ("wake-capable", .some(let targetDeviceId)):
+            self = .wakeCapable(targetDeviceId: targetDeviceId)
+        default:
+            self = .unavailable
+        }
+    }
+
+    var kind: String {
+        switch self {
+        case .unavailable:
+            return "unavailable"
+        case .wakeCapable:
+            return "wake-capable"
+        }
+    }
+
+    var targetDeviceId: String? {
+        switch self {
+        case .unavailable:
+            return nil
+        case .wakeCapable(let targetDeviceId):
+            return targetDeviceId
+        }
+    }
+}
+
+struct TurboWakeCapabilityStatusPayload: Decodable, Equatable {
+    let kind: String
+    let targetDeviceId: String?
+
+    init(kind: String, targetDeviceId: String? = nil) {
+        self.kind = kind
+        self.targetDeviceId = targetDeviceId
+    }
+
+    var status: TurboWakeCapabilityStatus {
+        TurboWakeCapabilityStatus(rawKind: kind, targetDeviceId: targetDeviceId)
+    }
+}
+
+struct TurboChannelWakeReadinessPayload: Decodable, Equatable {
+    let selfWakeCapability: TurboWakeCapabilityStatusPayload
+    let peerWakeCapability: TurboWakeCapabilityStatusPayload
+
+    init(
+        selfWakeCapability: TurboWakeCapabilityStatusPayload,
+        peerWakeCapability: TurboWakeCapabilityStatusPayload
+    ) {
+        self.selfWakeCapability = selfWakeCapability
+        self.peerWakeCapability = peerWakeCapability
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case selfWakeCapability = "self"
+        case peerWakeCapability = "peer"
+    }
+
+    var localStatus: RemoteWakeCapabilityState {
+        selfWakeCapability.status.remoteState
+    }
+
+    var remoteStatus: RemoteWakeCapabilityState {
+        peerWakeCapability.status.remoteState
+    }
+}
+
+private extension TurboWakeCapabilityStatus {
+    var remoteState: RemoteWakeCapabilityState {
+        switch self {
+        case .unavailable:
+            return .unavailable
+        case .wakeCapable(let targetDeviceId):
+            return .wakeCapable(targetDeviceId: targetDeviceId)
+        }
     }
 }
 
@@ -1278,6 +1366,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
     let activeTransmitExpiresAt: String?
     private let readinessPayload: TurboChannelReadinessPayload
     private let audioReadinessPayload: TurboChannelAudioReadinessPayload
+    private let wakeReadinessPayload: TurboChannelWakeReadinessPayload
 
     init(
         channelId: String,
@@ -1288,7 +1377,8 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         activeTransmitExpiresAt: String?,
         status: String,
         readinessPayload: TurboChannelReadinessPayload? = nil,
-        audioReadinessPayload: TurboChannelAudioReadinessPayload? = nil
+        audioReadinessPayload: TurboChannelAudioReadinessPayload? = nil,
+        wakeReadinessPayload: TurboChannelWakeReadinessPayload? = nil
     ) {
         self.channelId = channelId
         self.peerUserId = peerUserId
@@ -1304,6 +1394,10 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             peerReadiness: TurboAudioReadinessStatusPayload(kind: peerHasActiveDevice ? "waiting" : "unknown"),
             peerTargetDeviceId: nil
         )
+        self.wakeReadinessPayload = wakeReadinessPayload ?? TurboChannelWakeReadinessPayload(
+            selfWakeCapability: TurboWakeCapabilityStatusPayload(kind: "unavailable"),
+            peerWakeCapability: TurboWakeCapabilityStatusPayload(kind: "unavailable")
+        )
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1316,6 +1410,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         case status
         case readiness
         case audioReadiness
+        case wakeReadiness
     }
 
     init(from decoder: Decoder) throws {
@@ -1327,6 +1422,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         activeTransmitExpiresAt = try container.decodeIfPresent(String.self, forKey: .activeTransmitExpiresAt)
         readinessPayload = try container.decode(TurboChannelReadinessPayload.self, forKey: .readiness)
         audioReadinessPayload = try container.decode(TurboChannelAudioReadinessPayload.self, forKey: .audioReadiness)
+        wakeReadinessPayload = try container.decode(TurboChannelWakeReadinessPayload.self, forKey: .wakeReadiness)
     }
 
     var statusView: TurboChannelReadinessStatus {
@@ -1361,6 +1457,14 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         audioReadinessPayload.peerTargetDeviceId
     }
 
+    var remoteWakeCapability: RemoteWakeCapabilityState {
+        wakeReadinessPayload.remoteStatus
+    }
+
+    var localWakeCapability: RemoteWakeCapabilityState {
+        wakeReadinessPayload.localStatus
+    }
+
     func settingRemoteAudioReadiness(_ status: RemoteAudioReadinessState) -> TurboChannelReadinessResponse {
         TurboChannelReadinessResponse(
             channelId: channelId,
@@ -1371,7 +1475,8 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             activeTransmitExpiresAt: activeTransmitExpiresAt,
             status: statusKind,
             readinessPayload: readinessPayload,
-            audioReadinessPayload: audioReadinessPayload.settingRemoteStatus(status)
+            audioReadinessPayload: audioReadinessPayload.settingRemoteStatus(status),
+            wakeReadinessPayload: wakeReadinessPayload
         )
     }
 }

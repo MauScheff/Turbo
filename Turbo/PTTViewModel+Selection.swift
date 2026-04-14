@@ -65,6 +65,7 @@ extension PTTViewModel {
             localJoinFailure: pttCoordinator.state.lastJoinFailure,
             mediaState: mediaConnectionState,
             localMediaWarmupState: localMediaWarmupState(for: contact.id),
+            incomingWakeActivationState: pttWakeRuntime.incomingWakeActivationState(for: contact.id),
             channel: selectedChannelSnapshot(for: contact.id)
         )
     }
@@ -134,6 +135,11 @@ extension PTTViewModel {
             )
         )
         selectedPeerCoordinator.send(.mediaStateUpdated(mediaConnectionState))
+        selectedPeerCoordinator.send(
+            .incomingWakeActivationStateUpdated(
+                pttWakeRuntime.incomingWakeActivationState(for: contact.id)
+            )
+        )
     }
 
     func selectedPeerState(for contactID: UUID) -> SelectedPeerState {

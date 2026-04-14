@@ -18,6 +18,7 @@ struct SelectedPeerSessionState: Equatable {
     var localJoinFailure: PTTJoinFailure?
     var channel: ChannelReadinessSnapshot?
     var mediaState: MediaConnectionState = .idle
+    var incomingWakeActivationState: IncomingWakeActivationState?
     var selectedPeerState: SelectedPeerState = .initial
     var reconciliationAction: SessionReconciliationAction = .none
 
@@ -37,6 +38,7 @@ enum SelectedPeerEvent: Equatable {
     )
     case systemSessionUpdated(SystemPTTSessionState, matchesSelectedContact: Bool)
     case mediaStateUpdated(MediaConnectionState)
+    case incomingWakeActivationStateUpdated(IncomingWakeActivationState?)
     case joinRequested
     case disconnectRequested
     case reconcileRequested
@@ -86,6 +88,8 @@ enum SelectedPeerReducer {
             nextState.systemSessionMatchesContact = matchesSelectedContact
         case .mediaStateUpdated(let mediaState):
             nextState.mediaState = mediaState
+        case .incomingWakeActivationStateUpdated(let incomingWakeActivationState):
+            nextState.incomingWakeActivationState = incomingWakeActivationState
         case .joinRequested:
             recomputeDerivedState(&nextState)
             if let effect = joinEffect(for: nextState) {
@@ -142,6 +146,7 @@ enum SelectedPeerReducer {
                     return .failed
                 }
             }(),
+            incomingWakeActivationState: state.incomingWakeActivationState,
             channel: state.channel
         )
 

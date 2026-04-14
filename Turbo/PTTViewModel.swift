@@ -9,6 +9,7 @@ import Foundation
 import Observation
 import PushToTalk
 import AVFAudio
+import UIKit
 
 enum AudioOutputPreference: String, Equatable {
     case speaker
@@ -101,6 +102,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             await self?.runTransmitEffect(effect)
         }
         registerAudioSessionObservers()
+        registerApplicationLifecycleObservers()
     }
 
     deinit {
@@ -439,7 +441,14 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             backendPeerJoined: selectedChannelProjection.map { $0.membership.hasPeerMembership },
             backendPeerDeviceConnected: selectedChannelProjection.map { $0.membership.peerDeviceConnected },
             remoteAudioReadiness: selectedChannelProjection.map { String(describing: $0.remoteAudioReadiness) },
-            backendCanTransmit: selectedChannelProjection.map(\.canTransmit)
+            remoteWakeCapability: selectedChannelProjection.map { String(describing: $0.remoteWakeCapability) },
+            backendCanTransmit: selectedChannelProjection.map(\.canTransmit),
+            incomingWakeActivationState: selectedContact.flatMap { contact in
+                pttWakeRuntime.incomingWakeActivationState(for: contact.id).map { String(describing: $0) }
+            },
+            incomingWakeBufferedChunkCount: selectedContact.map {
+                pttWakeRuntime.bufferedAudioChunkCount(for: $0.id)
+            }
         )
     }
 
@@ -499,6 +508,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "pendingIncomingPushActivated": pttWakeRuntime.pendingIncomingPush.map {
                 String($0.playbackMode == .systemActivated)
             } ?? "false",
+            "incomingWakeActivationState": selectedSession.incomingWakeActivationState ?? "none",
+            "incomingWakeBufferedChunkCount": selectedSession.incomingWakeBufferedChunkCount.map(String.init(describing:)) ?? "0",
             "localJoinFailure": pttCoordinator.state.lastJoinFailure.map(String.init(describing:)) ?? "none",
             "websocket": backendRuntime.isWebSocketConnected ? "connected" : "disconnected",
             "mediaState": String(describing: mediaRuntime.connectionState),
@@ -510,6 +521,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "backendPeerJoined": selectedSession.backendPeerJoined.map(String.init(describing:)) ?? "none",
             "backendPeerDeviceConnected": selectedSession.backendPeerDeviceConnected.map(String.init(describing:)) ?? "none",
             "remoteAudioReadiness": selectedSession.remoteAudioReadiness ?? "unknown",
+            "remoteWakeCapability": selectedSession.remoteWakeCapability ?? "unavailable",
             "backendCanTransmit": selectedSession.backendCanTransmit.map(String.init(describing:)) ?? "none",
             "status": statusMessage,
             "backendStatus": backendStatusMessage
@@ -644,6 +656,27 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         )
     }
 
+    private func registerApplicationLifecycleObservers() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleApplicationDidBecomeActiveNotification(_:)),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleApplicationWillResignActiveNotification(_:)),
+            name: UIApplication.willResignActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleApplicationDidEnterBackgroundNotification(_:)),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+    }
+
     @objc private func handleAudioSessionInterruptionNotification(_ notification: Notification) {
         let info = notification.userInfo ?? [:]
         let rawType = (info[AVAudioSessionInterruptionTypeKey] as? UInt).map(String.init) ?? "unknown"
@@ -681,5 +714,53 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             message: "Audio session media services were reset",
             metadata: audioSessionDiagnostics()
         )
+    }
+
+    @objc private func handleApplicationDidBecomeActiveNotification(_ notification: Notification) {
+        let _ = notification
+        diagnostics.record(
+            .app,
+            message: "Application became active",
+            metadata: [:]
+        )
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.resumeBufferedWakePlaybackIfNeeded(
+                reason: "application-became-active",
+                applicationState: .active
+            )
+        }
+    }
+
+    @objc private func handleApplicationWillResignActiveNotification(_ notification: Notification) {
+        let _ = notification
+        diagnostics.record(
+            .app,
+            message: "Application will resign active",
+            metadata: [:]
+        )
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.suspendForegroundMediaForBackgroundTransition(
+                reason: "application-will-resign-active",
+                applicationState: .inactive
+            )
+        }
+    }
+
+    @objc private func handleApplicationDidEnterBackgroundNotification(_ notification: Notification) {
+        let _ = notification
+        diagnostics.record(
+            .app,
+            message: "Application entered background",
+            metadata: [:]
+        )
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.suspendForegroundMediaForBackgroundTransition(
+                reason: "application-did-enter-background",
+                applicationState: .background
+            )
+        }
     }
 }
