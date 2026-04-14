@@ -235,6 +235,7 @@ For fast iteration:
   - use `just ptt-push-target <channel_id> <backend> <sender>` to inspect the canonical receiver token + wake payload for the sender's active transmit
   - use `just ptt-apns-start <channel_id> <backend> <sender>` to send a real PushToTalk APNs wake push once APNs auth env vars are configured
   - use `just ptt-apns-bridge <backend> @avery @blake` to automatically watch an active channel and send wake pushes for each new transmit start
+  - restart `ptt-apns-bridge` after any reset/rejoin; it captures one channel ID at startup and will otherwise keep watching the stale channel from the earlier session
 - device loop:
   - use physical devices for lock-screen and blue-pill validation
   - treat those runs as the source of truth for background wake behavior
@@ -364,6 +365,9 @@ Important current split:
 Operational reminders:
 
 - `Turbo/Info.plist` `TurboBackendBaseURL` should be `http://localhost:8081/s/turbo` for local HTTP route checks, `http://localhost:8090/s/turbo` for local websocket-backed simulator scenario work, `http://<your-mac-lan-ip>:8081/s/turbo` for a physical device against local HTTP, and `https://beepbeep.to` for the deployed backend.
+- If no interactive `ucm` process is already using the local codebase, use `just deploy`.
+- If you are already working inside a live `ucm` session, `just deploy` can block on the codebase lock; in that case run `turbo.deploy` from that existing MCP/UCM session instead.
+- If you changed backend behavior in the local Unison codebase, that change will not be live on `https://beepbeep.to` until `turbo.deploy` has actually run.
 - Dev user seeding is no longer automatic on app launch. If you want the canonical dev handles on a fresh backend, call `POST /v1/dev/seed` explicitly.
 - Use `just reset` for the authenticated runtime reset and `just reset-all` for a full backend cleanup. `just seed` restores the canonical dev handles after a full reset. All default to `https://beepbeep.to` and can be overridden, e.g. `just reset http://localhost:8081/s/turbo @avery`.
 - Use `just clean-scratch` to delete repo-root `scratch_*.u` files when temporary route experiments or one-off migration drafts have drifted away from the actual codebase state.

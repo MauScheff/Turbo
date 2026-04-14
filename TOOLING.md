@@ -116,8 +116,16 @@ Important operational commands:
 - `direnv exec . just ptt-push-target <channel_id> <backend> <sender>`
 - `direnv exec . just ptt-apns-bridge`
 
+For deploys, the distinction is:
+
+- if no interactive `ucm` process is already occupying the local codebase, use `just deploy`
+- if you are already working inside a live `ucm` session, `just deploy` can block on that codebase lock; in that case keep using the existing codebase session and run `turbo.deploy` there via MCP/UCM
+
+In either case, if you changed backend behavior in the local Unison codebase, that change is not live on `https://beepbeep.to` until `turbo.deploy` has actually run.
+
 For current real-device background/lock-screen wake testing, `ptt-apns-bridge` is still part of the required operational lane. The backend now resolves the authoritative wake target, but the actual APNs PushToTalk send is still driven by that helper.
 Before the devices have rejoined the same backend channel, the bridge may have no valid push target yet. Treat that as setup/idle state rather than a wake failure.
+The bridge binds to the current direct-channel ID at startup. If a reset, reconnect, or rejoin creates a new backend channel, restart `ptt-apns-bridge` before trusting its output; otherwise it will keep polling the stale channel and can produce misleading `status=200` or timeout lines for the wrong session.
 
 ## Preferred app-side testing infrastructure
 

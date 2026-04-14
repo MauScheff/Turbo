@@ -52,6 +52,10 @@ Deploy / probe:
 - `just route-probe`
 - `just reset-all https://beepbeep.to`
 
+Use `just deploy` when no interactive `ucm` process is already holding the local codebase.
+If you are already working inside a live `ucm` session, `just deploy` can block on the codebase lock; run `turbo.deploy` from that existing MCP/UCM session instead.
+If you changed backend behavior in the local Unison codebase, that change is not live on `https://beepbeep.to` until `turbo.deploy` has actually run.
+
 Local backend loop:
 
 - `just serve-local`
@@ -70,7 +74,7 @@ At the moment, hosted real-device wake still depends on `ptt-apns-bridge` for th
 
 `ptt-push-target` returning a real token means the token-upload/backend-send boundary is healthy. If wake still fails after that, the bug is in app wake handling or playback, not in Apple Developer credential setup.
 
-Wake-ready transmit also requires the backend transmit-target selector to accept a token-backed receiver device when websocket presence is absent; otherwise the app will show `Hold to talk to wake ...` but `beginTransmit` will still fail server-side.
+Wake-ready transmit also requires the backend transmit-target selector to accept a token-backed receiver device when the peer is wake-capable but cannot receive foreground audio, including the case where websocket presence is still visible but the receiver has already published `receiver-not-ready`; otherwise the app will show `Hold to talk to wake ...` but `beginTransmit` will still fail server-side.
 
 For current architecture work, treat `/v1/channels/{channelId}/readiness/{deviceId}` as the canonical wake-capability view too:
 

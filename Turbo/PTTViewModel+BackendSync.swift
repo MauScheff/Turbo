@@ -355,7 +355,7 @@ extension PTTViewModel {
         switch envelope.type {
         case .transmitStart, .transmitStop:
             if envelope.type == .transmitStart {
-                remoteTransmittingContactIDs.insert(contactID)
+                markRemoteAudioActivity(for: contactID)
                 if shouldTreatIncomingSignalAsWakeCandidate(for: contactID) {
                     ensurePendingWakeCandidate(
                         for: contactID,

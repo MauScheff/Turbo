@@ -57,13 +57,20 @@ private final class ApplePTTSystemClientAdapter: NSObject, PTChannelManagerDeleg
     }
 
     func handleIncomingPush(channelUUID: UUID, payload: TurboPTTPushPayload) -> PTPushResult {
-        callbacks.receivedIncomingPush(channelUUID, payload)
+        let result: PTPushResult
         switch payload.event {
         case .transmitStart:
-            return .activeRemoteParticipant(PTParticipant(name: payload.participantName, image: nil))
+            result = .activeRemoteParticipant(PTParticipant(name: payload.participantName, image: nil))
         case .leaveChannel:
-            return .leaveChannel
+            result = .leaveChannel
         }
+
+        // Return the system result first and defer app-owned bookkeeping so the
+        // PushToTalk wake callback stays on the fast path.
+        Task { @MainActor [callbacks] in
+            callbacks.receivedIncomingPush(channelUUID, payload)
+        }
+        return result
     }
 
     func channelManager(_ channelManager: PTChannelManager, didJoinChannel channelUUID: UUID, reason: PTChannelJoinReason) {

@@ -2,6 +2,7 @@ import Foundation
 
 struct BackendSyncState: Equatable {
     var statusMessage: String = "Starting backend..."
+    var hasEstablishedConnection: Bool = false
     var contactSummaries: [UUID: TurboContactSummaryResponse] = [:]
     var channelStates: [UUID: TurboChannelStateResponse] = [:]
     var channelReadiness: [UUID: TurboChannelReadinessResponse] = [:]
@@ -66,12 +67,27 @@ struct BackendSyncState: Equatable {
 
     mutating func reset(statusMessage: String) {
         self.statusMessage = statusMessage
+        hasEstablishedConnection = false
         contactSummaries = [:]
         channelStates = [:]
         channelReadiness = [:]
         incomingInvites = [:]
         outgoingInvites = [:]
         requestCooldownDeadlines = [:]
+    }
+
+    mutating func applyRecoverableSyncFailureStatus(_ message: String) {
+        guard hasEstablishedConnection else {
+            statusMessage = message
+            return
+        }
+
+        guard !isReconnectStatusMessage else { return }
+        statusMessage = "Connected (retrying sync)"
+    }
+
+    var isReconnectStatusMessage: Bool {
+        statusMessage == "Connecting WebSocket..." || statusMessage == "Reconnecting WebSocket..."
     }
 
     var requestContactIDs: Set<UUID> {

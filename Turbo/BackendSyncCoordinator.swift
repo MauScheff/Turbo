@@ -59,9 +59,11 @@ enum BackendSyncReducer {
             nextState.syncState.statusMessage = message
 
         case .bootstrapCompleted(let mode, let handle):
+            nextState.syncState.hasEstablishedConnection = true
             nextState.syncState.statusMessage = "Backend connected (\(mode)) as \(handle)"
 
         case .bootstrapFailed(let message):
+            nextState.syncState.hasEstablishedConnection = false
             nextState.syncState.statusMessage = "Backend unavailable: \(message)"
 
         case .reset(let statusMessage):
@@ -88,7 +90,7 @@ enum BackendSyncReducer {
             nextState.syncState.applyContactSummaries(summaries)
 
         case .contactSummariesFailed(let message):
-            nextState.syncState.statusMessage = message
+            nextState.syncState.applyRecoverableSyncFailureStatus(message)
 
         case .channelStateUpdated(let contactID, let channelState):
             nextState.syncState.applyChannelState(channelState, for: contactID)
@@ -100,7 +102,7 @@ enum BackendSyncReducer {
             nextState.syncState.clearChannelState(for: contactID)
 
         case .channelStateFailed(_, let message):
-            nextState.syncState.statusMessage = message
+            nextState.syncState.applyRecoverableSyncFailureStatus(message)
 
         case .clearAllChannelStates:
             nextState.syncState.channelStates = [:]
@@ -112,7 +114,7 @@ enum BackendSyncReducer {
             nextState.syncState.applyInvites(incoming: incomingMap, outgoing: outgoingMap, now: now)
 
         case .invitesFailed(let message):
-            nextState.syncState.statusMessage = message
+            nextState.syncState.applyRecoverableSyncFailureStatus(message)
 
         case .outgoingInviteSeeded(let contactID, let invite, let now):
             nextState.syncState.outgoingInvites[contactID] = invite

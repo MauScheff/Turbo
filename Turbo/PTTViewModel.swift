@@ -134,6 +134,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             activeTarget: transmitCoordinator.state.activeTarget,
             isPressingTalk: transmitCoordinator.state.isPressingTalk
         )
+        updateStatusForSelectedContact()
         captureDiagnosticsState("transmit-sync")
     }
 
@@ -726,6 +727,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.resumeBufferedWakePlaybackIfNeeded(
+                reason: "application-became-active",
+                applicationState: .active
+            )
+            await self.resumeInteractiveAudioPrewarmIfNeeded(
                 reason: "application-became-active",
                 applicationState: .active
             )

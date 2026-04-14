@@ -145,6 +145,20 @@ extension PTTViewModel {
         await configureBackendIfNeeded()
     }
 
+    func restartLocalAppSession() async {
+        diagnostics.record(.app, message: "Restarting local app session", metadata: ["handle": currentDevUserHandle])
+        captureDiagnosticsState("local-restart:start")
+
+        if selectedContactId != nil || isJoined || pttCoordinator.state.systemChannelUUID != nil {
+            await requestDisconnectSelectedPeer()
+        }
+
+        resetLocalDevState(backendStatus: "Reconnecting as \(currentDevUserHandle)...")
+        backendStatusMessage = "Reconnecting as \(currentDevUserHandle)..."
+        captureDiagnosticsState("local-restart:local-cleared")
+        await configureBackendIfNeeded()
+    }
+
     func resetDevEnvironment() async {
         statusMessage = "Resetting dev world..."
         diagnostics.record(.app, message: "Resetting dev world", metadata: ["handle": currentDevUserHandle])
@@ -273,7 +287,7 @@ extension PTTViewModel {
 
         switch state {
         case .idle:
-            backendStatusMessage = "WebSocket disconnected"
+            backendStatusMessage = backendRuntime.isReady ? "Reconnecting WebSocket..." : "WebSocket disconnected"
             let shouldResetTransmitSession = shouldResetTransmitSessionOnWebSocketIdle(
                 hasPendingBeginOrActiveTransmit: transmitServices.hasPendingBeginOrActiveTarget(),
                 systemIsTransmitting: pttCoordinator.state.isTransmitting
@@ -290,6 +304,10 @@ extension PTTViewModel {
             backendStatusMessage = "Connecting WebSocket..."
             captureDiagnosticsState("websocket:connecting")
         case .connected:
+            if backendStatusMessage.hasPrefix("WebSocket")
+                || backendStatusMessage == "Connected (retrying sync)" {
+                backendStatusMessage = "Connected"
+            }
             captureDiagnosticsState("websocket:connected")
             Task {
                 await backendSyncCoordinator.handle(.webSocketStateChanged(state, selectedContactID: selectedContactId))

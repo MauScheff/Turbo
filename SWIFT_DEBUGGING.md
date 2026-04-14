@@ -196,6 +196,8 @@ Foreground signaling can still use the app websocket, but background receive nee
 - for current real-device smoke testing, you must run `direnv exec . just ptt-apns-bridge`
 - the backend now chooses the authoritative wake target on `/ptt-push-target` and `/readiness.wakeReadiness`, but the actual APNs send is still performed by that bridge helper
 - before the pair has an actually joined backend session, the bridge may see no active push target; that setup state should be treated as idle, not as a wake failure
+- the bridge resolves the active direct-channel ID once when it starts; if you reset dev state, reconnect, or otherwise rejoin into a new backend channel, you must restart the bridge or it will keep watching the stale channel
+- when validating a real wake attempt, make sure the bridge's startup line matches the current live channel; if the bridge is still watching an older channel, any `status=200` or `524` lines belong to the wrong session and should be ignored
 - the app uploads the ephemeral PushToTalk token it receives while joined
 - the backend uses that token to send a `pushtotalk` APNs push when a remote speaker starts
 - the app's `incomingPushResult(...)` returns the active remote participant quickly

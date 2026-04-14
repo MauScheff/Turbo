@@ -212,6 +212,7 @@ struct TurboTalkControlsView: View {
     let joinChannel: () -> Void
     let beginTransmit: () -> Void
     let endTransmit: () -> Void
+    @State private var holdToTalkPressActive = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
@@ -228,27 +229,32 @@ struct TurboTalkControlsView: View {
                     )
 
                     if primaryAction.kind == .holdToTalk {
-                        Button(action: {}) {
-                            Text(primaryAction.label)
-                                .font(.title3.weight(.semibold))
-                                .frame(maxWidth: .infinity, minHeight: 72)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(primaryActionTint(primaryAction.style))
-                        .simultaneousGesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { _ in
-                                    guard primaryAction.isEnabled else { return }
-                                    if !isTransmitting {
+                        Text(primaryAction.label)
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity, minHeight: 72)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(primaryActionTint(primaryAction.style))
+                                    .opacity(primaryAction.isEnabled ? 1 : 0.45)
+                            )
+                            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .gesture(
+                                DragGesture(minimumDistance: 0)
+                                    .onChanged { _ in
+                                        guard primaryAction.isEnabled else { return }
+                                        guard !holdToTalkPressActive else { return }
+                                        holdToTalkPressActive = true
                                         beginTransmit()
                                     }
-                                }
-                                .onEnded { _ in
-                                    guard primaryAction.isEnabled else { return }
-                                    endTransmit()
-                                }
-                        )
-                        .disabled(!primaryAction.isEnabled)
+                                    .onEnded { _ in
+                                        guard holdToTalkPressActive else { return }
+                                        holdToTalkPressActive = false
+                                        endTransmit()
+                                    }
+                            )
+                            .accessibilityAddTraits(.isButton)
+                            .opacity(primaryAction.isEnabled ? 1 : 0.8)
                     } else {
                         Button(action: joinChannel) {
                             Text(primaryAction.label)
@@ -273,6 +279,14 @@ struct TurboTalkControlsView: View {
                         .padding(.horizontal, 4)
                     }
                 }
+            }
+        }
+        .onChange(of: selectedContactID) { _, _ in
+            holdToTalkPressActive = false
+        }
+        .onChange(of: isTransmitting) { _, isTransmitting in
+            if !isTransmitting {
+                holdToTalkPressActive = false
             }
         }
     }

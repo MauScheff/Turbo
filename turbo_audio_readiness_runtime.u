@@ -7,12 +7,19 @@ resolveTransmitTarget db channelId senderUserId = do
     None         -> Left "channel not found"
     Some channel ->
       targetUserId = internal.targetUserId channel senderUserId
+      wakeCapableTargetDeviceId =
+        match latestForUserInChannel db channelId targetUserId () with
+          Some (EphemeralToken _ _ targetDeviceId _ _) -> Some targetDeviceId
+          None                                         -> None
       match getConnectedForUserInChannel db targetUserId channelId () with
         Some (DevicePresence targetDeviceId _ _ _ _) ->
           if turbo.store.receiverAudioReadiness.isReadyForCurrentSession db channelId targetUserId targetDeviceId ()
           then Right (targetUserId, targetDeviceId)
-          else Left "target receiving device audio is not ready"
+          else
+            match wakeCapableTargetDeviceId with
+              Some wakeCapableTargetDeviceId -> Right (targetUserId, wakeCapableTargetDeviceId)
+              None                           -> Left "target receiving device audio is not ready"
         None                                         ->
-          match latestForUserInChannel db channelId targetUserId () with
-            Some (EphemeralToken _ _ targetDeviceId _ _) -> Right (targetUserId, targetDeviceId)
-            None                                         -> Left "no connected or wake-capable receiving device for target user"
+          match wakeCapableTargetDeviceId with
+            Some wakeCapableTargetDeviceId -> Right (targetUserId, wakeCapableTargetDeviceId)
+            None                           -> Left "no connected or wake-capable receiving device for target user"

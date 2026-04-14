@@ -411,6 +411,10 @@ final class PTTWakeRuntimeState {
         playbackFallbackTasks[contactID] != nil
     }
 
+    func clearPlaybackFallbackTask(for contactID: UUID) {
+        replacePlaybackFallbackTask(for: contactID, with: nil)
+    }
+
     func clear(for contactID: UUID) {
         replacePlaybackFallbackTask(for: contactID, with: nil)
         guard pendingIncomingPush?.contactID == contactID else { return }
@@ -453,6 +457,7 @@ final class MediaRuntimeState {
     var sendAudioChunk: (@Sendable (String) async throws -> Void)?
     var startupState: MediaSessionStartupState = .idle
     var pendingInteractivePrewarmAfterAudioDeactivationContactID: UUID?
+    var interactivePrewarmRecoveryTask: Task<Void, Never>?
 
     var hasSession: Bool {
         session != nil
@@ -531,6 +536,8 @@ final class MediaRuntimeState {
     }
 
     func reset() {
+        interactivePrewarmRecoveryTask?.cancel()
+        interactivePrewarmRecoveryTask = nil
         session?.close()
         session = nil
         contactID = nil
@@ -546,6 +553,11 @@ final class MediaRuntimeState {
     func takePendingInteractivePrewarmAfterAudioDeactivationContactID() -> UUID? {
         defer { pendingInteractivePrewarmAfterAudioDeactivationContactID = nil }
         return pendingInteractivePrewarmAfterAudioDeactivationContactID
+    }
+
+    func replaceInteractivePrewarmRecoveryTask(with task: Task<Void, Never>?) {
+        interactivePrewarmRecoveryTask?.cancel()
+        interactivePrewarmRecoveryTask = task
     }
 }
 

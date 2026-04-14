@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var draftDevUserHandle: String = ""
     @State private var draftPeerHandle: String = ""
     @State private var isSavingDevIdentity: Bool = false
+    @State private var isRestartingLocalSession: Bool = false
     @State private var isOpeningPeer: Bool = false
     @State private var isResettingDevState: Bool = false
     @State private var isUploadingDiagnostics: Bool = false
@@ -77,13 +78,19 @@ struct ContentView: View {
                 currentDevUserHandle: viewModel.currentDevUserHandle,
                 diagnosticsHasError: viewModel.diagnostics.latestError != nil,
                 isRunningSelfCheck: viewModel.isRunningSelfCheck,
-                isResettingDevState: isResettingDevState,
+                isResettingDevState: isResettingDevState || isRestartingLocalSession,
                 microphonePermissionStatus: viewModel.microphonePermissionStatusText,
                 needsMicrophonePermission: viewModel.needsMicrophonePermission,
                 onBack: {
-                    viewModel.disconnect()
-                    viewModel.resetSelection()
                     isShowingSplash = true
+                    draftPeerHandle = ""
+                    isRestartingLocalSession = true
+                    Task {
+                        await viewModel.restartLocalAppSession()
+                        await MainActor.run {
+                            isRestartingLocalSession = false
+                        }
+                    }
                 },
                 onShowIdentity: {
                     draftDevUserHandle = viewModel.currentDevUserHandle
@@ -150,7 +157,7 @@ struct ContentView: View {
             draftPeerHandle: $draftPeerHandle,
             quickPeerHandles: viewModel.quickPeerHandles,
             isOpeningPeer: isOpeningPeer,
-            isResettingDevState: isResettingDevState,
+            isResettingDevState: isResettingDevState || isRestartingLocalSession,
             openPeer: openPeer
         )
     }

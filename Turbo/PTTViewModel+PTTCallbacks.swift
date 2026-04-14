@@ -103,7 +103,7 @@ extension PTTViewModel {
 
         switch payload.event {
         case .transmitStart:
-            remoteTransmittingContactIDs.insert(contactID)
+            markRemoteAudioActivity(for: contactID)
             if shouldArmWakeFlowForIncomingPush {
                 if pttWakeRuntime.hasPendingWake(for: contactID) {
                     pttWakeRuntime.confirmIncomingPush(for: channelUUID, payload: payload)
@@ -118,6 +118,7 @@ extension PTTViewModel {
                         )
                     )
                 }
+                pttWakeRuntime.clearPlaybackFallbackTask(for: contactID)
                 diagnostics.record(
                     .pushToTalk,
                     message: "Awaiting system PTT audio activation",

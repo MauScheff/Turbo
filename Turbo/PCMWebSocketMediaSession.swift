@@ -180,6 +180,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     private var capturedBufferReportBudget = 3
     private var convertedBufferReportBudget = 3
     private var enqueuedPayloadReportBudget = 3
+    private var activeAudioSessionOwnership: MediaSessionActivationMode?
 
     init(
         sendAudioChunk: (@Sendable (String) async throws -> Void)?,
@@ -374,7 +375,35 @@ final class PCMWebSocketMediaSession: MediaSession {
         playbackConverter = nil
         isPlaybackReady = false
         isCaptureReady = false
+        deactivateAudioSessionIfNeeded()
         state = .closed
+    }
+
+    private func deactivateAudioSessionIfNeeded() {
+        guard activeAudioSessionOwnership == .appManaged else {
+            activeAudioSessionOwnership = nil
+            return
+        }
+        activeAudioSessionOwnership = nil
+
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setActive(false, options: [.notifyOthersOnDeactivation])
+            try session.setCategory(.soloAmbient, mode: .default, options: [])
+            Task {
+                await report(
+                    "Audio session deactivated for media close",
+                    metadata: audioSessionMetadata(session)
+                )
+            }
+        } catch {
+            Task {
+                await report(
+                    "Failed to deactivate audio session for media close",
+                    metadata: ["error": error.localizedDescription]
+                )
+            }
+        }
     }
 
     private func configureAudioSession(
@@ -396,6 +425,7 @@ final class PCMWebSocketMediaSession: MediaSession {
         if configuration.shouldActivateSession {
             try session.setActive(true)
         }
+        activeAudioSessionOwnership = configuration.shouldActivateSession ? activationMode : nil
         Task {
             await report(
                 "Audio session configured",

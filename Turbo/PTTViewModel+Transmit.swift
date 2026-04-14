@@ -11,7 +11,7 @@ import AVFAudio
 import UIKit
 
 extension PTTViewModel {
-    private var wakePlaybackFallbackDelayNanoseconds: UInt64 { 1_500_000_000 }
+    private var wakePlaybackFallbackDelayNanoseconds: UInt64 { 3_500_000_000 }
     private var mediaSessionRetryCooldown: TimeInterval { 0.75 }
 
     func shouldUseAppManagedWakePlaybackFallback(
@@ -186,6 +186,35 @@ extension PTTViewModel {
         updateStatusForSelectedContact()
     }
 
+    func resumeInteractiveAudioPrewarmIfNeeded(
+        reason: String,
+        applicationState: UIApplication.State
+    ) async {
+        guard applicationState == .active else { return }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return }
+        guard !transmitCoordinator.state.isPressingTalk else { return }
+        guard let contact = selectedContact else { return }
+        guard isJoined, activeChannelId == contact.id else { return }
+        guard systemSessionMatches(contact.id) else { return }
+        guard !isTransmitting else { return }
+
+        switch localMediaWarmupState(for: contact.id) {
+        case .cold, .failed:
+            diagnostics.record(
+                .media,
+                message: "Resuming interactive audio prewarm after app activation",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "handle": contact.handle,
+                    "reason": reason,
+                ]
+            )
+            await prewarmLocalMediaIfNeeded(for: contact.id)
+        case .prewarming, .ready:
+            return
+        }
+    }
+
     func shouldRecreateMediaSession(connectionState: MediaConnectionState) -> Bool {
         switch connectionState {
         case .closed, .failed:
@@ -229,15 +258,42 @@ extension PTTViewModel {
     }
 
     func beginTransmit() {
-        guard isJoined else { return }
+        guard isJoined else {
+            diagnostics.record(.media, message: "Ignored begin transmit request", metadata: ["reason": "not-joined"])
+            return
+        }
         guard let contact = selectedContact else {
             statusMessage = "Pick a contact"
+            diagnostics.record(.media, message: "Ignored begin transmit request", metadata: ["reason": "no-selected-contact"])
             return
         }
         let transmit = transmitServices
-        guard !transmit.hasPendingBeginOrActiveTarget() else { return }
-        guard activeChannelId == contact.id else { return }
+        guard !transmit.hasPendingBeginOrActiveTarget() else {
+            diagnostics.record(
+                .media,
+                message: "Ignored begin transmit request",
+                metadata: ["reason": "pending-begin-or-active-target", "contact": contact.handle]
+            )
+            return
+        }
+        guard activeChannelId == contact.id else {
+            diagnostics.record(
+                .media,
+                message: "Ignored begin transmit request",
+                metadata: [
+                    "reason": "selected-contact-not-active-channel",
+                    "contact": contact.handle,
+                    "activeChannelId": activeChannelId?.uuidString ?? "none",
+                ]
+            )
+            return
+        }
         guard !remoteTransmittingContactIDs.contains(contact.id) else {
+            diagnostics.record(
+                .media,
+                message: "Ignored begin transmit request",
+                metadata: ["reason": "peer-still-transmitting", "contact": contact.handle]
+            )
             updateStatusForSelectedContact()
             return
         }
@@ -245,6 +301,15 @@ extension PTTViewModel {
         let isWakeReady = selectedPeer.phase == .wakeReady
 
         guard canBeginTransmit(for: contact.id) else {
+            diagnostics.record(
+                .media,
+                message: "Ignored begin transmit request",
+                metadata: [
+                    "reason": "selected-peer-disallows-hold-to-talk",
+                    "contact": contact.handle,
+                    "phase": String(describing: selectedPeer.phase),
+                ]
+            )
             updateStatusForSelectedContact()
             return
         }
@@ -252,6 +317,15 @@ extension PTTViewModel {
         if !isWakeReady {
             guard let channelState = selectedChannelState,
                   channelState.canTransmit else {
+                diagnostics.record(
+                    .media,
+                    message: "Ignored begin transmit request",
+                    metadata: [
+                        "reason": "backend-channel-cannot-transmit",
+                        "contact": contact.handle,
+                        "channelStatus": selectedChannelState?.status ?? "none",
+                    ]
+                )
                 updateStatusForSelectedContact()
                 return
             }
@@ -274,6 +348,8 @@ extension PTTViewModel {
             usesLocalHTTPBackend: usesLocalHTTPBackend,
             backendSupportsWebSocket: backend.supportsWebSocket
         )
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("transmit-begin:requested")
         Task {
             await transmitCoordinator.handle(.pressRequested(request))
             syncTransmitState()
@@ -282,6 +358,11 @@ extension PTTViewModel {
 
     func endTransmit() {
         guard isJoined else { return }
+        let hasPendingOrActiveTransmit =
+            transmitCoordinator.state.isPressingTalk
+            || transmitServices.hasPendingBeginOrActiveTarget()
+            || isTransmitting
+        guard hasPendingOrActiveTransmit else { return }
         diagnostics.record(.media, message: "End transmit requested")
         // Clear the local press latch immediately so a system-end callback racing
         // with release does not look like an unexpected end that should be retried.

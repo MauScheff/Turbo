@@ -1074,7 +1074,14 @@ private extension ConversationStateMachine {
             return nil
         }
 
-        let sessionTransmitReady = peerDeviceConnected
+        let effectivePeerDeviceConnected =
+            peerDeviceConnected
+            || context.remoteAudioReadinessState == .ready
+            || context.peerSignalIsTransmitting
+            || readinessStatus.isTransmitActive
+            || readinessStatus == .ready
+
+        let sessionTransmitReady = effectivePeerDeviceConnected
 
         if context.peerSignalIsTransmitting,
            let incomingWakeActivationState = context.incomingWakeActivationState {
@@ -1124,11 +1131,15 @@ private extension ConversationStateMachine {
             case .wakeCapable:
                 return (.wakeReady, "Hold to talk to wake \(context.contactName)")
             case .waiting, .unknown:
+                if !peerDeviceConnected,
+                   case .wakeCapable = context.remoteWakeCapabilityState {
+                    return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+                }
                 return (.waitingForPeer(reason: .remoteAudioPrewarm), "Waiting for \(context.contactName)'s audio...")
             }
         }
 
-        if !peerDeviceConnected {
+        if !effectivePeerDeviceConnected {
             switch context.remoteWakeCapabilityState {
             case .wakeCapable:
                 return (.wakeReady, "Hold to talk to wake \(context.contactName)")
@@ -1166,6 +1177,18 @@ private extension ConversationStateMachine {
 }
 
 private extension ConversationDerivationContext {
+    var effectivePeerDeviceConnectedForTransmit: Bool {
+        guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness else {
+            return false
+        }
+
+        return peerDeviceConnected
+            || remoteAudioReadinessState == .ready
+            || peerSignalIsTransmitting
+            || readinessStatus?.isTransmitActive == true
+            || readinessStatus == .ready
+    }
+
     var localSessionReadiness: LocalSessionReadiness {
         let hasAnyLocalSessionSignal =
             systemSessionMatchesContact
@@ -1211,13 +1234,24 @@ private extension ConversationDerivationContext {
     var canTransmitNow: Bool {
         guard selectedContactID == contactID,
               localSessionReadiness == .aligned,
-              case .both(let peerDeviceConnected, let canTransmit, _) = backendChannelReadiness,
-              peerDeviceConnected else {
+              case .both(_, let canTransmit, _) = backendChannelReadiness,
+              effectivePeerDeviceConnectedForTransmit else {
             return false
         }
         return canTransmit
             && localMediaWarmupState == .ready
             && remoteAudioReadinessState == .ready
+    }
+}
+
+private extension TurboChannelReadinessStatus {
+    var isTransmitActive: Bool {
+        switch self {
+        case .selfTransmitting, .peerTransmitting:
+            return true
+        case .waitingForSelf, .waitingForPeer, .ready, .unknown:
+            return false
+        }
     }
 }
 
