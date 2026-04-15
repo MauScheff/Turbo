@@ -1,0 +1,345 @@
+turbo.deploy.internal.readOptionalEnv : Text -> '{IO, Exception} Optional Text
+turbo.deploy.internal.readOptionalEnv key = do
+  match catch do getEnv key with
+    Right value -> Some value
+    Left _      -> None
+
+turbo.deploy.internal.syncOptionalEnvToCloud :
+  Environment -> Text -> '{IO, Exception, Cloud} ()
+turbo.deploy.internal.syncOptionalEnvToCloud env key = do
+  match turbo.deploy.internal.readOptionalEnv key () with
+    Some value -> Environment.setValue env key value
+    None       -> ()
+
+turbo.deploy.internal.resolveApnsPrivateKeyText :
+  '{IO, Exception} Optional Text
+turbo.deploy.internal.resolveApnsPrivateKeyText = do
+  match turbo.deploy.internal.readOptionalEnv "TURBO_APNS_PRIVATE_KEY" () with
+    Some pemText -> Some pemText
+    None ->
+      match turbo.deploy.internal.readOptionalEnv "TURBO_APNS_PRIVATE_KEY_PATH" () with
+        Some pathText ->
+          pemText = FilePath.readFileUtf8 (FilePath.FilePath pathText)
+          Some pemText
+        None -> None
+
+turbo.deploy : '{IO, Exception} URI
+turbo.deploy =
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    database = Database.named "turbo-control-plane-v2"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_WORKER_SECRET"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_WORKER_BASE_URL"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_TEAM_ID"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_KEY_ID"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_BUNDLE_ID"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_USE_SANDBOX"
+    _ = match turbo.deploy.internal.resolveApnsPrivateKeyText () with
+      Some pemText -> Environment.setValue env "TURBO_APNS_PRIVATE_KEY" pemText
+      None         -> ()
+    Database.assign database env
+    serviceHash = Route.deployWebSocket env (web database)
+    serviceName = ServiceName.named "turbo"
+    uri = ServiceName.assign serviceName serviceHash
+    _ =
+      createDomainMapping
+        (HostName "beepbeep.to") (ServiceName.name serviceName)
+    uri
+
+turbo.setApnsWorkerSecret : Text -> '{IO, Exception} ()
+turbo.setApnsWorkerSecret secret =
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    Environment.setValue env "TURBO_APNS_WORKER_SECRET" secret
+
+turbo.setApnsWorkerBaseUrl : Text -> '{IO, Exception} ()
+turbo.setApnsWorkerBaseUrl baseUrl =
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    Environment.setValue env "TURBO_APNS_WORKER_BASE_URL" baseUrl
+
+turbo.syncApnsWorkerConfig : '{IO} ()
+turbo.syncApnsWorkerConfig = do
+  match catch do
+    secret = getEnv "TURBO_APNS_WORKER_SECRET"
+    baseUrl = getEnv "TURBO_APNS_WORKER_BASE_URL"
+    Cloud.main do
+      env = Environment.named "turbo-production-v2"
+      Environment.setValue env "TURBO_APNS_WORKER_SECRET" secret
+      Environment.setValue env "TURBO_APNS_WORKER_BASE_URL" baseUrl
+  with
+    Left _  -> ()
+    Right _ -> ()
+
+turbo.apns.worker.internal.useSandbox : Optional Text -> Boolean
+turbo.apns.worker.internal.useSandbox = cases
+  Some "0"     -> false
+  Some "false" -> false
+  Some "no"    -> false
+  _            -> true
+
+turbo.apns.worker.internal.config : '{Config} Either Text (Text, Text, Text, Boolean)
+turbo.apns.worker.internal.config =
+  do
+    baseUrl = Config.lookup "TURBO_APNS_WORKER_BASE_URL"
+    secret = Config.lookup "TURBO_APNS_WORKER_SECRET"
+    bundleId = Config.lookup "TURBO_APNS_BUNDLE_ID"
+    useSandboxValue = Config.lookup "TURBO_APNS_USE_SANDBOX"
+    match (baseUrl, secret) with
+      (Some baseUrlText, Some secretText) ->
+        Right
+          ( baseUrlText
+          , secretText
+          , match bundleId with
+              Some configured -> configured
+              None            -> "com.rounded.Turbo"
+          , turbo.apns.worker.internal.useSandbox useSandboxValue
+          )
+      _ -> Left "missing APNs worker config"
+
+turbo.apns.worker.internal.payloadJson :
+  ChannelId -> Text -> UserId -> DeviceId -> UserId -> DeviceId -> Text -> Text -> Text -> Boolean -> Text
+turbo.apns.worker.internal.payloadJson
+  channelId
+  senderHandle
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt
+  token
+  bundleId
+  sandbox =
+  use object empty
+  Json.toText
+    (empty
+      |> addText "token" token
+      |> addText "pushType" "pushtotalk"
+      |> addText "bundleId" bundleId
+      |> object.add "sandbox" (Boolean sandbox)
+      |> addText "topicSuffix" ".voip-ptt"
+      |> object.add
+           "payload"
+           (empty
+             |> object.add "aps" empty
+             |> addText "event" "transmit-start"
+             |> addText "channelId" (ChannelId.toText channelId)
+             |> addText "activeSpeaker" senderHandle
+             |> addText "senderUserId" (UserId.toText senderUserId)
+             |> addText "senderDeviceId" (DeviceId.toText senderDeviceId))
+      |> object.add
+           "metadata"
+           (empty
+             |> addText "channelId" (ChannelId.toText channelId)
+             |> addText "senderUserId" (UserId.toText senderUserId)
+             |> addText "senderDeviceId" (DeviceId.toText senderDeviceId)
+             |> addText "targetUserId" (UserId.toText targetUserId)
+             |> addText "targetDeviceId" (DeviceId.toText targetDeviceId)
+             |> addText "startedAt" startedAt))
+
+turbo.apns.worker.internal.sendWakePush :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> Text
+  -> '{Config, Exception, Http, Storage, Remote} ()
+turbo.apns.worker.internal.sendWakePush
+  db
+  channelId
+  senderHandle
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt
+  token =
+  do
+    use HttpRequest addHeader
+    use Nat < >=
+    use Text ++
+    match turbo.apns.worker.internal.config () with
+      Left err ->
+        _ =
+          appendRecent
+            db
+            senderUserId
+            channelId
+            senderDeviceId
+            senderHandle
+            targetUserId
+            targetDeviceId
+            startedAt
+            "skipped-config"
+            "0"
+            (Some err)
+            ()
+        ()
+      Right (baseUrl, workerSecret, bundleId, sandbox) ->
+        payloadBodyText =
+          turbo.apns.worker.internal.payloadJson
+            channelId
+            senderHandle
+            senderUserId
+            senderDeviceId
+            targetUserId
+            targetDeviceId
+            startedAt
+            token
+            bundleId
+            sandbox
+        uri = URI.parse (baseUrl ++ "/apns/send")
+        req0 = HttpRequest.post uri (Body.fromText payloadBodyText)
+        req =
+          req0
+            |> addHeader "x-turbo-worker-secret" workerSecret
+            |> addHeader "content-type" "application/json"
+        match catch do Http.request req with
+          Left _ ->
+            _ =
+              appendRecent
+                db
+                senderUserId
+                channelId
+                senderDeviceId
+                senderHandle
+                targetUserId
+                targetDeviceId
+                startedAt
+                "send-crashed"
+                "0"
+                None
+                ()
+            ()
+          Right response ->
+            statusCode = HttpResponse.status response |> code
+            responseBody = bodyText response
+            result =
+              if statusCode < 200 || statusCode >= 300 then "failed"
+              else "sent"
+            _ =
+              appendRecent
+                db
+                senderUserId
+                channelId
+                senderDeviceId
+                senderHandle
+                targetUserId
+                targetDeviceId
+                startedAt
+                result
+                (Nat.toText statusCode)
+                (Some responseBody)
+                ()
+            ()
+
+turbo.service.channels.internal.sendWakePushIfPossible :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> '{Config, Exception, Http, Storage, Remote} ()
+turbo.service.channels.internal.sendWakePushIfPossible
+  db
+  channelId
+  senderHandle
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt =
+  do
+    tokenRecord = match tokens.get db channelId targetUserId targetDeviceId () with
+      Some record -> Some record
+      None        -> latestForUserInChannel db channelId targetUserId ()
+    match tokenRecord with
+      None ->
+        _ =
+          appendRecent
+            db
+            senderUserId
+            channelId
+            senderDeviceId
+            senderHandle
+            targetUserId
+            targetDeviceId
+            startedAt
+            "skipped-no-token"
+            "0"
+            None
+            ()
+        ()
+      Some (EphemeralToken _ _ tokenDeviceId token _) ->
+        turbo.apns.worker.internal.sendWakePush
+          db
+          channelId
+          senderHandle
+          senderUserId
+          senderDeviceId
+          targetUserId
+          tokenDeviceId
+          startedAt
+          token
+          ()
+
+turbo.service.channels.beginTransmit :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.channels.beginTransmit db = do
+  use Parser /
+  use object empty
+  channelIdText = route POST (s "v1" / s "channels" / Parser.text / s "begin-transmit")
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      currentHandle =
+        (User _ handleText _ _ _) = currentUser
+        handleText
+      fields = decodeJson (Decoder.object Decoder.text)
+      channelId = ChannelId.fromText channelIdText
+      isMember = memberships.exists db channelId currentUserId ()
+      if Boolean.not isMember then unauthorized.json (empty |> addText "error" "not a channel member")
+      else
+        match Map.get "deviceId" fields with
+          Some deviceIdText ->
+            resolvedTarget = resolveTransmitTarget db channelId currentUserId ()
+            match resolvedTarget with
+              Left err                             -> badRequest.json (empty |> addText "error" err)
+              Right (targetUserId, targetDeviceId) ->
+                result = runtime.beginTransmit db channelId currentUserId (DeviceId.fromText deviceIdText) targetUserId targetDeviceId ()
+                match result with
+                  Left err    -> badRequest.json (empty |> addText "error" err)
+                  Right state ->
+                    (startedAt, expiresAt, senderDeviceId) =
+                      (TransmitState _ _ fromDeviceId _ _ startedAt expiresAt) = state
+                      (Instant.toText startedAt, Instant.toText expiresAt, fromDeviceId)
+                    _ =
+                      turbo.service.channels.internal.sendWakePushIfPossible
+                        db
+                        channelId
+                        currentHandle
+                        currentUserId
+                        senderDeviceId
+                        targetUserId
+                        targetDeviceId
+                        startedAt
+                        ()
+                    ok.json
+                      (empty
+                        |> addText "channelId" channelIdText
+                        |> addText "status" "transmitting"
+                        |> addText "startedAt" startedAt
+                        |> addText "expiresAt" expiresAt
+                        |> addText "targetUserId" (UserId.toText targetUserId)
+                        |> addText "targetDeviceId" (DeviceId.toText targetDeviceId))
+          None              -> badRequest.json (empty |> addText "error" "missing deviceId")

@@ -11,13 +11,21 @@ venv:
   .venv/bin/python -m pip install -r requirements.txt
 
 serve-local-http:
-  sh -c 'cd {{justfile_directory()}} && ucm run turbo/main:.turbo.serveHttpLocal'
+  sh -c 'cd {{justfile_directory()}} && direnv exec . ucm run turbo/main:.turbo.serveHttpLocal'
 
 serve-local:
-  sh -c 'cd {{justfile_directory()}} && ucm run turbo/main:.turbo.serveLocal'
+  sh -c 'cd {{justfile_directory()}} && direnv exec . ucm run turbo/main:.turbo.serveLocal'
 
 deploy:
-  sh -c 'cd {{justfile_directory()}} && ucm run turbo/main:.turbo.deploy'
+  sh -c 'cd {{justfile_directory()}} && direnv exec . ucm run turbo/main:.turbo.deploy'
+
+bump-deploy-stamp:
+  sh -c 'cd {{justfile_directory()}} && ./scripts/write_deploy_stamp_scratch.sh'
+  sh -c 'cd {{justfile_directory()}} && direnv exec . ucm -c ~/.unison/v2 transcript.in-place bump-deploy-stamp.transcript.md'
+
+deploy-force:
+  just bump-deploy-stamp
+  just deploy
 
 prod-probe:
   .venv/bin/python scripts/prod_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
@@ -97,6 +105,18 @@ ptt-apns-bridge base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" b
     --handle-b "{{handle_b}}" \
     --bundle-id "{{bundle_id}}" \
     {{insecure}}
+
+ptt-apns-worker base="https://beepbeep.to" bundle_id="com.rounded.Turbo" insecure="--insecure":
+  python3 scripts/ptt_apns_worker.py \
+    --base-url "{{base}}" \
+    --bundle-id "{{bundle_id}}" \
+    {{insecure}}
+
+cf-apns-worker-dev:
+  sh -c 'cd {{justfile_directory()}}/cloudflare/apns-worker && wrangler dev'
+
+cf-apns-worker-deploy:
+  sh -c 'cd {{justfile_directory()}}/cloudflare/apns-worker && wrangler deploy'
 
 simulator-scenario scenario="" base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" insecure="--insecure":
   python3 scripts/run_simulator_scenarios.py \

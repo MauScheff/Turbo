@@ -1,0 +1,16 @@
+> match
+    turbo.lib.es256.bytes.fromHexText
+      "0102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F20"
+  with
+    Left err -> err
+    Right bytes ->
+      match turbo.lib.es256.ecdsa.signingKeyFromBytes bytes with
+        Left err -> err
+        Right signingKey ->
+          match turbo.lib.es256.ecdsa.verificationKey signingKey with
+            Left err -> err
+            Right (turbo.lib.es256.ecdsa.VerificationKey.VerificationKey point) ->
+              match point with
+                turbo.lib.es256.p256.Point.Infinity -> "infinity"
+                turbo.lib.es256.p256.Point.Point x y ->
+                  "x=" ++ Integer.toText x ++ " y=" ++ Integer.toText y

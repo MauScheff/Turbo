@@ -1,0 +1,84 @@
+turbo.deploy.internal.readOptionalEnv : Text -> '{IO, Exception} Optional Text
+turbo.deploy.internal.readOptionalEnv key = do
+  match catch do getEnv key with
+    Right value -> Some value
+    Left _      -> None
+
+turbo.deploy.internal.syncOptionalEnvToCloud :
+  Environment -> Text -> '{IO, Exception, Cloud} ()
+turbo.deploy.internal.syncOptionalEnvToCloud env key = do
+  match turbo.deploy.internal.readOptionalEnv key () with
+    Some value -> Environment.setValue env key value
+    None       -> ()
+
+turbo.deploy.internal.resolveApnsPrivateKeyText :
+  '{IO, Exception} Optional Text
+turbo.deploy.internal.resolveApnsPrivateKeyText = do
+  match turbo.deploy.internal.readOptionalEnv "TURBO_APNS_PRIVATE_KEY" () with
+    Some pemText -> Some pemText
+    None ->
+      match turbo.deploy.internal.readOptionalEnv "TURBO_APNS_PRIVATE_KEY_PATH" () with
+        Some pathText ->
+          pemText = FilePath.readFileUtf8 (FilePath.FilePath pathText)
+          Some pemText
+        None -> None
+
+turbo.deploy : '{IO, Exception} URI
+turbo.deploy =
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    database = Database.named "turbo-control-plane-v2"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_WORKER_SECRET"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_TEAM_ID"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_KEY_ID"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_BUNDLE_ID"
+    _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_USE_SANDBOX"
+    _ = match turbo.deploy.internal.resolveApnsPrivateKeyText () with
+      Some pemText -> Environment.setValue env "TURBO_APNS_PRIVATE_KEY" pemText
+      None         -> ()
+    Database.assign database env
+    serviceHash = Route.deployWebSocket env (web database)
+    serviceName = ServiceName.named "turbo"
+    uri = ServiceName.assign serviceName serviceHash
+    _ =
+      createDomainMapping
+        (HostName "beepbeep.to") (ServiceName.name serviceName)
+    uri
+
+turbo.setApnsTeamId : Text -> '{IO, Exception} ()
+turbo.setApnsTeamId teamId =
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    Environment.setValue env "TURBO_APNS_TEAM_ID" teamId
+
+turbo.setApnsKeyId : Text -> '{IO, Exception} ()
+turbo.setApnsKeyId keyId =
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    Environment.setValue env "TURBO_APNS_KEY_ID" keyId
+
+turbo.setApnsPrivateKey : Text -> '{IO, Exception} ()
+turbo.setApnsPrivateKey pemText =
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    Environment.setValue env "TURBO_APNS_PRIVATE_KEY" pemText
+
+turbo.setApnsPrivateKeyFromPath : Text -> '{IO, Exception} ()
+turbo.setApnsPrivateKeyFromPath pathText = do
+  pemText = FilePath.readFileUtf8 (FilePath.FilePath pathText)
+  turbo.setApnsPrivateKey pemText ()
+
+turbo.setApnsBundleId : Text -> '{IO, Exception} ()
+turbo.setApnsBundleId bundleId =
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    Environment.setValue env "TURBO_APNS_BUNDLE_ID" bundleId
+
+turbo.setApnsUseSandbox : Text -> '{IO, Exception} ()
+turbo.setApnsUseSandbox useSandbox =
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    Environment.setValue env "TURBO_APNS_USE_SANDBOX" useSandbox
+
+
+---- Anything below this line is ignored by Unison.

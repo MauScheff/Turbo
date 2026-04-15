@@ -1,0 +1,49 @@
+turbo.apns.internal.sendWakePush :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> Text
+  -> '{Config, Exception, Http, Storage, Remote, Log} ()
+turbo.apns.internal.sendWakePush
+  db
+  channelId
+  senderHandle
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt
+  token =
+  do
+    match (internal.config(), jwt()) with
+      (Right (_, _, bundleId, useSandboxValue), Right jwtToken) ->
+        use HttpRequest addHeader
+        use Nat < >=
+        use Text ++
+        payloadText = payloadJson channelId senderHandle senderUserId senderDeviceId
+        uri = URI.parse (internal.host useSandboxValue ++ "/3/device/" ++ token)
+        req0 = HttpRequest.post uri (Body.fromText payloadText)
+        req = req0 |> addHeader "authorization" ("bearer " ++ jwtToken) |> addHeader "apns-push-type" "pushtotalk" |> addHeader "apns-topic" (topic bundleId) |> addHeader "apns-priority" "10" |> addHeader "apns-expiration" "0" |> addHeader "content-type" "application/json"
+        match catch do Http.request req with
+          Left _         ->
+            info "apns.wake.send_crashed" [("channelId", ChannelId.toText channelId), ("targetDeviceId", DeviceId.toText targetDeviceId)]
+            appendWakeEvent db channelId senderHandle senderUserId senderDeviceId targetUserId targetDeviceId startedAt "send-crashed" "0" None ()
+          Right response ->
+            statusCode = HttpResponse.status response |> code
+            responseBody = bodyText response
+            result = if statusCode < 200 || statusCode >= 300 then "failed" else "sent"
+            _ = info "apns.wake.sent" [("channelId", ChannelId.toText channelId), ("targetDeviceId", DeviceId.toText targetDeviceId), ("statusCode", Nat.toText statusCode), ("result", result)]
+            appendWakeEvent db channelId senderHandle senderUserId senderDeviceId targetUserId targetDeviceId startedAt result (Nat.toText statusCode) (Some responseBody) ()
+      (Left err, _)                                             ->
+        info "apns.wake.skipped" [("reason", err)]
+        appendWakeEvent db channelId senderHandle senderUserId senderDeviceId targetUserId targetDeviceId startedAt "skipped-config" "0" (Some err) ()
+      (_, Left err)                                             ->
+        info "apns.wake.skipped" [("reason", err)]
+        appendWakeEvent db channelId senderHandle senderUserId senderDeviceId targetUserId targetDeviceId startedAt "skipped-signing" "0" (Some err) ()
+
+---- Anything below this line is ignored by Unison.

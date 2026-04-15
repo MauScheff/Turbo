@@ -1,0 +1,276 @@
+type h2client.hpack.HeaderField
+  = HeaderField Text Text
+
+h2client.hpack.HeaderField.name : h2client.hpack.HeaderField -> Text
+h2client.hpack.HeaderField.name = cases
+  HeaderField name _ -> name
+
+h2client.hpack.HeaderField.value : h2client.hpack.HeaderField -> Text
+h2client.hpack.HeaderField.value = cases
+  HeaderField _ value -> value
+
+h2client.hpack.internal.maxPrefixValue : Nat -> Nat
+h2client.hpack.internal.maxPrefixValue prefixBits =
+  use Nat shiftLeft
+  shiftLeft 1 prefixBits - 1
+
+h2client.hpack.Integer.encode : Nat -> Nat -> Nat -> [Nat]
+h2client.hpack.Integer.encode prefixBits prefixMask n =
+  use Nat div mod
+  maxPrefixValue = h2client.hpack.internal.maxPrefixValue prefixBits
+  continue remaining =
+    if Nat.lt remaining 128 then [remaining]
+    else (128 + mod remaining 128) +: continue (div remaining 128)
+  if Nat.lt n maxPrefixValue then [prefixMask + n]
+  else (prefixMask + maxPrefixValue) +: continue (n - maxPrefixValue)
+
+h2client.hpack.Integer.decode : Nat -> [Nat] -> Optional (Nat, [Nat])
+h2client.hpack.Integer.decode prefixBits bytes =
+  use Nat and shiftLeft
+  maxPrefixValue = h2client.hpack.internal.maxPrefixValue prefixBits
+  step extra acc shift =
+    match extra with
+      [] ->
+        None
+      byte +: rest ->
+        payload = and byte 127
+        nextAcc = acc + shiftLeft payload shift
+        if Nat.lt byte 128 then Some (maxPrefixValue + nextAcc, rest)
+        else step rest nextAcc (shift + 7)
+  match bytes with
+    [] ->
+      None
+    first +: rest ->
+      prefixValue = and first maxPrefixValue
+      if Nat.lt prefixValue maxPrefixValue then Some (prefixValue, rest)
+      else step rest 0 0
+
+h2client.hpack.String.encode : Text -> [Nat]
+h2client.hpack.String.encode text =
+  utf8Bytes = lib.unison_base_7_16_0.Bytes.toList (lib.unison_base_7_16_0.Text.toUtf8 text)
+  h2client.hpack.Integer.encode 7 0 (lib.unison_base_7_16_0.data.List.size utf8Bytes)
+    ++ utf8Bytes
+
+h2client.hpack.String.decode : [Nat] -> Optional (Text, [Nat])
+h2client.hpack.String.decode bytes =
+  use Nat and
+  match bytes with
+    [] ->
+      None
+    first +: _ ->
+      if Nat.eq (and first 128) 128 then None
+      else
+        match h2client.hpack.Integer.decode 7 bytes with
+          None ->
+            None
+          Some (length, afterLength) ->
+            (stringBytes, rest) = lib.unison_base_7_16_0.data.List.splitAt length afterLength
+            if Nat.neq (lib.unison_base_7_16_0.data.List.size stringBytes) length then None
+            else
+              utf8 = lib.unison_base_7_16_0.Bytes.fromList.impl stringBytes
+              match lib.unison_base_7_16_0.Text.fromUtf8.impl utf8 with
+                Right text -> Some (text, rest)
+                Left _     -> None
+
+h2client.hpack.StaticTable.entry : Nat -> Optional h2client.hpack.HeaderField
+h2client.hpack.StaticTable.entry = cases
+  1  -> Some (HeaderField ":authority" "")
+  2  -> Some (HeaderField ":method" "GET")
+  3  -> Some (HeaderField ":method" "POST")
+  4  -> Some (HeaderField ":path" "/")
+  5  -> Some (HeaderField ":path" "/index.html")
+  6  -> Some (HeaderField ":scheme" "http")
+  7  -> Some (HeaderField ":scheme" "https")
+  8  -> Some (HeaderField ":status" "200")
+  9  -> Some (HeaderField ":status" "204")
+  10 -> Some (HeaderField ":status" "206")
+  11 -> Some (HeaderField ":status" "304")
+  12 -> Some (HeaderField ":status" "400")
+  13 -> Some (HeaderField ":status" "404")
+  14 -> Some (HeaderField ":status" "500")
+  16 -> Some (HeaderField "accept-encoding" "gzip, deflate")
+  23 -> Some (HeaderField "authorization" "")
+  28 -> Some (HeaderField "content-length" "")
+  31 -> Some (HeaderField "content-type" "")
+  58 -> Some (HeaderField "user-agent" "")
+  _  -> None
+
+h2client.hpack.StaticTable.name : Nat -> Optional Text
+h2client.hpack.StaticTable.name index =
+  Optional.map h2client.hpack.HeaderField.name (h2client.hpack.StaticTable.entry index)
+
+h2client.hpack.StaticTable.nameIndex : Text -> Optional Nat
+h2client.hpack.StaticTable.nameIndex name =
+  use Text ==
+  if name == ":authority" then Some 1
+  else if name == ":method" then Some 2
+  else if name == ":path" then Some 4
+  else if name == ":scheme" then Some 6
+  else if name == ":status" then Some 8
+  else if name == "accept-encoding" then Some 16
+  else if name == "authorization" then Some 23
+  else if name == "content-length" then Some 28
+  else if name == "content-type" then Some 31
+  else if name == "user-agent" then Some 58
+  else None
+
+h2client.hpack.StaticTable.exactIndex : h2client.hpack.HeaderField -> Optional Nat
+h2client.hpack.StaticTable.exactIndex header =
+  use Text ==
+  name = h2client.hpack.HeaderField.name header
+  value = h2client.hpack.HeaderField.value header
+  if name == ":method" then
+    if value == "GET" then Some 2
+    else if value == "POST" then Some 3
+    else None
+  else if name == ":path" then
+    if value == "/" then Some 4
+    else if value == "/index.html" then Some 5
+    else None
+  else if name == ":scheme" then
+    if value == "http" then Some 6
+    else if value == "https" then Some 7
+    else None
+  else if name == ":status" then
+    if value == "200" then Some 8
+    else if value == "204" then Some 9
+    else if value == "206" then Some 10
+    else if value == "304" then Some 11
+    else if value == "400" then Some 12
+    else if value == "404" then Some 13
+    else if value == "500" then Some 14
+    else None
+  else if name == "accept-encoding" then
+    if value == "gzip, deflate" then Some 16
+    else None
+  else None
+
+h2client.hpack.HeaderField.encode : h2client.hpack.HeaderField -> [Nat]
+h2client.hpack.HeaderField.encode header =
+  match h2client.hpack.StaticTable.exactIndex header with
+    Some index ->
+      h2client.hpack.Integer.encode 7 128 index
+    None ->
+      name = h2client.hpack.HeaderField.name header
+      value = h2client.hpack.HeaderField.value header
+      match h2client.hpack.StaticTable.nameIndex name with
+        Some index ->
+          h2client.hpack.Integer.encode 4 0 index
+            ++ h2client.hpack.String.encode value
+        None ->
+          h2client.hpack.Integer.encode 4 0 0
+            ++ h2client.hpack.String.encode name
+            ++ h2client.hpack.String.encode value
+
+h2client.hpack.HeaderField.decode
+  : [Nat] -> Optional (h2client.hpack.HeaderField, [Nat])
+h2client.hpack.HeaderField.decode bytes =
+  use Nat and
+  match bytes with
+    [] ->
+      None
+    first +: _ ->
+      if Nat.eq (and first 128) 128 then
+        match h2client.hpack.Integer.decode 7 bytes with
+          Some (index, rest) ->
+            match h2client.hpack.StaticTable.entry index with
+              Some header -> Some (header, rest)
+              None        -> None
+          None ->
+            None
+      else if Nat.eq (and first 192) 64 then
+        match h2client.hpack.Integer.decode 6 bytes with
+          None ->
+            None
+          Some (nameIndex, afterNameIndex) ->
+            match
+              if Nat.eq nameIndex 0 then
+                match h2client.hpack.String.decode afterNameIndex with
+                  Some (name, afterName) -> Some (name, afterName)
+                  None                   -> None
+              else
+                Optional.map
+                  (name -> (name, afterNameIndex))
+                  (h2client.hpack.StaticTable.name nameIndex)
+              with
+              None ->
+                None
+              Some (name, afterName) ->
+                match h2client.hpack.String.decode afterName with
+                  Some (value, rest) -> Some (HeaderField name value, rest)
+                  None               -> None
+      else if Nat.eq (and first 240) 0 then
+        match h2client.hpack.Integer.decode 4 bytes with
+          None ->
+            None
+          Some (nameIndex, afterNameIndex) ->
+            match
+              if Nat.eq nameIndex 0 then
+                match h2client.hpack.String.decode afterNameIndex with
+                  Some (name, afterName) -> Some (name, afterName)
+                  None                   -> None
+              else
+                Optional.map
+                  (name -> (name, afterNameIndex))
+                  (h2client.hpack.StaticTable.name nameIndex)
+              with
+              None ->
+                None
+              Some (name, afterName) ->
+                match h2client.hpack.String.decode afterName with
+                  Some (value, rest) -> Some (HeaderField name value, rest)
+                  None               -> None
+      else
+        None
+
+test> h2client.hpack.Integer.tests.examples = verify do
+  ensureEqual [10] (h2client.hpack.Integer.encode 5 0 10)
+  ensureEqual [31, 154, 10] (h2client.hpack.Integer.encode 5 0 1337)
+  ensureEqual
+    (Some (10, []))
+    (h2client.hpack.Integer.decode 5 [10])
+  ensureEqual
+    (Some (1337, []))
+    (h2client.hpack.Integer.decode 5 [31, 154, 10])
+
+test> h2client.hpack.String.tests.roundTrip = verify do
+  encoded = h2client.hpack.String.encode "custom-key"
+  ensureEqual
+    (Some ("custom-key", []))
+    (h2client.hpack.String.decode encoded)
+
+test> h2client.hpack.HeaderField.tests.indexedRoundTrip = verify do
+  header = HeaderField ":method" "GET"
+  encoded = h2client.hpack.HeaderField.encode header
+  ensureEqual [130] encoded
+  ensureEqual
+    (Some (header, []))
+    (h2client.hpack.HeaderField.decode encoded)
+
+test> h2client.hpack.HeaderField.tests.literalWithIndexedNameRoundTrip = verify do
+  header = HeaderField ":authority" "api.sandbox.push.apple.com"
+  encoded = h2client.hpack.HeaderField.encode header
+  ensureEqual
+    (Some (header, []))
+    (h2client.hpack.HeaderField.decode encoded)
+
+test> h2client.hpack.HeaderField.tests.literalWithNewNameRoundTrip = verify do
+  header = HeaderField "apns-topic" "com.rounded.Turbo"
+  encoded = h2client.hpack.HeaderField.encode header
+  ensureEqual
+    (Some (header, []))
+    (h2client.hpack.HeaderField.decode encoded)
+
+test> h2client.hpack.HeaderField.tests.decodeIncrementalIndexedName = verify do
+  encoded = [72, 3, 52, 48, 53]
+  ensureEqual
+    (Some (HeaderField ":status" "405", []))
+    (h2client.hpack.HeaderField.decode encoded)
+
+test> h2client.hpack.HeaderField.tests.decodeIncrementalNewName = verify do
+  encoded = [64, 7, 97, 112, 110, 115, 45, 105, 100, 3, 120, 121, 122]
+  ensureEqual
+    (Some (HeaderField "apns-id" "xyz", []))
+    (h2client.hpack.HeaderField.decode encoded)
+
+---- Anything below this line is ignored by Unison.

@@ -1,0 +1,95 @@
+h2client.transport.rawFrameToBytes : h2client.frame.RawFrame -> Optional Bytes
+h2client.transport.rawFrameToBytes rawFrame =
+  Optional.map
+    lib.unison_base_7_16_0.Bytes.fromList.impl
+    (h2client.frame.RawFrame.encodeNats rawFrame)
+
+h2client.transport.rawFramesToBytes : [h2client.frame.RawFrame] -> Optional Bytes
+h2client.transport.rawFramesToBytes rawFrames =
+  go remaining =
+    match remaining with
+      [] ->
+        Some lib.unison_base_7_16_0.Bytes.empty
+      frame +: rest ->
+        match (h2client.transport.rawFrameToBytes frame, go rest) with
+          (Some prefix, Some suffix) -> Some (prefix ++ suffix)
+          _                          -> None
+  go rawFrames
+
+h2client.transport.handleFrames
+  : h2client.session.State
+  -> [h2client.frame.RawFrame]
+  -> (h2client.session.State, [h2client.frame.RawFrame], Optional h2client.client.Response)
+h2client.transport.handleFrames state frames =
+  go currentState pendingFrames outboundAcc =
+    match pendingFrames with
+      [] ->
+        (currentState, outboundAcc, None)
+      frame +: rest ->
+        step = h2client.session.handleIncomingFrame currentState frame
+        nextOutbound = outboundAcc ++ h2client.session.Step.outbound step
+        match h2client.session.Step.response step with
+          Some response ->
+            (h2client.session.Step.state step, nextOutbound, Some response)
+          None ->
+            go (h2client.session.Step.state step) rest nextOutbound
+  go state frames []
+
+h2client.client.defaultSettings : h2client.settings.Payload
+h2client.client.defaultSettings =
+  Payload
+    [ Entry HeaderTableSize 4096
+    , Entry EnablePush 0
+    , Entry MaxConcurrentStreams 100
+    , Entry InitialWindowSize 65535
+    , Entry MaxFrameSize 16384
+    ]
+
+test> h2client.transport.tests.rawFramesToBytes = verify do
+  frames =
+    [ h2client.settings.Frame.toRawFrame
+        (Parameters (Payload [Entry HeaderTableSize 4096]))
+    , h2client.data.Frame.toRawFrame
+        (h2client.data.Frame.Frame (StreamId 1) true [9, 8])
+    ]
+  encoded =
+    Optional.map
+      lib.unison_base_7_16_0.Bytes.toList
+      (h2client.transport.rawFramesToBytes frames)
+  ensureEqual
+    (Some
+      [ 0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 1, 0, 0, 16, 0
+      , 0, 0, 2, 0, 1, 0, 0, 0, 1, 9, 8
+      ])
+    encoded
+
+test> h2client.transport.tests.handleFramesStopsOnResponse = verify do
+  (_, session0, _) =
+    h2client.session.start
+      h2client.client.defaultSettings
+      (h2client.client.Request.fromMethod
+        (StreamId 1)
+        Get
+        "https"
+        "www.unison.cloud"
+        "/"
+        []
+        [])
+  responseFrames =
+    [ h2client.headers.Frame.toRawFrame
+        (h2client.headers.Frame.Frame
+          (StreamId 1)
+          false
+          true
+          (h2client.client.internal.encodeHeaderBlock [HeaderField ":status" "200"]))
+    , h2client.data.Frame.toRawFrame
+        (h2client.data.Frame.Frame (StreamId 1) true [1, 2, 3])
+    ]
+  (_, outbound, response) =
+    h2client.transport.handleFrames session0 responseFrames
+  ensureEqual [] outbound
+  ensureEqual
+    (Some (Response (ResponseHead 200 []) [1, 2, 3]))
+    response
+
+---- Anything below this line is ignored by Unison.

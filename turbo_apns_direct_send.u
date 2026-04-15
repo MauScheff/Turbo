@@ -1,0 +1,1025 @@
+turbo.apns.internal.useSandbox : Optional Text -> Boolean
+turbo.apns.internal.useSandbox = cases
+  Some "0"     -> false
+  Some "false" -> false
+  Some "no"    -> false
+  _            -> true
+
+turbo.apns.internal.host : Boolean -> Text
+turbo.apns.internal.host useSandbox =
+  if useSandbox then "https://api.sandbox.push.apple.com"
+  else "https://api.push.apple.com"
+
+turbo.apns.internal.topic : Text -> Text
+turbo.apns.internal.topic bundleId =
+  use Text ++
+  bundleId ++ ".voip-ptt"
+
+turbo.apns.internal.headerJson : Text -> Text
+turbo.apns.internal.headerJson keyId =
+  Json.toText (object.empty |> addText "alg" "ES256" |> addText "kid" keyId)
+
+turbo.apns.internal.claimsJson : Text -> Int -> Text
+turbo.apns.internal.claimsJson teamId issuedAtSeconds =
+  Json.toText
+    (object.empty
+      |> addText "iss" teamId
+      |> object.add "iat" (Number (Int.toText issuedAtSeconds)))
+
+turbo.apns.internal.payloadJson :
+  ChannelId -> Text -> UserId -> DeviceId -> Text
+turbo.apns.internal.payloadJson
+  channelId senderHandle senderUserId senderDeviceId =
+  use object empty
+  Json.toText
+    (empty
+      |> object.add "aps" empty
+      |> addText "event" "transmit-start"
+      |> addText "channelId" (ChannelId.toText channelId)
+      |> addText "activeSpeaker" senderHandle
+      |> addText "senderUserId" (UserId.toText senderUserId)
+      |> addText "senderDeviceId" (DeviceId.toText senderDeviceId))
+
+turbo.apns.internal.config : '{Config} Either Text (Text, Text, Text, Boolean)
+turbo.apns.internal.config =
+  do
+    use Config lookup
+    teamId = lookup "TURBO_APNS_TEAM_ID"
+    keyId = lookup "TURBO_APNS_KEY_ID"
+    pemText = lookup "TURBO_APNS_PRIVATE_KEY"
+    bundleId = lookup "TURBO_APNS_BUNDLE_ID"
+    useSandboxValue = lookup "TURBO_APNS_USE_SANDBOX"
+    match (teamId, keyId, pemText) with
+      (Some teamIdText, Some keyIdText, Some pemTextValue) ->
+        Right
+          ( teamIdText
+          , keyIdText
+          , match bundleId with
+              Some configured -> configured
+              None            -> "com.rounded.Turbo"
+          , turbo.apns.internal.useSandbox useSandboxValue
+          )
+      _ -> Left "missing APNs config"
+
+turbo.apns.internal.signingKey : '{Config} Either Text ecdsa.SigningKey
+turbo.apns.internal.signingKey =
+  do
+    use Text ++
+    pemText = Config.lookup "TURBO_APNS_PRIVATE_KEY"
+    match pemText with
+      None -> Left "missing TURBO_APNS_PRIVATE_KEY"
+      Some pem ->
+        match parsePemEcPrivateKey pem with
+          Left err -> Left ("invalid APNs private key: " ++ err)
+          Right (pkcs8.SigningKey.SigningKey scalarBytes) ->
+            signingKeyFromBytes scalarBytes
+
+turbo.apns.internal.jwt : '{Config, Exception, Remote} Either Text Text
+turbo.apns.internal.jwt =
+  do
+    match (turbo.apns.internal.config(), turbo.apns.internal.signingKey()) with
+      (Right (teamId, keyId, _, _), Right signingKey) ->
+        issuedAtSeconds = secondsSinceEpoch now!
+        jwt.encode
+          signingKey
+          (turbo.apns.internal.headerJson keyId)
+          (turbo.apns.internal.claimsJson teamId issuedAtSeconds)
+      (Left err, _) -> Left err
+      (_, Left err) -> Left err
+
+turbo.apns.internal.appendWakeEvent :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> Text
+  -> Text
+  -> Optional Text
+  -> '{Exception, Storage, Remote} ()
+turbo.apns.internal.appendWakeEvent
+  db
+  channelId
+  senderHandle
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt
+  result
+  statusCode
+  responseBody =
+  do
+    _ =
+      appendRecent
+        db
+        senderUserId
+        channelId
+        senderDeviceId
+        senderHandle
+        targetUserId
+        targetDeviceId
+        startedAt
+        result
+        statusCode
+        responseBody
+    ()
+
+turbo.apns.internal.sendWakePush :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> Text
+  -> '{Config, Exception, Http, Storage, Remote, Log} ()
+turbo.apns.internal.sendWakePush
+  db
+  channelId
+  senderHandle
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt
+  token =
+  do
+    match (turbo.apns.internal.config(), turbo.apns.internal.jwt()) with
+      (Right (_, _, bundleId, useSandboxValue), Right jwtToken) ->
+        use HttpRequest addHeader
+        use Nat < >=
+        use Text ++
+        payloadText =
+          turbo.apns.internal.payloadJson
+            channelId senderHandle senderUserId senderDeviceId
+        uri =
+          URI.parse
+            (turbo.apns.internal.host useSandboxValue ++ "/3/device/" ++ token)
+        req0 = HttpRequest.post uri (Body.fromText payloadText)
+        req =
+          req0
+            |> addHeader "authorization" ("bearer " ++ jwtToken)
+            |> addHeader "apns-push-type" "pushtotalk"
+            |> addHeader "apns-topic" (turbo.apns.internal.topic bundleId)
+            |> addHeader "apns-priority" "10"
+            |> addHeader "apns-expiration" "0"
+            |> addHeader "content-type" "application/json"
+        match catch do Http.request req with
+          Left _ ->
+            info
+              "apns.wake.send_crashed"
+              [ ("channelId", ChannelId.toText channelId)
+              , ("targetDeviceId", DeviceId.toText targetDeviceId)
+              ]
+            turbo.apns.internal.appendWakeEvent
+              db
+              channelId
+              senderHandle
+              senderUserId
+              senderDeviceId
+              targetUserId
+              targetDeviceId
+              startedAt
+              "send-crashed"
+              "0"
+              None
+              ()
+          Right response ->
+            statusCode = HttpResponse.status response |> code
+            responseBody = bodyText response
+            result =
+              if statusCode < 200 || statusCode >= 300 then "failed"
+              else "sent"
+            _ =
+              info
+                "apns.wake.sent"
+                [ ("channelId", ChannelId.toText channelId)
+                , ("targetDeviceId", DeviceId.toText targetDeviceId)
+                , ("statusCode", Nat.toText statusCode)
+                , ("result", result)
+                ]
+            turbo.apns.internal.appendWakeEvent
+              db
+              channelId
+              senderHandle
+              senderUserId
+              senderDeviceId
+              targetUserId
+              targetDeviceId
+              startedAt
+              result
+              (Nat.toText statusCode)
+              (Some responseBody)
+              ()
+      (Left err, _) ->
+        info "apns.wake.skipped" [("reason", err)]
+        turbo.apns.internal.appendWakeEvent
+          db
+          channelId
+          senderHandle
+          senderUserId
+          senderDeviceId
+          targetUserId
+          targetDeviceId
+          startedAt
+          "skipped-config"
+          "0"
+          (Some err)
+          ()
+      (_, Left err) ->
+        info "apns.wake.skipped" [("reason", err)]
+        turbo.apns.internal.appendWakeEvent
+          db
+          channelId
+          senderHandle
+          senderUserId
+          senderDeviceId
+          targetUserId
+          targetDeviceId
+          startedAt
+          "skipped-signing"
+          "0"
+          (Some err)
+          ()
+
+turbo.service.channels.internal.sendWakePushIfPossible :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> '{Config, Exception, Http, Storage, Remote, Log} ()
+turbo.service.channels.internal.sendWakePushIfPossible
+  db
+  channelId
+  senderHandle
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt =
+  do
+    tokenRecord =
+      match tokens.get db channelId targetUserId targetDeviceId () with
+        Some record -> Some record
+        None        -> latestForUserInChannel db channelId targetUserId ()
+    match tokenRecord with
+      None -> ()
+      Some (EphemeralToken _ _ tokenDeviceId token _) ->
+        turbo.apns.internal.sendWakePush
+          db
+          channelId
+          senderHandle
+          senderUserId
+          senderDeviceId
+          targetUserId
+          tokenDeviceId
+          startedAt
+          token
+          ()
+
+turbo.service.channels.beginTransmit :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.channels.beginTransmit db =
+  do
+    use Parser /
+    use object empty
+    channelIdText =
+      route POST (s "v1" / s "channels" / Parser.text / s "begin-transmit")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        currentHandle =
+          (User _ handleText _ _ _) = currentUser
+          handleText
+        fields = decodeJson (Decoder.object Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match Map.get "deviceId" fields with
+            Some deviceIdText ->
+              resolvedTarget =
+                resolveTransmitTarget db channelId currentUserId ()
+              match resolvedTarget with
+                Left err -> badRequest.json (empty |> addText "error" err)
+                Right (targetUserId, targetDeviceId) ->
+                  result =
+                    runtime.beginTransmit
+                      db
+                      channelId
+                      currentUserId
+                      (DeviceId.fromText deviceIdText)
+                      targetUserId
+                      targetDeviceId
+                      ()
+                  match result with
+                    Left err -> badRequest.json (empty |> addText "error" err)
+                    Right state ->
+                      (startedAt, expiresAt, senderDeviceId) =
+                        (TransmitState _ _ fromDeviceId _ _ startedAt expiresAt)
+                          =
+                          state
+                        ( Instant.toText startedAt
+                        , Instant.toText expiresAt
+                        , fromDeviceId
+                        )
+                      _ =
+                        turbo.service.channels.internal.sendWakePushIfPossible
+                          db
+                          channelId
+                          currentHandle
+                          currentUserId
+                          senderDeviceId
+                          targetUserId
+                          targetDeviceId
+                          startedAt
+                          ()
+                      ok.json
+                        (empty
+                          |> addText "channelId" channelIdText
+                          |> addText "status" "transmitting"
+                          |> addText "startedAt" startedAt
+                          |> addText "expiresAt" expiresAt
+                          |> addText
+                               "targetUserId" (UserId.toText targetUserId)
+                          |> addText
+                               "targetDeviceId"
+                               (DeviceId.toText targetDeviceId))
+            None ->
+              badRequest.json (empty |> addText "error" "missing deviceId")
+
+turbo.apns.internal.useSandbox.tests.examples : [Result]
+turbo.apns.internal.useSandbox.tests.examples =
+  first = iff (turbo.apns.internal.useSandbox None) true
+  second = iff (turbo.apns.internal.useSandbox (Some "1")) true
+  third = iff (turbo.apns.internal.useSandbox (Some "false")) false
+  check (first && second && third)
+
+turbo.apns.internal.topic.tests.examples : [Result]
+turbo.apns.internal.topic.tests.examples =
+  use Text ==
+  check
+    (turbo.apns.internal.topic "com.rounded.Turbo"
+      == "com.rounded.Turbo.voip-ptt")
+
+-- The definitions below no longer typecheck with the changes above.
+-- Please fix the errors and try `update` again.
+
+turbo.deploy : '{IO, Exception} URI
+turbo.deploy = 
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    database = Database.named "turbo-control-plane-v2"
+    _ = syncOptionalEnvToCloud env "TURBO_APNS_WORKER_SECRET"
+    _ = syncOptionalEnvToCloud env "TURBO_APNS_TEAM_ID"
+    _ = syncOptionalEnvToCloud env "TURBO_APNS_KEY_ID"
+    _ = match resolveApnsPrivateKeyText() with
+      Some pemText -> setValue env "TURBO_APNS_PRIVATE_KEY" pemText
+      None         -> ()
+    Database.assign database env
+    serviceHash = Route.deployWebSocket env (web database)
+    serviceName = ServiceName.named "turbo"
+    uri = ServiceName.assign serviceName serviceHash
+    _ =
+      createDomainMapping
+        (HostName "beepbeep.to") (ServiceName.name serviceName)
+    uri
+
+turbo.domain.WakeJob.doc : Doc
+turbo.domain.WakeJob.doc =
+  {{
+  {type WakeJob} stores one pending production wake send for the external APNs
+  worker.
+  
+  The deployed Unison service still cannot open the APNs HTTPS connection
+  directly, so {channels.beginTransmit} enqueues one of these jobs and the
+  worker drains them.
+  }}
+
+turbo.serveHttpLocal : '{IO, Exception} ()
+turbo.serveHttpLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8081)
+    Random.run do
+      Threads.run do
+        _ = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localHttpService = httpWithConfig "local-http" false database
+            hash = deployHttp env (Route.run localHttpService)
+            serviceName = ServiceName.named "turbo"
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8081/h/" ++ hashText ++ "/")
+            ()
+        printLine
+          "Local HTTP computation starting on port 8081. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        ()
+
+turbo.serveLocal :
+  '{IO, Exception} ServiceHash
+    HttpRequest (Either HttpResponse (WebSocket ->{Remote, WebSockets} ()))
+turbo.serveLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8090)
+    Random.run do
+      Threads.run do
+        hash = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localWebService = web database
+            hash = Route.deployWebSocket env localWebService
+            serviceName = ServiceName.named "turbo"
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8090/h/" ++ hashText ++ "/")
+            hash
+        printLine
+          "Local Cloud computation starting on port 8090. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        hash
+
+turbo.service.channels.beginTransmit.doc : Doc
+turbo.service.channels.beginTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.beginTransmit db }} starts transmit state
+  for a direct channel if it is currently idle.
+  
+  The request body only needs the sender `deviceId`.
+  
+  The backend resolves the other channel member and selects that user's
+  currently active receiving device.
+  }}
+
+turbo.service.channels.endTransmit.doc : Doc
+turbo.service.channels.endTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.endTransmit db }} ends transmit state for
+  the caller's device.
+  
+  This operation is idempotent: if the caller no longer owns an active transmit
+  lease, the backend still returns `idle`.
+  
+  **Also see:** {channels.beginTransmit}, {runtime.endTransmit}
+  }}
+
+turbo.service.channels.pttPushTarget.doc : Doc
+turbo.service.channels.pttPushTarget.doc =
+  {{
+  {{ docExample 1 do db -> pttPushTarget db }} returns the current receiver
+  push target for the caller's active transmit.
+  
+  This is the canonical background-wake payload shape for a live transmit
+  owner. It is useful for APNs integration and simulator push tooling.
+  
+  **Also see:** {channels.beginTransmit}, {{
+  docLink (docEmbedTermLink do latestForUserInChannel) }}
+  }}
+
+turbo.service.channels.renewTransmit.doc : Doc
+turbo.service.channels.renewTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.renewTransmit db }} extends the caller's
+  active transmit lease for a direct channel.
+  
+  The request body only needs the sender `deviceId`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do channels.beginTransmit) }}, {{
+  docLink (docEmbedTermLink do channels.endTransmit) }}
+  }}
+
+turbo.service.http :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.http db = httpWithConfig "cloud" true db
+
+turbo.service.httpWithConfig :
+  Text
+  -> Boolean
+  -> Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.httpWithConfig mode supportsWebSocket db =
+  use Route or
+  or
+    health
+    (or
+      (service.config mode supportsWebSocket)
+      (or
+        (internal.routes db)
+        (or
+          (dev db)
+          (or
+            (service.presence.heartbeat db)
+            (or (auth db) (or (users db) (or (invites db) (channels db))))))))
+
+turbo.service.routes.channels :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.channels db =
+  use Route or
+  or
+    (channels.direct db)
+    (or
+      (channels.join db)
+      (or
+        (leave db)
+        (or
+          (channels.state db)
+          (or
+            (ephemeralToken db)
+            (or
+              (pttPushTarget db)
+              (or
+                (channels.beginTransmit db)
+                (or
+                  (channels.renewTransmit db)
+                  (or (channels.endTransmit db) (readiness db)))))))))
+
+turbo.service.web :
+  Database
+  -> '{Route,
+  Config,
+  Exception,
+  Http,
+  OpenWebSocket,
+  Storage,
+  Remote,
+  WebSockets,
+  Random,
+  Log} ()
+turbo.service.web db = Route.or (service.http db) (ws db)
+
+
+
+---- Anything below this line is ignored by Unison.
+
+
+turbo.apns.internal.useSandbox : Optional Text -> Boolean
+turbo.apns.internal.useSandbox = cases
+  Some "0"     -> false
+  Some "false" -> false
+  Some "no"    -> false
+  _            -> true
+
+turbo.apns.internal.host : Boolean -> Text
+turbo.apns.internal.host useSandbox =
+  if useSandbox then "https://api.sandbox.push.apple.com"
+  else "https://api.push.apple.com"
+
+turbo.apns.internal.topic : Text -> Text
+turbo.apns.internal.topic bundleId =
+  bundleId Text.++ ".voip-ptt"
+
+turbo.apns.internal.headerJson : Text -> Text
+turbo.apns.internal.headerJson keyId =
+  use object empty
+  Json.toText (empty |> addText "alg" "ES256" |> addText "kid" keyId)
+
+turbo.apns.internal.claimsJson : Text -> Int -> Text
+turbo.apns.internal.claimsJson teamId issuedAtSeconds =
+  use object empty
+  Json.toText
+    (empty
+      |> addText "iss" teamId
+      |> object.add "iat" (Json.Number (Int.toText issuedAtSeconds)))
+
+turbo.apns.internal.payloadJson :
+  ChannelId -> Text -> UserId -> DeviceId -> Text
+turbo.apns.internal.payloadJson channelId senderHandle senderUserId senderDeviceId =
+  use object empty
+  Json.toText
+    (empty
+      |> object.add "aps" object.empty
+      |> addText "event" "transmit-start"
+      |> addText "channelId" (ChannelId.toText channelId)
+      |> addText "activeSpeaker" senderHandle
+      |> addText "senderUserId" (UserId.toText senderUserId)
+      |> addText "senderDeviceId" (DeviceId.toText senderDeviceId))
+
+turbo.apns.internal.config : '{Config} Either Text (Text, Text, Text, Boolean)
+turbo.apns.internal.config = do
+  teamId = Config.lookup "TURBO_APNS_TEAM_ID"
+  keyId = Config.lookup "TURBO_APNS_KEY_ID"
+  pemText = Config.lookup "TURBO_APNS_PRIVATE_KEY"
+  bundleId = Config.lookup "TURBO_APNS_BUNDLE_ID"
+  useSandboxValue = Config.lookup "TURBO_APNS_USE_SANDBOX"
+  match (teamId, keyId, pemText) with
+    (Some teamIdText, Some keyIdText, Some pemTextValue) ->
+      Right
+        ( teamIdText,
+          keyIdText,
+          match bundleId with
+            Some configured -> configured
+            None -> "com.rounded.Turbo",
+          turbo.apns.internal.useSandbox useSandboxValue
+        )
+    _ -> Left "missing APNs config"
+
+turbo.apns.internal.signingKey : '{Config} Either Text ecdsa.SigningKey
+turbo.apns.internal.signingKey = do
+  pemText = Config.lookup "TURBO_APNS_PRIVATE_KEY"
+  match pemText with
+    None -> Left "missing TURBO_APNS_PRIVATE_KEY"
+    Some pem ->
+      match pkcs8.parsePemEcPrivateKey pem with
+        Left err -> Left ("invalid APNs private key: " Text.++ err)
+        Right (pkcs8.SigningKey.SigningKey scalarBytes) ->
+          ecdsa.signingKeyFromBytes scalarBytes
+
+turbo.apns.internal.jwt : '{Config, Exception, Remote} Either Text Text
+turbo.apns.internal.jwt = do
+  match (turbo.apns.internal.config (), turbo.apns.internal.signingKey ()) with
+    (Right (teamId, keyId, _, _), Right signingKey) ->
+      issuedAtSeconds = Instant.secondsSinceEpoch now!
+      es256.jwt.encode
+        signingKey
+        (turbo.apns.internal.headerJson keyId)
+        (turbo.apns.internal.claimsJson teamId issuedAtSeconds)
+    (Left err, _) -> Left err
+    (_, Left err) -> Left err
+
+turbo.apns.internal.appendWakeEvent :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> Text
+  -> Text
+  -> Optional Text
+  -> '{Exception, Storage, Remote} ()
+turbo.apns.internal.appendWakeEvent db channelId senderHandle senderUserId senderDeviceId targetUserId targetDeviceId startedAt result statusCode responseBody =
+  do
+    _ =
+      turbo.store.devWakeEvents.appendRecent
+        db
+        senderUserId
+        channelId
+        senderDeviceId
+        senderHandle
+        targetUserId
+        targetDeviceId
+        startedAt
+        result
+        statusCode
+        responseBody
+    ()
+
+turbo.apns.internal.sendWakePush :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> Text
+  -> '{Config, Exception, Http, Storage, Remote, Log} ()
+turbo.apns.internal.sendWakePush db channelId senderHandle senderUserId senderDeviceId targetUserId targetDeviceId startedAt token = do
+  use Nat < >=
+  use Text ++
+  use unison_http_15_0_0.HttpRequest addHeader
+  match (turbo.apns.internal.config (), turbo.apns.internal.jwt ()) with
+    (Right (_, _, bundleId, useSandboxValue), Right jwtToken) ->
+      payloadText =
+        turbo.apns.internal.payloadJson
+          channelId
+          senderHandle
+          senderUserId
+          senderDeviceId
+      uri =
+        URI.parse
+          (turbo.apns.internal.host useSandboxValue ++ "/3/device/" ++ token)
+      req0 =
+        unison_http_15_0_0.HttpRequest.post uri (Body.fromText payloadText)
+      req =
+        req0
+          |> addHeader "authorization" ("bearer " ++ jwtToken)
+          |> addHeader "apns-push-type" "pushtotalk"
+          |> addHeader "apns-topic" (turbo.apns.internal.topic bundleId)
+          |> addHeader "apns-priority" "10"
+          |> addHeader "apns-expiration" "0"
+          |> addHeader "content-type" "application/json"
+      match catch do Http.request req with
+        Left _ ->
+          info
+            "apns.wake.send_crashed"
+            [ ("channelId", ChannelId.toText channelId),
+              ("targetDeviceId", DeviceId.toText targetDeviceId)
+            ]
+          turbo.apns.internal.appendWakeEvent
+            db
+            channelId
+            senderHandle
+            senderUserId
+            senderDeviceId
+            targetUserId
+            targetDeviceId
+            startedAt
+            "send-crashed"
+            "0"
+            None
+            ()
+        Right response ->
+          statusCode = HttpResponse.status response |> Status.code
+          responseBody = bodyText response
+          result =
+            if statusCode < 200 || statusCode >= 300 then "failed"
+            else "sent"
+          _ =
+            info
+              "apns.wake.sent"
+              [ ("channelId", ChannelId.toText channelId),
+                ("targetDeviceId", DeviceId.toText targetDeviceId),
+                ("statusCode", Nat.toText statusCode),
+                ("result", result)
+              ]
+          turbo.apns.internal.appendWakeEvent
+            db
+            channelId
+            senderHandle
+            senderUserId
+            senderDeviceId
+            targetUserId
+            targetDeviceId
+            startedAt
+            result
+            (Nat.toText statusCode)
+            (Some responseBody)
+            ()
+    (Left err, _) ->
+      info "apns.wake.skipped" [("reason", err)]
+      turbo.apns.internal.appendWakeEvent
+        db
+        channelId
+        senderHandle
+        senderUserId
+        senderDeviceId
+        targetUserId
+        targetDeviceId
+        startedAt
+        "skipped-config"
+        "0"
+        (Some err)
+        ()
+    (_, Left err) ->
+      info "apns.wake.skipped" [("reason", err)]
+      turbo.apns.internal.appendWakeEvent
+        db
+        channelId
+        senderHandle
+        senderUserId
+        senderDeviceId
+        targetUserId
+        targetDeviceId
+        startedAt
+        "skipped-signing"
+        "0"
+        (Some err)
+        ()
+
+turbo.service.channels.internal.sendWakePushIfPossible :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> '{Config, Exception, Http, Storage, Remote, Log} Text
+turbo.service.channels.internal.sendWakePushIfPossible db channelId senderHandle senderUserId senderDeviceId targetUserId targetDeviceId startedAt = do
+  tokenRecord = match tokens.get db channelId targetUserId targetDeviceId () with
+    Some record -> Some record
+    None        -> latestForUserInChannel db channelId targetUserId ()
+  match tokenRecord with
+    None -> do
+      info
+        "apns.wake.skipped"
+        [ ("reason", "no-target-ptt-token"),
+          ("channelId", ChannelId.toText channelId),
+          ("targetUserId", UserId.toText targetUserId),
+          ("targetDeviceId", DeviceId.toText targetDeviceId)
+        ]
+      turbo.apns.internal.appendWakeEvent
+        db
+        channelId
+        senderHandle
+        senderUserId
+        senderDeviceId
+        targetUserId
+        targetDeviceId
+        startedAt
+        "skipped-no-token"
+        "0"
+        None
+        ()
+      "skipped-no-token"
+    Some (EphemeralToken _ _ tokenDeviceId token _) ->
+      _ = turbo.apns.internal.sendWakePush
+        db
+        channelId
+        senderHandle
+        senderUserId
+        senderDeviceId
+        targetUserId
+        tokenDeviceId
+        startedAt
+        token
+        ()
+      "attempted"
+
+turbo.service.channels.beginTransmit :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.channels.beginTransmit db = do
+  use Parser /
+  use object empty
+  channelIdText =
+    route POST (s "v1" / s "channels" / Parser.text / s "begin-transmit")
+  match requireUser db () with
+    Left err -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      currentHandle =
+        (User _ handleText _ _ _) = currentUser
+        handleText
+      fields = decodeJson (Decoder.object Decoder.text)
+      channelId = ChannelId.fromText channelIdText
+      isMember = memberships.exists db channelId currentUserId ()
+      if Boolean.not isMember then
+        unauthorized.json (empty |> addText "error" "not a channel member")
+      else
+        match Map.get "deviceId" fields with
+          Some deviceIdText ->
+            resolvedTarget = resolveTransmitTarget db channelId currentUserId ()
+            match resolvedTarget with
+              Left err -> badRequest.json (empty |> addText "error" err)
+              Right (targetUserId, targetDeviceId) ->
+                result =
+                  runtime.beginTransmit
+                    db
+                    channelId
+                    currentUserId
+                    (DeviceId.fromText deviceIdText)
+                    targetUserId
+                    targetDeviceId
+                    ()
+                match result with
+                  Left err -> badRequest.json (empty |> addText "error" err)
+                    Right state ->
+                      (startedAt, expiresAt, senderDeviceId) =
+                        (TransmitState _ _ fromDeviceId _ _ startedAt expiresAt) =
+                          state
+                      (Instant.toText startedAt, Instant.toText expiresAt, fromDeviceId)
+                    wakeDispatch =
+                      turbo.service.channels.internal.sendWakePushIfPossible
+                        db
+                        channelId
+                        currentHandle
+                        currentUserId
+                        senderDeviceId
+                        targetUserId
+                        targetDeviceId
+                        startedAt
+                        ()
+                    ok.json
+                      (empty
+                        |> addText "channelId" channelIdText
+                        |> addText "status" "transmitting"
+                        |> addText "wakeDispatch" wakeDispatch
+                        |> addText "startedAt" startedAt
+                        |> addText "expiresAt" expiresAt
+                        |> addText "targetUserId" (UserId.toText targetUserId)
+                        |> addText "targetDeviceId" (DeviceId.toText targetDeviceId))
+          None -> badRequest.json (empty |> addText "error" "missing deviceId")
+
+turbo.service.routes.channels :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.channels db =
+  use Route or
+  or
+    (channels.direct db)
+    (or
+      (channels.join db)
+      (or
+        (leave db)
+        (or
+          (channels.state db)
+          (or
+            (ephemeralToken db)
+            (or
+              (pttPushTarget db)
+              (or
+                (channels.beginTransmit db)
+                (or (channels.renewTransmit db) (or (channels.endTransmit db) (readiness db)))))))))
+
+turbo.domain.WakeJob.doc : Doc
+turbo.domain.WakeJob.doc =
+  {{
+  {type WakeJob} stores one pending wake send for the legacy external APNs worker path.
+
+  The direct Unison APNs integration should make these rows unnecessary in the normal production lane.
+  }}
+
+turbo.service.channels.beginTransmit.doc : Doc
+turbo.service.channels.beginTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.beginTransmit db }} starts transmit state for a direct channel if it is currently idle.
+
+  The request body only needs the sender `deviceId`.
+
+  The backend resolves the other channel member, selects that user's current transmit target, and attempts the PushToTalk wake send inline when a token-backed wake path exists.
+  }}
+
+turbo.service.channels.endTransmit.doc : Doc
+turbo.service.channels.endTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.endTransmit db }} ends transmit state for the caller's device.
+
+  This operation is idempotent: if the caller no longer owns an active transmit lease, the backend still returns `idle`.
+
+  **Also see:** {channels.beginTransmit}, {runtime.endTransmit}
+  }}
+
+turbo.service.channels.pttPushTarget.doc : Doc
+turbo.service.channels.pttPushTarget.doc =
+  {{
+  {{ docExample 1 do db -> pttPushTarget db }} returns the current receiver push target for the caller's active transmit.
+
+  This remains the canonical background-wake payload shape for a live transmit owner. It is useful for diagnostics, simulator tooling, and verifying the backend-selected APNs target.
+
+  **Also see:** {channels.beginTransmit}, {{ docLink (docEmbedTermLink do latestForUserInChannel) }}
+  }}
+
+turbo.service.channels.renewTransmit.doc : Doc
+turbo.service.channels.renewTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.renewTransmit db }} extends the caller's active transmit lease for a direct channel.
+
+  The request body only needs the sender `deviceId`.
+
+  **Also see:** {{ docLink (docEmbedTermLink do channels.beginTransmit) }}, {{ docLink (docEmbedTermLink do channels.endTransmit) }}
+  }}
+
+turbo.apns.internal.useSandbox.tests.examples : [Result]
+turbo.apns.internal.useSandbox.tests.examples =
+  first = turbo.apns.internal.useSandbox None == true
+  second = turbo.apns.internal.useSandbox (Some "1") == true
+  third = turbo.apns.internal.useSandbox (Some "false") == false
+  check (first && second && third)
+
+turbo.apns.internal.topic.tests.examples : [Result]
+turbo.apns.internal.topic.tests.examples =
+  check
+    (turbo.apns.internal.topic "com.rounded.Turbo"
+      == "com.rounded.Turbo.voip-ptt")
+
+---- Anything below this line is ignored by Unison.

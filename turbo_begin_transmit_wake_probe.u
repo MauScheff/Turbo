@@ -1,0 +1,114 @@
+turbo.service.channels.internal.sendWakePushIfPossible :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> '{Config, Exception, Http, Storage, Remote, Log} Text
+turbo.service.channels.internal.sendWakePushIfPossible db channelId senderHandle senderUserId senderDeviceId targetUserId targetDeviceId startedAt = do
+  tokenRecord = match tokens.get db channelId targetUserId targetDeviceId () with
+    Some record -> Some record
+    None        -> latestForUserInChannel db channelId targetUserId ()
+  match tokenRecord with
+    None -> do
+      _ =
+        turbo.apns.internal.appendWakeEvent
+          db
+          channelId
+          senderHandle
+          senderUserId
+          senderDeviceId
+          targetUserId
+          targetDeviceId
+          startedAt
+          "skipped-no-token"
+          "0"
+          None
+          ()
+      "skipped-no-token"
+    Some (EphemeralToken _ _ tokenDeviceId token _) -> do
+      _ =
+        turbo.apns.internal.sendWakePush
+          db
+          channelId
+          senderHandle
+          senderUserId
+          senderDeviceId
+          targetUserId
+          tokenDeviceId
+          startedAt
+          token
+          ()
+      "attempted"
+
+turbo.service.channels.beginTransmit :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.channels.beginTransmit db = do
+  use Parser /
+  use object empty
+  channelIdText =
+    route POST (s "v1" / s "channels" / Parser.text / s "begin-transmit")
+  match requireUser db () with
+    Left err -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      currentHandle =
+        (User _ handleText _ _ _) = currentUser
+        handleText
+      fields = decodeJson (Decoder.object Decoder.text)
+      channelId = ChannelId.fromText channelIdText
+      isMember = memberships.exists db channelId currentUserId ()
+      if Boolean.not isMember then
+        unauthorized.json (empty |> addText "error" "not a channel member")
+      else
+        match Map.get "deviceId" fields with
+          Some deviceIdText ->
+            resolvedTarget = resolveTransmitTarget db channelId currentUserId ()
+            match resolvedTarget with
+              Left err -> badRequest.json (empty |> addText "error" err)
+              Right (targetUserId, targetDeviceId) ->
+                result =
+                  runtime.beginTransmit
+                    db
+                    channelId
+                    currentUserId
+                    (DeviceId.fromText deviceIdText)
+                    targetUserId
+                    targetDeviceId
+                    ()
+                match result with
+                  Left err -> badRequest.json (empty |> addText "error" err)
+                  Right state ->
+                    (startedAt, expiresAt, senderDeviceId) =
+                      (TransmitState _ _ fromDeviceId _ _ startedAt expiresAt) =
+                        state
+                      (Instant.toText startedAt, Instant.toText expiresAt, fromDeviceId)
+                    wakeDispatch =
+                      turbo.service.channels.internal.sendWakePushIfPossible
+                        db
+                        channelId
+                        currentHandle
+                        currentUserId
+                        senderDeviceId
+                        targetUserId
+                        targetDeviceId
+                        startedAt
+                        ()
+                    ok.json
+                      (empty
+                        |> addText "channelId" channelIdText
+                        |> addText "status" "transmitting"
+                        |> addText "wakeDispatch" wakeDispatch
+                        |> addText "startedAt" startedAt
+                        |> addText "expiresAt" expiresAt
+                        |> addText "targetUserId" (UserId.toText targetUserId)
+                        |> addText "targetDeviceId" (DeviceId.toText targetDeviceId))
+          None -> badRequest.json (empty |> addText "error" "missing deviceId")
+
+---- Anything below this line is ignored by Unison.

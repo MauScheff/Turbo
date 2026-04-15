@@ -1,0 +1,74 @@
+turbo.service.dev.apnsProbe :
+  Database -> '{Route, Config, Exception, Storage, Remote} ()
+turbo.service.dev.apnsProbe db = do
+  use Text ++ size
+  use Parser /
+  use object empty
+  noCapture GET (s "v1" / s "dev" / s "apns-probe")
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      before = listRecent db currentUserId ()
+      startedAt = Instant.toText now!
+      _ =
+        appendWakeEvent
+          db
+          (ChannelId.fromText "apns-probe")
+          "@probe"
+          currentUserId
+          (DeviceId.fromText "probe-sender-device")
+          currentUserId
+          (DeviceId.fromText "probe-target-device")
+          startedAt
+          "probe-write"
+          "0"
+          (Some "probe")
+          ()
+      after = listRecent db currentUserId ()
+      configStatus = match turbo.apns.internal.config() with
+        Right _ -> "ok"
+        Left err -> "error:" ++ err
+      signingStatus = match turbo.apns.internal.signingKey() with
+        Right _ -> "ok"
+        Left err -> "error:" ++ err
+      jwtStatus = match turbo.apns.internal.jwt() with
+        Right jwtToken -> "ok:length=" ++ Nat.toText (Text.size jwtToken)
+        Left err -> "error:" ++ err
+      ok.json
+        (empty
+          |> addText "configStatus" configStatus
+          |> addText "signingStatus" signingStatus
+          |> addText "jwtStatus" jwtStatus
+          |> object.add "recentCountBefore" (Number (Nat.toText (List.size before)))
+          |> object.add "recentCountAfter" (Number (Nat.toText (List.size after))))
+
+turbo.service.routes.dev :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.dev db =
+  use Route or
+  or
+    (seed db)
+    (or
+      (resetAll db)
+      (or
+        (resetState db)
+        (or
+          (uploadDiagnostics db)
+          (or
+            (latestDiagnostics db)
+            (or
+              (latestDiagnosticsForCurrentUser db)
+              (or
+                (runtimeInspection db)
+                (or
+                  (uploadWakeEvent db)
+                  (or
+                    (recentWakeEvents db)
+                    (or
+                      (apnsConfig db)
+                      (apnsProbe db))))))))))
+
+---- Anything below this line is ignored by Unison.

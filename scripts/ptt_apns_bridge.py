@@ -60,6 +60,45 @@ def direct_channel(base_url: str, handle: str, other_handle: str, insecure: bool
     return payload["channelId"]
 
 
+def sync_channel(
+    base_url: str,
+    handle_a: str,
+    handle_b: str,
+    insecure: bool,
+    current_channel_id: str | None,
+) -> str | None:
+    try:
+        resolved = direct_channel(base_url, handle_a, handle_b, insecure)
+    except SystemExit as error:
+        print(f"[bridge] {error}", file=sys.stderr, flush=True)
+        return current_channel_id
+    if resolved != current_channel_id:
+        print(f"[bridge] watching channel {resolved} for {handle_a} <-> {handle_b}", flush=True)
+    return resolved
+
+
+def upload_wake_event(
+    base_url: str,
+    sender_handle: str,
+    event: dict[str, str | None],
+    insecure: bool,
+) -> None:
+    status, payload = request_json(
+        f"{base_url.rstrip('/')}/v1/dev/wake-events",
+        sender_handle,
+        method="POST",
+        body={key: value for key, value in event.items() if value is not None},
+        insecure=insecure,
+    )
+    if 200 <= status < 300:
+        return
+    print(
+        f"[bridge] wake-event upload failed sender={sender_handle} status={status} payload={payload}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bridge active Turbo transmit state to real PushToTalk APNs wake pushes.")
     parser.add_argument("--base-url", default="https://beepbeep.to")
@@ -76,13 +115,16 @@ def main() -> int:
         raise SystemExit("Missing TURBO_APNS_TEAM_ID or TURBO_APNS_KEY_ID")
 
     jwt_provider = APNSJWTProvider(team_id, key_id, load_private_key_pem())
-    channel_id = direct_channel(args.base_url, args.handle_a, args.handle_b, args.insecure)
-    print(f"[bridge] watching channel {channel_id} for {args.handle_a} <-> {args.handle_b}", flush=True)
+    channel_id: str | None = None
 
-    seen_starts: set[tuple[str, str, str]] = set()
+    seen_starts: set[tuple[str, str, str, str]] = set()
     senders = [args.handle_a, args.handle_b]
 
     while True:
+        channel_id = sync_channel(args.base_url, args.handle_a, args.handle_b, args.insecure, channel_id)
+        if not channel_id:
+            time.sleep(args.interval)
+            continue
         for sender in senders:
             status, payload = request_json(
                 f"{args.base_url.rstrip('/')}/v1/channels/{channel_id}/ptt-push-target",
@@ -102,7 +144,7 @@ def main() -> int:
                 continue
 
             started_at = payload.get("startedAt", "")
-            dedupe_key = (sender, payload.get("targetDeviceId", ""), started_at)
+            dedupe_key = (channel_id, sender, payload.get("targetDeviceId", ""), started_at)
             if dedupe_key in seen_starts:
                 continue
 
@@ -113,6 +155,15 @@ def main() -> int:
                 "activeSpeaker": payload["activeSpeaker"],
                 "senderUserId": payload["senderUserId"],
                 "senderDeviceId": payload["senderDeviceId"],
+            }
+            event_payload = {
+                "senderUserId": payload["senderUserId"],
+                "channelId": payload["channelId"],
+                "senderDeviceId": payload["senderDeviceId"],
+                "senderHandle": sender,
+                "targetUserId": payload["targetUserId"],
+                "targetDeviceId": payload["targetDeviceId"],
+                "startedAt": started_at,
             }
             try:
                 status_code, body = send_apns(
@@ -127,12 +178,34 @@ def main() -> int:
                     file=sys.stderr,
                     flush=True,
                 )
+                upload_wake_event(
+                    args.base_url,
+                    sender,
+                    {
+                        **event_payload,
+                        "result": "send-crashed",
+                        "statusCode": "0",
+                        "responseBody": str(error),
+                    },
+                    args.insecure,
+                )
                 continue
             if 200 <= status_code < 300:
                 seen_starts.add(dedupe_key)
                 print(
                     f"[bridge] sent wake push sender={sender} target={payload.get('targetDeviceId')} startedAt={started_at} status={status_code}",
                     flush=True,
+                )
+                upload_wake_event(
+                    args.base_url,
+                    sender,
+                    {
+                        **event_payload,
+                        "result": "sent",
+                        "statusCode": str(status_code),
+                        "responseBody": body or None,
+                    },
+                    args.insecure,
                 )
             else:
                 if status_code == 403 and body == '{"reason":"ExpiredProviderToken"}':
@@ -149,6 +222,17 @@ def main() -> int:
                             file=sys.stderr,
                             flush=True,
                         )
+                        upload_wake_event(
+                            args.base_url,
+                            sender,
+                            {
+                                **event_payload,
+                                "result": "send-crashed",
+                                "statusCode": "0",
+                                "responseBody": str(error),
+                            },
+                            args.insecure,
+                        )
                         continue
                     if 200 <= status_code < 300:
                         seen_starts.add(dedupe_key)
@@ -156,11 +240,33 @@ def main() -> int:
                             f"[bridge] sent wake push sender={sender} target={payload.get('targetDeviceId')} startedAt={started_at} status={status_code} retry=refreshed-token",
                             flush=True,
                         )
+                        upload_wake_event(
+                            args.base_url,
+                            sender,
+                            {
+                                **event_payload,
+                                "result": "sent",
+                                "statusCode": str(status_code),
+                                "responseBody": body or '{"retry":"refreshed-token"}',
+                            },
+                            args.insecure,
+                        )
                         continue
                 print(
                     f"[bridge] push send failed sender={sender} status={status_code} body={body}",
                     file=sys.stderr,
                     flush=True,
+                )
+                upload_wake_event(
+                    args.base_url,
+                    sender,
+                    {
+                        **event_payload,
+                        "result": "failed",
+                        "statusCode": str(status_code),
+                        "responseBody": body or None,
+                    },
+                    args.insecure,
                 )
         time.sleep(args.interval)
 

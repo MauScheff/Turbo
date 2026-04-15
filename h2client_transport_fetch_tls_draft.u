@@ -1,0 +1,85 @@
+h2client.transport.tls.clientConfig.h2
+  : lib.unison_base_7_16_0.IO.net.HostName
+  -> lib.unison_base_7_16_0.IO.net.Tls.ClientConfig
+h2client.transport.tls.clientConfig.h2 host =
+  defaultConfig =
+    lib.unison_base_7_16_0.IO.net.Tls.ClientConfig.default host ""
+  builtin.io2.Tls.ClientConfig.alpn.set
+    [lib.unison_base_7_16_0.Text.toUtf8 "h2"]
+    defaultConfig
+
+h2client.transport.sendBytes
+  : lib.unison_base_7_16_0.IO.net.Connection {IO, Exception}
+  -> Bytes
+  ->{IO, Exception} ()
+h2client.transport.sendBytes connection bytes =
+  lib.unison_base_7_16_0.IO.net.Connection.send connection bytes
+
+h2client.transport.sendRawFrames
+  : lib.unison_base_7_16_0.IO.net.Connection {IO, Exception}
+  -> [h2client.frame.RawFrame]
+  ->{IO, Exception} ()
+h2client.transport.sendRawFrames connection frames =
+  match h2client.transport.rawFramesToBytes frames with
+    Some bytes ->
+      h2client.transport.sendBytes connection bytes
+    None ->
+      bug "raw frame encoding failed"
+
+h2client.client.fetchTls
+  : lib.unison_base_7_16_0.IO.net.HostName
+  -> lib.unison_base_7_16_0.IO.net.Port
+  -> h2client.client.Request
+  ->{IO, Exception} Optional h2client.client.Response
+h2client.client.fetchTls host port request =
+  config = h2client.transport.tls.clientConfig.h2 host
+  connection =
+    lib.unison_base_7_16_0.IO.net.Connection.tls.withConfig host port config
+  (prefaceBytes, session0, initialFrames) =
+    h2client.session.start h2client.client.defaultSettings request
+  _ =
+    h2client.transport.sendBytes
+      connection
+      (lib.unison_base_7_16_0.Bytes.fromList.impl prefaceBytes)
+  _ = h2client.transport.sendRawFrames connection initialFrames
+  h2client.client.fetchTls.loop connection session0 []
+
+h2client.client.fetchTls.loop
+  : lib.unison_base_7_16_0.IO.net.Connection {IO, Exception}
+  -> h2client.session.State
+  -> [Nat]
+  ->{IO, Exception} Optional h2client.client.Response
+h2client.client.fetchTls.loop connection session buffered =
+  chunk = lib.unison_base_7_16_0.IO.net.Connection.receive connection
+  incoming = lib.unison_base_7_16_0.Bytes.toList chunk
+  match incoming with
+    [] -> h2client.client.fetchTls.loop.onEof
+    _  -> h2client.client.fetchTls.loop.onChunk connection session buffered incoming
+
+h2client.client.fetchTls.loop.onEof : Optional h2client.client.Response
+h2client.client.fetchTls.loop.onEof =
+  None
+
+h2client.client.fetchTls.loop.onChunk
+  : lib.unison_base_7_16_0.IO.net.Connection {IO, Exception}
+  -> h2client.session.State
+  -> [Nat]
+  -> [Nat]
+  ->{IO, Exception} Optional h2client.client.Response
+h2client.client.fetchTls.loop.onChunk connection session buffered incoming =
+  allBytes = buffered ++ incoming
+  (frames, rest) = h2client.frame.RawFrame.decodeAvailableNats allBytes
+  (nextSession, outboundFrames, response) =
+    h2client.transport.handleFrames session frames
+  _ = h2client.transport.sendRawFrames connection outboundFrames
+  match response with
+    Some completed -> h2client.client.fetchTls.loop.onResponse completed
+    None           -> h2client.client.fetchTls.loop connection nextSession rest
+
+h2client.client.fetchTls.loop.onResponse
+  : h2client.client.Response
+  ->{IO, Exception} Optional h2client.client.Response
+h2client.client.fetchTls.loop.onResponse response =
+  Some response
+
+---- Anything below this line is ignored by Unison.

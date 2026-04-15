@@ -1,0 +1,55 @@
+turbo.service.dev.apnsConfig :
+  Database -> '{Route, Config, Exception, Storage, Remote} ()
+turbo.service.dev.apnsConfig db = do
+  use Parser /
+  use object empty
+  noCapture GET (s "v1" / s "dev" / s "apns-config")
+  match requireUser db () with
+    Left err -> unauthorized.json (empty |> addText "error" err)
+    Right _ ->
+      teamId = Environment.Config.lookup "TURBO_APNS_TEAM_ID"
+      keyId = Environment.Config.lookup "TURBO_APNS_KEY_ID"
+      privateKey = Environment.Config.lookup "TURBO_APNS_PRIVATE_KEY"
+      bundleId = Environment.Config.lookup "TURBO_APNS_BUNDLE_ID"
+      useSandbox = Environment.Config.lookup "TURBO_APNS_USE_SANDBOX"
+      effectiveBundleId =
+        match bundleId with
+          Some configured -> configured
+          None -> "com.rounded.Turbo"
+      effectiveSandbox =
+        match useSandbox with
+          Some "0"     -> false
+          Some "false" -> false
+          Some "no"    -> false
+          _            -> true
+      ok.json
+        (empty
+          |> addBoolean "hasTeamId" (Optional.isSome teamId)
+          |> addBoolean "hasKeyId" (Optional.isSome keyId)
+          |> addBoolean "hasPrivateKey" (Optional.isSome privateKey)
+          |> addText "effectiveBundleId" effectiveBundleId
+          |> addBoolean "effectiveUseSandbox" effectiveSandbox)
+
+turbo.service.routes.dev :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.dev db =
+  use Route or
+  or
+    (seed db)
+    (or
+      (resetAll db)
+      (or
+        (resetState db)
+        (or
+          (uploadDiagnostics db)
+          (or
+            (latestDiagnostics db)
+            (or
+              (latestDiagnosticsForCurrentUser db)
+              (or
+                (runtimeInspection db)
+                (or
+                  (uploadWakeEvent db)
+                  (or (recentWakeEvents db) (apnsConfig db)))))))))
+
+---- Anything below this line is ignored by Unison.

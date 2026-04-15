@@ -1,0 +1,88 @@
+type h2client.frame.FrameType
+  = Data
+  | Headers
+  | Priority
+  | RstStream
+  | Settings
+  | PushPromise
+  | Ping
+  | GoAway
+  | WindowUpdate
+  | Continuation
+
+h2client.frame.FrameType.code : h2client.frame.FrameType -> Nat
+h2client.frame.FrameType.code = cases
+  Data         -> 0
+  Headers      -> 1
+  Priority     -> 2
+  RstStream    -> 3
+  Settings     -> 4
+  PushPromise  -> 5
+  Ping         -> 6
+  GoAway       -> 7
+  WindowUpdate -> 8
+  Continuation -> 9
+
+type h2client.frame.StreamId
+  = StreamId Nat
+
+h2client.frame.StreamId.max : Nat
+h2client.frame.StreamId.max = 2147483647
+
+h2client.frame.StreamId.fromNat : Nat -> Optional h2client.frame.StreamId
+h2client.frame.StreamId.fromNat n =
+  if n == 0 then None
+  else if n > h2client.frame.StreamId.max then None
+  else Some (StreamId n)
+
+h2client.frame.StreamId.toNat : h2client.frame.StreamId -> Nat
+h2client.frame.StreamId.toNat = cases
+  StreamId n -> n
+
+h2client.frame.StreamId.isClientInitiated : h2client.frame.StreamId -> Boolean
+h2client.frame.StreamId.isClientInitiated streamId =
+  use Nat mod
+  mod (h2client.frame.StreamId.toNat streamId) 2 == 1
+
+h2client.frame.connectionPreface : Text
+h2client.frame.connectionPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+test> h2client.frame.FrameType.tests.codes = verify do
+  ensureEqual 0 (h2client.frame.FrameType.code Data)
+  ensureEqual 1 (h2client.frame.FrameType.code Headers)
+  ensureEqual 2 (h2client.frame.FrameType.code Priority)
+  ensureEqual 3 (h2client.frame.FrameType.code RstStream)
+  ensureEqual 4 (h2client.frame.FrameType.code Settings)
+  ensureEqual 5 (h2client.frame.FrameType.code PushPromise)
+  ensureEqual 6 (h2client.frame.FrameType.code Ping)
+  ensureEqual 7 (h2client.frame.FrameType.code GoAway)
+  ensureEqual 8 (h2client.frame.FrameType.code WindowUpdate)
+  ensureEqual 9 (h2client.frame.FrameType.code Continuation)
+
+test> h2client.frame.StreamId.tests.examples = verify do
+  ensureEqual None (h2client.frame.StreamId.fromNat 0)
+  ensureEqual (Some (StreamId 1)) (h2client.frame.StreamId.fromNat 1)
+  ensureEqual (Some (StreamId 2)) (h2client.frame.StreamId.fromNat 2)
+  ensureEqual None
+    (h2client.frame.StreamId.fromNat (h2client.frame.StreamId.max + 1))
+
+test> h2client.frame.StreamId.tests.clientParity = verify do
+  ensure
+    (match h2client.frame.StreamId.fromNat 1 with
+      Some streamId -> h2client.frame.StreamId.isClientInitiated streamId
+      None          -> false)
+  ensure
+    (match h2client.frame.StreamId.fromNat 3 with
+      Some streamId -> h2client.frame.StreamId.isClientInitiated streamId
+      None          -> false)
+  ensure
+    (match h2client.frame.StreamId.fromNat 2 with
+      Some streamId -> Boolean.not (h2client.frame.StreamId.isClientInitiated streamId)
+      None          -> false)
+
+test> h2client.frame.tests.connectionPreface = verify do
+  ensureEqual
+    "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    h2client.frame.connectionPreface
+
+---- Anything below this line is ignored by Unison.

@@ -233,21 +233,24 @@ For fast iteration:
   - use `just simulator-ptt-push <channel_id>` to inject a simulator push payload into the running app
 - backend payload loop:
   - use `just ptt-push-target <channel_id> <backend> <sender>` to inspect the canonical receiver token + wake payload for the sender's active transmit
-  - use `just ptt-apns-start <channel_id> <backend> <sender>` to send a real PushToTalk APNs wake push once APNs auth env vars are configured
-  - use `just ptt-apns-bridge <backend> @avery @blake` to automatically watch an active channel and send wake pushes for each new transmit start
-  - restart `ptt-apns-bridge` after any reset/rejoin; it captures one channel ID at startup and will otherwise keep watching the stale channel from the earlier session
+  - the intended end state is direct APNs send from Unison, but hosted Unison Cloud is currently waiting on the upstream runtime rollout
+  - until that runtime is deployed, the interim production sender should be the backend-triggered Cloudflare worker path described in [APNS_DELIVERY_PLAN.md](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md)
+  - use `just ptt-apns-start <channel_id> <backend> <sender>` only for manual one-off APNs debugging once auth env vars are configured
+  - use `just ptt-apns-worker <backend>` and `just ptt-apns-bridge <backend> @avery @blake` only as legacy/debug helpers
+  - wake-send attempts are uploaded to the backend dev diagnostics surface, so `scripts/merged_diagnostics.py` includes them in the merged timeline as `[wake:apns] ...`
 - device loop:
   - use physical devices for lock-screen and blue-pill validation
   - treat those runs as the source of truth for background wake behavior
 
 The simulator path is useful for payload handling and app state transitions, but physical devices are still required for the real PushToTalk wake + audio-session behavior.
 
-APNs sender env vars for the helper script:
+APNs sender env vars for deploys and local APNs debugging:
 
 - `TURBO_APNS_TEAM_ID`
 - `TURBO_APNS_KEY_ID`
 - `TURBO_APNS_PRIVATE_KEY_PATH` or `TURBO_APNS_PRIVATE_KEY`
 - optional `TURBO_APNS_USE_SANDBOX=1` for development entitlements
+- optional `TURBO_APNS_BUNDLE_ID="com.rounded.Turbo"`
 
 Recommended local setup uses `direnv` with an untracked `.envrc`:
 
@@ -264,6 +267,8 @@ Notes:
 - `.envrc` is ignored by git in this repo, so local APNs secrets stay untracked
 - after creating or editing `.envrc`, run `direnv allow`
 - verify the variables are visible inside the repo with `direnv exec . env | rg '^TURBO_APNS'`
+- `turbo.deploy` resolves `TURBO_APNS_PRIVATE_KEY_PATH` locally at deploy time and stores the PEM contents in cloud config as `TURBO_APNS_PRIVATE_KEY`
+- deployed backend code should read `TURBO_APNS_PRIVATE_KEY`, not a filesystem path
 
 ### Diagnostics
 

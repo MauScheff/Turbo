@@ -1,0 +1,43 @@
+turbo.apns.internal.appendWakeEvent :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> Text
+  -> Text
+  -> Optional Text
+  -> '{Exception, Storage, Remote} ()
+turbo.apns.internal.appendWakeEvent
+  db
+  channelId
+  senderHandle
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt
+  result
+  statusCode
+  responseBody =
+  do
+    _ =
+      appendRecent
+        db
+        senderUserId
+        channelId
+        senderDeviceId
+        senderHandle
+        targetUserId
+        targetDeviceId
+        startedAt
+        result
+        statusCode
+        responseBody
+        ()
+    ()
+
+---- Anything below this line is ignored by Unison.

@@ -23,6 +23,7 @@ class Report:
     snapshot: dict[str, str]
     state_timeline: list[tuple[datetime, str]]
     diagnostics: list[tuple[datetime, str]]
+    wake_events: list[tuple[datetime, str]]
 
 
 def snapshot_bool(snapshot: dict[str, str], key: str) -> bool | None:
@@ -106,7 +107,57 @@ def fetch_latest_report(base_url: str, handle: str, insecure: bool, device_id: s
         snapshot=parse_snapshot(sections.get("STATE SNAPSHOT", "")),
         state_timeline=parse_timeline_section(handle, "state", sections.get("STATE TIMELINE", "")),
         diagnostics=parse_timeline_section(handle, "diag", sections.get("DIAGNOSTICS", "")),
+        wake_events=fetch_wake_events(base_url, handle, insecure),
     )
+
+
+def fetch_json(base_url: str, handle: str, path: str, insecure: bool) -> dict:
+    command = [
+        "curl",
+        "--fail-with-body",
+        "-sS",
+        "-H",
+        f"x-turbo-user-handle: {handle}",
+        "-H",
+        f"Authorization: Bearer {handle}",
+    ]
+    if insecure:
+        command.append("--insecure")
+    command.append(f"{base_url.rstrip('/')}{path}")
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as exc:
+        body = (exc.stderr or exc.stdout).strip()
+        raise RuntimeError(f"{handle}: request failed: {body}") from exc
+    return json.loads(result.stdout)
+
+
+def fetch_wake_events(base_url: str, handle: str, insecure: bool) -> list[tuple[datetime, str]]:
+    payload = fetch_json(base_url, handle, "/v1/dev/wake-events/recent", insecure)
+    raw_events = payload.get("events", [])
+    if not isinstance(raw_events, list):
+        return []
+    events: list[tuple[datetime, str]] = []
+    for raw_event in raw_events:
+        if not isinstance(raw_event, dict):
+            continue
+        recorded_at = parse_timestamp(str(raw_event.get("recordedAt", "")))
+        if recorded_at is None:
+            continue
+        result = str(raw_event.get("result", "unknown"))
+        status_code = str(raw_event.get("statusCode", ""))
+        channel_id = str(raw_event.get("channelId", ""))
+        target_device_id = str(raw_event.get("targetDeviceId", ""))
+        started_at = str(raw_event.get("startedAt", ""))
+        body = str(raw_event.get("responseBody", "")).strip()
+        summary = (
+            f"[{handle}] [wake:apns] result={result} status={status_code} "
+            f"channelId={channel_id} targetDeviceId={target_device_id} startedAt={started_at}"
+        )
+        if body and body != "None":
+            summary += f" body={body}"
+        events.append((recorded_at, summary))
+    return events
 
 
 def split_sections(transcript: str) -> dict[str, str]:
@@ -222,6 +273,7 @@ def merged_events(reports: Iterable[Report]) -> list[tuple[datetime, str]]:
     for report in reports:
         events.extend(report.state_timeline)
         events.extend(report.diagnostics)
+        events.extend(report.wake_events)
     return sorted(events, key=lambda item: item[0])
 
 

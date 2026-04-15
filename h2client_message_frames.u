@@ -1,0 +1,163 @@
+type h2client.data.Frame
+  = Frame h2client.frame.StreamId Boolean [Nat]
+
+h2client.data.Frame.streamId : h2client.data.Frame -> h2client.frame.StreamId
+h2client.data.Frame.streamId = cases
+  h2client.data.Frame.Frame streamId _ _ -> streamId
+
+h2client.data.Frame.endStream : h2client.data.Frame -> Boolean
+h2client.data.Frame.endStream = cases
+  h2client.data.Frame.Frame _ endStream _ -> endStream
+
+h2client.data.Frame.payload : h2client.data.Frame -> [Nat]
+h2client.data.Frame.payload = cases
+  h2client.data.Frame.Frame _ _ payload -> payload
+
+h2client.data.endStreamFlag : Nat
+h2client.data.endStreamFlag = 1
+
+h2client.data.Frame.toRawFrame : h2client.data.Frame -> h2client.frame.RawFrame
+h2client.data.Frame.toRawFrame frame =
+  payload = h2client.data.Frame.payload frame
+  flags =
+    if h2client.data.Frame.endStream frame then h2client.data.endStreamFlag else 0
+  RawFrame
+    (FrameHeader
+      (lib.unison_base_7_16_0.data.List.size payload)
+      Data
+      flags
+      (MessageStream (h2client.data.Frame.streamId frame)))
+    payload
+
+h2client.data.Frame.fromRawFrame : h2client.frame.RawFrame -> Optional h2client.data.Frame
+h2client.data.Frame.fromRawFrame rawFrame =
+  use Nat and
+  header = h2client.frame.RawFrame.header rawFrame
+  payload = h2client.frame.RawFrame.payload rawFrame
+  match
+    (h2client.frame.FrameHeader.frameType header, h2client.frame.FrameHeader.stream header)
+    with
+    (Data, MessageStream streamId) ->
+      if h2client.frame.FrameHeader.length header != lib.unison_base_7_16_0.data.List.size payload then None
+      else
+        Some
+          (h2client.data.Frame.Frame
+            streamId
+            (and (h2client.frame.FrameHeader.flags header) h2client.data.endStreamFlag == h2client.data.endStreamFlag)
+            payload)
+    _ ->
+      None
+
+type h2client.headers.Frame
+  = Frame h2client.frame.StreamId Boolean Boolean [Nat]
+
+h2client.headers.Frame.streamId : h2client.headers.Frame -> h2client.frame.StreamId
+h2client.headers.Frame.streamId = cases
+  h2client.headers.Frame.Frame streamId _ _ _ -> streamId
+
+h2client.headers.Frame.endStream : h2client.headers.Frame -> Boolean
+h2client.headers.Frame.endStream = cases
+  h2client.headers.Frame.Frame _ endStream _ _ -> endStream
+
+h2client.headers.Frame.endHeaders : h2client.headers.Frame -> Boolean
+h2client.headers.Frame.endHeaders = cases
+  h2client.headers.Frame.Frame _ _ endHeaders _ -> endHeaders
+
+h2client.headers.Frame.blockFragment : h2client.headers.Frame -> [Nat]
+h2client.headers.Frame.blockFragment = cases
+  h2client.headers.Frame.Frame _ _ _ blockFragment -> blockFragment
+
+h2client.headers.endStreamFlag : Nat
+h2client.headers.endStreamFlag = 1
+
+h2client.headers.endHeadersFlag : Nat
+h2client.headers.endHeadersFlag = 4
+
+h2client.headers.paddedFlag : Nat
+h2client.headers.paddedFlag = 8
+
+h2client.headers.priorityFlag : Nat
+h2client.headers.priorityFlag = 32
+
+h2client.headers.Frame.toRawFrame : h2client.headers.Frame -> h2client.frame.RawFrame
+h2client.headers.Frame.toRawFrame frame =
+  use Nat or
+  blockFragment = h2client.headers.Frame.blockFragment frame
+  flags =
+    or
+      (if h2client.headers.Frame.endStream frame then h2client.headers.endStreamFlag else 0)
+      (if h2client.headers.Frame.endHeaders frame then h2client.headers.endHeadersFlag else 0)
+  RawFrame
+    (FrameHeader
+      (lib.unison_base_7_16_0.data.List.size blockFragment)
+      Headers
+      flags
+      (MessageStream (h2client.headers.Frame.streamId frame)))
+    blockFragment
+
+h2client.headers.Frame.fromRawFrame : h2client.frame.RawFrame -> Optional h2client.headers.Frame
+h2client.headers.Frame.fromRawFrame rawFrame =
+  use Nat and
+  header = h2client.frame.RawFrame.header rawFrame
+  blockFragment = h2client.frame.RawFrame.payload rawFrame
+  match
+    (h2client.frame.FrameHeader.frameType header, h2client.frame.FrameHeader.stream header)
+    with
+    (Headers, MessageStream streamId) ->
+      flags = h2client.frame.FrameHeader.flags header
+      if h2client.frame.FrameHeader.length header != lib.unison_base_7_16_0.data.List.size blockFragment then None
+      else if and flags h2client.headers.paddedFlag == h2client.headers.paddedFlag then None
+      else if and flags h2client.headers.priorityFlag == h2client.headers.priorityFlag then None
+      else
+        Some
+          (h2client.headers.Frame.Frame
+            streamId
+            (and flags h2client.headers.endStreamFlag == h2client.headers.endStreamFlag)
+            (and flags h2client.headers.endHeadersFlag == h2client.headers.endHeadersFlag)
+            blockFragment)
+    _ ->
+      None
+
+test> h2client.data.Frame.tests.roundTrip = verify do
+  frame = h2client.data.Frame.Frame (StreamId 1) true [1, 2, 3]
+  rawFrame = h2client.data.Frame.toRawFrame frame
+  ensureEqual
+    (FrameHeader 3 Data 1 (MessageStream (StreamId 1)))
+    (h2client.frame.RawFrame.header rawFrame)
+  ensureEqual
+    (Some frame)
+    (h2client.data.Frame.fromRawFrame rawFrame)
+
+test> h2client.data.Frame.tests.rejectConnectionStream = verify do
+  ensureEqual
+    None
+    (h2client.data.Frame.fromRawFrame
+      (RawFrame (FrameHeader 1 Data 0 ConnectionStream) [9]))
+
+test> h2client.headers.Frame.tests.roundTrip = verify do
+  frame = h2client.headers.Frame.Frame (StreamId 3) true true [130, 134]
+  rawFrame = h2client.headers.Frame.toRawFrame frame
+  ensureEqual
+    (FrameHeader 2 Headers 5 (MessageStream (StreamId 3)))
+    (h2client.frame.RawFrame.header rawFrame)
+  ensureEqual
+    (Some frame)
+    (h2client.headers.Frame.fromRawFrame rawFrame)
+
+test> h2client.headers.Frame.tests.rejectPadded = verify do
+  ensureEqual
+    None
+    (h2client.headers.Frame.fromRawFrame
+      (RawFrame
+        (FrameHeader 2 Headers 8 (MessageStream (StreamId 1)))
+        [0, 42]))
+
+test> h2client.headers.Frame.tests.rejectPriority = verify do
+  ensureEqual
+    None
+    (h2client.headers.Frame.fromRawFrame
+      (RawFrame
+        (FrameHeader 5 Headers 32 (MessageStream (StreamId 1)))
+        [1, 2, 3, 4, 5]))
+
+---- Anything below this line is ignored by Unison.

@@ -1,0 +1,1101 @@
+type turbo.domain.DevWakeEvent
+  = DevWakeEvent
+      UserId
+      ChannelId
+      DeviceId
+      Text
+      UserId
+      DeviceId
+      Text
+      Text
+      Text
+      (Optional Text)
+      Instant
+
+turbo.domain.DevWakeEvent.doc =
+  {{
+  {type turbo.domain.DevWakeEvent} stores one dev-visible wake-send attempt for
+  an authenticated sender.
+  
+  It is intended to make hosted PushToTalk wake attempts visible in merged
+  diagnostics even when the actual APNs send is still performed by an external
+  bridge helper.
+  }}
+
+type turbo.domain.WakeJobKey
+  = WakeJobKey ChannelId UserId DeviceId DeviceId Text
+
+type turbo.domain.WakeJob
+  = WakeJob
+      turbo.domain.WakeJobKey
+      Text
+      Text
+      UserId
+      DeviceId
+      Text
+      UserId
+      DeviceId
+      Text
+      Text
+      Instant
+
+turbo.domain.WakeJob.doc =
+  {{
+  {type turbo.domain.WakeJob} stores one pending production wake send for the
+  external APNs worker.
+
+  The deployed Unison service still cannot open the APNs HTTPS connection
+  directly, so {turbo.service.channels.beginTransmit} enqueues one of these
+  jobs and the worker drains them.
+  }}
+
+turbo.store.wakeJobs.tables.pendingByKey :
+  Database -> OrderedTable turbo.domain.WakeJobKey turbo.domain.WakeJob
+turbo.store.wakeJobs.tables.pendingByKey db =
+  OrderedTable.named db "turboWakeJobsPendingByKey_v1" Universal.ordering
+
+turbo.store.wakeJobs.enqueue :
+  Database
+  -> ChannelId
+  -> Text
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> Text
+  -> '{Exception, Storage, Remote} turbo.domain.WakeJob
+turbo.store.wakeJobs.enqueue
+  db
+  channelId
+  event
+  activeSpeaker
+  senderUserId
+  senderDeviceId
+  senderHandle
+  targetUserId
+  targetDeviceId
+  startedAt
+  token =
+  do
+    key =
+      turbo.domain.WakeJobKey.WakeJobKey
+        channelId
+        senderUserId
+        senderDeviceId
+        targetDeviceId
+        startedAt
+    job =
+      turbo.domain.WakeJob.WakeJob
+        key
+        event
+        activeSpeaker
+        senderUserId
+        senderDeviceId
+        senderHandle
+        targetUserId
+        targetDeviceId
+        startedAt
+        token
+        now!
+    _ = OrderedTable.write (turbo.store.wakeJobs.tables.pendingByKey db) key job
+    job
+
+turbo.store.wakeJobs.listPending :
+  Database -> '{Exception, Remote} [turbo.domain.WakeJob]
+turbo.store.wakeJobs.listPending db =
+  do
+    Stream.toList
+      (Stream.map
+        turbo.store.wakeJobs.internal.rowValue
+        (OrderedTable.toStream (turbo.store.wakeJobs.tables.pendingByKey db)))
+
+turbo.store.wakeJobs.internal.rowValue :
+  (turbo.domain.WakeJobKey, turbo.domain.WakeJob) -> turbo.domain.WakeJob
+turbo.store.wakeJobs.internal.rowValue = cases
+  (_, job) -> job
+
+turbo.store.wakeJobs.deletePending :
+  Database -> turbo.domain.WakeJobKey -> '{Exception, Storage, Remote} ()
+turbo.store.wakeJobs.deletePending db key =
+  do OrderedTable.delete (turbo.store.wakeJobs.tables.pendingByKey db) key
+
+turbo.store.wakeJobs.clearPending :
+  Database -> '{Exception, Storage, Remote} Nat
+turbo.store.wakeJobs.clearPending db =
+  do
+    rows =
+      Stream.toList
+        (OrderedTable.toStream
+          (turbo.store.wakeJobs.tables.pendingByKey db))
+    _ = List.foreach (turbo.store.wakeJobs.internal.clearRow db) rows
+    List.size rows
+
+turbo.store.wakeJobs.internal.clearRow :
+  Database
+  -> (turbo.domain.WakeJobKey, turbo.domain.WakeJob)
+  ->{Exception, Storage, Remote} ()
+turbo.store.wakeJobs.internal.clearRow db = cases
+  (key, _) ->
+    OrderedTable.delete (turbo.store.wakeJobs.tables.pendingByKey db) key
+
+turbo.service.internal.workerAuthorized : '{Route, Config} Boolean
+turbo.service.internal.workerAuthorized =
+  do
+    match Environment.Config.lookup "TURBO_APNS_WORKER_SECRET" with
+      None -> false
+      Some expectedSecret ->
+        match Route.request.header "x-turbo-worker-secret" with
+          provided +: _ -> provided == expectedSecret
+          []            -> false
+
+turbo.service.internal.unauthorizedWorker : '{Route} ()
+turbo.service.internal.unauthorizedWorker =
+  do unauthorized.json (object.empty |> addText "error" "invalid worker secret")
+
+turbo.service.internal.wakeJobs.internal.jobJson :
+  turbo.domain.WakeJob -> Json
+turbo.service.internal.wakeJobs.internal.jobJson = cases
+  turbo.domain.WakeJob.WakeJob
+    (turbo.domain.WakeJobKey.WakeJobKey channelId _ _ _ _)
+    event
+    activeSpeaker
+    senderUserId
+    senderDeviceId
+    senderHandle
+    targetUserId
+    targetDeviceId
+    startedAt
+    token
+    enqueuedAt ->
+    object.empty
+      |> addText "channelId" (ChannelId.toText channelId)
+      |> addText "event" event
+      |> addText "activeSpeaker" activeSpeaker
+      |> addText "senderUserId" (UserId.toText senderUserId)
+      |> addText "senderDeviceId" (DeviceId.toText senderDeviceId)
+      |> addText "senderHandle" senderHandle
+      |> addText "targetUserId" (UserId.toText targetUserId)
+      |> addText "targetDeviceId" (DeviceId.toText targetDeviceId)
+      |> addText "startedAt" startedAt
+      |> addText "token" token
+      |> addText "enqueuedAt" (Instant.toText enqueuedAt)
+
+turbo.service.internal.wakeJobs.listPending :
+  Database -> '{Route, Config, Exception, Storage, Remote} ()
+turbo.service.internal.wakeJobs.listPending db =
+  do
+    use Parser /
+    noCapture GET (s "v1" / s "internal" / s "wake-jobs")
+    if turbo.service.internal.workerAuthorized () then
+      jobs = List.take 20 (turbo.store.wakeJobs.listPending db ())
+      ok.json
+        (object.empty
+          |> addText "status" "ok"
+          |> object.add
+               "jobs"
+               (Json.array
+                 (List.map turbo.service.internal.wakeJobs.internal.jobJson jobs)))
+    else
+      turbo.service.internal.unauthorizedWorker ()
+
+turbo.service.internal.wakeJobs.finish :
+  Database -> '{Route, Config, Exception, Storage, Remote} ()
+turbo.service.internal.wakeJobs.finish db =
+  do
+    use Map get
+    use Parser /
+    noCapture POST (s "v1" / s "internal" / s "wake-jobs" / s "result")
+    if Boolean.not (turbo.service.internal.workerAuthorized ()) then
+      turbo.service.internal.unauthorizedWorker ()
+    else
+      fields = decodeJson (Decoder.object Decoder.text)
+      match
+        ( get "channelId" fields
+        , get "senderUserId" fields
+        , get "senderDeviceId" fields
+        , get "senderHandle" fields
+        , get "targetUserId" fields
+        , get "targetDeviceId" fields
+        , get "startedAt" fields
+        , get "result" fields
+        , get "statusCode" fields
+        ) with
+        ( Some channelIdText
+        , Some senderUserIdText
+        , Some senderDeviceIdText
+        , Some senderHandle
+        , Some targetUserIdText
+        , Some targetDeviceIdText
+        , Some startedAt
+        , Some result
+        , Some statusCode
+        ) ->
+          key =
+            turbo.domain.WakeJobKey.WakeJobKey
+              (ChannelId.fromText channelIdText)
+              (UserId.fromText senderUserIdText)
+              (DeviceId.fromText senderDeviceIdText)
+              (DeviceId.fromText targetDeviceIdText)
+              startedAt
+          _ = turbo.store.wakeJobs.deletePending db key
+          event =
+            turbo.store.devWakeEvents.appendRecent
+              db
+              (UserId.fromText senderUserIdText)
+              (ChannelId.fromText channelIdText)
+              (DeviceId.fromText senderDeviceIdText)
+              senderHandle
+              (UserId.fromText targetUserIdText)
+              (DeviceId.fromText targetDeviceIdText)
+              startedAt
+              result
+              statusCode
+              (get "responseBody" fields)
+              ()
+          ok.json
+            (object.empty
+              |> addText "status" "recorded"
+              |> object.add
+                   "event"
+                   (turbo.service.dev.wakeEvents.internal.eventJson event))
+        _ ->
+          badRequest.json
+            (object.empty
+              |> addText
+                   "error"
+                   "missing channelId, senderUserId, senderDeviceId, senderHandle, targetUserId, targetDeviceId, startedAt, result, or statusCode")
+
+turbo.service.internal.routes :
+  Database -> '{Route, Config, Exception, Storage, Remote} ()
+turbo.service.internal.routes db =
+  Route.or
+    (turbo.service.internal.wakeJobs.listPending db)
+    (turbo.service.internal.wakeJobs.finish db)
+
+turbo.service.channels.internal.enqueueWakeJobIfPossible :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> '{Exception, Storage, Remote} ()
+turbo.service.channels.internal.enqueueWakeJobIfPossible
+  db
+  channelId
+  senderHandle
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt =
+  do
+    tokenRecord =
+      match turbo.store.tokens.get db channelId targetUserId targetDeviceId () with
+        Some record -> Some record
+        None        -> turbo.store.tokens.latestForUserInChannel db channelId targetUserId ()
+    match tokenRecord with
+      None -> ()
+      Some (EphemeralToken _ _ tokenDeviceId token _) ->
+        _ =
+          turbo.store.wakeJobs.enqueue
+            db
+            channelId
+            "transmit-start"
+            senderHandle
+            senderUserId
+            senderDeviceId
+            senderHandle
+            targetUserId
+            tokenDeviceId
+            startedAt
+            token
+        ()
+
+turbo.service.channels.beginTransmit :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.beginTransmit db =
+  do
+    use Map get
+    use Parser /
+    channelIdText =
+      route POST (s "v1" / s "channels" / Parser.text / s "begin-transmit")
+    match requireUser db () with
+      Left err -> unauthorized.json (object.empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        currentHandle =
+          (User _ handleText _ _ _) = currentUser
+          handleText
+        fields = decodeJson (Decoder.object Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if Boolean.not isMember then
+          unauthorized.json (object.empty |> addText "error" "not a channel member")
+        else
+          match get "deviceId" fields with
+            Some deviceIdText ->
+              resolvedTarget = resolveTransmitTarget db channelId currentUserId ()
+              match resolvedTarget with
+                Left err -> badRequest.json (object.empty |> addText "error" err)
+                Right (targetUserId, targetDeviceId) ->
+                  result =
+                    runtime.beginTransmit
+                      db
+                      channelId
+                      currentUserId
+                      (DeviceId.fromText deviceIdText)
+                      targetUserId
+                      targetDeviceId
+                      ()
+                  match result with
+                    Left err -> badRequest.json (object.empty |> addText "error" err)
+                    Right state ->
+                      (startedAt, expiresAt, senderDeviceId) =
+                        (TransmitState _ _ fromDeviceId _ _ startedAt expiresAt) = state
+                        (Instant.toText startedAt, Instant.toText expiresAt, fromDeviceId)
+                      _ =
+                        turbo.service.channels.internal.enqueueWakeJobIfPossible
+                          db
+                          channelId
+                          currentHandle
+                          currentUserId
+                          senderDeviceId
+                          targetUserId
+                          targetDeviceId
+                          startedAt
+                          ()
+                      ok.json
+                        (object.empty
+                          |> addText "channelId" channelIdText
+                          |> addText "status" "transmitting"
+                          |> addText "startedAt" startedAt
+                          |> addText "expiresAt" expiresAt
+                          |> addText "targetUserId" (UserId.toText targetUserId)
+                          |> addText "targetDeviceId" (DeviceId.toText targetDeviceId))
+            None ->
+              badRequest.json (object.empty |> addText "error" "missing deviceId")
+
+turbo.store.devWakeEvents.tables.recentByUser :
+  Database -> OrderedTable UserId [turbo.domain.DevWakeEvent]
+turbo.store.devWakeEvents.tables.recentByUser db =
+  OrderedTable.named db "turboDevWakeEventsRecentByUser_v1" Universal.ordering
+
+turbo.store.devWakeEvents.listRecent :
+  Database -> UserId -> '{Exception, Remote} [turbo.domain.DevWakeEvent]
+turbo.store.devWakeEvents.listRecent db userId =
+  do
+    match OrderedTable.tryRead
+      (turbo.store.devWakeEvents.tables.recentByUser db) userId with
+      Some events -> events
+      None        -> []
+
+turbo.store.devWakeEvents.appendRecent :
+  Database
+  -> UserId
+  -> ChannelId
+  -> DeviceId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> Text
+  -> Text
+  -> Optional Text
+  -> '{Exception, Storage, Remote} turbo.domain.DevWakeEvent
+turbo.store.devWakeEvents.appendRecent
+  db
+  senderUserId
+  channelId
+  senderDeviceId
+  senderHandle
+  targetUserId
+  targetDeviceId
+  startedAt
+  result
+  statusCode
+  responseBody =
+  do
+    use List ++
+    existing = turbo.store.devWakeEvents.listRecent db senderUserId ()
+    event =
+      turbo.domain.DevWakeEvent.DevWakeEvent
+        senderUserId
+        channelId
+        senderDeviceId
+        senderHandle
+        targetUserId
+        targetDeviceId
+        startedAt
+        result
+        statusCode
+        responseBody
+        now!
+    updated = List.takeEnd 50 (existing ++ [event])
+    _ =
+      OrderedTable.write
+        (turbo.store.devWakeEvents.tables.recentByUser db) senderUserId updated
+    event
+
+turbo.store.devWakeEvents.clearRecent :
+  Database -> '{Exception, Storage, Remote} Nat
+turbo.store.devWakeEvents.clearRecent db =
+  do
+    rows =
+      Stream.toList
+        (OrderedTable.toStream
+          (turbo.store.devWakeEvents.tables.recentByUser db))
+    _ = List.foreach (turbo.store.devWakeEvents.internal.clearRow db) rows
+    List.size rows
+
+turbo.store.devWakeEvents.internal.clearRow :
+  Database
+  -> (UserId, [turbo.domain.DevWakeEvent])
+  ->{Exception, Storage, Remote} ()
+turbo.store.devWakeEvents.internal.clearRow db = cases
+  (userId, _) ->
+    OrderedTable.write
+      (turbo.store.devWakeEvents.tables.recentByUser db) userId []
+
+turbo.service.dev.wakeEvents.internal.eventJson :
+  turbo.domain.DevWakeEvent -> Json
+turbo.service.dev.wakeEvents.internal.eventJson = cases
+  turbo.domain.DevWakeEvent.DevWakeEvent
+    senderUserId
+    channelId
+    senderDeviceId
+    senderHandle
+    targetUserId
+    targetDeviceId
+    startedAt
+    result
+    statusCode
+    responseBody
+    recordedAt ->
+    object.empty
+      |> addText "senderUserId" (UserId.toText senderUserId)
+      |> addText "channelId" (ChannelId.toText channelId)
+      |> addText "senderDeviceId" (DeviceId.toText senderDeviceId)
+      |> addText "senderHandle" senderHandle
+      |> addText "targetUserId" (UserId.toText targetUserId)
+      |> addText "targetDeviceId" (DeviceId.toText targetDeviceId)
+      |> addText "startedAt" startedAt
+      |> addText "result" result
+      |> addText "statusCode" statusCode
+      |> addOptionalText "responseBody" responseBody
+      |> addText "recordedAt" (Instant.toText recordedAt)
+
+turbo.service.dev.uploadWakeEvent :
+  Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.dev.uploadWakeEvent db =
+  do
+    use Map get
+    use Parser /
+    use Text !=
+    use object empty
+    noCapture POST (s "v1" / s "dev" / s "wake-events")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        fields = decodeJson (Decoder.object Decoder.text)
+        senderUserIdText = get "senderUserId" fields
+        match ( senderUserIdText
+        , get "channelId" fields
+        , get "senderDeviceId" fields
+        , get "senderHandle" fields
+        , get "targetUserId" fields
+        , get "targetDeviceId" fields
+        , get "startedAt" fields
+        , get "result" fields
+        , get "statusCode" fields
+        ) with
+          ( Some senderUserIdText,
+            Some channelIdText,
+            Some senderDeviceIdText,
+            Some senderHandle,
+            Some targetUserIdText,
+            Some targetDeviceIdText,
+            Some startedAt,
+            Some result,
+            Some statusCode) ->
+            if UserId.toText currentUserId != senderUserIdText then
+              unauthorized.json
+                (empty
+                  |> addText
+                    "error" "wake event sender does not match current user")
+            else
+              event =
+                turbo.store.devWakeEvents.appendRecent
+                  db
+                  currentUserId
+                  (ChannelId.fromText channelIdText)
+                  (DeviceId.fromText senderDeviceIdText)
+                  senderHandle
+                  (UserId.fromText targetUserIdText)
+                  (DeviceId.fromText targetDeviceIdText)
+                  startedAt
+                  result
+                  statusCode
+                  (get "responseBody" fields)
+                  ()
+              ok.json
+                (empty
+                  |> addText "status" "uploaded"
+                  |> object.add
+                       "event"
+                       (turbo.service.dev.wakeEvents.internal.eventJson event))
+          _ ->
+            badRequest.json
+              (empty
+                |> addText
+                  "error"
+                  "missing senderUserId, channelId, senderDeviceId, senderHandle, targetUserId, targetDeviceId, startedAt, result, or statusCode")
+
+turbo.service.dev.recentWakeEvents :
+  Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.dev.recentWakeEvents db =
+  do
+    use Parser /
+    use object empty
+    noCapture GET (s "v1" / s "dev" / s "wake-events" / s "recent")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        events = turbo.store.devWakeEvents.listRecent db currentUserId ()
+        ok.json
+          (empty
+            |> addText "status" "ok"
+            |> object.add
+                 "events"
+                 (Json.array
+                   (List.map
+                     turbo.service.dev.wakeEvents.internal.eventJson events)))
+
+type turbo.service.dev.internal.ResetSummary
+  = ResetSummary Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat
+
+turbo.service.dev.internal.performReset :
+  Database
+  -> '{Exception, Storage, Remote} turbo.service.dev.internal.ResetSummary
+turbo.service.dev.internal.performReset db =
+  do
+    use List foreach size
+    use OrderedTable toStream
+    use Stream toList
+    runtimeRows = toList (toStream (byChannel db))
+    _ = foreach (deleteRuntimeRow db) runtimeRows
+    presenceRows = toList (toStream (presence.tables.byDevice db))
+    _ = foreach (deletePresenceRow db) presenceRows
+    tokenRows = toList (toStream (tokens.tables.byChannelUserDevice db))
+    _ = foreach (deleteTokenRow db) tokenRows
+    inviteIdRows = toList (toStream (invites.tables.byId db))
+    _ = foreach (deleteInviteIdRow db) inviteIdRows
+    inviteFromRows = toList (toStream (byFromCreatedAt db))
+    _ = foreach (deleteInviteFromRow db) inviteFromRows
+    inviteToRows = toList (toStream (byToCreatedAt db))
+    _ = foreach (deleteInviteToRow db) inviteToRows
+    membershipRows = toList (toStream (byChannelUser db))
+    _ = foreach (deleteMembershipRow db) membershipRows
+    sessionRows = toList (toStream (sessions.tables.byDevice db))
+    _ = foreach (deleteSessionRow db) sessionRows
+    channelRows = toList (toStream (channels.tables.byId db))
+    _ = foreach (deleteChannelRow db) channelRows
+    participantRows = toList (toStream (byParticipantCreatedAt db))
+    _ = foreach (deleteChannelParticipantRow db) participantRows
+    userPairRows = toList (toStream (byUserPair db))
+    _ = foreach (deleteChannelUserPairRow db) userPairRows
+    wakeJobRowCount = turbo.store.wakeJobs.clearPending db ()
+    wakeEventRowCount = turbo.store.devWakeEvents.clearRecent db ()
+    turbo.service.dev.internal.ResetSummary.ResetSummary
+      (size runtimeRows)
+      (size presenceRows)
+      (size tokenRows)
+      (size inviteIdRows)
+      (size inviteFromRows)
+      (size inviteToRows)
+      (size membershipRows)
+      (size sessionRows)
+      0
+      (size channelRows)
+      (size userPairRows)
+      wakeJobRowCount
+      wakeEventRowCount
+
+turbo.service.dev.internal.resetSummaryJson :
+  Text -> turbo.service.dev.internal.ResetSummary -> Json
+turbo.service.dev.internal.resetSummaryJson status = cases
+  turbo.service.dev.internal.ResetSummary.ResetSummary
+    runtimeCount
+    presenceCount
+    tokenCount
+    inviteIdCount
+    inviteFromCount
+    inviteToCount
+    membershipCount
+    sessionCount
+    socketCount
+    channelCount
+    userPairCount
+    wakeJobRowCount
+    wakeEventRowCount ->
+    object.empty
+      |> addText "status" status
+      |> addNat "clearedTransmitStates" runtimeCount
+      |> addNat "clearedPresenceEntries" presenceCount
+      |> addNat "clearedTokenEntries" tokenCount
+      |> addNat "clearedInviteByIdEntries" inviteIdCount
+      |> addNat "clearedInviteByFromEntries" inviteFromCount
+      |> addNat "clearedInviteByToEntries" inviteToCount
+      |> addNat "clearedMemberships" membershipCount
+      |> addNat "clearedSessions" sessionCount
+      |> addNat "clearedSockets" socketCount
+      |> addNat "clearedChannels" channelCount
+      |> addNat "clearedChannelUserPairEntries" userPairCount
+      |> addNat "clearedWakeJobs" wakeJobRowCount
+      |> addNat "clearedWakeEventRows" wakeEventRowCount
+
+turbo.service.routes.dev :
+  Database -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.dev db =
+  use Route or
+  or
+    (seed db)
+    (or
+      (resetAll db)
+      (or
+        (resetState db)
+        (or
+          (uploadDiagnostics db)
+          (or
+            (latestDiagnostics db)
+            (or
+              (latestDiagnosticsForCurrentUser db)
+              (or
+                (runtimeInspection db)
+                (or
+                  (turbo.service.dev.uploadWakeEvent db)
+                  (turbo.service.dev.recentWakeEvents db))))))))
+
+-- The definitions below no longer typecheck with the changes above.
+-- Please fix the errors and try `update` again.
+
+turbo.deploy : '{IO, Exception} URI
+turbo.deploy = 
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    database = Database.named "turbo-control-plane-v2"
+    _ = match catch do getEnv "TURBO_APNS_WORKER_SECRET" with
+      Right secret -> Environment.setValue env "TURBO_APNS_WORKER_SECRET" secret
+      Left _       -> ()
+    Database.assign database env
+    serviceHash = Route.deployWebSocket env (web database)
+    serviceName = ServiceName.named "turbo"
+    uri = ServiceName.assign serviceName serviceHash
+    _ =
+      createDomainMapping
+        (HostName "beepbeep.to") (ServiceName.name serviceName)
+    uri
+
+turbo.setApnsWorkerSecret : Text -> '{IO, Exception} ()
+turbo.setApnsWorkerSecret secret =
+  Cloud.main do
+    env = Environment.named "turbo-production-v2"
+    Environment.setValue env "TURBO_APNS_WORKER_SECRET" secret
+
+turbo.serveHttpLocal : '{IO, Exception} ()
+turbo.serveHttpLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8081)
+    Random.run do
+      Threads.run do
+        _ = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localHttpService = httpWithConfig "local-http" false database
+            hash = deployHttp env (Route.run localHttpService)
+            serviceName = ServiceName.named "turbo"
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8081/h/" ++ hashText ++ "/")
+            ()
+        printLine
+          "Local HTTP computation starting on port 8081. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        ()
+
+turbo.serveLocal :
+  '{IO, Exception} ServiceHash
+    HttpRequest (Either HttpResponse (WebSocket ->{Remote, WebSockets} ()))
+turbo.serveLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8090)
+    Random.run do
+      Threads.run do
+        hash = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localWebService = web database
+            hash = Route.deployWebSocket env localWebService
+            serviceName = ServiceName.named "turbo"
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8090/h/" ++ hashText ++ "/")
+            hash
+        printLine
+          "Local Cloud computation starting on port 8090. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        hash
+
+turbo.service.dev.resetAll : Database -> '{Route, Remote, Storage, Exception} ()
+turbo.service.dev.resetAll db = do
+  use Parser /
+  noCapture POST (s "v1" / s "dev" / s "reset-all")
+  summary = performReset db ()
+  ok.json (resetSummaryJson "reset-all" summary)
+
+turbo.service.dev.resetState : Database -> '{Route, Remote, Storage, Exception} ()
+turbo.service.dev.resetState db = do
+  use Parser /
+  noCapture POST (s "v1" / s "dev" / s "reset-state")
+  summary = performReset db ()
+  ok.json (resetSummaryJson "reset" summary)
+
+turbo.service.http :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.http db = httpWithConfig "cloud" true db
+
+turbo.service.httpWithConfig :
+  Text
+  -> Boolean
+  -> Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.httpWithConfig mode supportsWebSocket db =
+  use Route or
+  or
+    health
+    (or
+      (service.config mode supportsWebSocket)
+      (or
+        (turbo.service.internal.routes db)
+        (or
+        (dev db)
+        (or
+          (service.presence.heartbeat db)
+          (or (auth db) (or (users db) (or (invites db) (channels db))))))))
+
+turbo.service.web :
+  Database
+  -> '{Route,
+  Config,
+  Exception,
+  Http,
+  OpenWebSocket,
+  Storage,
+  Remote,
+  WebSockets,
+  Random,
+  Log} ()
+turbo.service.web db = Route.or (service.http db) (ws db)
+
+
+
+---- Anything below this line is ignored by Unison.
+
+
+use lib.base.data.List takeEnd
+use lib.unison_cloud_27_3_0.durable.OrderedTable
+use lib.unison_json_1_3_5.Decoder
+use lib.unison_json_1_3_5.core.Json
+use lib.unison_json_1_3_5.core.Json.object
+
+type turbo.domain.DevWakeEvent
+  = DevWakeEvent
+      UserId
+      ChannelId
+      DeviceId
+      Text
+      UserId
+      DeviceId
+      Text
+      Text
+      Text
+      (Optional Text)
+      Instant
+
+turbo.domain.DevWakeEvent.doc =
+  {{
+  {type DevWakeEvent} stores one dev-visible wake-send attempt for an authenticated sender.
+
+  It is intended to make hosted PushToTalk wake attempts visible in merged diagnostics even
+  when the actual APNs send is still performed by an external bridge helper.
+  }}
+
+turbo.store.devWakeEvents.tables.recentByUser : Database -> OrderedTable UserId [DevWakeEvent]
+turbo.store.devWakeEvents.tables.recentByUser db =
+  OrderedTable.named db "turboDevWakeEventsRecentByUser_v1" Universal.ordering
+
+turbo.store.devWakeEvents.listRecent : Database -> UserId -> '{Exception, Remote} [DevWakeEvent]
+turbo.store.devWakeEvents.listRecent db userId = do
+  match OrderedTable.tryRead (turbo.store.devWakeEvents.tables.recentByUser db) userId with
+    Some events -> events
+    None -> []
+
+turbo.store.devWakeEvents.appendRecent :
+  Database
+  -> UserId
+  -> ChannelId
+  -> DeviceId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> Text
+  -> Text
+  -> Optional Text
+  -> '{Exception, Storage, Remote} DevWakeEvent
+turbo.store.devWakeEvents.appendRecent db senderUserId channelId senderDeviceId senderHandle targetUserId targetDeviceId startedAt result statusCode responseBody = do
+  existing = turbo.store.devWakeEvents.listRecent db senderUserId ()
+  event =
+    DevWakeEvent
+      senderUserId
+      channelId
+      senderDeviceId
+      senderHandle
+      targetUserId
+      targetDeviceId
+      startedAt
+      result
+      statusCode
+      responseBody
+      now!
+  updated = takeEnd 50 (existing ++ [event])
+  _ = OrderedTable.write (turbo.store.devWakeEvents.tables.recentByUser db) senderUserId updated
+  event
+
+turbo.store.devWakeEvents.clearRecent : Database -> '{Exception, Storage, Remote} Nat
+turbo.store.devWakeEvents.clearRecent db = do
+  use List foreach size
+  rows = Stream.toList (OrderedTable.toStream (turbo.store.devWakeEvents.tables.recentByUser db))
+  _ = foreach (turbo.store.devWakeEvents.internal.clearRow db) rows
+  size rows
+
+turbo.store.devWakeEvents.internal.clearRow : Database -> (UserId, [DevWakeEvent]) ->{Exception, Storage, Remote} ()
+turbo.store.devWakeEvents.internal.clearRow db =
+  cases
+    (userId, _) -> OrderedTable.write (turbo.store.devWakeEvents.tables.recentByUser db) userId []
+
+turbo.service.dev.wakeEvents.internal.eventJson : DevWakeEvent -> Json
+turbo.service.dev.wakeEvents.internal.eventJson =
+  cases
+    DevWakeEvent senderUserId channelId senderDeviceId senderHandle targetUserId targetDeviceId startedAt result statusCode responseBody recordedAt ->
+      object.empty
+        |> object.addText "senderUserId" (UserId.toText senderUserId)
+        |> object.addText "channelId" (ChannelId.toText channelId)
+        |> object.addText "senderDeviceId" (DeviceId.toText senderDeviceId)
+        |> object.addText "senderHandle" senderHandle
+        |> object.addText "targetUserId" (UserId.toText targetUserId)
+        |> object.addText "targetDeviceId" (DeviceId.toText targetDeviceId)
+        |> object.addText "startedAt" startedAt
+        |> object.addText "result" result
+        |> object.addText "statusCode" statusCode
+        |> object.addOptionalText "responseBody" responseBody
+        |> object.addText "recordedAt" (Instant.toText recordedAt)
+
+turbo.service.dev.uploadWakeEvent : Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.dev.uploadWakeEvent db = do
+  use Parser /
+  use object empty
+  noCapture POST (s "v1" / s "dev" / s "wake-events")
+  match requireUser db () with
+    Left err -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      fields = decodeJson (Decoder.object Decoder.text)
+      senderUserIdText = Map.get "senderUserId" fields
+      match
+        (
+          senderUserIdText,
+          Map.get "channelId" fields,
+          Map.get "senderDeviceId" fields,
+          Map.get "senderHandle" fields,
+          Map.get "targetUserId" fields,
+          Map.get "targetDeviceId" fields,
+          Map.get "startedAt" fields,
+          Map.get "result" fields,
+          Map.get "statusCode" fields
+        )
+      with
+        (Some senderUserIdText, Some channelIdText, Some senderDeviceIdText, Some senderHandle, Some targetUserIdText, Some targetDeviceIdText, Some startedAt, Some result, Some statusCode) ->
+          if UserId.toText currentUserId != senderUserIdText then
+            unauthorized.json (empty |> addText "error" "wake event sender does not match current user")
+          else
+            event =
+              turbo.store.devWakeEvents.appendRecent
+                db
+                currentUserId
+                (ChannelId.fromText channelIdText)
+                (DeviceId.fromText senderDeviceIdText)
+                senderHandle
+                (UserId.fromText targetUserIdText)
+                (DeviceId.fromText targetDeviceIdText)
+                startedAt
+                result
+                statusCode
+                (Map.get "responseBody" fields)
+                ()
+            ok.json (empty |> addText "status" "uploaded" |> object.add "event" (turbo.service.dev.wakeEvents.internal.eventJson event))
+        _ ->
+          badRequest.json
+            (empty |> addText "error" "missing senderUserId, channelId, senderDeviceId, senderHandle, targetUserId, targetDeviceId, startedAt, result, or statusCode")
+
+turbo.service.dev.recentWakeEvents : Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.dev.recentWakeEvents db = do
+  use Parser /
+  use object empty
+  noCapture GET (s "v1" / s "dev" / s "wake-events" / s "recent")
+  match requireUser db () with
+    Left err -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      events = turbo.store.devWakeEvents.listRecent db currentUserId ()
+      ok.json
+        (empty
+          |> addText "status" "ok"
+          |> object.add "events" (Json.array (List.map turbo.service.dev.wakeEvents.internal.eventJson events)))
+
+type turbo.service.dev.internal.ResetSummary
+  = ResetSummary Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat
+
+turbo.service.dev.internal.performReset : Database -> '{Remote, Storage, Exception} ResetSummary
+turbo.service.dev.internal.performReset db = do
+  use List foreach size
+  use OrderedTable toStream
+  runtimeRows = Stream.toList (toStream (byChannel db))
+  _ = foreach (deleteRuntimeRow db) runtimeRows
+  presenceRows = Stream.toList (toStream (presence.tables.byDevice db))
+  _ = foreach (deletePresenceRow db) presenceRows
+  tokenRows = Stream.toList (toStream (tokens.tables.byChannelUserDevice db))
+  _ = foreach (deleteTokenRow db) tokenRows
+  inviteIdRows = Stream.toList (toStream (invites.tables.byId db))
+  _ = foreach (deleteInviteIdRow db) inviteIdRows
+  inviteFromRows = Stream.toList (toStream (byFromCreatedAt db))
+  _ = foreach (deleteInviteFromRow db) inviteFromRows
+  inviteToRows = Stream.toList (toStream (byToCreatedAt db))
+  _ = foreach (deleteInviteToRow db) inviteToRows
+  membershipRows = Stream.toList (toStream (byChannelUser db))
+  _ = foreach (deleteMembershipRow db) membershipRows
+  sessionRows = Stream.toList (toStream (sessions.tables.byDevice db))
+  _ = foreach (deleteSessionRow db) sessionRows
+  channelRows = Stream.toList (toStream (channels.tables.byId db))
+  _ = foreach (deleteChannelRow db) channelRows
+  participantRows = Stream.toList (toStream (byParticipantCreatedAt db))
+  _ = foreach (deleteChannelParticipantRow db) participantRows
+  userPairRows = Stream.toList (toStream (byUserPair db))
+  _ = foreach (deleteChannelUserPairRow db) userPairRows
+  wakeEventRowCount = turbo.store.devWakeEvents.clearRecent db ()
+  ResetSummary
+    (size runtimeRows)
+    (size presenceRows)
+    (size tokenRows)
+    (size inviteIdRows)
+    (size inviteFromRows)
+    (size inviteToRows)
+    (size membershipRows)
+    (size sessionRows)
+    0
+    (size channelRows)
+    (size userPairRows)
+    wakeEventRowCount
+
+turbo.service.dev.internal.resetSummaryJson : Text -> ResetSummary -> Json
+turbo.service.dev.internal.resetSummaryJson status =
+  cases
+    ResetSummary runtimeCount presenceCount tokenCount inviteIdCount inviteFromCount inviteToCount membershipCount sessionCount socketCount channelCount userPairCount wakeEventRowCount ->
+      object.empty
+        |> addText "status" status
+        |> addNat "clearedTransmitStates" runtimeCount
+        |> addNat "clearedPresenceEntries" presenceCount
+        |> addNat "clearedTokenEntries" tokenCount
+        |> addNat "clearedInviteByIdEntries" inviteIdCount
+        |> addNat "clearedInviteByFromEntries" inviteFromCount
+        |> addNat "clearedInviteByToEntries" inviteToCount
+        |> addNat "clearedMemberships" membershipCount
+        |> addNat "clearedSessions" sessionCount
+        |> addNat "clearedSockets" socketCount
+        |> addNat "clearedChannels" channelCount
+        |> addNat "clearedChannelUserPairEntries" userPairCount
+        |> addNat "clearedWakeEventRows" wakeEventRowCount
+
+turbo.service.dev.resetAll : Database -> '{Route, Remote, Storage, Exception} ()
+turbo.service.dev.resetAll db = do
+  use Parser /
+  noCapture POST (s "v1" / s "dev" / s "reset-all")
+  summary = performReset db ()
+  ok.json (resetSummaryJson "reset-all" summary)
+
+turbo.service.dev.resetState : Database -> '{Route, Remote, Storage, Exception} ()
+turbo.service.dev.resetState db = do
+  use Parser /
+  noCapture POST (s "v1" / s "dev" / s "reset-state")
+  summary = performReset db ()
+  ok.json (resetSummaryJson "reset" summary)
+
+turbo.service.routes.dev : Database -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.dev db =
+  use Route or
+  or
+    (seed db)
+    (or
+      (resetAll db)
+      (or
+        (resetState db)
+        (or
+          (uploadDiagnostics db)
+          (or
+            (latestDiagnostics db)
+            (or
+              (latestDiagnosticsForCurrentUser db)
+              (or (runtimeInspection db) (or (uploadWakeEvent db) (recentWakeEvents db))))))))

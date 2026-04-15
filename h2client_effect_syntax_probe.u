@@ -1,0 +1,27 @@
+h2client.probe.constant : Nat -> Nat
+h2client.probe.constant n =
+  n
+
+h2client.probe.receiveOnce
+  : lib.unison_base_7_16_0.IO.net.HostName
+  -> lib.unison_base_7_16_0.IO.net.Port
+  ->{IO, Exception} Nat
+h2client.probe.receiveOnce host port =
+  connection = lib.unison_base_7_16_0.IO.net.Connection.tls host port
+  chunk = lib.unison_base_7_16_0.IO.net.Connection.receive connection
+  lib.unison_base_7_16_0.data.List.size
+    (lib.unison_base_7_16_0.Bytes.toList chunk)
+
+h2client.probe.receiveBranchHelper
+  : lib.unison_base_7_16_0.IO.net.HostName
+  -> lib.unison_base_7_16_0.IO.net.Port
+  ->{IO, Exception} Nat
+h2client.probe.receiveBranchHelper host port =
+  connection = lib.unison_base_7_16_0.IO.net.Connection.tls host port
+  chunk = lib.unison_base_7_16_0.IO.net.Connection.receive connection
+  incoming = lib.unison_base_7_16_0.Bytes.toList chunk
+  match incoming with
+    [] -> 0
+    _  -> h2client.probe.constant 1
+
+---- Anything below this line is ignored by Unison.

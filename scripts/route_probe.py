@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import ssl
 import subprocess
 import sys
@@ -39,6 +40,7 @@ def request(
     *,
     method: str = "GET",
     body: dict | None = None,
+    extra_headers: dict[str, str] | None = None,
     insecure: bool = False,
 ) -> dict | list:
     url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
@@ -53,6 +55,8 @@ def request(
         "-H",
         f"Authorization: Bearer {handle}",
     ]
+    for key, value in (extra_headers or {}).items():
+        command.extend(["-H", f"{key}: {value}"])
     if insecure:
         command.append("-k")
     if body is not None:
@@ -313,6 +317,13 @@ def require_diagnostics_report(
     return report
 
 
+def require_wake_events_payload(payload: dict[str, Any], *, expected_status: str) -> list[dict[str, Any]]:
+    require(payload.get("status") == expected_status, f"unexpected wake-events payload: {payload}")
+    events = payload.get("events")
+    require(isinstance(events, list), f"wake-events response missing events list: {payload}")
+    return events
+
+
 async def receive_json_or_timeout(connection, timeout_seconds: int) -> dict:
     try:
         raw = await asyncio.wait_for(connection.recv(), timeout=timeout_seconds)
@@ -450,6 +461,7 @@ async def main() -> int:
     results: list[CheckResult] = []
     caller = participant(args.caller, "route-probe-caller")
     callee = participant(args.callee, "route-probe-callee")
+    worker_secret = os.environ.get("TURBO_APNS_WORKER_SECRET", "").strip()
 
     try:
         config = run_check(
@@ -476,6 +488,29 @@ async def main() -> int:
             lambda: request(args.base_url, "/v1/dev/reset-state", caller["handle"], method="POST", insecure=args.insecure),
         )
         require(reset_state.get("status") == "reset", f"unexpected reset-state payload: {reset_state}")
+        if worker_secret:
+            try:
+                internal_wake_jobs = run_check(
+                    results,
+                    "internal-wake-jobs:empty",
+                    lambda: request(
+                        args.base_url,
+                        "/v1/internal/wake-jobs",
+                        caller["handle"],
+                        insecure=args.insecure,
+                        extra_headers={"x-turbo-worker-secret": worker_secret},
+                    ),
+                )
+                require(internal_wake_jobs.get("status") == "ok", f"unexpected internal wake jobs payload: {internal_wake_jobs}")
+                require(isinstance(internal_wake_jobs.get("jobs"), list), f"internal wake jobs missing jobs list: {internal_wake_jobs}")
+            except Exception as exc:
+                results.append(
+                    CheckResult(
+                        name="internal-wake-jobs:empty",
+                        ok=True,
+                        detail=f"skipped legacy wake-jobs check: {exc}",
+                    )
+                )
         run_check(
             results,
             "dev-seed-after-reset",
@@ -802,6 +837,69 @@ async def main() -> int:
         )
         require(direct.get("channelId") == accepted_channel_id, f"direct channel disagreed with accepted invite channel: {direct}")
         channel_id = direct["channelId"]
+
+        wake_events_before = run_check(
+            results,
+            "wake-events:recent:before-upload",
+            lambda: request(
+                args.base_url,
+                "/v1/dev/wake-events/recent",
+                caller["handle"],
+                insecure=args.insecure,
+            ),
+        )
+        require_wake_events_payload(wake_events_before, expected_status="ok")
+
+        wake_event_upload = run_check(
+            results,
+            "wake-events:upload",
+            lambda: request(
+                args.base_url,
+                "/v1/dev/wake-events",
+                caller["handle"],
+                method="POST",
+                body={
+                    "senderUserId": caller["user_id"],
+                    "channelId": channel_id,
+                    "senderDeviceId": caller["device_id"],
+                    "senderHandle": caller["handle"],
+                    "targetUserId": callee["user_id"],
+                    "targetDeviceId": callee["device_id"],
+                    "startedAt": "2026-04-14T00:00:00Z",
+                    "result": "sent",
+                    "statusCode": "200",
+                    "responseBody": "{}",
+                },
+                insecure=args.insecure,
+            ),
+        )
+        uploaded_event = wake_event_upload.get("event")
+        require(wake_event_upload.get("status") == "uploaded", f"unexpected wake event upload payload: {wake_event_upload}")
+        require(isinstance(uploaded_event, dict), f"wake event upload missing event payload: {wake_event_upload}")
+        require(uploaded_event.get("channelId") == channel_id, f"wake event upload mismatched channel: {uploaded_event}")
+
+        wake_events_after = run_check(
+            results,
+            "wake-events:recent:after-upload",
+            lambda: request(
+                args.base_url,
+                "/v1/dev/wake-events/recent",
+                caller["handle"],
+                insecure=args.insecure,
+            ),
+        )
+        recent_wake_events = require_wake_events_payload(wake_events_after, expected_status="ok")
+        require(
+            any(
+                isinstance(event, dict)
+                and event.get("channelId") == channel_id
+                and event.get("senderDeviceId") == caller["device_id"]
+                and event.get("targetDeviceId") == callee["device_id"]
+                for event in recent_wake_events
+            ),
+            f"wake events did not include uploaded row: {recent_wake_events}",
+        )
+
         post_direct_summaries = run_check(
             results,
             "contact-summaries:caller:post-direct",
@@ -1048,6 +1146,28 @@ async def main() -> int:
                 ),
             )
             require(begin_payload.get("status") == "transmitting", f"begin-transmit returned unexpected payload: {begin_payload}")
+            wake_events_after_begin = run_check(
+                results,
+                "wake-events:recent:after-begin-transmit",
+                lambda: request(
+                    args.base_url,
+                    "/v1/dev/wake-events/recent",
+                    caller["handle"],
+                    insecure=args.insecure,
+                ),
+            )
+            begin_wake_events = require_wake_events_payload(wake_events_after_begin, expected_status="ok")
+            require(
+                any(
+                    isinstance(event, dict)
+                    and event.get("channelId") == channel_id
+                    and event.get("senderDeviceId") == caller["device_id"]
+                    and event.get("targetDeviceId") == callee["device_id"]
+                    and event.get("startedAt") == begin_payload.get("startedAt")
+                    for event in begin_wake_events
+                ),
+                f"begin-transmit did not record a backend wake event: {begin_wake_events}",
+            )
             if is_local_base_url(args.base_url):
                 caller_state_transmitting = run_check(
                     results,

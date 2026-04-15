@@ -1,0 +1,445 @@
+use lib.base.Bytes
+use lib.base.Text
+
+type turbo.lib.es256.der.TagClass
+  = Universal
+  | Application
+  | ContextSpecific
+  | Private
+
+type turbo.lib.es256.der.Tag
+  = Tag turbo.lib.es256.der.TagClass Boolean Nat
+
+type turbo.lib.es256.der.Value
+  = Primitive turbo.lib.es256.der.Tag Bytes
+  | Constructed turbo.lib.es256.der.Tag [turbo.lib.es256.der.Value]
+
+type turbo.lib.es256.pkcs8.SigningKey
+  = SigningKey Bytes
+
+turbo.lib.es256.internal.natEquals : Nat -> Nat -> Boolean
+turbo.lib.es256.internal.natEquals left right =
+  match Nat.diff left right with
+    0 -> true
+    _ -> false
+
+turbo.lib.es256.der.read : Bytes -> Either Text turbo.lib.es256.der.Value
+turbo.lib.es256.der.read bytes =
+  match turbo.lib.es256.der.readOne bytes with
+    Left err -> Left err
+    Right (value, rest) ->
+      match Bytes.size rest with
+        0 -> Right value
+        _ -> Left "unexpected trailing DER bytes"
+
+turbo.lib.es256.der.readOne :
+  Bytes -> Either Text (turbo.lib.es256.der.Value, Bytes)
+turbo.lib.es256.der.readOne bytes =
+  match turbo.lib.es256.der.readTag bytes with
+    Left err -> Left err
+    Right (tag, afterTag) ->
+      match turbo.lib.es256.der.readLength afterTag with
+        Left err -> Left err
+        Right (contentLength, afterLength) ->
+          match turbo.lib.es256.der.take contentLength afterLength with
+            Left err -> Left err
+            Right (content, rest) ->
+              match tag with
+                turbo.lib.es256.der.Tag.Tag _ true _ ->
+                  match turbo.lib.es256.der.readMany content with
+                    Left err -> Left err
+                    Right children ->
+                      Right (turbo.lib.es256.der.Value.Constructed tag children, rest)
+                _ ->
+                  Right (turbo.lib.es256.der.Value.Primitive tag content, rest)
+
+turbo.lib.es256.der.readMany :
+  Bytes -> Either Text [turbo.lib.es256.der.Value]
+turbo.lib.es256.der.readMany bytes =
+  match Bytes.size bytes with
+    0 -> Right []
+    _ ->
+      match turbo.lib.es256.der.readOne bytes with
+        Left err -> Left err
+        Right (value, rest) ->
+          match turbo.lib.es256.der.readMany rest with
+            Left err -> Left err
+            Right more -> Right (List.cons value more)
+
+turbo.lib.es256.der.readTag :
+  Bytes -> Either Text (turbo.lib.es256.der.Tag, Bytes)
+turbo.lib.es256.der.readTag bytes =
+  match Bytes.at 0 bytes with
+    None -> Left "missing DER tag byte"
+    Some first ->
+      classBits = Nat.shiftRight first 6
+      constructed =
+        match Nat.and first 32 with
+          32 -> true
+          _ -> false
+      tagNumber = Nat.and first 31
+      match tagNumber with
+        31 -> Left "high-tag-number DER tags are unsupported"
+        _ ->
+          Right
+            ( turbo.lib.es256.der.Tag.Tag
+                (turbo.lib.es256.der.classFromBits classBits)
+                constructed
+                tagNumber
+            , Bytes.drop 1 bytes
+            )
+
+turbo.lib.es256.der.classFromBits :
+  Nat -> turbo.lib.es256.der.TagClass
+turbo.lib.es256.der.classFromBits bits =
+  match bits with
+    0 -> turbo.lib.es256.der.TagClass.Universal
+    1 -> turbo.lib.es256.der.TagClass.Application
+    2 -> turbo.lib.es256.der.TagClass.ContextSpecific
+    _ -> turbo.lib.es256.der.TagClass.Private
+
+turbo.lib.es256.der.readLength :
+  Bytes -> Either Text (Nat, Bytes)
+turbo.lib.es256.der.readLength bytes =
+  match Bytes.at 0 bytes with
+    None -> Left "missing DER length byte"
+    Some first ->
+      match Nat.and first 128 with
+        0 -> Right (first, Bytes.drop 1 bytes)
+        _ ->
+          count = Nat.and first 127
+          match count with
+            0 -> Left "indefinite DER lengths are unsupported"
+            _ ->
+              match turbo.lib.es256.der.take count (Bytes.drop 1 bytes) with
+                Left err -> Left err
+                Right (lengthBytes, rest) ->
+                  Right
+                    ( turbo.lib.es256.der.bytesToNat lengthBytes
+                    , rest
+                    )
+
+turbo.lib.es256.der.take : Nat -> Bytes -> Either Text (Bytes, Bytes)
+turbo.lib.es256.der.take size bytes =
+  use Nat <
+  if Bytes.size bytes < size then
+    Left "DER payload truncated"
+  else
+    Right (Bytes.take size bytes, Bytes.drop size bytes)
+
+turbo.lib.es256.der.bytesToNat : Bytes -> Nat
+turbo.lib.es256.der.bytesToNat bytes =
+  List.foldLeft
+    turbo.lib.es256.der.internal.accumulateNatByte
+    0
+    (Bytes.toList bytes)
+
+turbo.lib.es256.der.internal.accumulateNatByte : Nat -> Nat -> Nat
+turbo.lib.es256.der.internal.accumulateNatByte acc byte =
+  acc * 256 + byte
+
+turbo.lib.es256.der.expectSequence :
+  turbo.lib.es256.der.Value -> Either Text [turbo.lib.es256.der.Value]
+turbo.lib.es256.der.expectSequence value =
+  match value with
+    turbo.lib.es256.der.Value.Constructed
+      (turbo.lib.es256.der.Tag.Tag turbo.lib.es256.der.TagClass.Universal true 16)
+      children ->
+        Right children
+    _ -> Left "expected DER SEQUENCE"
+
+turbo.lib.es256.der.expectPrimitive :
+  Nat -> turbo.lib.es256.der.Value -> Either Text Bytes
+turbo.lib.es256.der.expectPrimitive tagNumber value =
+  match value with
+    turbo.lib.es256.der.Value.Primitive
+      (turbo.lib.es256.der.Tag.Tag turbo.lib.es256.der.TagClass.Universal false actualTag)
+      bytes ->
+        if turbo.lib.es256.internal.natEquals actualTag tagNumber then
+          Right bytes
+        else
+          Left "unexpected DER primitive tag"
+    _ -> Left "expected DER primitive value"
+
+turbo.lib.es256.der.expectIntegerNat :
+  turbo.lib.es256.der.Value -> Either Text Nat
+turbo.lib.es256.der.expectIntegerNat value =
+  match turbo.lib.es256.der.expectPrimitive 2 value with
+    Left err -> Left err
+    Right bytes ->
+      match Bytes.size bytes with
+        0 -> Left "invalid empty DER INTEGER"
+        _ ->
+          match Bytes.at 0 bytes with
+            Some first ->
+              match Nat.and first 128 with
+                128 -> Left "negative DER INTEGER unsupported"
+                _ -> Right (turbo.lib.es256.der.bytesToNat bytes)
+            None -> Left "invalid empty DER INTEGER"
+
+turbo.lib.es256.der.expectOctetString :
+  turbo.lib.es256.der.Value -> Either Text Bytes
+turbo.lib.es256.der.expectOctetString value =
+  turbo.lib.es256.der.expectPrimitive 4 value
+
+turbo.lib.es256.der.expectObjectIdentifier :
+  turbo.lib.es256.der.Value -> Either Text [Nat]
+turbo.lib.es256.der.expectObjectIdentifier value =
+  match turbo.lib.es256.der.expectPrimitive 6 value with
+    Left err -> Left err
+    Right bytes -> turbo.lib.es256.der.decodeOid bytes
+
+turbo.lib.es256.der.expectContextSpecificConstructed :
+  Nat -> turbo.lib.es256.der.Value -> Either Text [turbo.lib.es256.der.Value]
+turbo.lib.es256.der.expectContextSpecificConstructed expectedTag value =
+  match value with
+    turbo.lib.es256.der.Value.Constructed
+      (turbo.lib.es256.der.Tag.Tag turbo.lib.es256.der.TagClass.ContextSpecific true actualTag)
+      children ->
+        if turbo.lib.es256.internal.natEquals actualTag expectedTag then
+          Right children
+        else
+          Left "unexpected DER context-specific tag"
+    _ -> Left "expected DER context-specific constructed value"
+
+turbo.lib.es256.der.decodeOid : Bytes -> Either Text [Nat]
+turbo.lib.es256.der.decodeOid bytes =
+  use Nat / - *
+  match Bytes.at 0 bytes with
+    None -> Left "empty DER OBJECT IDENTIFIER"
+    Some first ->
+      firstArc = first / 40
+      secondArc = first - firstArc * 40
+      rest = Bytes.drop 1 bytes
+      match turbo.lib.es256.der.decodeOidTail rest 0 [] with
+        Left err -> Left err
+        Right arcs ->
+          Right (List.cons firstArc (List.cons secondArc arcs))
+
+turbo.lib.es256.der.oidText : [Nat] -> Text
+turbo.lib.es256.der.oidText arcs =
+  use Text ++
+  match arcs with
+    [] -> ""
+    first +: rest ->
+      List.foldLeft
+        turbo.lib.es256.der.internal.appendOidArc
+        (Nat.toText first)
+        rest
+
+turbo.lib.es256.der.internal.appendOidArc : Text -> Nat -> Text
+turbo.lib.es256.der.internal.appendOidArc acc arc =
+  use Text ++
+  acc ++ "." ++ Nat.toText arc
+
+turbo.lib.es256.der.decodeOidTail :
+  Bytes -> Nat -> [Nat] -> Either Text [Nat]
+turbo.lib.es256.der.decodeOidTail bytes current acc =
+  match Bytes.size bytes with
+    0 ->
+      match current with
+        0 -> Right (List.reverse acc)
+        _ -> Left "truncated DER OBJECT IDENTIFIER"
+    _ ->
+      match Bytes.at 0 bytes with
+        None -> Left "truncated DER OBJECT IDENTIFIER"
+        Some byte ->
+          value = current * 128 + Nat.and byte 127
+          rest = Bytes.drop 1 bytes
+          match Nat.and byte 128 with
+            128 -> turbo.lib.es256.der.decodeOidTail rest value acc
+            _ -> turbo.lib.es256.der.decodeOidTail rest 0 (List.cons value acc)
+
+turbo.lib.es256.pkcs8.parsePemEcPrivateKey :
+  Text -> Either Text turbo.lib.es256.pkcs8.SigningKey
+turbo.lib.es256.pkcs8.parsePemEcPrivateKey pemText =
+  match turbo.lib.es256.pkcs8.stripPem pemText with
+    Left err -> Left err
+    Right derBytes -> turbo.lib.es256.pkcs8.parsePrivateKeyInfo derBytes
+
+turbo.lib.es256.pkcs8.stripPem : Text -> Either Text Bytes
+turbo.lib.es256.pkcs8.stripPem pemText =
+  use Text ++
+  bodyLines =
+    List.filter
+      turbo.lib.es256.pkcs8.internal.keepPemBodyLine
+      (Text.lines pemText)
+  bodyText =
+    List.foldLeft
+      turbo.lib.es256.pkcs8.internal.concatText
+      ""
+      bodyLines
+  match Text.size bodyText with
+    0 -> Left "PEM body is empty"
+    _ -> Bytes.fromBase64.impl (Text.toUtf8 bodyText)
+
+turbo.lib.es256.pkcs8.internal.keepPemBodyLine : Text -> Boolean
+turbo.lib.es256.pkcs8.internal.keepPemBodyLine line =
+  match Text.size line with
+    0 -> false
+    _ ->
+      if Text.startsWith "-----BEGIN " line then
+        false
+      else if Text.startsWith "-----END " line then
+        false
+      else
+        true
+
+turbo.lib.es256.pkcs8.internal.concatText : Text -> Text -> Text
+turbo.lib.es256.pkcs8.internal.concatText acc next =
+  acc ++ next
+
+turbo.lib.es256.pkcs8.parsePrivateKeyInfo :
+  Bytes -> Either Text turbo.lib.es256.pkcs8.SigningKey
+turbo.lib.es256.pkcs8.parsePrivateKeyInfo derBytes =
+  expectedAlgorithmOid = "1.2.840.10045.2.1"
+  expectedCurveOid = "1.2.840.10045.3.1.7"
+  match turbo.lib.es256.der.read derBytes with
+    Left err -> Left err
+    Right top ->
+      match turbo.lib.es256.der.expectSequence top with
+        Left err -> Left err
+        Right children ->
+          match children with
+            [versionNode, algorithmNode, privateKeyNode] ->
+              match turbo.lib.es256.der.expectIntegerNat versionNode with
+                Left err -> Left err
+                Right version ->
+                  match version with
+                    0 ->
+                      match turbo.lib.es256.der.expectSequence algorithmNode with
+                        Left err -> Left err
+                        Right algorithmChildren ->
+                          match algorithmChildren with
+                            [algorithmOidNode, curveOidNode] ->
+                              match turbo.lib.es256.der.expectObjectIdentifier algorithmOidNode with
+                                Left err -> Left err
+                                Right algorithmOid ->
+                                  if turbo.lib.es256.der.oidText algorithmOid != expectedAlgorithmOid then
+                                    Left "unsupported PKCS#8 algorithm OID"
+                                  else
+                                    match turbo.lib.es256.der.expectObjectIdentifier curveOidNode with
+                                      Left err -> Left err
+                                      Right curveOid ->
+                                        if turbo.lib.es256.der.oidText curveOid != expectedCurveOid then
+                                          Left "unsupported EC curve OID"
+                                        else
+                                          match turbo.lib.es256.der.expectOctetString privateKeyNode with
+                                            Left err -> Left err
+                                            Right ecPrivateKeyDer ->
+                                              turbo.lib.es256.pkcs8.parseEcPrivateKey ecPrivateKeyDer
+                            _ -> Left "unsupported PKCS#8 algorithm structure"
+                    _ -> Left "unsupported PKCS#8 version"
+            _ -> Left "unsupported PKCS#8 field count"
+
+turbo.lib.es256.pkcs8.parseEcPrivateKey :
+  Bytes -> Either Text turbo.lib.es256.pkcs8.SigningKey
+turbo.lib.es256.pkcs8.parseEcPrivateKey derBytes =
+  match turbo.lib.es256.der.read derBytes with
+    Left err -> Left err
+    Right top ->
+      match turbo.lib.es256.der.expectSequence top with
+        Left err -> Left err
+        Right children ->
+          match children with
+            [versionNode, scalarNode] ->
+              turbo.lib.es256.pkcs8.internal.finishEcPrivateKey versionNode scalarNode
+            [versionNode, scalarNode, _] ->
+              turbo.lib.es256.pkcs8.internal.finishEcPrivateKey versionNode scalarNode
+            [versionNode, scalarNode, _, _] ->
+              turbo.lib.es256.pkcs8.internal.finishEcPrivateKey versionNode scalarNode
+            _ -> Left "unsupported ECPrivateKey structure"
+
+turbo.lib.es256.pkcs8.internal.finishEcPrivateKey :
+  turbo.lib.es256.der.Value
+  -> turbo.lib.es256.der.Value
+  -> Either Text turbo.lib.es256.pkcs8.SigningKey
+turbo.lib.es256.pkcs8.internal.finishEcPrivateKey versionNode scalarNode =
+  use Nat >
+  match turbo.lib.es256.der.expectIntegerNat versionNode with
+    Left err -> Left err
+    Right version ->
+      match version with
+        1 ->
+          match turbo.lib.es256.der.expectOctetString scalarNode with
+            Left err -> Left err
+            Right scalar ->
+              match Bytes.size scalar with
+                0 -> Left "empty EC private scalar"
+                _ ->
+                  if Bytes.size scalar > 32 then
+                    Left "EC private scalar too large for P-256"
+                  else
+                    Right (turbo.lib.es256.pkcs8.SigningKey.SigningKey scalar)
+        _ -> Left "unsupported ECPrivateKey version"
+
+turbo.lib.es256.der.tests.readInteger : [Result]
+turbo.lib.es256.der.tests.readInteger =
+  parsed =
+    catch do
+      bytes = Bytes.fromBase16 (Text.toUtf8 "020105")
+      turbo.lib.es256.der.read bytes
+  check
+    (match parsed with
+      Right (Right (turbo.lib.es256.der.Value.Primitive _ content)) ->
+        match Bytes.size content with
+          1 ->
+            match Bytes.at 0 content with
+              Some 5 -> true
+              _ -> false
+          _ -> false
+      _ -> false)
+
+turbo.lib.es256.der.tests.decodeOid : [Result]
+turbo.lib.es256.der.tests.decodeOid =
+  parsed =
+    catch do
+      bytes = Bytes.fromBase16 (Text.toUtf8 "06082A8648CE3D030107")
+      turbo.lib.es256.der.read bytes
+  check
+    (match parsed with
+      Right (Right node) ->
+        match turbo.lib.es256.der.expectObjectIdentifier node with
+          Right oid -> turbo.lib.es256.der.oidText oid == "1.2.840.10045.3.1.7"
+          Left _ -> false
+      Right (Left _) -> false
+      Left _ -> false)
+
+turbo.lib.es256.pkcs8.tests.parsePrivateKeyInfo : [Result]
+turbo.lib.es256.pkcs8.tests.parsePrivateKeyInfo =
+  parsed =
+    catch do
+      bytes =
+        Bytes.fromBase16
+          (Text.toUtf8
+            "3041020100301306072A8648CE3D020106082A8648CE3D0301070427302502010104200102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F20")
+      turbo.lib.es256.pkcs8.parsePrivateKeyInfo bytes
+  check
+    (match parsed with
+      Right (Right (turbo.lib.es256.pkcs8.SigningKey.SigningKey scalar)) ->
+        match Bytes.size scalar with
+          32 -> true
+          _ -> false
+      _ -> false)
+
+turbo.lib.es256.pkcs8.tests.parsePemRoundtrip : [Result]
+turbo.lib.es256.pkcs8.tests.parsePemRoundtrip =
+  parsed =
+    catch do
+      bytes =
+        Bytes.fromBase16
+          (Text.toUtf8
+            "3041020100301306072A8648CE3D020106082A8648CE3D0301070427302502010104200102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F20")
+      base64Text = Text.fromUtf8 (Bytes.toBase64 bytes)
+      pem =
+        "-----BEGIN PRIVATE KEY-----\n"
+          ++ base64Text
+          ++ "\n-----END PRIVATE KEY-----\n"
+      turbo.lib.es256.pkcs8.parsePemEcPrivateKey pem
+  check
+    (match parsed with
+      Right (Right (turbo.lib.es256.pkcs8.SigningKey.SigningKey scalar)) ->
+        match Bytes.size scalar with
+          32 -> true
+          _ -> false
+      _ -> false)

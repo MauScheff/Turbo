@@ -193,11 +193,12 @@ That distinction matters for background and lock-screen work. "Peer is offline" 
 
 Foreground signaling can still use the app websocket, but background receive needs the real PushToTalk wake contract:
 
-- for current real-device smoke testing, you must run `direnv exec . just ptt-apns-bridge`
-- the backend now chooses the authoritative wake target on `/ptt-push-target` and `/readiness.wakeReadiness`, but the actual APNs send is still performed by that bridge helper
-- before the pair has an actually joined backend session, the bridge may see no active push target; that setup state should be treated as idle, not as a wake failure
-- the bridge resolves the active direct-channel ID once when it starts; if you reset dev state, reconnect, or otherwise rejoin into a new backend channel, you must restart the bridge or it will keep watching the stale channel
-- when validating a real wake attempt, make sure the bridge's startup line matches the current live channel; if the bridge is still watching an older channel, any `status=200` or `524` lines belong to the wrong session and should be ignored
+- direct APNs-from-Unison is the intended end state, but hosted Unison Cloud is still waiting on the upstream runtime rollout
+- until that lands, use the interim backend-triggered Cloudflare sender plan in [APNS_DELIVERY_PLAN.md](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md)
+- the backend chooses the authoritative wake target on `/ptt-push-target` and `/readiness.wakeReadiness`
+- the long-term hosted path is still for `begin-transmit` to build the APNs JWT in Unison and perform the `pushtotalk` send directly with `Http.request`
+- wake-send results are uploaded to the backend dev diagnostics surface, so `python3 scripts/merged_diagnostics.py ...` now includes `[wake:apns] ...` entries in the merged timeline
+- `ptt-apns-worker` and `ptt-apns-bridge` are still available only as legacy/debug helpers
 - the app uploads the ephemeral PushToTalk token it receives while joined
 - the backend uses that token to send a `pushtotalk` APNs push when a remote speaker starts
 - the app's `incomingPushResult(...)` returns the active remote participant quickly

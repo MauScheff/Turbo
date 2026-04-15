@@ -1,0 +1,138 @@
+type h2client.connection.BootstrapState
+  = AwaitingServerSettingsAndAck
+  | AwaitingServerSettings
+  | AwaitingServerAck
+  | Ready
+
+type h2client.connection.Outbound
+  = SendClientPreface
+  | SendSettings h2client.settings.Frame
+
+type h2client.connection.Step
+  = Step h2client.connection.BootstrapState [h2client.connection.Outbound]
+
+h2client.connection.Step.state : h2client.connection.Step -> h2client.connection.BootstrapState
+h2client.connection.Step.state = cases
+  Step state _ -> state
+
+h2client.connection.Step.outbound : h2client.connection.Step -> [h2client.connection.Outbound]
+h2client.connection.Step.outbound = cases
+  Step _ outbound -> outbound
+
+h2client.connection.BootstrapState.awaitingServerSettings : h2client.connection.BootstrapState -> Boolean
+h2client.connection.BootstrapState.awaitingServerSettings = cases
+  AwaitingServerSettingsAndAck -> true
+  AwaitingServerSettings       -> true
+  AwaitingServerAck            -> false
+  Ready                        -> false
+
+h2client.connection.BootstrapState.awaitingServerAck : h2client.connection.BootstrapState -> Boolean
+h2client.connection.BootstrapState.awaitingServerAck = cases
+  AwaitingServerSettingsAndAck -> true
+  AwaitingServerSettings       -> false
+  AwaitingServerAck            -> true
+  Ready                        -> false
+
+h2client.connection.BootstrapState.fromNeeds
+  : Boolean -> Boolean -> h2client.connection.BootstrapState
+h2client.connection.BootstrapState.fromNeeds awaitingServerSettings awaitingServerAck =
+  match (awaitingServerSettings, awaitingServerAck) with
+    (true, true)   -> AwaitingServerSettingsAndAck
+    (true, false)  -> AwaitingServerSettings
+    (false, true)  -> AwaitingServerAck
+    (false, false) -> Ready
+
+h2client.connection.start : h2client.settings.Payload -> h2client.connection.Step
+h2client.connection.start clientSettings =
+  Step
+    AwaitingServerSettingsAndAck
+    [ SendClientPreface
+    , SendSettings (Parameters clientSettings)
+    ]
+
+h2client.connection.handleSettingsFrame
+  : h2client.connection.BootstrapState
+  -> h2client.settings.Frame
+  -> Optional h2client.connection.Step
+h2client.connection.handleSettingsFrame state frame =
+  awaitingServerSettings = h2client.connection.BootstrapState.awaitingServerSettings state
+  awaitingServerAck = h2client.connection.BootstrapState.awaitingServerAck state
+  match frame with
+    Ack ->
+      if awaitingServerAck then
+        Some
+          (Step
+            (h2client.connection.BootstrapState.fromNeeds awaitingServerSettings false)
+            [])
+      else
+        match state with
+          Ready -> Some (Step Ready [])
+          _     -> None
+    Parameters _ ->
+      nextState =
+        h2client.connection.BootstrapState.fromNeeds false awaitingServerAck
+      Some (Step nextState [SendSettings Ack])
+
+test> h2client.connection.start.tests.initialStep = verify do
+  initial =
+    h2client.connection.start
+      (Payload [Entry HeaderTableSize 4096, Entry MaxFrameSize 16384])
+  ensureEqual
+    AwaitingServerSettingsAndAck
+    (h2client.connection.Step.state initial)
+  ensureEqual
+    [ SendClientPreface
+    , SendSettings (Parameters (Payload [Entry HeaderTableSize 4096, Entry MaxFrameSize 16384]))
+    ]
+    (h2client.connection.Step.outbound initial)
+
+test> h2client.connection.handleSettingsFrame.tests.settingsThenAck = verify do
+  step1 =
+    Optional.getOrBug
+      "expected server settings to be accepted"
+      (h2client.connection.handleSettingsFrame
+        AwaitingServerSettingsAndAck
+        (Parameters (Payload [Entry MaxConcurrentStreams 100])))
+  ensureEqual AwaitingServerAck (h2client.connection.Step.state step1)
+  ensureEqual [SendSettings Ack] (h2client.connection.Step.outbound step1)
+  step2 =
+    Optional.getOrBug
+      "expected server ack to complete bootstrap"
+      (h2client.connection.handleSettingsFrame
+        (h2client.connection.Step.state step1)
+        Ack)
+  ensureEqual Ready (h2client.connection.Step.state step2)
+  ensureEqual [] (h2client.connection.Step.outbound step2)
+
+test> h2client.connection.handleSettingsFrame.tests.ackThenSettings = verify do
+  step1 =
+    Optional.getOrBug
+      "expected early ack to be accepted"
+      (h2client.connection.handleSettingsFrame AwaitingServerSettingsAndAck Ack)
+  ensureEqual AwaitingServerSettings (h2client.connection.Step.state step1)
+  ensureEqual [] (h2client.connection.Step.outbound step1)
+  step2 =
+    Optional.getOrBug
+      "expected later server settings to be accepted"
+      (h2client.connection.handleSettingsFrame
+        (h2client.connection.Step.state step1)
+        (Parameters (Payload [Entry EnablePush 0])))
+  ensureEqual Ready (h2client.connection.Step.state step2)
+  ensureEqual [SendSettings Ack] (h2client.connection.Step.outbound step2)
+
+test> h2client.connection.handleSettingsFrame.tests.unexpectedAckRejected = verify do
+  ensureEqual
+    None
+    (h2client.connection.handleSettingsFrame AwaitingServerSettings Ack)
+
+test> h2client.connection.handleSettingsFrame.tests.readySettingsStillAcked = verify do
+  step =
+    Optional.getOrBug
+      "expected post-bootstrap settings to be acked"
+      (h2client.connection.handleSettingsFrame
+        Ready
+        (Parameters (Payload [Entry InitialWindowSize 65535])))
+  ensureEqual Ready (h2client.connection.Step.state step)
+  ensureEqual [SendSettings Ack] (h2client.connection.Step.outbound step)
+
+---- Anything below this line is ignored by Unison.

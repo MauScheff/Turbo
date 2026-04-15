@@ -1,0 +1,223 @@
+type h2client.frame.StreamRef
+  = ConnectionStream
+  | MessageStream h2client.frame.StreamId
+
+h2client.frame.StreamRef.toNat : h2client.frame.StreamRef -> Nat
+h2client.frame.StreamRef.toNat = cases
+  ConnectionStream        -> 0
+  MessageStream streamId  -> h2client.frame.StreamId.toNat streamId
+
+h2client.frame.StreamRef.fromNat : Nat -> Optional h2client.frame.StreamRef
+h2client.frame.StreamRef.fromNat n =
+  if n == 0 then Some ConnectionStream
+  else Optional.map MessageStream (h2client.frame.StreamId.fromNat n)
+
+type h2client.frame.FrameHeader
+  = FrameHeader Nat h2client.frame.FrameType Nat h2client.frame.StreamRef
+
+h2client.frame.FrameHeader.length : h2client.frame.FrameHeader -> Nat
+h2client.frame.FrameHeader.length = cases
+  FrameHeader length _ _ _ -> length
+
+h2client.frame.FrameHeader.frameType : h2client.frame.FrameHeader -> h2client.frame.FrameType
+h2client.frame.FrameHeader.frameType = cases
+  FrameHeader _ frameType _ _ -> frameType
+
+h2client.frame.FrameHeader.flags : h2client.frame.FrameHeader -> Nat
+h2client.frame.FrameHeader.flags = cases
+  FrameHeader _ _ flags _ -> flags
+
+h2client.frame.FrameHeader.stream : h2client.frame.FrameHeader -> h2client.frame.StreamRef
+h2client.frame.FrameHeader.stream = cases
+  FrameHeader _ _ _ stream -> stream
+
+h2client.frame.maxPayloadLength : Nat
+h2client.frame.maxPayloadLength = 16777215
+
+h2client.frame.internal.byte : Nat -> Nat
+h2client.frame.internal.byte n =
+  use Nat mod
+  mod n 256
+
+h2client.frame.internal.encodeNat16be : Nat -> [Nat]
+h2client.frame.internal.encodeNat16be n =
+  use Nat shiftRight
+  [ h2client.frame.internal.byte (shiftRight n 8)
+  , h2client.frame.internal.byte n
+  ]
+
+h2client.frame.internal.encodeNat24be : Nat -> Optional [Nat]
+h2client.frame.internal.encodeNat24be n =
+  use Nat shiftRight
+  if n > h2client.frame.maxPayloadLength then None
+  else
+    Some
+      [ h2client.frame.internal.byte (shiftRight n 16)
+      , h2client.frame.internal.byte (shiftRight n 8)
+      , h2client.frame.internal.byte n
+      ]
+
+h2client.frame.internal.encodeNat32be : Nat -> [Nat]
+h2client.frame.internal.encodeNat32be n =
+  use Nat shiftRight
+  [ h2client.frame.internal.byte (shiftRight n 24)
+  , h2client.frame.internal.byte (shiftRight n 16)
+  , h2client.frame.internal.byte (shiftRight n 8)
+  , h2client.frame.internal.byte n
+  ]
+
+h2client.frame.internal.decodeNat24be : [Nat] -> Optional Nat
+h2client.frame.internal.decodeNat24be = cases
+  [b0, b1, b2] ->
+    use Nat or shiftLeft
+    Some (or (shiftLeft b0 16) (or (shiftLeft b1 8) b2))
+  _            -> None
+
+h2client.frame.internal.decodeNat32be : [Nat] -> Optional Nat
+h2client.frame.internal.decodeNat32be = cases
+  [b0, b1, b2, b3] ->
+    use Nat or shiftLeft
+    Some (or (shiftLeft b0 24) (or (shiftLeft b1 16) (or (shiftLeft b2 8) b3)))
+  _                -> None
+
+h2client.frame.FrameHeader.encodeNats : h2client.frame.FrameHeader -> Optional [Nat]
+h2client.frame.FrameHeader.encodeNats header =
+  use Nat and or shiftLeft
+  match h2client.frame.internal.encodeNat24be (h2client.frame.FrameHeader.length header) with
+    None              -> None
+    Some lengthPrefix ->
+      streamBytes =
+        streamNat = h2client.frame.StreamRef.toNat (h2client.frame.FrameHeader.stream header)
+        h2client.frame.internal.encodeNat32be streamNat
+      Some
+        ( lengthPrefix
+          ++ [ h2client.frame.FrameType.code (h2client.frame.FrameHeader.frameType header)
+             , h2client.frame.internal.byte (h2client.frame.FrameHeader.flags header)
+             ]
+          ++ streamBytes
+        )
+
+h2client.frame.FrameHeader.decodeNats : [Nat] -> Optional h2client.frame.FrameHeader
+h2client.frame.FrameHeader.decodeNats = cases
+  [l0, l1, l2, typeCode, flags, s0, s1, s2, s3] ->
+    use Nat and
+    match
+      ( h2client.frame.internal.decodeNat24be [l0, l1, l2]
+      , h2client.frame.FrameType.fromCode typeCode
+      , h2client.frame.internal.decodeNat32be [and s0 127, s1, s2, s3]
+      ) with
+      (Some length, Some frameType, Some streamNat) ->
+        match h2client.frame.StreamRef.fromNat streamNat with
+          Some stream -> Some (FrameHeader length frameType flags stream)
+          None        -> None
+      _                                        -> None
+  _                                          -> None
+
+h2client.frame.FrameType.fromCode : Nat -> Optional h2client.frame.FrameType
+h2client.frame.FrameType.fromCode = cases
+  0 -> Some Data
+  1 -> Some Headers
+  2 -> Some Priority
+  3 -> Some RstStream
+  4 -> Some Settings
+  5 -> Some PushPromise
+  6 -> Some Ping
+  7 -> Some GoAway
+  8 -> Some WindowUpdate
+  9 -> Some Continuation
+  _ -> None
+
+type h2client.settings.SettingId
+  = HeaderTableSize
+  | EnablePush
+  | MaxConcurrentStreams
+  | InitialWindowSize
+  | MaxFrameSize
+  | MaxHeaderListSize
+
+h2client.settings.SettingId.code : h2client.settings.SettingId -> Nat
+h2client.settings.SettingId.code = cases
+  HeaderTableSize     -> 1
+  EnablePush          -> 2
+  MaxConcurrentStreams -> 3
+  InitialWindowSize   -> 4
+  MaxFrameSize        -> 5
+  MaxHeaderListSize   -> 6
+
+h2client.settings.SettingId.fromCode : Nat -> Optional h2client.settings.SettingId
+h2client.settings.SettingId.fromCode = cases
+  1 -> Some HeaderTableSize
+  2 -> Some EnablePush
+  3 -> Some MaxConcurrentStreams
+  4 -> Some InitialWindowSize
+  5 -> Some MaxFrameSize
+  6 -> Some MaxHeaderListSize
+  _ -> None
+
+type h2client.settings.Entry
+  = Entry h2client.settings.SettingId Nat
+
+h2client.settings.Entry.id : h2client.settings.Entry -> h2client.settings.SettingId
+h2client.settings.Entry.id = cases
+  Entry id _ -> id
+
+h2client.settings.Entry.value : h2client.settings.Entry -> Nat
+h2client.settings.Entry.value = cases
+  Entry _ value -> value
+
+h2client.settings.Entry.encodeNats : h2client.settings.Entry -> [Nat]
+h2client.settings.Entry.encodeNats entry =
+  h2client.frame.internal.encodeNat16be (h2client.settings.SettingId.code (h2client.settings.Entry.id entry))
+    ++ h2client.frame.internal.encodeNat32be (h2client.settings.Entry.value entry)
+
+h2client.settings.Entry.decodeNats : [Nat] -> Optional h2client.settings.Entry
+h2client.settings.Entry.decodeNats = cases
+  [i0, i1, v0, v1, v2, v3] ->
+    use Nat or shiftLeft
+    idNat = or (shiftLeft i0 8) i1
+    match
+      ( h2client.settings.SettingId.fromCode idNat
+      , h2client.frame.internal.decodeNat32be [v0, v1, v2, v3]
+      ) with
+      (Some id, Some value) -> Some (Entry id value)
+      _                     -> None
+  _                        -> None
+
+test> h2client.frame.internal.tests.nat24RoundTrip = verify do
+  ensureEqual (Some [0, 0, 0]) (h2client.frame.internal.encodeNat24be 0)
+  ensureEqual (Some [0, 1, 0]) (h2client.frame.internal.encodeNat24be 256)
+  ensureEqual (Some [255, 255, 255]) (h2client.frame.internal.encodeNat24be 16777215)
+  ensureEqual None (h2client.frame.internal.encodeNat24be 16777216)
+  ensureEqual (Some 66051) (h2client.frame.internal.decodeNat24be [1, 2, 3])
+
+test> h2client.frame.FrameType.tests.fromCode = verify do
+  ensureEqual (Some Data) (h2client.frame.FrameType.fromCode 0)
+  ensureEqual (Some Settings) (h2client.frame.FrameType.fromCode 4)
+  ensureEqual (Some Continuation) (h2client.frame.FrameType.fromCode 9)
+  ensureEqual None (h2client.frame.FrameType.fromCode 10)
+
+test> h2client.frame.StreamRef.tests.examples = verify do
+  ensureEqual (Some ConnectionStream) (h2client.frame.StreamRef.fromNat 0)
+  ensureEqual
+    (Some (MessageStream (StreamId 1)))
+    (h2client.frame.StreamRef.fromNat 1)
+  ensureEqual None
+    (h2client.frame.StreamRef.fromNat (h2client.frame.StreamId.max + 1))
+
+test> h2client.frame.FrameHeader.tests.encodeDecodeRoundTrip = verify do
+  header = FrameHeader 12 Settings 1 ConnectionStream
+  encoded = h2client.frame.FrameHeader.encodeNats header
+  ensureEqual
+    (Some [0, 0, 12, 4, 1, 0, 0, 0, 0])
+    encoded
+  ensureEqual
+    (Some header)
+    (Optional.flatMap h2client.frame.FrameHeader.decodeNats encoded)
+
+test> h2client.settings.Entry.tests.encodeDecode = verify do
+  entry = Entry MaxFrameSize 16384
+  encoded = h2client.settings.Entry.encodeNats entry
+  ensureEqual [0, 5, 0, 0, 64, 0] encoded
+  ensureEqual (Some entry) (h2client.settings.Entry.decodeNats encoded)
+
+---- Anything below this line is ignored by Unison.

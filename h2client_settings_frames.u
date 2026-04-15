@@ -1,0 +1,177 @@
+type h2client.frame.RawFrame
+  = RawFrame h2client.frame.FrameHeader [Nat]
+
+h2client.frame.RawFrame.header : h2client.frame.RawFrame -> h2client.frame.FrameHeader
+h2client.frame.RawFrame.header = cases
+  RawFrame header _ -> header
+
+h2client.frame.RawFrame.payload : h2client.frame.RawFrame -> [Nat]
+h2client.frame.RawFrame.payload = cases
+  RawFrame _ payload -> payload
+
+h2client.frame.RawFrame.encodeNats : h2client.frame.RawFrame -> Optional [Nat]
+h2client.frame.RawFrame.encodeNats rawFrame =
+  header = h2client.frame.RawFrame.header rawFrame
+  payload = h2client.frame.RawFrame.payload rawFrame
+  if lib.unison_base_7_16_0.data.List.size payload != h2client.frame.FrameHeader.length header then None
+  else
+    Optional.map
+      (headerBytes -> headerBytes ++ payload)
+      (h2client.frame.FrameHeader.encodeNats header)
+
+h2client.frame.RawFrame.decodePrefixNats
+  : [Nat] -> Optional (h2client.frame.RawFrame, [Nat])
+h2client.frame.RawFrame.decodePrefixNats bytes =
+  (headerBytes, afterHeader) = lib.unison_base_7_16_0.data.List.splitAt 9 bytes
+  match h2client.frame.FrameHeader.decodeNats headerBytes with
+    None        -> None
+    Some header ->
+      expectedPayloadLength = h2client.frame.FrameHeader.length header
+      (payload, rest) = lib.unison_base_7_16_0.data.List.splitAt expectedPayloadLength afterHeader
+      if lib.unison_base_7_16_0.data.List.size payload != expectedPayloadLength then None
+      else Some (RawFrame header payload, rest)
+
+h2client.frame.RawFrame.decodeNats : [Nat] -> Optional h2client.frame.RawFrame
+h2client.frame.RawFrame.decodeNats bytes =
+  match h2client.frame.RawFrame.decodePrefixNats bytes with
+    Some (rawFrame, []) -> Some rawFrame
+    _                   -> None
+
+type h2client.settings.Payload
+  = Payload [h2client.settings.Entry]
+
+h2client.settings.Payload.entries : h2client.settings.Payload -> [h2client.settings.Entry]
+h2client.settings.Payload.entries = cases
+  Payload entries -> entries
+
+h2client.settings.Payload.encodeNats : h2client.settings.Payload -> [Nat]
+h2client.settings.Payload.encodeNats payload =
+  go = cases
+    []            -> []
+    entry +: rest ->
+      h2client.settings.Entry.encodeNats entry ++ go rest
+  go (h2client.settings.Payload.entries payload)
+
+h2client.settings.Payload.decodeNats : [Nat] -> Optional h2client.settings.Payload
+h2client.settings.Payload.decodeNats bytes =
+  go = cases
+    [] ->
+      Some []
+    remaining ->
+      (entryBytes, rest) = lib.unison_base_7_16_0.data.List.splitAt 6 remaining
+      if lib.unison_base_7_16_0.data.List.size entryBytes != 6 then None
+      else
+        match (h2client.settings.Entry.decodeNats entryBytes, go rest) with
+          (Some entry, Some entries) -> Some (entry +: entries)
+          _                          -> None
+  Optional.map Payload (go bytes)
+
+type h2client.settings.Frame
+  = Ack
+  | Parameters h2client.settings.Payload
+
+h2client.settings.ackFlag : Nat
+h2client.settings.ackFlag = 1
+
+h2client.settings.Frame.toRawFrame : h2client.settings.Frame -> h2client.frame.RawFrame
+h2client.settings.Frame.toRawFrame = cases
+  Ack ->
+    RawFrame
+      (FrameHeader 0 Settings h2client.settings.ackFlag ConnectionStream)
+      []
+  Parameters payload ->
+    payloadBytes = h2client.settings.Payload.encodeNats payload
+    RawFrame
+      (FrameHeader
+        (lib.unison_base_7_16_0.data.List.size payloadBytes)
+        Settings
+        0
+        ConnectionStream)
+      payloadBytes
+
+h2client.settings.Frame.fromRawFrame : h2client.frame.RawFrame -> Optional h2client.settings.Frame
+h2client.settings.Frame.fromRawFrame rawFrame =
+  use Nat and
+  header = h2client.frame.RawFrame.header rawFrame
+  payloadBytes = h2client.frame.RawFrame.payload rawFrame
+  match
+    (h2client.frame.FrameHeader.frameType header, h2client.frame.FrameHeader.stream header)
+    with
+    (Settings, ConnectionStream) ->
+      if h2client.frame.FrameHeader.length header != lib.unison_base_7_16_0.data.List.size payloadBytes then None
+      else if and (h2client.frame.FrameHeader.flags header) h2client.settings.ackFlag == h2client.settings.ackFlag then
+        match payloadBytes with
+          [] -> Some Ack
+          _  -> None
+      else
+        Optional.map Parameters (h2client.settings.Payload.decodeNats payloadBytes)
+    _ ->
+      None
+
+test> h2client.frame.RawFrame.tests.encodeDecodeRoundTrip = verify do
+  rawFrame =
+    RawFrame
+      (FrameHeader 3 Data 1 (MessageStream (StreamId 1)))
+      [10, 11, 12]
+  encoded = h2client.frame.RawFrame.encodeNats rawFrame
+  ensureEqual
+    (Some [0, 0, 3, 0, 1, 0, 0, 0, 1, 10, 11, 12])
+    encoded
+  ensureEqual
+    (Some rawFrame)
+    (Optional.flatMap h2client.frame.RawFrame.decodeNats encoded)
+
+test> h2client.frame.RawFrame.tests.decodePrefix = verify do
+  bytes =
+    [0, 0, 0, 4, 1, 0, 0, 0, 0, 0, 5, 0, 0, 64, 0, 9, 9]
+  ensureEqual
+    (Some
+      ( RawFrame (FrameHeader 0 Settings 1 ConnectionStream) []
+      , [0, 5, 0, 0, 64, 0, 9, 9]
+      ))
+    (h2client.frame.RawFrame.decodePrefixNats bytes)
+
+test> h2client.settings.Payload.tests.encodeDecode = verify do
+  payload =
+    Payload
+      [ Entry HeaderTableSize 4096
+      , Entry EnablePush 0
+      ]
+  encoded = h2client.settings.Payload.encodeNats payload
+  ensureEqual
+    [0, 1, 0, 0, 16, 0, 0, 2, 0, 0, 0, 0]
+    encoded
+  ensureEqual
+    (Some payload)
+    (h2client.settings.Payload.decodeNats encoded)
+
+test> h2client.settings.Payload.tests.rejectRemainder = verify do
+  ensureEqual
+    None
+    (h2client.settings.Payload.decodeNats [0, 1, 0, 0, 16])
+
+test> h2client.settings.Frame.tests.ackRoundTrip = verify do
+  rawFrame = h2client.settings.Frame.toRawFrame Ack
+  ensureEqual
+    (RawFrame (FrameHeader 0 Settings 1 ConnectionStream) [])
+    rawFrame
+  ensureEqual
+    (Some Ack)
+    (h2client.settings.Frame.fromRawFrame rawFrame)
+
+test> h2client.settings.Frame.tests.parametersRoundTrip = verify do
+  frame =
+    Parameters
+      (Payload
+        [ Entry HeaderTableSize 4096
+        , Entry MaxFrameSize 16384
+        ])
+  rawFrame = h2client.settings.Frame.toRawFrame frame
+  ensureEqual
+    (FrameHeader 12 Settings 0 ConnectionStream)
+    (h2client.frame.RawFrame.header rawFrame)
+  ensureEqual
+    (Some frame)
+    (h2client.settings.Frame.fromRawFrame rawFrame)
+
+---- Anything below this line is ignored by Unison.

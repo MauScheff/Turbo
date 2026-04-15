@@ -1,0 +1,775 @@
+use lib.base.Bytes
+use lib.base.Text
+use lib.base.crypto
+use lib.base.math.Integer
+
+type turbo.lib.es256.p256.Point
+  = Infinity
+  | Point Integer Integer
+
+type turbo.lib.es256.ecdsa.SigningKey
+  = SigningKey Integer
+
+type turbo.lib.es256.ecdsa.VerificationKey
+  = VerificationKey turbo.lib.es256.p256.Point
+
+type turbo.lib.es256.ecdsa.Signature
+  = Signature Integer Integer
+
+type turbo.lib.es256.ecdsa.NonceState
+  = NonceState Bytes Bytes
+
+turbo.lib.es256.internal.natEquals : Nat -> Nat -> Boolean
+turbo.lib.es256.internal.natEquals left right =
+  match Nat.diff left right with
+    0 -> true
+    _ -> false
+
+turbo.lib.es256.internal.integerEquals : Integer -> Integer -> Boolean
+turbo.lib.es256.internal.integerEquals left right =
+  Boolean.not (left < right || right < left)
+
+turbo.lib.es256.internal.integerLess : Integer -> Integer -> Boolean
+turbo.lib.es256.internal.integerLess left right =
+  left < right
+
+turbo.lib.es256.internal.integerAtMost : Integer -> Integer -> Boolean
+turbo.lib.es256.internal.integerAtMost left right =
+  left <= right
+
+turbo.lib.es256.internal.integerToNat : Integer -> Nat
+turbo.lib.es256.internal.integerToNat value =
+  Natural.toNat (Natural.fromInteger value)
+
+turbo.lib.es256.integer.modNormalize : Integer -> Integer -> Integer
+turbo.lib.es256.integer.modNormalize modulus value =
+  zero = Integer.fromNat 0
+  if turbo.lib.es256.internal.integerEquals modulus zero then
+    value
+  else
+    residue = value % modulus
+    if turbo.lib.es256.internal.integerLess residue zero then residue + modulus else residue
+
+turbo.lib.es256.integer.extendedGcd : Integer -> Integer -> (Integer, Integer, Integer)
+turbo.lib.es256.integer.extendedGcd a b =
+  zero = Integer.fromNat 0
+  one = Integer.fromNat 1
+  if turbo.lib.es256.internal.integerEquals b zero then
+    (a, one, zero)
+  else
+    quotient = a / b
+    remainder = a % b
+    (g, x1, y1) = turbo.lib.es256.integer.extendedGcd b remainder
+    (g, y1, x1 - quotient * y1)
+
+turbo.lib.es256.integer.modInverse : Integer -> Integer -> Optional Integer
+turbo.lib.es256.integer.modInverse modulus value =
+  zero = Integer.fromNat 0
+  one = Integer.fromNat 1
+  if turbo.lib.es256.internal.integerEquals modulus zero then
+    None
+  else
+    normalized = turbo.lib.es256.integer.modNormalize modulus value
+    (g, x, _) = turbo.lib.es256.integer.extendedGcd normalized modulus
+    if turbo.lib.es256.internal.integerEquals (Integer.abs g) one then
+      Some (turbo.lib.es256.integer.modNormalize modulus x)
+    else
+      None
+
+turbo.lib.es256.integer.powMod : Integer -> Integer -> Integer -> Integer
+turbo.lib.es256.integer.powMod base exponent modulus =
+  zero = Integer.fromNat 0
+  one = Integer.fromNat 1
+  if turbo.lib.es256.internal.integerEquals modulus zero then
+    zero
+  else
+    turbo.lib.es256.integer.powMod.internal
+      (turbo.lib.es256.integer.modNormalize modulus base)
+      exponent
+      modulus
+      one
+
+turbo.lib.es256.integer.powMod.internal :
+  Integer -> Integer -> Integer -> Integer -> Integer
+turbo.lib.es256.integer.powMod.internal base exponent modulus acc =
+  zero = Integer.fromNat 0
+  one = Integer.fromNat 1
+  two = Integer.fromNat 2
+  if turbo.lib.es256.internal.integerEquals exponent zero then
+    acc
+  else
+    bit = Integer.emod exponent two
+    squared = turbo.lib.es256.integer.modNormalize modulus (base * base)
+    if turbo.lib.es256.internal.natEquals (Natural.toNat bit) 1 then
+      turbo.lib.es256.integer.powMod.internal
+        squared
+        ((exponent - one) / two)
+        modulus
+        (turbo.lib.es256.integer.modNormalize modulus (acc * base))
+    else
+      turbo.lib.es256.integer.powMod.internal
+        squared
+        (exponent / two)
+        modulus
+        acc
+
+turbo.lib.es256.bytes.toUnsignedInteger : Bytes -> Integer
+turbo.lib.es256.bytes.toUnsignedInteger bytes =
+  List.foldLeft
+    turbo.lib.es256.bytes.internal.accumulateUnsignedByte
+    (Integer.fromNat 0)
+    (Bytes.toList bytes)
+
+turbo.lib.es256.bytes.internal.accumulateUnsignedByte : Integer -> Nat -> Integer
+turbo.lib.es256.bytes.internal.accumulateUnsignedByte acc byte =
+  acc * Integer.fromNat 256 + Integer.fromNat byte
+
+turbo.lib.es256.bytes.base64UrlText : Bytes -> Either Text Text
+turbo.lib.es256.bytes.base64UrlText bytes =
+  match Text.fromUtf8.impl (Bytes.toBase64UrlUnpadded bytes) with
+    Right text -> Right text
+    Left failure -> Left (IO.Failure.message failure)
+
+turbo.lib.es256.bytes.append : Bytes -> Bytes -> Bytes
+turbo.lib.es256.bytes.append left right =
+  use Bytes ++
+  left ++ right
+
+turbo.lib.es256.bytes.append4 : Bytes -> Bytes -> Bytes -> Bytes -> Bytes
+turbo.lib.es256.bytes.append4 a b c d =
+  turbo.lib.es256.bytes.append
+    (turbo.lib.es256.bytes.append (turbo.lib.es256.bytes.append a b) c)
+    d
+
+turbo.lib.es256.bytes.fromHexText : Text -> Either Text Bytes
+turbo.lib.es256.bytes.fromHexText text =
+  Bytes.fromBase16.impl (Text.toUtf8 text)
+
+turbo.lib.es256.bytes.repeatPair : Nat -> Text -> Either Text Bytes
+turbo.lib.es256.bytes.repeatPair count pair =
+  turbo.lib.es256.bytes.fromHexText (Text.repeat count pair)
+
+turbo.lib.es256.bytes.constantByte : Nat -> Either Text Bytes
+turbo.lib.es256.bytes.constantByte byte =
+  match byte with
+    0 -> turbo.lib.es256.bytes.repeatPair 1 "00"
+    1 -> turbo.lib.es256.bytes.repeatPair 1 "01"
+    _ -> Left "unsupported byte literal"
+
+turbo.lib.es256.bytes.hexTextFixed : Nat -> Integer -> Either Text Text
+turbo.lib.es256.bytes.hexTextFixed width value =
+  use Nat * - > mod
+  zero = Integer.fromNat 0
+  targetChars = width * 2
+  if turbo.lib.es256.internal.integerLess value zero then
+    Left "negative integers cannot be encoded as unsigned bytes"
+  else
+    match Integer.toHex value with
+      None -> Left "integer-to-hex failed"
+      Some rawHex ->
+        size = Text.size rawHex
+        evenHex =
+          match Nat.mod size 2 with
+            1 -> "0" ++ rawHex
+            _ -> rawHex
+        evenSize = Text.size evenHex
+        if evenSize > targetChars then
+          Left "integer exceeds fixed byte width"
+        else
+          padCount = targetChars - evenSize
+          Right (Text.repeat padCount "0" ++ evenHex)
+
+turbo.lib.es256.bytes.fromUnsignedIntegerFixed :
+  Nat -> Integer -> Either Text Bytes
+turbo.lib.es256.bytes.fromUnsignedIntegerFixed width value =
+  match turbo.lib.es256.bytes.hexTextFixed width value with
+    Left err -> Left err
+    Right hexText -> turbo.lib.es256.bytes.fromHexText hexText
+
+turbo.lib.es256.bytes.sha256 : Bytes -> Bytes
+turbo.lib.es256.bytes.sha256 bytes =
+  crypto.hashBytes HashAlgorithm.Sha2_256 bytes
+
+turbo.lib.es256.bytes.hmacSha256 : Bytes -> Bytes -> Bytes
+turbo.lib.es256.bytes.hmacSha256 key message =
+  crypto.hmacBytes HashAlgorithm.Sha2_256 key message
+
+turbo.lib.es256.p256.modP : Integer -> Integer
+turbo.lib.es256.p256.modP value =
+  turbo.lib.es256.integer.modNormalize (turbo.lib.es256.p256.fieldPrime ()) value
+
+turbo.lib.es256.p256.modN : Integer -> Integer
+turbo.lib.es256.p256.modN value =
+  turbo.lib.es256.integer.modNormalize (turbo.lib.es256.p256.curveOrder ()) value
+
+turbo.lib.es256.p256.fieldPrime : () -> Integer
+turbo.lib.es256.p256.fieldPrime _ =
+  Integer.unsafeFromText
+    "115792089210356248762697446949407573530086143415290314195533631308867097853951"
+
+turbo.lib.es256.p256.curveOrder : () -> Integer
+turbo.lib.es256.p256.curveOrder _ =
+  Integer.unsafeFromText
+    "115792089210356248762697446949407573529996955224135760342422259061068512044369"
+
+turbo.lib.es256.p256.coefficientA : () -> Integer
+turbo.lib.es256.p256.coefficientA _ =
+  turbo.lib.es256.p256.modP (Integer.negate (Integer.fromNat 3))
+
+turbo.lib.es256.p256.coefficientB : () -> Integer
+turbo.lib.es256.p256.coefficientB _ =
+  Integer.unsafeFromText
+    "41058363725152142129326129780047268409114441015993725554835256314039467401291"
+
+turbo.lib.es256.p256.generator : () -> turbo.lib.es256.p256.Point
+turbo.lib.es256.p256.generator _ =
+  turbo.lib.es256.p256.Point.Point
+    (Integer.unsafeFromText
+      "48439561293906451759052585252797914202762949526041747995844080717082404635286")
+    (Integer.unsafeFromText
+      "36134250956749795798585127919587881956611106672985015071877198253568414405109")
+
+turbo.lib.es256.p256.pointEquals :
+  turbo.lib.es256.p256.Point -> turbo.lib.es256.p256.Point -> Boolean
+turbo.lib.es256.p256.pointEquals left right =
+  match (left, right) with
+    (turbo.lib.es256.p256.Point.Infinity, turbo.lib.es256.p256.Point.Infinity) -> true
+    (turbo.lib.es256.p256.Point.Point x1 y1, turbo.lib.es256.p256.Point.Point x2 y2) ->
+      turbo.lib.es256.internal.integerEquals x1 x2
+        && turbo.lib.es256.internal.integerEquals y1 y2
+    _ -> false
+
+turbo.lib.es256.p256.isOnCurve : turbo.lib.es256.p256.Point -> Boolean
+turbo.lib.es256.p256.isOnCurve point =
+  match point with
+    turbo.lib.es256.p256.Point.Infinity -> true
+    turbo.lib.es256.p256.Point.Point x y ->
+      left = turbo.lib.es256.p256.modP (y * y)
+      right =
+        turbo.lib.es256.p256.modP
+          (x * x * x
+            + turbo.lib.es256.p256.coefficientA () * x
+            + turbo.lib.es256.p256.coefficientB ())
+      turbo.lib.es256.internal.integerEquals left right
+
+turbo.lib.es256.p256.negate :
+  turbo.lib.es256.p256.Point -> turbo.lib.es256.p256.Point
+turbo.lib.es256.p256.negate point =
+  match point with
+    turbo.lib.es256.p256.Point.Infinity -> point
+    turbo.lib.es256.p256.Point.Point x y ->
+      turbo.lib.es256.p256.Point.Point x (turbo.lib.es256.p256.modP (Integer.negate y))
+
+turbo.lib.es256.p256.add :
+  turbo.lib.es256.p256.Point
+  -> turbo.lib.es256.p256.Point
+  -> Either Text turbo.lib.es256.p256.Point
+turbo.lib.es256.p256.add left right =
+  zero = Integer.fromNat 0
+  two = Integer.fromNat 2
+  three = Integer.fromNat 3
+  prime = turbo.lib.es256.p256.fieldPrime ()
+  a = turbo.lib.es256.p256.coefficientA ()
+  match (left, right) with
+    (turbo.lib.es256.p256.Point.Infinity, _) -> Right right
+    (_, turbo.lib.es256.p256.Point.Infinity) -> Right left
+    (turbo.lib.es256.p256.Point.Point x1 y1, turbo.lib.es256.p256.Point.Point x2 y2) ->
+      if turbo.lib.es256.internal.integerEquals x1 x2 then
+        if turbo.lib.es256.internal.integerEquals
+          (turbo.lib.es256.p256.modP (y1 + y2))
+          zero then
+          Right turbo.lib.es256.p256.Point.Infinity
+        else
+          match turbo.lib.es256.integer.modInverse prime (two * y1) with
+            None -> Left "point doubling inverse missing"
+            Some inverse ->
+              slope =
+                turbo.lib.es256.p256.modP ((three * x1 * x1 + a) * inverse)
+              x3 = turbo.lib.es256.p256.modP (slope * slope - x1 - x2)
+              y3 = turbo.lib.es256.p256.modP (slope * (x1 - x3) - y1)
+              Right (turbo.lib.es256.p256.Point.Point x3 y3)
+      else
+        match turbo.lib.es256.integer.modInverse prime (x2 - x1) with
+          None -> Left "point addition inverse missing"
+          Some inverse ->
+            slope =
+              turbo.lib.es256.p256.modP ((y2 - y1) * inverse)
+            x3 = turbo.lib.es256.p256.modP (slope * slope - x1 - x2)
+            y3 = turbo.lib.es256.p256.modP (slope * (x1 - x3) - y1)
+            Right (turbo.lib.es256.p256.Point.Point x3 y3)
+
+turbo.lib.es256.p256.scalarMultiply :
+  Integer -> turbo.lib.es256.p256.Point -> Either Text turbo.lib.es256.p256.Point
+turbo.lib.es256.p256.scalarMultiply scalar point =
+  zero = Integer.fromNat 0
+  match turbo.lib.es256.internal.integerLess scalar zero with
+    true ->
+      turbo.lib.es256.p256.scalarMultiply
+        (Integer.negate scalar)
+        (turbo.lib.es256.p256.negate point)
+    false ->
+      turbo.lib.es256.p256.scalarMultiply.internal
+        scalar
+        point
+        turbo.lib.es256.p256.Point.Infinity
+
+turbo.lib.es256.p256.scalarMultiply.internal :
+  Integer
+  -> turbo.lib.es256.p256.Point
+  -> turbo.lib.es256.p256.Point
+  -> Either Text turbo.lib.es256.p256.Point
+turbo.lib.es256.p256.scalarMultiply.internal scalar addend acc =
+  zero = Integer.fromNat 0
+  two = Integer.fromNat 2
+  if turbo.lib.es256.internal.integerEquals scalar zero then
+    Right acc
+  else
+    nextScalar = scalar / two
+    odd = Integer.emod scalar two
+    nextAcc =
+      match Natural.toNat odd with
+        1 -> turbo.lib.es256.p256.add acc addend
+        _ -> Right acc
+    match nextAcc with
+      Left err -> Left err
+      Right updatedAcc ->
+        match turbo.lib.es256.p256.add addend addend with
+          Left err -> Left err
+          Right doubled ->
+            turbo.lib.es256.p256.scalarMultiply.internal
+              nextScalar
+              doubled
+              updatedAcc
+
+turbo.lib.es256.ecdsa.signingKeyFromBytes :
+  Bytes -> Either Text turbo.lib.es256.ecdsa.SigningKey
+turbo.lib.es256.ecdsa.signingKeyFromBytes scalarBytes =
+  turbo.lib.es256.ecdsa.signingKeyFromInteger
+    (turbo.lib.es256.bytes.toUnsignedInteger scalarBytes)
+
+turbo.lib.es256.ecdsa.signingKeyFromInteger :
+  Integer -> Either Text turbo.lib.es256.ecdsa.SigningKey
+turbo.lib.es256.ecdsa.signingKeyFromInteger scalar =
+  zero = Integer.fromNat 0
+  order = turbo.lib.es256.p256.curveOrder ()
+  if turbo.lib.es256.internal.integerAtMost scalar zero then
+    Left "signing scalar must be positive"
+  else if turbo.lib.es256.internal.integerAtMost order scalar then
+    Left "signing scalar must be less than curve order"
+  else
+    Right (turbo.lib.es256.ecdsa.SigningKey.SigningKey scalar)
+
+turbo.lib.es256.ecdsa.verificationKey :
+  turbo.lib.es256.ecdsa.SigningKey
+  -> Either Text turbo.lib.es256.ecdsa.VerificationKey
+turbo.lib.es256.ecdsa.verificationKey signingKey =
+  match signingKey with
+    turbo.lib.es256.ecdsa.SigningKey.SigningKey scalar ->
+      match turbo.lib.es256.p256.scalarMultiply scalar (turbo.lib.es256.p256.generator ()) with
+        Left err -> Left err
+        Right point -> Right (turbo.lib.es256.ecdsa.VerificationKey.VerificationKey point)
+
+turbo.lib.es256.ecdsa.bits2Octets : Bytes -> Either Text Bytes
+turbo.lib.es256.ecdsa.bits2Octets bytes =
+  turbo.lib.es256.bytes.fromUnsignedIntegerFixed
+    32
+    (turbo.lib.es256.p256.modN (turbo.lib.es256.bytes.toUnsignedInteger bytes))
+
+turbo.lib.es256.ecdsa.int2octets : Integer -> Either Text Bytes
+turbo.lib.es256.ecdsa.int2octets value =
+  turbo.lib.es256.bytes.fromUnsignedIntegerFixed 32 value
+
+turbo.lib.es256.ecdsa.initialNonceState :
+  Integer -> Bytes -> Either Text turbo.lib.es256.ecdsa.NonceState
+turbo.lib.es256.ecdsa.initialNonceState privateScalar messageHash =
+  match turbo.lib.es256.ecdsa.int2octets privateScalar with
+    Left err -> Left err
+    Right x ->
+      match turbo.lib.es256.ecdsa.bits2Octets messageHash with
+        Left err -> Left err
+        Right h1 ->
+          match turbo.lib.es256.bytes.repeatPair 32 "01" with
+            Left err -> Left err
+            Right v0 ->
+              match turbo.lib.es256.bytes.repeatPair 32 "00" with
+                Left err -> Left err
+                Right k0 ->
+                  match (turbo.lib.es256.bytes.constantByte 0, turbo.lib.es256.bytes.constantByte 1) with
+                    (Right zeroByte, Right oneByte) ->
+                      k1 =
+                        turbo.lib.es256.bytes.hmacSha256
+                          k0
+                          (turbo.lib.es256.bytes.append4 v0 zeroByte x h1)
+                      v1 = turbo.lib.es256.bytes.hmacSha256 k1 v0
+                      k2 =
+                        turbo.lib.es256.bytes.hmacSha256
+                          k1
+                          (turbo.lib.es256.bytes.append4 v1 oneByte x h1)
+                      v2 = turbo.lib.es256.bytes.hmacSha256 k2 v1
+                      Right (turbo.lib.es256.ecdsa.NonceState.NonceState k2 v2)
+                    (Left err, _) -> Left err
+                    (_, Left err) -> Left err
+
+turbo.lib.es256.ecdsa.rejectNonceState :
+  turbo.lib.es256.ecdsa.NonceState -> Either Text turbo.lib.es256.ecdsa.NonceState
+turbo.lib.es256.ecdsa.rejectNonceState nonceState =
+  match nonceState with
+    turbo.lib.es256.ecdsa.NonceState.NonceState k v ->
+      match turbo.lib.es256.bytes.constantByte 0 with
+        Left err -> Left err
+        Right zeroByte ->
+          nextK =
+            turbo.lib.es256.bytes.hmacSha256
+              k
+              (turbo.lib.es256.bytes.append v zeroByte)
+          nextV = turbo.lib.es256.bytes.hmacSha256 nextK v
+          Right (turbo.lib.es256.ecdsa.NonceState.NonceState nextK nextV)
+
+turbo.lib.es256.ecdsa.nextNonce :
+  turbo.lib.es256.ecdsa.NonceState
+  -> Either Text (Integer, turbo.lib.es256.ecdsa.NonceState)
+turbo.lib.es256.ecdsa.nextNonce nonceState =
+  match nonceState with
+    turbo.lib.es256.ecdsa.NonceState.NonceState k v ->
+      zero = Integer.fromNat 0
+      order = turbo.lib.es256.p256.curveOrder ()
+      nextV = turbo.lib.es256.bytes.hmacSha256 k v
+      candidate = turbo.lib.es256.bytes.toUnsignedInteger nextV
+      if turbo.lib.es256.internal.integerAtMost candidate zero
+        || turbo.lib.es256.internal.integerAtMost order candidate then
+        match turbo.lib.es256.ecdsa.rejectNonceState
+          (turbo.lib.es256.ecdsa.NonceState.NonceState k nextV) with
+          Left err -> Left err
+          Right retryState -> turbo.lib.es256.ecdsa.nextNonce retryState
+      else
+        Right (candidate, turbo.lib.es256.ecdsa.NonceState.NonceState k nextV)
+
+turbo.lib.es256.ecdsa.sign :
+  turbo.lib.es256.ecdsa.SigningKey -> Bytes -> Either Text turbo.lib.es256.ecdsa.Signature
+turbo.lib.es256.ecdsa.sign signingKey message =
+  match signingKey with
+    turbo.lib.es256.ecdsa.SigningKey.SigningKey privateScalar ->
+      hash = turbo.lib.es256.bytes.sha256 message
+      z = turbo.lib.es256.p256.modN (turbo.lib.es256.bytes.toUnsignedInteger hash)
+      match turbo.lib.es256.ecdsa.initialNonceState privateScalar hash with
+        Left err -> Left err
+        Right state ->
+          turbo.lib.es256.ecdsa.signWithState privateScalar z state
+
+turbo.lib.es256.ecdsa.signWithState :
+  Integer
+  -> Integer
+  -> turbo.lib.es256.ecdsa.NonceState
+  -> Either Text turbo.lib.es256.ecdsa.Signature
+turbo.lib.es256.ecdsa.signWithState privateScalar z state =
+  zero = Integer.fromNat 0
+  order = turbo.lib.es256.p256.curveOrder ()
+  match turbo.lib.es256.ecdsa.nextNonce state with
+    Left err -> Left err
+    Right (nonce, nextState) ->
+      match turbo.lib.es256.p256.scalarMultiply nonce (turbo.lib.es256.p256.generator ()) with
+        Left err -> Left err
+        Right point ->
+          match point with
+            turbo.lib.es256.p256.Point.Infinity ->
+              match turbo.lib.es256.ecdsa.rejectNonceState nextState with
+                Left err -> Left err
+                Right retryState ->
+                  turbo.lib.es256.ecdsa.signWithState privateScalar z retryState
+            turbo.lib.es256.p256.Point.Point x _ ->
+              r = turbo.lib.es256.p256.modN x
+              if turbo.lib.es256.internal.integerEquals r zero then
+                match turbo.lib.es256.ecdsa.rejectNonceState nextState with
+                  Left err -> Left err
+                  Right retryState ->
+                    turbo.lib.es256.ecdsa.signWithState privateScalar z retryState
+              else
+                match turbo.lib.es256.integer.modInverse order nonce with
+                  None -> Left "nonce inverse missing"
+                  Some inverseNonce ->
+                    s =
+                      turbo.lib.es256.p256.modN
+                        (inverseNonce * (z + r * privateScalar))
+                    if turbo.lib.es256.internal.integerEquals s zero then
+                      match turbo.lib.es256.ecdsa.rejectNonceState nextState with
+                        Left err -> Left err
+                        Right retryState ->
+                          turbo.lib.es256.ecdsa.signWithState privateScalar z retryState
+                    else
+                      Right (turbo.lib.es256.ecdsa.Signature.Signature r s)
+
+turbo.lib.es256.ecdsa.verify :
+  turbo.lib.es256.ecdsa.VerificationKey
+  -> Bytes
+  -> turbo.lib.es256.ecdsa.Signature
+  -> Either Text Boolean
+turbo.lib.es256.ecdsa.verify verificationKey message signature =
+  match (verificationKey, signature) with
+    ( turbo.lib.es256.ecdsa.VerificationKey.VerificationKey publicPoint
+    , turbo.lib.es256.ecdsa.Signature.Signature r s
+    ) ->
+      zero = Integer.fromNat 0
+      order = turbo.lib.es256.p256.curveOrder ()
+      if turbo.lib.es256.internal.integerAtMost r zero
+        || turbo.lib.es256.internal.integerAtMost order r
+        || turbo.lib.es256.internal.integerAtMost s zero
+        || turbo.lib.es256.internal.integerAtMost order s then
+        Right false
+      else if Boolean.not (turbo.lib.es256.p256.isOnCurve publicPoint) then
+        Right false
+      else
+        hash = turbo.lib.es256.bytes.sha256 message
+        z = turbo.lib.es256.p256.modN (turbo.lib.es256.bytes.toUnsignedInteger hash)
+        match turbo.lib.es256.integer.modInverse order s with
+          None -> Right false
+          Some w ->
+            u1 = turbo.lib.es256.p256.modN (z * w)
+            u2 = turbo.lib.es256.p256.modN (r * w)
+            match turbo.lib.es256.p256.scalarMultiply u1 (turbo.lib.es256.p256.generator ()) with
+              Left err -> Left err
+              Right p1 ->
+                match turbo.lib.es256.p256.scalarMultiply u2 publicPoint with
+                  Left err -> Left err
+                  Right p2 ->
+                    match turbo.lib.es256.p256.add p1 p2 with
+                      Left err -> Left err
+                      Right combined ->
+                        match combined with
+                          turbo.lib.es256.p256.Point.Infinity -> Right false
+                          turbo.lib.es256.p256.Point.Point x _ ->
+                            Right
+                              (turbo.lib.es256.internal.integerEquals
+                                (turbo.lib.es256.p256.modN x)
+                                r)
+
+turbo.lib.es256.ecdsa.signatureBytes :
+  turbo.lib.es256.ecdsa.Signature -> Either Text Bytes
+turbo.lib.es256.ecdsa.signatureBytes signature =
+  match signature with
+    turbo.lib.es256.ecdsa.Signature.Signature r s ->
+      match turbo.lib.es256.bytes.fromUnsignedIntegerFixed 32 r with
+        Left err -> Left err
+        Right rBytes ->
+          match turbo.lib.es256.bytes.fromUnsignedIntegerFixed 32 s with
+            Left err -> Left err
+            Right sBytes ->
+              Right (turbo.lib.es256.bytes.append rBytes sBytes)
+
+turbo.lib.es256.jwt.signingInput : Text -> Text -> Either Text Text
+turbo.lib.es256.jwt.signingInput headerJson claimsJson =
+  match turbo.lib.es256.bytes.base64UrlText (Text.toUtf8 headerJson) with
+    Left err -> Left err
+    Right header ->
+      match turbo.lib.es256.bytes.base64UrlText (Text.toUtf8 claimsJson) with
+        Left err -> Left err
+        Right claims -> Right (header ++ "." ++ claims)
+
+turbo.lib.es256.jwt.encode :
+  turbo.lib.es256.ecdsa.SigningKey -> Text -> Text -> Either Text Text
+turbo.lib.es256.jwt.encode signingKey headerJson claimsJson =
+  match turbo.lib.es256.jwt.signingInput headerJson claimsJson with
+    Left err -> Left err
+    Right input ->
+      match turbo.lib.es256.ecdsa.sign signingKey (Text.toUtf8 input) with
+        Left err -> Left err
+        Right signature ->
+          match turbo.lib.es256.ecdsa.signatureBytes signature with
+            Left err -> Left err
+            Right signatureBytes ->
+              match turbo.lib.es256.bytes.base64UrlText signatureBytes with
+                Left err -> Left err
+                Right encodedSignature -> Right (input ++ "." ++ encodedSignature)
+
+turbo.lib.es256.p256.tests.generatorOnCurve : [Result]
+turbo.lib.es256.p256.tests.generatorOnCurve =
+  check (turbo.lib.es256.p256.isOnCurve (turbo.lib.es256.p256.generator ()))
+
+turbo.lib.es256.p256.tests.scalarIdentity : [Result]
+turbo.lib.es256.p256.tests.scalarIdentity =
+  result =
+    turbo.lib.es256.p256.scalarMultiply
+      (Integer.fromNat 1)
+      (turbo.lib.es256.p256.generator ())
+  check
+    (match result with
+      Right point ->
+        turbo.lib.es256.p256.pointEquals point (turbo.lib.es256.p256.generator ())
+      Left _ -> false)
+
+turbo.lib.es256.p256.tests.scalarZero : [Result]
+turbo.lib.es256.p256.tests.scalarZero =
+  result =
+    turbo.lib.es256.p256.scalarMultiply
+      (Integer.fromNat 0)
+      (turbo.lib.es256.p256.generator ())
+  check
+    (match result with
+      Right turbo.lib.es256.p256.Point.Infinity -> true
+      _ -> false)
+
+turbo.lib.es256.p256.tests.groupOrderIdentity : [Result]
+turbo.lib.es256.p256.tests.groupOrderIdentity =
+  result =
+    turbo.lib.es256.p256.scalarMultiply
+      (turbo.lib.es256.p256.curveOrder ())
+      (turbo.lib.es256.p256.generator ())
+  check
+    (match result with
+      Right turbo.lib.es256.p256.Point.Infinity -> true
+      _ -> false)
+
+turbo.lib.es256.p256.tests.derivedPointsStayOnCurve : [Result]
+turbo.lib.es256.p256.tests.derivedPointsStayOnCurve =
+  test.verify do
+    Each.repeat 20
+    scalarNat = Random.natIn 1 1000
+    scalar = Integer.fromNat scalarNat
+    point =
+      match turbo.lib.es256.p256.scalarMultiply scalar (turbo.lib.es256.p256.generator ()) with
+        Right computed -> computed
+        Left err -> test.raiseFailure err ()
+    ensureEqual true (turbo.lib.es256.p256.isOnCurve point)
+
+turbo.lib.es256.ecdsa.tests.signVerifyExample : [Result]
+turbo.lib.es256.ecdsa.tests.signVerifyExample =
+  check
+    (match turbo.lib.es256.ecdsa.signingKeyFromInteger (Integer.fromNat 7) with
+      Left _ -> false
+      Right signingKey ->
+        match turbo.lib.es256.ecdsa.verificationKey signingKey with
+          Left _ -> false
+          Right verificationKey ->
+            match turbo.lib.es256.ecdsa.sign signingKey (Text.toUtf8 "hello") with
+              Left _ -> false
+              Right signature ->
+                match turbo.lib.es256.ecdsa.verify verificationKey (Text.toUtf8 "hello") signature with
+                  Right true -> true
+                  _ -> false)
+
+turbo.lib.es256.ecdsa.tests.opensslDerivedPublicKeyVector : [Result]
+turbo.lib.es256.ecdsa.tests.opensslDerivedPublicKeyVector =
+  scalarBytes =
+    turbo.lib.es256.bytes.fromHexText
+      "0102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F20"
+  expectedX =
+    Integer.unsafeFromText
+      "36800314656901874971922233984230487086293627707649141846109612816362852582239"
+  expectedY =
+    Integer.unsafeFromText
+      "31306309197751198336942314602598899411556768283567356274538599682493485388628"
+  check
+    (match scalarBytes with
+      Left _ -> false
+      Right bytes ->
+        match turbo.lib.es256.ecdsa.signingKeyFromBytes bytes with
+          Left _ -> false
+          Right signingKey ->
+            match turbo.lib.es256.ecdsa.verificationKey signingKey with
+              Right (turbo.lib.es256.ecdsa.VerificationKey.VerificationKey point) ->
+                match point with
+                  turbo.lib.es256.p256.Point.Point x y ->
+                    turbo.lib.es256.internal.integerEquals x expectedX
+                      && turbo.lib.es256.internal.integerEquals y expectedY
+                  turbo.lib.es256.p256.Point.Infinity -> false
+              Left _ -> false)
+
+turbo.lib.es256.ecdsa.tests.deterministicSignature : [Result]
+turbo.lib.es256.ecdsa.tests.deterministicSignature =
+  check
+    (match turbo.lib.es256.ecdsa.signingKeyFromInteger (Integer.fromNat 42) with
+      Left _ -> false
+      Right signingKey ->
+        match
+          ( turbo.lib.es256.ecdsa.sign signingKey (Text.toUtf8 "same-message")
+          , turbo.lib.es256.ecdsa.sign signingKey (Text.toUtf8 "same-message")
+          ) with
+          ( Right (turbo.lib.es256.ecdsa.Signature.Signature r1 s1)
+          , Right (turbo.lib.es256.ecdsa.Signature.Signature r2 s2)
+          ) ->
+            turbo.lib.es256.internal.integerEquals r1 r2
+              && turbo.lib.es256.internal.integerEquals s1 s2
+          _ -> false)
+
+turbo.lib.es256.ecdsa.tests.signatureBytesSize : [Result]
+turbo.lib.es256.ecdsa.tests.signatureBytesSize =
+  check
+    (match turbo.lib.es256.ecdsa.signingKeyFromInteger (Integer.fromNat 9) with
+      Left _ -> false
+      Right signingKey ->
+        match turbo.lib.es256.ecdsa.sign signingKey (Text.toUtf8 "size-check") with
+          Left _ -> false
+          Right signature ->
+            match turbo.lib.es256.ecdsa.signatureBytes signature with
+              Right bytes ->
+                match Bytes.size bytes with
+                  64 -> true
+                  _ -> false
+              Left _ -> false)
+
+turbo.lib.es256.ecdsa.tests.signVerify.props : [Result]
+turbo.lib.es256.ecdsa.tests.signVerify.props =
+  test.verify do
+    Each.repeat 15
+    scalarNat = Random.natIn 1 1000
+    messageNat = Random.natIn 0 100000
+    signingKey =
+      match turbo.lib.es256.ecdsa.signingKeyFromInteger (Integer.fromNat scalarNat) with
+        Right key -> key
+        Left err -> test.raiseFailure err ()
+    verificationKey =
+      match turbo.lib.es256.ecdsa.verificationKey signingKey with
+        Right key -> key
+        Left err -> test.raiseFailure err ()
+    message = Text.toUtf8 (Nat.toText messageNat)
+    signature =
+      match turbo.lib.es256.ecdsa.sign signingKey message with
+        Right sig -> sig
+        Left err -> test.raiseFailure err ()
+    verified =
+      match turbo.lib.es256.ecdsa.verify verificationKey message signature with
+        Right ok -> ok
+        Left err -> test.raiseFailure err ()
+    ensureEqual true verified
+
+turbo.lib.es256.ecdsa.tests.tamperedMessageRejected : [Result]
+turbo.lib.es256.ecdsa.tests.tamperedMessageRejected =
+  test.verify do
+    Each.repeat 10
+    scalarNat = Random.natIn 1 500
+    messageNat = Random.natIn 0 100000
+    signingKey =
+      match turbo.lib.es256.ecdsa.signingKeyFromInteger (Integer.fromNat scalarNat) with
+        Right key -> key
+        Left err -> test.raiseFailure err ()
+    verificationKey =
+      match turbo.lib.es256.ecdsa.verificationKey signingKey with
+        Right key -> key
+        Left err -> test.raiseFailure err ()
+    message = Text.toUtf8 (Nat.toText messageNat)
+    tampered = Text.toUtf8 (Nat.toText (Nat.increment messageNat))
+    signature =
+      match turbo.lib.es256.ecdsa.sign signingKey message with
+        Right sig -> sig
+        Left err -> test.raiseFailure err ()
+    verified =
+      match turbo.lib.es256.ecdsa.verify verificationKey tampered signature with
+        Right ok -> ok
+        Left err -> test.raiseFailure err ()
+    ensureEqual false verified
+
+turbo.lib.es256.jwt.tests.encodeStructure : [Result]
+turbo.lib.es256.jwt.tests.encodeStructure =
+  check
+    (match turbo.lib.es256.ecdsa.signingKeyFromInteger (Integer.fromNat 3) with
+      Left _ -> false
+      Right signingKey ->
+        match
+          turbo.lib.es256.jwt.encode
+            signingKey
+            "{\"alg\":\"ES256\",\"typ\":\"JWT\"}"
+            "{\"sub\":\"123\"}" with
+          Right token ->
+            match Text.splitOnText "." token with
+              [_h, _p, _s] -> true
+              _ -> false
+          Left _ -> false)

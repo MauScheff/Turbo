@@ -114,6 +114,7 @@ Important operational commands:
 - `just simulator-scenario-merge-local`
 - `just swift-test-target <name>`
 - `direnv exec . just ptt-push-target <channel_id> <backend> <sender>`
+- `direnv exec . just ptt-apns-worker`
 - `direnv exec . just ptt-apns-bridge`
 
 For deploys, the distinction is:
@@ -123,9 +124,23 @@ For deploys, the distinction is:
 
 In either case, if you changed backend behavior in the local Unison codebase, that change is not live on `https://beepbeep.to` until `turbo.deploy` has actually run.
 
-For current real-device background/lock-screen wake testing, `ptt-apns-bridge` is still part of the required operational lane. The backend now resolves the authoritative wake target, but the actual APNs PushToTalk send is still driven by that helper.
-Before the devices have rejoined the same backend channel, the bridge may have no valid push target yet. Treat that as setup/idle state rather than a wake failure.
-The bridge binds to the current direct-channel ID at startup. If a reset, reconnect, or rejoin creates a new backend channel, restart `ptt-apns-bridge` before trusting its output; otherwise it will keep polling the stale channel and can produce misleading `status=200` or timeout lines for the wrong session.
+For APNs credentials, keep the `.p8` file outside the repo and expose either `TURBO_APNS_PRIVATE_KEY_PATH` or `TURBO_APNS_PRIVATE_KEY` in the local deploy environment. `turbo.deploy` resolves the path locally when present and stores the PEM text in cloud config as `TURBO_APNS_PRIVATE_KEY`, so deployed backend code should never depend on filesystem access.
+
+For current real-device background/lock-screen wake testing, do not assume hosted Unison Cloud can send APNs directly yet. Direct APNs-from-Unison is the intended end state, but it is currently waiting on the upstream runtime rollout. Use the interim Cloudflare sender plan in [APNS_DELIVERY_PLAN.md](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md) for the production-shaped path.
+Set `TURBO_APNS_TEAM_ID`, `TURBO_APNS_KEY_ID`, and either `TURBO_APNS_PRIVATE_KEY_PATH` or `TURBO_APNS_PRIVATE_KEY` in the deploy environment before `turbo.deploy`. Optional `TURBO_APNS_BUNDLE_ID` and `TURBO_APNS_USE_SANDBOX` are also copied into cloud config when present.
+For the current Cloudflare sender path, `TURBO_APNS_WORKER_SECRET` and `TURBO_APNS_WORKER_BASE_URL` must also be present in the deploy environment before `turbo.deploy`.
+`ptt-apns-bridge` and `ptt-apns-worker` still exist as legacy/debug helpers. They are not the preferred interim production path.
+Wake-send attempts should still be uploaded to the backend dev diagnostics surface so `merged_diagnostics.py` includes them in the merged timeline as `[wake:apns] ...` events.
+
+## Deploying new backend env vars
+
+When introducing a new backend environment variable, treat it as a three-part change:
+
+1. Add the variable to the local deploy environment.
+2. Update `turbo.deploy` so the variable is copied into the named cloud environment.
+3. Add or extend a small runtime config surface so the deployed service can report whether it sees the new value.
+
+Do not stop at step 1. A variable existing in the local shell does not make it live in the deployed backend. New backend env vars are not fully wired until deploy-time sync and runtime visibility are both in place.
 
 ## Preferred app-side testing infrastructure
 
@@ -205,7 +220,7 @@ Local-only transport-fault scenarios belong in the local websocket lane. The sce
 - distributed control-plane bug:
   - start with `just simulator-scenario` and `just simulator-scenario-merge`
 - APNs wake or lock-screen receive issue:
-  - start with `ptt-push-target`, then `ptt-apns-bridge`, then devices
+  - start with `ptt-push-target`, then a deployed backend, then devices
 
 ## Related docs
 

@@ -8,3 +8,5 @@ __pycache__/
 .scenario-diagnostics/
 .scenario-runtime-config.json
 .envrc
+node_modules/
+.wrangler/

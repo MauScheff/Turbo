@@ -1,0 +1,116 @@
+use lib.base.Bytes
+use lib.base.Text
+use lib.base.crypto
+use lib.base.math.Integer
+
+turbo.crypto.integer.modNormalize : Integer -> Integer -> Integer
+turbo.crypto.integer.modNormalize modulus value =
+  zero = Integer.fromNat 0
+  if modulus == zero then
+    value
+  else
+    residue = value % modulus
+    if residue < zero then residue + modulus else residue
+
+turbo.crypto.integer.extendedGcd : Integer -> Integer -> (Integer, Integer, Integer)
+turbo.crypto.integer.extendedGcd a b =
+  zero = Integer.fromNat 0
+  one = Integer.fromNat 1
+  if b == zero then
+    (a, one, zero)
+  else
+    quotient = a / b
+    remainder = a % b
+    (g, x1, y1) = turbo.crypto.integer.extendedGcd b remainder
+    (g, y1, x1 - quotient * y1)
+
+turbo.crypto.integer.modInverse : Integer -> Integer -> Optional Integer
+turbo.crypto.integer.modInverse modulus value =
+  zero = Integer.fromNat 0
+  one = Integer.fromNat 1
+  if modulus == zero then
+    None
+  else
+    normalized = turbo.crypto.integer.modNormalize modulus value
+    (g, x, _) = turbo.crypto.integer.extendedGcd normalized modulus
+    if Integer.abs g == one then
+      Some (turbo.crypto.integer.modNormalize modulus x)
+    else
+      None
+
+turbo.crypto.integer.powMod : Integer -> Nat -> Integer -> Integer
+turbo.crypto.integer.powMod base exponent modulus =
+  zero = Integer.fromNat 0
+  one = Integer.fromNat 1
+  if modulus == zero then
+    zero
+  else
+    turbo.crypto.integer.powMod.internal
+      (turbo.crypto.integer.modNormalize modulus base)
+      exponent
+      modulus
+      one
+
+turbo.crypto.integer.powMod.internal : Integer -> Nat -> Integer -> Integer -> Integer
+turbo.crypto.integer.powMod.internal base exponent modulus acc =
+  use Nat / - mod
+  match exponent with
+    0 -> acc
+    _ ->
+      match mod exponent 2 with
+        1 ->
+          nextExponent = (exponent - 1) / 2
+          turbo.crypto.integer.powMod.internal
+            (turbo.crypto.integer.modNormalize modulus (base * base))
+            nextExponent
+            modulus
+            (turbo.crypto.integer.modNormalize modulus (acc * base))
+        _ ->
+          nextExponent = exponent / 2
+          turbo.crypto.integer.powMod.internal
+            (turbo.crypto.integer.modNormalize modulus (base * base))
+            nextExponent
+            modulus
+            acc
+
+turbo.crypto.bytes.toUnsignedInteger : Bytes -> Integer
+turbo.crypto.bytes.toUnsignedInteger bytes =
+  zero = Integer.fromNat 0
+  List.foldLeft
+    turbo.crypto.bytes.internal.accumulateUnsignedByte
+    zero
+    (Bytes.toList bytes)
+
+turbo.crypto.bytes.internal.accumulateUnsignedByte : Integer -> Nat -> Integer
+turbo.crypto.bytes.internal.accumulateUnsignedByte acc byte =
+  acc * Integer.fromNat 256 + Integer.fromNat byte
+
+turbo.crypto.bytes.base64UrlText : Bytes ->{Exception} Text
+turbo.crypto.bytes.base64UrlText bytes =
+  Text.fromUtf8 (Bytes.toBase64UrlUnpadded bytes)
+
+turbo.apns.jwt.signingInput : Text -> Text ->{Exception} Text
+turbo.apns.jwt.signingInput headerJson claimsJson =
+  header =
+    turbo.crypto.bytes.base64UrlText (Text.toUtf8 headerJson)
+  claims =
+    turbo.crypto.bytes.base64UrlText (Text.toUtf8 claimsJson)
+  header ++ "." ++ claims
+
+turbo.crypto.integer.modNormalize.tests.examples : [Result]
+turbo.crypto.integer.modNormalize.tests.examples =
+  first = turbo.crypto.integer.modNormalize (Integer.fromNat 11) (Integer.negate (Integer.fromNat 1)) == Integer.fromNat 10
+  second = turbo.crypto.integer.modNormalize (Integer.fromNat 11) (Integer.fromNat 12) == Integer.fromNat 1
+  check (first && second)
+
+turbo.crypto.integer.modInverse.tests.examples : [Result]
+turbo.crypto.integer.modInverse.tests.examples =
+  first =
+    match turbo.crypto.integer.modInverse (Integer.fromNat 11) (Integer.fromNat 3) with
+      Some value -> value == Integer.fromNat 4
+      None       -> false
+  second =
+    match turbo.crypto.integer.modInverse (Integer.fromNat 11) (Integer.fromNat 0) with
+      Some _ -> false
+      None   -> true
+  check (first && second)

@@ -64,13 +64,46 @@ Local backend loop:
 
 ## APNs / wake debugging
 
+Keep APNs credentials out of the repo. The local deploy environment may provide either `TURBO_APNS_PRIVATE_KEY_PATH` or `TURBO_APNS_PRIVATE_KEY` plus `TURBO_APNS_TEAM_ID` and `TURBO_APNS_KEY_ID`. `turbo.deploy` resolves the local path when needed and stores the PEM contents in cloud config as `TURBO_APNS_PRIVATE_KEY`, so deployed backend code should read config values, not filesystem paths.
+
+Current interim APNs sending also requires:
+
+- `TURBO_APNS_WORKER_SECRET`
+- `TURBO_APNS_WORKER_BASE_URL`
+
+Both must be visible to `turbo.deploy`, and both must then be verified from the live deployed service via `Config.lookup`, not inferred from local shell state.
+
+## Deploying new backend env vars
+
+When adding a new backend config key:
+
+1. add it to the local deploy environment
+2. make `turbo.deploy` copy it into the cloud environment
+3. make the deployed service able to report whether it sees the value at runtime
+
+This is part of the implementation, not optional operational cleanup. A new backend env var is not considered fully deployed until the running service can confirm it sees it.
+
 For background / lock-screen PushToTalk work, treat the loop as:
 
 1. `direnv exec . just ptt-push-target <channel_id> <backend> <sender>` to prove the receiver token exists
-2. `direnv exec . just ptt-apns-bridge` to prove real wake pushes are being sent
+2. use the current production APNs sender path:
+   - direct Unison Cloud send only after the upstream runtime support is merged and deployed
+   - until then, the interim sender should be the Cloudflare worker path documented in [`APNS_DELIVERY_PLAN.md`](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md)
 3. only then use physical-device diagnostics to debug post-wake playback or Apple PTT behavior
 
-At the moment, hosted real-device wake still depends on `ptt-apns-bridge` for the actual APNs send. The backend owns target selection and wake-capability truth, but it does not yet send the production PushToTalk APNs request by itself.
+The intended long-term wake architecture is:
+
+- the backend owns wake-target selection
+- `begin-transmit` builds the APNs JWT in Unison and sends the `pushtotalk` wake directly with `Http.request`
+- wake-send results are written to dev wake events so merged diagnostics can show the send timeline inline
+
+Current reality is different:
+
+- hosted direct APNs-from-Unison is blocked on the current Unison Cloud runtime
+- local runtime work proves the missing ALPN / HTTP/2 and P-256 builtin pieces
+- until that runtime is merged and deployed upstream, use the external sender plan in [`APNS_DELIVERY_PLAN.md`](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md)
+
+`ptt-apns-bridge` and `ptt-apns-worker` remain available only as legacy/debug tooling. The preferred interim production path is the backend-triggered Cloudflare sender, not the old pair-specific bridge.
 
 `ptt-push-target` returning a real token means the token-upload/backend-send boundary is healthy. If wake still fails after that, the bug is in app wake handling or playback, not in Apple Developer credential setup.
 

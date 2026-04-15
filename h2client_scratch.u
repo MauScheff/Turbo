@@ -1,0 +1,4 @@
+h2client.hello : Text
+h2client.hello = "hello"
+
+---- Anything below this line is ignored by Unison.

@@ -1,0 +1,370 @@
+h2client.probe.request.get
+  : h2client.frame.StreamId
+  -> Text
+  -> Text
+  -> Text
+  -> h2client.client.Request
+h2client.probe.request.get streamId scheme authority path =
+  h2client.client.Request.fromMethod
+    streamId
+    Get
+    scheme
+    authority
+    path
+    []
+    []
+
+h2client.probe.response.describe : Optional h2client.client.Response -> Text
+h2client.probe.response.describe = cases
+  None ->
+    "no-response"
+  Some response ->
+    status =
+      h2client.client.Response.head response
+        |> h2client.client.ResponseHead.status
+    bodySize =
+      h2client.client.Response.body response
+        |> lib.unison_base_7_16_0.data.List.size
+    "status:"
+      ++ lib.unison_base_7_16_0.Nat.toText status
+      ++ " body-bytes:"
+      ++ lib.unison_base_7_16_0.Nat.toText bodySize
+
+h2client.probe.failure.describe : lib.unison_base_7_16_0.IO.Failure -> Text
+h2client.probe.failure.describe failure =
+  "failure: " ++ lib.unison_base_7_16_0.IO.Failure.message failure
+
+h2client.probe.frame.describeStream : h2client.frame.StreamRef -> Text
+h2client.probe.frame.describeStream = cases
+  ConnectionStream ->
+    "conn"
+  MessageStream streamId ->
+    "stream:" ++ lib.unison_base_7_16_0.Nat.toText (h2client.frame.StreamId.toNat streamId)
+
+h2client.probe.frame.describeType : h2client.frame.FrameType -> Text
+h2client.probe.frame.describeType = cases
+  Data         -> "DATA"
+  Headers      -> "HEADERS"
+  Priority     -> "PRIORITY"
+  RstStream    -> "RST_STREAM"
+  Settings     -> "SETTINGS"
+  PushPromise  -> "PUSH_PROMISE"
+  Ping         -> "PING"
+  GoAway       -> "GOAWAY"
+  WindowUpdate -> "WINDOW_UPDATE"
+  Continuation -> "CONTINUATION"
+
+h2client.probe.frame.describe : h2client.frame.RawFrame -> Text
+h2client.probe.frame.describe frame =
+  header = h2client.frame.RawFrame.header frame
+  h2client.probe.frame.describeType (h2client.frame.FrameHeader.frameType header)
+    ++ " "
+    ++ h2client.probe.frame.describeStream (h2client.frame.FrameHeader.stream header)
+    ++ " len:"
+    ++ lib.unison_base_7_16_0.Nat.toText (h2client.frame.FrameHeader.length header)
+    ++ " flags:"
+    ++ lib.unison_base_7_16_0.Nat.toText (h2client.frame.FrameHeader.flags header)
+
+h2client.probe.frame.describeMany : [h2client.frame.RawFrame] -> Text
+h2client.probe.frame.describeMany frames =
+  match frames with
+    [] ->
+      "[]"
+    _  ->
+      "[" ++
+        lib.unison_base_7_16_0.data.List.foldLeft_
+          ""
+          (acc frame ->
+            if lib.unison_base_7_16_0.Text.eq acc "" then
+              h2client.probe.frame.describe frame
+            else
+              acc ++ ", " ++ h2client.probe.frame.describe frame)
+          frames
+        ++ "]"
+
+h2client.probe.bytes.previewText : [Nat] -> Text
+h2client.probe.bytes.previewText bytes =
+  preview = lib.unison_base_7_16_0.data.List.take 80 bytes
+  match lib.unison_base_7_16_0.Text.fromUtf8.impl (lib.unison_base_7_16_0.Bytes.fromList.impl preview) with
+    Right text -> text
+    Left _     -> "<non-utf8>"
+
+h2client.probe.text.joinComma : [Text] -> Text
+h2client.probe.text.joinComma parts =
+  match parts with
+    [] ->
+      ""
+    _  ->
+      lib.unison_base_7_16_0.data.List.foldLeft_
+        ""
+        (acc part ->
+          if lib.unison_base_7_16_0.Text.eq acc "" then
+            part
+          else
+            acc ++ ", " ++ part)
+        parts
+
+h2client.probe.bytes.describeList : [Nat] -> Text
+h2client.probe.bytes.describeList bytes =
+  "["
+    ++ h2client.probe.text.joinComma
+      (lib.unison_base_7_16_0.data.List.map lib.unison_base_7_16_0.Nat.toText bytes)
+    ++ "]"
+
+h2client.probe.chunk.summary
+  : Nat
+  -> [Nat]
+  -> [h2client.frame.RawFrame]
+  -> [Nat]
+  -> [h2client.frame.RawFrame]
+  -> Optional h2client.client.Response
+  -> Text
+h2client.probe.chunk.summary index incoming frames rest outbound response =
+  responseText =
+    match response with
+      None   -> "none"
+      Some _ -> "some"
+  headerBlockPreview =
+    match frames with
+      [] ->
+        ""
+      _  ->
+        previews =
+          lib.unison_base_7_16_0.data.List.foldLeft_
+            []
+            (acc frame ->
+              match h2client.headers.Frame.fromRawFrame frame with
+                Some headersFrame ->
+                  block =
+                    h2client.headers.Frame.blockFragment headersFrame
+                      |> lib.unison_base_7_16_0.data.List.take 24
+                  acc ++
+                    [" headers-block:"
+                      ++ h2client.probe.bytes.describeList block]
+                None ->
+                  acc)
+            frames
+        h2client.probe.text.joinComma previews
+  "chunk"
+    ++ lib.unison_base_7_16_0.Nat.toText index
+    ++ " bytes:"
+    ++ lib.unison_base_7_16_0.Nat.toText (lib.unison_base_7_16_0.data.List.size incoming)
+    ++ " frames:["
+    ++ h2client.probe.text.joinComma
+      (lib.unison_base_7_16_0.data.List.map h2client.probe.frame.describe frames)
+    ++ "] rest:"
+    ++ lib.unison_base_7_16_0.Nat.toText (lib.unison_base_7_16_0.data.List.size rest)
+    ++ " outbound:["
+    ++ h2client.probe.text.joinComma
+      (lib.unison_base_7_16_0.data.List.map h2client.probe.frame.describe outbound)
+    ++ "] response:"
+    ++ responseText
+    ++ headerBlockPreview
+
+h2client.probe.fetch.readChunk
+  : Nat
+  -> lib.unison_base_7_16_0.IO.net.Connection {IO, Exception}
+  -> h2client.session.State
+  -> [Nat]
+  ->{IO, Exception} (h2client.session.State, [Nat], Text)
+h2client.probe.fetch.readChunk index connection session buffered =
+  chunk = lib.unison_base_7_16_0.IO.net.Connection.receive connection
+  incoming = lib.unison_base_7_16_0.Bytes.toList chunk
+  allBytes = buffered ++ incoming
+  (frames, rest) = h2client.frame.RawFrame.decodeAvailableNats allBytes
+  (nextSession, outboundFrames, response) =
+    h2client.transport.handleFrames session frames
+  _ = h2client.transport.sendRawFrames connection outboundFrames
+  ( nextSession
+  , rest
+  , h2client.probe.chunk.summary
+      index
+      incoming
+      frames
+      rest
+      outboundFrames
+      response
+  )
+
+h2client.probe.fetch.inspectFirstChunk
+  : Text
+  -> Text
+  -> '{IO} Text
+h2client.probe.fetch.inspectFirstChunk authority path = do
+  host = lib.unison_base_7_16_0.IO.net.HostName.HostName authority
+  port = lib.unison_base_7_16_0.IO.net.Port.Port "443"
+  request = h2client.probe.request.get (StreamId 1) "https" authority path
+  result =
+    lib.unison_base_7_16_0.IO.catchAll do
+      config = h2client.transport.tls.clientConfig.h2 host
+      connection =
+        lib.unison_base_7_16_0.IO.net.Connection.tls.withConfig host port config
+      (prefaceBytes, _, initialFrames) =
+        h2client.session.start h2client.client.defaultSettings request
+      _ =
+        h2client.transport.sendBytes
+          connection
+          (lib.unison_base_7_16_0.Bytes.fromList.impl prefaceBytes)
+      _ = h2client.transport.sendRawFrames connection initialFrames
+      chunk = lib.unison_base_7_16_0.IO.net.Connection.receive connection
+      incoming = lib.unison_base_7_16_0.Bytes.toList chunk
+      (frames, rest) = h2client.frame.RawFrame.decodeAvailableNats incoming
+      "chunk-bytes:"
+        ++ lib.unison_base_7_16_0.Nat.toText (lib.unison_base_7_16_0.data.List.size incoming)
+        ++ " frames:"
+        ++ h2client.probe.frame.describeMany frames
+        ++ " rest:"
+        ++ lib.unison_base_7_16_0.Nat.toText (lib.unison_base_7_16_0.data.List.size rest)
+        ++ " preview:"
+        ++ h2client.probe.bytes.previewText incoming
+  match result with
+    Left failure ->
+      h2client.probe.failure.describe failure
+    Right summary ->
+      summary
+
+h2client.probe.fetch.describe
+  : Text
+  -> Text
+  -> '{IO} Text
+h2client.probe.fetch.describe authority path = do
+  host = lib.unison_base_7_16_0.IO.net.HostName.HostName authority
+  port = lib.unison_base_7_16_0.IO.net.Port.Port "443"
+  request = h2client.probe.request.get (StreamId 1) "https" authority path
+  result =
+    lib.unison_base_7_16_0.IO.catchAll do
+      h2client.client.fetchTls host port request
+  match result with
+    Left failure ->
+      h2client.probe.failure.describe failure
+    Right response ->
+      h2client.probe.response.describe response
+
+h2client.probe.fetch.traceThreeChunks
+  : Text
+  -> Text
+  -> '{IO} Text
+h2client.probe.fetch.traceThreeChunks authority path = do
+  host = lib.unison_base_7_16_0.IO.net.HostName.HostName authority
+  port = lib.unison_base_7_16_0.IO.net.Port.Port "443"
+  request = h2client.probe.request.get (StreamId 1) "https" authority path
+  result =
+    lib.unison_base_7_16_0.IO.catchAll do
+      config = h2client.transport.tls.clientConfig.h2 host
+      connection =
+        lib.unison_base_7_16_0.IO.net.Connection.tls.withConfig host port config
+      (prefaceBytes, session0, initialFrames) =
+        h2client.session.start h2client.client.defaultSettings request
+      _ =
+        h2client.transport.sendBytes
+          connection
+          (lib.unison_base_7_16_0.Bytes.fromList.impl prefaceBytes)
+      _ = h2client.transport.sendRawFrames connection initialFrames
+      (session1, rest1, summary1) =
+        h2client.probe.fetch.readChunk 1 connection session0 []
+      (session2, rest2, summary2) =
+        h2client.probe.fetch.readChunk 2 connection session1 rest1
+      (_, _, summary3) =
+        h2client.probe.fetch.readChunk 3 connection session2 rest2
+      summary1 ++ "\n" ++ summary2 ++ "\n" ++ summary3
+  match result with
+    Left failure ->
+      h2client.probe.failure.describe failure
+    Right summary ->
+      summary
+
+h2client.probe.fetch.traceTwoChunks
+  : Text
+  -> Text
+  -> '{IO} Text
+h2client.probe.fetch.traceTwoChunks authority path = do
+  host = lib.unison_base_7_16_0.IO.net.HostName.HostName authority
+  port = lib.unison_base_7_16_0.IO.net.Port.Port "443"
+  request = h2client.probe.request.get (StreamId 1) "https" authority path
+  result =
+    lib.unison_base_7_16_0.IO.catchAll do
+      config = h2client.transport.tls.clientConfig.h2 host
+      connection =
+        lib.unison_base_7_16_0.IO.net.Connection.tls.withConfig host port config
+      (prefaceBytes, session0, initialFrames) =
+        h2client.session.start h2client.client.defaultSettings request
+      _ =
+        h2client.transport.sendBytes
+          connection
+          (lib.unison_base_7_16_0.Bytes.fromList.impl prefaceBytes)
+      _ = h2client.transport.sendRawFrames connection initialFrames
+      (session1, rest1, summary1) =
+        h2client.probe.fetch.readChunk 1 connection session0 []
+      (_, _, summary2) =
+        h2client.probe.fetch.readChunk 2 connection session1 rest1
+      summary1 ++ "\n" ++ summary2
+  match result with
+    Left failure ->
+      h2client.probe.failure.describe failure
+    Right summary ->
+      summary
+
+h2client.probe.fetch.unisonCloud : '{IO} Text
+h2client.probe.fetch.unisonCloud =
+  h2client.probe.fetch.describe "www.unison.cloud" "/"
+
+h2client.probe.fetch.unisonCloud.firstChunk : '{IO} Text
+h2client.probe.fetch.unisonCloud.firstChunk =
+  h2client.probe.fetch.inspectFirstChunk "www.unison.cloud" "/"
+
+h2client.probe.fetch.apnsSandbox : '{IO} Text
+h2client.probe.fetch.apnsSandbox =
+  h2client.probe.fetch.describe "api.sandbox.push.apple.com" "/3/device/probe"
+
+h2client.probe.fetch.apnsSandbox.firstChunk : '{IO} Text
+h2client.probe.fetch.apnsSandbox.firstChunk =
+  h2client.probe.fetch.inspectFirstChunk "api.sandbox.push.apple.com" "/3/device/probe"
+
+h2client.probe.fetch.unisonCloud.trace : '{IO} Text
+h2client.probe.fetch.unisonCloud.trace =
+  h2client.probe.fetch.traceThreeChunks "www.unison.cloud" "/"
+
+h2client.probe.fetch.apnsSandbox.trace : '{IO} Text
+h2client.probe.fetch.apnsSandbox.trace =
+  h2client.probe.fetch.traceThreeChunks "api.sandbox.push.apple.com" "/3/device/probe"
+
+h2client.probe.fetch.apnsSandbox.trace2 : '{IO} Text
+h2client.probe.fetch.apnsSandbox.trace2 =
+  h2client.probe.fetch.traceTwoChunks "api.sandbox.push.apple.com" "/3/device/probe"
+
+h2client.probe.run.unisonCloud : '{IO, Exception} ()
+h2client.probe.run.unisonCloud = do
+  result = h2client.probe.fetch.unisonCloud ()
+  lib.unison_base_7_16_0.IO.console.printLine result
+
+h2client.probe.run.unisonCloud.firstChunk : '{IO, Exception} ()
+h2client.probe.run.unisonCloud.firstChunk = do
+  result = h2client.probe.fetch.unisonCloud.firstChunk ()
+  lib.unison_base_7_16_0.IO.console.printLine result
+
+h2client.probe.run.apnsSandbox : '{IO, Exception} ()
+h2client.probe.run.apnsSandbox = do
+  result = h2client.probe.fetch.apnsSandbox ()
+  lib.unison_base_7_16_0.IO.console.printLine result
+
+h2client.probe.run.apnsSandbox.firstChunk : '{IO, Exception} ()
+h2client.probe.run.apnsSandbox.firstChunk = do
+  result = h2client.probe.fetch.apnsSandbox.firstChunk ()
+  lib.unison_base_7_16_0.IO.console.printLine result
+
+h2client.probe.run.unisonCloud.trace : '{IO, Exception} ()
+h2client.probe.run.unisonCloud.trace = do
+  result = h2client.probe.fetch.unisonCloud.trace ()
+  lib.unison_base_7_16_0.IO.console.printLine result
+
+h2client.probe.run.apnsSandbox.trace : '{IO, Exception} ()
+h2client.probe.run.apnsSandbox.trace = do
+  result = h2client.probe.fetch.apnsSandbox.trace ()
+  lib.unison_base_7_16_0.IO.console.printLine result
+
+h2client.probe.run.apnsSandbox.trace2 : '{IO, Exception} ()
+h2client.probe.run.apnsSandbox.trace2 = do
+  result = h2client.probe.fetch.apnsSandbox.trace2 ()
+  lib.unison_base_7_16_0.IO.console.printLine result
+
+---- Anything below this line is ignored by Unison.

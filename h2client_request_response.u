@@ -1,0 +1,301 @@
+type h2client.client.Method
+  = Get
+  | Post
+
+h2client.client.Method.toText : h2client.client.Method -> Text
+h2client.client.Method.toText = cases
+  Get  -> "GET"
+  Post -> "POST"
+
+type h2client.client.Request
+  = Request
+      h2client.frame.StreamId
+      Text
+      Text
+      Text
+      Text
+      [h2client.hpack.HeaderField]
+      [Nat]
+
+h2client.client.Request.streamId : h2client.client.Request -> h2client.frame.StreamId
+h2client.client.Request.streamId = cases
+  Request streamId _ _ _ _ _ _ -> streamId
+
+h2client.client.Request.method : h2client.client.Request -> Text
+h2client.client.Request.method = cases
+  Request _ method _ _ _ _ _ -> method
+
+h2client.client.Request.scheme : h2client.client.Request -> Text
+h2client.client.Request.scheme = cases
+  Request _ _ scheme _ _ _ _ -> scheme
+
+h2client.client.Request.authority : h2client.client.Request -> Text
+h2client.client.Request.authority = cases
+  Request _ _ _ authority _ _ _ -> authority
+
+h2client.client.Request.path : h2client.client.Request -> Text
+h2client.client.Request.path = cases
+  Request _ _ _ _ path _ _ -> path
+
+h2client.client.Request.headers : h2client.client.Request -> [h2client.hpack.HeaderField]
+h2client.client.Request.headers = cases
+  Request _ _ _ _ _ headers _ -> headers
+
+h2client.client.Request.body : h2client.client.Request -> [Nat]
+h2client.client.Request.body = cases
+  Request _ _ _ _ _ _ body -> body
+
+h2client.client.Request.fromMethod
+  : h2client.frame.StreamId
+  -> h2client.client.Method
+  -> Text
+  -> Text
+  -> Text
+  -> [h2client.hpack.HeaderField]
+  -> [Nat]
+  -> h2client.client.Request
+h2client.client.Request.fromMethod streamId method scheme authority path headers body =
+  Request streamId (h2client.client.Method.toText method) scheme authority path headers body
+
+h2client.client.internal.encodeHeaderBlock : [h2client.hpack.HeaderField] -> [Nat]
+h2client.client.internal.encodeHeaderBlock headers =
+  lib.unison_base_7_16_0.data.List.foldLeft_
+    []
+    (acc header -> acc ++ h2client.hpack.HeaderField.encode header)
+    headers
+
+h2client.client.Request.headerFields
+  : h2client.client.Request -> [h2client.hpack.HeaderField]
+h2client.client.Request.headerFields request =
+  [ HeaderField ":method" (h2client.client.Request.method request)
+  , HeaderField ":scheme" (h2client.client.Request.scheme request)
+  , HeaderField ":authority" (h2client.client.Request.authority request)
+  , HeaderField ":path" (h2client.client.Request.path request)
+  ]
+    ++ h2client.client.Request.headers request
+
+h2client.client.Request.toRawFrames : h2client.client.Request -> [h2client.frame.RawFrame]
+h2client.client.Request.toRawFrames request =
+  headerBlock =
+    h2client.client.internal.encodeHeaderBlock
+      (h2client.client.Request.headerFields request)
+  body = h2client.client.Request.body request
+  streamId = h2client.client.Request.streamId request
+  headersFrame =
+    h2client.headers.Frame.toRawFrame
+      (h2client.headers.Frame.Frame
+        streamId
+        (match body with
+          [] -> true
+          _  -> false)
+        true
+        headerBlock)
+  match body with
+    [] ->
+      [headersFrame]
+    _  ->
+      [ headersFrame
+      , h2client.data.Frame.toRawFrame
+          (h2client.data.Frame.Frame streamId true body)
+      ]
+
+type h2client.client.ResponseHead
+  = ResponseHead Nat [h2client.hpack.HeaderField]
+
+h2client.client.ResponseHead.status : h2client.client.ResponseHead -> Nat
+h2client.client.ResponseHead.status = cases
+  ResponseHead status _ -> status
+
+h2client.client.ResponseHead.headers : h2client.client.ResponseHead -> [h2client.hpack.HeaderField]
+h2client.client.ResponseHead.headers = cases
+  ResponseHead _ headers -> headers
+
+type h2client.client.Response
+  = Response h2client.client.ResponseHead [Nat]
+
+h2client.client.Response.head : h2client.client.Response -> h2client.client.ResponseHead
+h2client.client.Response.head = cases
+  Response head _ -> head
+
+h2client.client.Response.body : h2client.client.Response -> [Nat]
+h2client.client.Response.body = cases
+  Response _ body -> body
+
+h2client.client.internal.decodeHeaderBlock
+  : [Nat] -> Optional [h2client.hpack.HeaderField]
+h2client.client.internal.decodeHeaderBlock bytes =
+  go remaining =
+    match remaining with
+      [] ->
+        Some []
+      _  ->
+        match h2client.hpack.HeaderField.decode remaining with
+          Some (header, rest) ->
+            match go rest with
+              Some headers -> Some (header +: headers)
+              None         -> None
+          None ->
+            None
+  go bytes
+
+h2client.client.ResponseHead.fromHeaders
+  : [h2client.hpack.HeaderField]
+  -> Optional h2client.client.ResponseHead
+h2client.client.ResponseHead.fromHeaders headers =
+  use Text ==
+  go remaining =
+    match remaining with
+      [] ->
+        None
+      HeaderField name value +: rest ->
+        if name == ":status" then
+          match Nat.fromText value with
+            Some status -> Some (ResponseHead status rest)
+            None        -> None
+        else
+          go rest
+  go headers
+
+h2client.client.Response.fromRawFrames
+  : [h2client.frame.RawFrame]
+  -> Optional h2client.client.Response
+h2client.client.Response.fromRawFrames rawFrames =
+  match rawFrames with
+    [] ->
+      None
+    first +: rest ->
+      match h2client.headers.Frame.fromRawFrame first with
+        None ->
+          None
+        Some headersFrame ->
+          if Boolean.not (h2client.headers.Frame.endHeaders headersFrame) then None
+          else
+            match
+              ( h2client.client.internal.decodeHeaderBlock
+                  (h2client.headers.Frame.blockFragment headersFrame)
+              , rest
+              ) with
+              (Some headers, []) ->
+                match h2client.client.ResponseHead.fromHeaders headers with
+                  Some head ->
+                    if h2client.headers.Frame.endStream headersFrame then
+                      Some (Response head [])
+                    else
+                      None
+                  None ->
+                    None
+              (Some headers, [second]) ->
+                match
+                  ( h2client.client.ResponseHead.fromHeaders headers
+                  , h2client.data.Frame.fromRawFrame second
+                  ) with
+                  (Some head, Some dataFrame) ->
+                    if Boolean.not (h2client.data.Frame.endStream dataFrame) then None
+                    else if h2client.headers.Frame.endStream headersFrame then None
+                    else
+                      if
+                        h2client.frame.StreamId.toNat (h2client.data.Frame.streamId dataFrame)
+                          == h2client.frame.StreamId.toNat (h2client.headers.Frame.streamId headersFrame)
+                      then
+                        Some (Response head (h2client.data.Frame.payload dataFrame))
+                      else None
+                  _ ->
+                    None
+              _ ->
+                None
+
+test> h2client.client.Request.tests.getRequestFrames = verify do
+  request =
+    h2client.client.Request.fromMethod
+      (StreamId 1)
+      Get
+      "https"
+      "www.unison.cloud"
+      "/"
+      []
+      []
+  frames = h2client.client.Request.toRawFrames request
+  ensureEqual 1 (lib.unison_base_7_16_0.data.List.size frames)
+  first =
+    Optional.getOrBug "expected one headers frame" (lib.unison_base_7_16_0.data.List.at 0 frames)
+  ensureEqual
+    (Some
+        (h2client.headers.Frame.Frame
+          (StreamId 1)
+          true
+          true
+          (h2client.client.internal.encodeHeaderBlock
+          [ HeaderField ":method" "GET"
+          , HeaderField ":scheme" "https"
+          , HeaderField ":authority" "www.unison.cloud"
+          , HeaderField ":path" "/"
+          ])))
+    (h2client.headers.Frame.fromRawFrame first)
+
+test> h2client.client.Request.tests.postRequestFrames = verify do
+  request =
+    h2client.client.Request.fromMethod
+      (StreamId 3)
+      Post
+      "https"
+      "api.sandbox.push.apple.com"
+      "/3/device/token"
+      [ HeaderField "authorization" "bearer token"
+      , HeaderField "apns-topic" "com.rounded.Turbo"
+      ]
+      [123, 125]
+  frames = h2client.client.Request.toRawFrames request
+  ensureEqual 2 (lib.unison_base_7_16_0.data.List.size frames)
+  ensureEqual
+    (Some (h2client.data.Frame.Frame (StreamId 3) true [123, 125]))
+    (Optional.flatMap
+      h2client.data.Frame.fromRawFrame
+      (lib.unison_base_7_16_0.data.List.at 1 frames))
+
+test> h2client.client.Response.tests.headersOnly = verify do
+  response =
+    h2client.client.Response.fromRawFrames
+      [ h2client.headers.Frame.toRawFrame
+          (h2client.headers.Frame.Frame
+            (StreamId 1)
+            true
+            true
+            (h2client.client.internal.encodeHeaderBlock
+              [ HeaderField ":status" "200"
+              , HeaderField "content-type" "application/json"
+              ]))
+      ]
+  ensureEqual
+    (Some
+      (Response
+        (ResponseHead
+          200
+          [HeaderField "content-type" "application/json"])
+        []))
+    response
+
+test> h2client.client.Response.tests.headersAndData = verify do
+  response =
+    h2client.client.Response.fromRawFrames
+      [ h2client.headers.Frame.toRawFrame
+          (h2client.headers.Frame.Frame
+            (StreamId 1)
+            false
+            true
+            (h2client.client.internal.encodeHeaderBlock
+              [ HeaderField ":status" "400"
+              , HeaderField "content-type" "text/plain"
+              ]))
+      , h2client.data.Frame.toRawFrame
+          (h2client.data.Frame.Frame (StreamId 1) true [111, 107])
+      ]
+  ensureEqual
+    (Some
+      (Response
+        (ResponseHead
+          400
+          [HeaderField "content-type" "text/plain"])
+        [111, 107]))
+    response
+
+---- Anything below this line is ignored by Unison.

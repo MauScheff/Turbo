@@ -1,0 +1,248 @@
+type h2client.session.State
+  = State
+      h2client.connection.BootstrapState
+      h2client.frame.StreamId
+      [h2client.frame.RawFrame]
+
+h2client.session.State.bootstrap : h2client.session.State -> h2client.connection.BootstrapState
+h2client.session.State.bootstrap = cases
+  State bootstrap _ _ -> bootstrap
+
+h2client.session.State.streamId : h2client.session.State -> h2client.frame.StreamId
+h2client.session.State.streamId = cases
+  State _ streamId _ -> streamId
+
+h2client.session.State.responseFrames : h2client.session.State -> [h2client.frame.RawFrame]
+h2client.session.State.responseFrames = cases
+  State _ _ responseFrames -> responseFrames
+
+type h2client.session.Step
+  = Step h2client.session.State [h2client.frame.RawFrame] (Optional h2client.client.Response)
+
+h2client.session.Step.state : h2client.session.Step -> h2client.session.State
+h2client.session.Step.state = cases
+  h2client.session.Step.Step state _ _ -> state
+
+h2client.session.Step.outbound : h2client.session.Step -> [h2client.frame.RawFrame]
+h2client.session.Step.outbound = cases
+  h2client.session.Step.Step _ outbound _ -> outbound
+
+h2client.session.Step.response : h2client.session.Step -> Optional h2client.client.Response
+h2client.session.Step.response = cases
+  h2client.session.Step.Step _ _ response -> response
+
+h2client.session.start
+  : h2client.settings.Payload
+  -> h2client.client.Request
+  -> ([Nat], h2client.session.State, [h2client.frame.RawFrame])
+h2client.session.start clientSettings request =
+  bootstrapStep = h2client.connection.start clientSettings
+  prefaceBytes =
+    lib.unison_base_7_16_0.Bytes.toList
+      (lib.unison_base_7_16_0.Text.toUtf8 h2client.frame.connectionPreface)
+  settingsFrames =
+    lib.unison_base_7_16_0.data.List.foldLeft_
+      []
+      (acc outbound ->
+        match outbound with
+          SendClientPreface   -> acc
+          SendSettings frame  -> acc ++ [h2client.settings.Frame.toRawFrame frame])
+      (h2client.connection.Step.outbound bootstrapStep)
+  requestFrames = h2client.client.Request.toRawFrames request
+  ( prefaceBytes
+  , State
+      (h2client.connection.Step.state bootstrapStep)
+      (h2client.client.Request.streamId request)
+      []
+  , settingsFrames ++ requestFrames
+  )
+
+h2client.frame.RawFrame.decodeAvailableNats
+  : [Nat] -> ([h2client.frame.RawFrame], [Nat])
+h2client.frame.RawFrame.decodeAvailableNats bytes =
+  match h2client.frame.RawFrame.decodePrefixNats bytes with
+    Some (frame, rest) ->
+      (decoded, remainder) = h2client.frame.RawFrame.decodeAvailableNats rest
+      (frame +: decoded, remainder)
+    None ->
+      ([], bytes)
+
+h2client.session.isResponseFrameCandidate
+  : h2client.frame.StreamId
+  -> h2client.frame.RawFrame
+  -> Boolean
+h2client.session.isResponseFrameCandidate streamId frame =
+  header = h2client.frame.RawFrame.header frame
+  expectedStream = h2client.frame.StreamId.toNat streamId
+  match
+    ( h2client.frame.FrameHeader.frameType header
+    , h2client.frame.FrameHeader.stream header
+    )
+    with
+    (Headers, MessageStream actualStream) ->
+      h2client.frame.StreamId.toNat actualStream == expectedStream
+    (Data, MessageStream actualStream) ->
+      h2client.frame.StreamId.toNat actualStream == expectedStream
+    (Continuation, MessageStream actualStream) ->
+      h2client.frame.StreamId.toNat actualStream == expectedStream
+    _ ->
+      false
+
+h2client.session.handleIncomingFrame
+  : h2client.session.State
+  -> h2client.frame.RawFrame
+  -> h2client.session.Step
+h2client.session.handleIncomingFrame state frame =
+  match h2client.settings.Frame.fromRawFrame frame with
+    Some settingsFrame ->
+      match
+        h2client.connection.handleSettingsFrame
+          (h2client.session.State.bootstrap state)
+          settingsFrame
+        with
+        Some bootstrapStep ->
+          outboundFrames =
+            lib.unison_base_7_16_0.data.List.foldLeft_
+              []
+              (acc outbound ->
+                match outbound with
+                  SendClientPreface  -> acc
+                  SendSettings reply -> acc ++ [h2client.settings.Frame.toRawFrame reply])
+              (h2client.connection.Step.outbound bootstrapStep)
+          Step
+            (State
+              (h2client.connection.Step.state bootstrapStep)
+              (h2client.session.State.streamId state)
+              (h2client.session.State.responseFrames state))
+            outboundFrames
+            None
+        None ->
+          Step state [] None
+    None ->
+      if
+        Boolean.not
+          (h2client.session.isResponseFrameCandidate
+            (h2client.session.State.streamId state)
+            frame)
+      then
+        Step state [] None
+      else
+        responseFrames =
+          h2client.session.State.responseFrames state ++ [frame]
+        nextState =
+          State
+            (h2client.session.State.bootstrap state)
+            (h2client.session.State.streamId state)
+            responseFrames
+        response =
+          h2client.client.Response.fromRawFrames responseFrames
+        Step nextState [] response
+
+test> h2client.frame.RawFrame.tests.decodeAvailableNats = verify do
+  bytes =
+    [0, 0, 0, 4, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 9]
+  ensureEqual
+    ( [ RawFrame (FrameHeader 0 Settings 1 ConnectionStream) []
+      , RawFrame (FrameHeader 1 Data 1 (MessageStream (StreamId 1))) [9]
+      ]
+    , []
+    )
+    (h2client.frame.RawFrame.decodeAvailableNats bytes)
+
+test> h2client.session.handleIncomingFrame.tests.bootstrapAck = verify do
+  (_, state, _) =
+    h2client.session.start
+      (Payload [Entry HeaderTableSize 4096])
+      (h2client.client.Request.fromMethod
+        (StreamId 1)
+        Get
+        "https"
+        "www.unison.cloud"
+        "/"
+        []
+        [])
+  step =
+    h2client.session.handleIncomingFrame
+      state
+      (h2client.settings.Frame.toRawFrame (Parameters (Payload [Entry EnablePush 0])))
+  ensureEqual 1 (lib.unison_base_7_16_0.data.List.size (h2client.session.Step.outbound step))
+  ensureEqual
+    (Some Ack)
+    (Optional.flatMap
+      h2client.settings.Frame.fromRawFrame
+      (lib.unison_base_7_16_0.data.List.at 0 (h2client.session.Step.outbound step)))
+
+test> h2client.session.handleIncomingFrame.tests_responseCompletion = verify do
+  (_, state0, _) =
+    h2client.session.start
+      (Payload [Entry HeaderTableSize 4096])
+      (h2client.client.Request.fromMethod
+        (StreamId 1)
+        Get
+        "https"
+        "www.unison.cloud"
+        "/"
+        []
+        [])
+  state1 =
+    h2client.session.Step.state
+      (h2client.session.handleIncomingFrame
+        state0
+        (h2client.settings.Frame.toRawFrame Ack))
+  step =
+    h2client.session.handleIncomingFrame
+      state1
+      (h2client.headers.Frame.toRawFrame
+        (h2client.headers.Frame.Frame
+          (StreamId 1)
+          true
+          true
+          (h2client.client.internal.encodeHeaderBlock
+            [HeaderField ":status" "200"])))
+  ensureEqual
+    (Some (Response (ResponseHead 200 []) []))
+    (h2client.session.Step.response step)
+
+test> h2client.session.handleIncomingFrame.tests_ignoreConnectionControlFrame = verify do
+  (_, state, _) =
+    h2client.session.start
+      (Payload [Entry HeaderTableSize 4096])
+      (h2client.client.Request.fromMethod
+        (StreamId 1)
+        Get
+        "https"
+        "www.unison.cloud"
+        "/"
+        []
+        [])
+  frame = RawFrame (FrameHeader 4 WindowUpdate 0 ConnectionStream) [0, 0, 0, 1]
+  step = h2client.session.handleIncomingFrame state frame
+  ensureEqual [] (h2client.session.Step.outbound step)
+  ensureEqual None (h2client.session.Step.response step)
+  ensureEqual [] (h2client.session.State.responseFrames (h2client.session.Step.state step))
+
+test> h2client.session.handleIncomingFrame.tests_ignoreOtherStreamFrame = verify do
+  (_, state, _) =
+    h2client.session.start
+      (Payload [Entry HeaderTableSize 4096])
+      (h2client.client.Request.fromMethod
+        (StreamId 1)
+        Get
+        "https"
+        "www.unison.cloud"
+        "/"
+        []
+        [])
+  frame =
+    h2client.headers.Frame.toRawFrame
+      (h2client.headers.Frame.Frame
+        (StreamId 3)
+        true
+        true
+        (h2client.client.internal.encodeHeaderBlock
+          [HeaderField ":status" "200"]))
+  step = h2client.session.handleIncomingFrame state frame
+  ensureEqual [] (h2client.session.State.responseFrames (h2client.session.Step.state step))
+  ensureEqual None (h2client.session.Step.response step)
+
+---- Anything below this line is ignored by Unison.
