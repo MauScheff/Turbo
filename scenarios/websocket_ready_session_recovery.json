@@ -74,12 +74,14 @@
           "selectedHandle": "@avery",
           "phase": "wakeReady",
           "isJoined": true,
+          "pttTokenRegistrationKind": "registered",
           "contacts": [
             { "handle": "@avery", "listState": "waiting-for-peer", "badgeStatus": "waiting-for-peer" }
           ],
           "backend": {
             "peerDeviceConnected": false,
-            "remoteAudioReadiness": "unknown"
+            "remoteAudioReadiness": "unknown",
+            "remoteWakeCapabilityKind": "wake-capable"
           }
         }
       }

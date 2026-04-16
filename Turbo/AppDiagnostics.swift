@@ -24,7 +24,9 @@ struct SelectedSessionDiagnosticsSummary: Equatable {
     let backendPeerDeviceConnected: Bool?
     let remoteAudioReadiness: String?
     let remoteWakeCapability: String?
+    let remoteWakeCapabilityKind: String?
     let backendCanTransmit: Bool?
+    let pttTokenRegistrationKind: String
     let incomingWakeActivationState: String?
     let incomingWakeBufferedChunkCount: Int?
 }
@@ -159,6 +161,7 @@ final class DiagnosticsStore {
 
     private(set) var entries: [DiagnosticsEntry] = []
     private(set) var stateCaptures: [DiagnosticsStateCapture] = []
+    private(set) var latestErrorEntry: DiagnosticsEntry?
 
     init() {
         let baseDirectory =
@@ -178,7 +181,7 @@ final class DiagnosticsStore {
     }
 
     var latestError: DiagnosticsEntry? {
-        entries.first(where: { $0.level == .error })
+        latestErrorEntry
     }
 
     var logFilePath: String? {
@@ -196,6 +199,7 @@ final class DiagnosticsStore {
         if entries.count > entryLimit {
             entries.removeLast(entries.count - entryLimit)
         }
+        refreshLatestErrorEntry(afterRecording: entry)
         logger.log(level: level.osLogType, "\(subsystem.rawValue, privacy: .public): \(message, privacy: .public) \(metadata.formattedForLog, privacy: .public)")
         appendToDisk(entry)
     }
@@ -203,6 +207,7 @@ final class DiagnosticsStore {
     func clear() {
         entries.removeAll()
         stateCaptures.removeAll()
+        latestErrorEntry = nil
         guard let logFileURL else { return }
         try? Data().write(to: logFileURL, options: .atomic)
     }
@@ -311,6 +316,20 @@ final class DiagnosticsStore {
         Array(Set(oldFields.keys).union(newFields.keys))
             .filter { oldFields[$0] != newFields[$0] }
             .sorted()
+    }
+
+    private func refreshLatestErrorEntry(afterRecording entry: DiagnosticsEntry) {
+        if entry.level == .error {
+            latestErrorEntry = entry
+            return
+        }
+
+        guard let latestErrorEntry else { return }
+        if entries.contains(where: { $0.id == latestErrorEntry.id }) {
+            return
+        }
+
+        self.latestErrorEntry = entries.first(where: { $0.level == .error })
     }
 }
 

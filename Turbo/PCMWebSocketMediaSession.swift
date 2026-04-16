@@ -349,7 +349,7 @@ final class PCMWebSocketMediaSession: MediaSession {
         }
     }
 
-    func close() {
+    func close(deactivateAudioSession: Bool) {
         stateLock.lock()
         isSendingAudio = false
         stateLock.unlock()
@@ -375,21 +375,29 @@ final class PCMWebSocketMediaSession: MediaSession {
         playbackConverter = nil
         isPlaybackReady = false
         isCaptureReady = false
-        deactivateAudioSessionIfNeeded()
+        deactivateAudioSessionIfNeeded(deactivateAudioSession: deactivateAudioSession)
         state = .closed
     }
 
-    private func deactivateAudioSessionIfNeeded() {
+    private func deactivateAudioSessionIfNeeded(deactivateAudioSession: Bool) {
         guard activeAudioSessionOwnership == .appManaged else {
             activeAudioSessionOwnership = nil
             return
         }
         activeAudioSessionOwnership = nil
+        guard deactivateAudioSession else {
+            Task {
+                await report(
+                    "Preserved active audio session during media close",
+                    metadata: [:]
+                )
+            }
+            return
+        }
 
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setActive(false, options: [.notifyOthersOnDeactivation])
-            try session.setCategory(.soloAmbient, mode: .default, options: [])
             Task {
                 await report(
                     "Audio session deactivated for media close",
@@ -415,6 +423,22 @@ final class PCMWebSocketMediaSession: MediaSession {
             activationMode: activationMode,
             startupMode: startupMode
         )
+        guard configuration.shouldConfigureSession else {
+            activeAudioSessionOwnership = nil
+            Task {
+                await report(
+                    "Preserved system-managed audio session configuration",
+                    metadata: audioSessionMetadata(session).merging(
+                        [
+                            "activationMode": String(describing: activationMode),
+                            "startupMode": String(describing: startupMode),
+                        ],
+                        uniquingKeysWith: { _, new in new }
+                    )
+                )
+            }
+            return
+        }
         try session.setCategory(
             configuration.category,
             mode: configuration.mode,

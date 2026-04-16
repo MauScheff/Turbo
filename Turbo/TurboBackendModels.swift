@@ -739,6 +739,30 @@ struct TurboChannelWakeReadinessPayload: Decodable, Equatable {
     var remoteStatus: RemoteWakeCapabilityState {
         peerWakeCapability.status.remoteState
     }
+
+    func settingRemoteStatus(_ status: RemoteWakeCapabilityState) -> TurboChannelWakeReadinessPayload {
+        TurboChannelWakeReadinessPayload(
+            selfWakeCapability: selfWakeCapability,
+            peerWakeCapability: TurboWakeCapabilityStatusPayload(
+                kind: {
+                    switch status {
+                    case .unavailable:
+                        return "unavailable"
+                    case .wakeCapable:
+                        return "wake-capable"
+                    }
+                }(),
+                targetDeviceId: {
+                    switch status {
+                    case .unavailable:
+                        return nil
+                    case .wakeCapable(let targetDeviceId):
+                        return targetDeviceId
+                    }
+                }()
+            )
+        )
+    }
 }
 
 private extension TurboWakeCapabilityStatus {
@@ -1477,6 +1501,21 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             readinessPayload: readinessPayload,
             audioReadinessPayload: audioReadinessPayload.settingRemoteStatus(status),
             wakeReadinessPayload: wakeReadinessPayload
+        )
+    }
+
+    func settingRemoteWakeCapability(_ status: RemoteWakeCapabilityState) -> TurboChannelReadinessResponse {
+        TurboChannelReadinessResponse(
+            channelId: channelId,
+            peerUserId: peerUserId,
+            selfHasActiveDevice: selfHasActiveDevice,
+            peerHasActiveDevice: peerHasActiveDevice,
+            activeTransmitterUserId: activeTransmitterUserId,
+            activeTransmitExpiresAt: activeTransmitExpiresAt,
+            status: statusKind,
+            readinessPayload: readinessPayload,
+            audioReadinessPayload: audioReadinessPayload,
+            wakeReadinessPayload: wakeReadinessPayload.settingRemoteStatus(status)
         )
     }
 }

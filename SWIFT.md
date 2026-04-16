@@ -55,6 +55,35 @@ For simulator/device/PTT debugging loops and operational debugging guidance, use
 - For iOS refactors, prefer extracting small dedicated types/files over growing `ContentView.swift`.
 - For backend and app integration, keep repeatable probes and smoke checks checked into the repo when they materially improve iteration speed.
 
+## Default architecture pattern
+
+This is the default shape we want across the app, and usually across the system wherever it fits:
+
+- Keep the UI thin.
+  - views render derived state
+  - views emit user intents
+  - views should not own business-state truth
+- Model each workflow around one canonical domain state machine.
+  - use enums with associated values for mutually exclusive phases
+  - keep phase-specific data inside the matching case
+  - do not spread the same truth across parallel booleans, optional fields, and UI latches
+- Normalize every input into typed events before it reaches the core.
+  - UI gestures, backend updates, websocket signals, and Apple/PTT callbacks should all become explicit domain events
+  - reducers or transition functions should decide the next valid state
+- Prefer a functional core / imperative shell split.
+  - the core should derive state and transitions with pure or mostly-pure functions
+  - adapters, clients, and coordinators should contain framework calls and side effects
+- Store canonical state once and derive projections from it.
+  - selected-contact UI state, button labels, status text, and diagnostics summaries should be projections, not competing sources of truth
+- Make important transitions idempotent and replay-safe.
+  - duplicate delivery, retries, reconnects, and reordered signals should converge on the same valid state
+  - explicit stop or release should dominate stale late-arriving events
+- Make the system observable at the state-machine seam.
+  - log meaningful transitions, invariants, and rejected events
+  - prefer diagnostics that explain why a transition happened or was ignored
+
+When a code path does not currently match this shape, the preferred direction is to move more logic into typed state, typed events, and derived projections rather than adding another local flag or UI workaround.
+
 ## Current app shape
 
 The important boundaries are:

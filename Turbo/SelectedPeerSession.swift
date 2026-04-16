@@ -11,6 +11,9 @@ struct SelectedPeerSessionState: Equatable {
     var relationship: PairRelationshipState = .none
     var baseState: ConversationState = .idle
     var isJoined: Bool = false
+    var localIsTransmitting: Bool = false
+    var localIsStopping: Bool = false
+    var localRequiresFreshPress: Bool = false
     var activeChannelID: UUID?
     var systemSessionMatchesContact: Bool = false
     var systemSessionState: SystemPTTSessionState = .none
@@ -32,6 +35,9 @@ enum SelectedPeerEvent: Equatable {
     case channelUpdated(ChannelReadinessSnapshot?)
     case localSessionUpdated(
         isJoined: Bool,
+        localIsTransmitting: Bool,
+        localIsStopping: Bool,
+        localRequiresFreshPress: Bool,
         activeChannelID: UUID?,
         pendingAction: PendingSessionAction,
         localJoinFailure: PTTJoinFailure?
@@ -78,8 +84,19 @@ enum SelectedPeerReducer {
             nextState.baseState = baseState
         case .channelUpdated(let channel):
             nextState.channel = channel
-        case .localSessionUpdated(let isJoined, let activeChannelID, let pendingAction, let localJoinFailure):
+        case .localSessionUpdated(
+            let isJoined,
+            let localIsTransmitting,
+            let localIsStopping,
+            let localRequiresFreshPress,
+            let activeChannelID,
+            let pendingAction,
+            let localJoinFailure
+        ):
             nextState.isJoined = isJoined
+            nextState.localIsTransmitting = localIsTransmitting
+            nextState.localIsStopping = localIsStopping
+            nextState.localRequiresFreshPress = localRequiresFreshPress
             nextState.activeChannelID = activeChannelID
             nextState.pendingAction = pendingAction
             nextState.localJoinFailure = localJoinFailure
@@ -128,6 +145,9 @@ enum SelectedPeerReducer {
             contactName: selection.contactName,
             contactIsOnline: selection.contactIsOnline,
             isJoined: state.isJoined,
+            localIsTransmitting: state.localIsTransmitting,
+            localIsStopping: state.localIsStopping,
+            localRequiresFreshPress: state.localRequiresFreshPress,
             activeChannelID: state.activeChannelID,
             systemSessionMatchesContact: state.systemSessionMatchesContact,
             systemSessionState: state.systemSessionState,

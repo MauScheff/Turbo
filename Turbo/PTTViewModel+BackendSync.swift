@@ -11,14 +11,30 @@ import UIKit
 extension PTTViewModel {
     func mergedChannelReadinessPreservingWakeCapableFallback(
         existing: TurboChannelReadinessResponse?,
-        fetched: TurboChannelReadinessResponse?
+        fetched: TurboChannelReadinessResponse?,
+        peerDeviceConnected: Bool
     ) -> TurboChannelReadinessResponse? {
         guard let fetched else { return existing }
         guard let existing else { return fetched }
-        guard existing.remoteAudioReadiness == .wakeCapable else { return fetched }
-        guard fetched.remoteAudioReadiness == .waiting else { return fetched }
-        guard case .wakeCapable = fetched.remoteWakeCapability else { return fetched }
-        return fetched.settingRemoteAudioReadiness(.wakeCapable)
+        guard !peerDeviceConnected else { return fetched }
+        guard case .wakeCapable(let existingTargetDeviceId) = existing.remoteWakeCapability else {
+            return fetched
+        }
+
+        var merged = fetched
+
+        if existing.remoteAudioReadiness == .wakeCapable,
+           fetched.remoteAudioReadiness == .waiting {
+            merged = merged.settingRemoteAudioReadiness(.wakeCapable)
+        }
+
+        if case .unavailable = fetched.remoteWakeCapability {
+            merged = merged.settingRemoteWakeCapability(
+                .wakeCapable(targetDeviceId: existingTargetDeviceId)
+            )
+        }
+
+        return merged
     }
 
     func trackedPresenceFallbackTargets(
@@ -60,16 +76,23 @@ extension PTTViewModel {
     private func shouldTreatIncomingSignalAsWakeCandidate(for contactID: UUID) -> Bool {
         guard UIApplication.shared.applicationState != .active else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
+        guard !pttWakeRuntime.shouldSuppressProvisionalWakeCandidate(for: contactID) else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
     }
 
-    func shouldRepairSystemRemoteParticipantFromSignalPath(
+    func shouldSetSystemRemoteParticipantFromSignalPath(
         for contactID: UUID,
         applicationState: UIApplication.State
     ) -> Bool {
         guard applicationState == .active else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID
+    }
+
+    func shouldClearSystemRemoteParticipantFromSignalPath(for contactID: UUID) -> Bool {
+        guard let channelUUID = channelUUID(for: contactID) else { return false }
+        guard pttCoordinator.state.systemChannelUUID == channelUUID else { return false }
+        return !pttCoordinator.state.isTransmitting
     }
 
     func prefersForegroundAppManagedReceivePlayback(for contactID: UUID) -> Bool {
@@ -103,6 +126,19 @@ extension PTTViewModel {
             for: contactID,
             applicationState: applicationState
         ) else { return false }
+        guard remoteTransmittingContactIDs.contains(contactID) else { return false }
+        guard let channelUUID = channelUUID(for: contactID) else { return false }
+        return pttCoordinator.state.systemChannelUUID == channelUUID
+            && !pttCoordinator.state.isTransmitting
+            && isPTTAudioSessionActive
+    }
+
+    func shouldDeferBackgroundPlaybackUntilPTTAudioActivation(
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState != .active else { return false }
+        guard !isPTTAudioSessionActive else { return false }
         guard remoteTransmittingContactIDs.contains(contactID) else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
@@ -355,6 +391,7 @@ extension PTTViewModel {
         switch envelope.type {
         case .transmitStart, .transmitStop:
             if envelope.type == .transmitStart {
+                pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
                 markRemoteAudioActivity(for: contactID)
                 if shouldTreatIncomingSignalAsWakeCandidate(for: contactID) {
                     ensurePendingWakeCandidate(
@@ -365,7 +402,25 @@ extension PTTViewModel {
                     )
                 }
             } else {
-                pttWakeRuntime.clear(for: contactID)
+                pttWakeRuntime.suppressProvisionalWakeCandidate(for: contactID)
+                if let activationState = pttWakeRuntime.incomingWakeActivationState(for: contactID),
+                   activationState == .signalBuffered
+                    || activationState == .awaitingSystemActivation
+                    || activationState == .systemActivationTimedOutWaitingForForeground {
+                    pttWakeRuntime.markSystemActivationInterruptedByTransmitEnd(for: contactID)
+                    diagnostics.record(
+                        .media,
+                        level: .error,
+                        message: "Transmit ended before system wake audio activation arrived",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "channelId": envelope.channelId,
+                            "activationState": String(describing: activationState),
+                        ]
+                    )
+                } else {
+                    pttWakeRuntime.clear(for: contactID)
+                }
                 clearRemoteAudioActivity(for: contactID)
                 let shouldRestoreInteractivePrewarm =
                     isJoined
@@ -383,7 +438,7 @@ extension PTTViewModel {
                         metadata: ["contactId": contactID.uuidString]
                     )
                     if shouldRestoreInteractivePrewarm {
-                        mediaRuntime.requestInteractivePrewarmAfterAudioDeactivation(for: contactID)
+                        deferInteractivePrewarmUntilPTTAudioDeactivation(for: contactID)
                         diagnostics.record(
                             .media,
                             message: "Deferred interactive audio prewarm until PTT audio deactivation",
@@ -402,13 +457,19 @@ extension PTTViewModel {
                 captureDiagnosticsState("backend-signal:\(envelope.type.rawValue)")
             }
             Task {
-                if shouldRepairSystemRemoteParticipantFromSignalPath(
-                    for: contactID,
-                    applicationState: UIApplication.shared.applicationState
-                ) {
+                let shouldSetRemoteParticipant =
+                    envelope.type == .transmitStart
+                    && shouldSetSystemRemoteParticipantFromSignalPath(
+                        for: contactID,
+                        applicationState: UIApplication.shared.applicationState
+                    )
+                let shouldClearRemoteParticipant =
+                    envelope.type == .transmitStop
+                    && shouldClearSystemRemoteParticipantFromSignalPath(for: contactID)
+                if shouldSetRemoteParticipant || shouldClearRemoteParticipant {
                     await updateSystemRemoteParticipant(
                         for: contactID,
-                        isActive: envelope.type == .transmitStart
+                        isActive: shouldSetRemoteParticipant
                     )
                 }
                 await refreshContactSummaries()
@@ -460,11 +521,12 @@ extension PTTViewModel {
                 metadata: ["channelId": envelope.channelId, "fromDeviceId": envelope.fromDeviceId]
             )
             Task {
+                let applicationState = UIApplication.shared.applicationState
                 let shouldRepairRemoteParticipant =
                     !remoteTransmittingContactIDs.contains(contactID)
-                    && shouldRepairSystemRemoteParticipantFromSignalPath(
+                    && shouldSetSystemRemoteParticipantFromSignalPath(
                         for: contactID,
-                        applicationState: UIApplication.shared.applicationState
+                        applicationState: applicationState
                     )
                 if shouldTreatIncomingSignalAsWakeCandidate(for: contactID) {
                     ensurePendingWakeCandidate(
@@ -486,6 +548,17 @@ extension PTTViewModel {
                     diagnostics.record(
                         .media,
                         message: "Buffered wake audio chunk until PTT activation",
+                        metadata: ["channelId": envelope.channelId, "contactId": contactID.uuidString]
+                    )
+                    return
+                }
+                if shouldDeferBackgroundPlaybackUntilPTTAudioActivation(
+                    for: contactID,
+                    applicationState: applicationState
+                ) {
+                    diagnostics.record(
+                        .media,
+                        message: "Deferred background audio chunk until PTT audio session activates",
                         metadata: ["channelId": envelope.channelId, "contactId": contactID.uuidString]
                     )
                     return
@@ -629,7 +702,8 @@ extension PTTViewModel {
             let existingChannelState = backendSyncCoordinator.state.syncState.channelStates[contactID]
             let effectiveChannelReadiness = mergedChannelReadinessPreservingWakeCapableFallback(
                 existing: channelReadinessByContactID[contactID],
-                fetched: fetchedChannelReadiness
+                fetched: fetchedChannelReadiness,
+                peerDeviceConnected: channelState.membership.peerDeviceConnected
             )
             let effectiveChannelState =
                 shouldPreserveLiveChannelState(
@@ -672,14 +746,20 @@ extension PTTViewModel {
                     readiness: effectiveChannelReadiness
                 )
                 let backendShowsLocalTransmit = backendChannelSnapshot.status == .transmitting
+                let transmitSnapshot = transmitDomainSnapshot
                 let shouldPreserveTransmitState = shouldPreserveLocalTransmitState(
                     selectedContactID: selectedContactId,
                     refreshedContactID: contactID,
                     backendChannelStatus: backendChannelSnapshot.status?.rawValue ?? effectiveChannelState.status,
-                    transmitPhase: transmitCoordinator.state.phase,
-                    systemIsTransmitting: pttCoordinator.state.isTransmitting
+                    transmitSnapshot: transmitSnapshot
                 )
-                isTransmitting = backendShowsLocalTransmit || pttCoordinator.state.isTransmitting
+                isTransmitting =
+                    backendShowsLocalTransmit
+                    || transmitSnapshot.isSystemTransmitting
+                    || (
+                        transmitSnapshot.activeContactID == contactID
+                        && transmitSnapshot.isPressActive
+                    )
                 if !shouldPreserveTransmitState {
                     tearDownTransmitRuntime(resetCoordinator: true)
                 }

@@ -13,6 +13,8 @@ import UIKit
 extension PTTViewModel {
     private var wakePlaybackFallbackDelayNanoseconds: UInt64 { 3_500_000_000 }
     private var mediaSessionRetryCooldown: TimeInterval { 0.75 }
+    private var deferredInteractivePrewarmRecoveryDelayNanoseconds: UInt64 { 500_000_000 }
+    private var transmitLeaseRenewIntervalNanoseconds: UInt64 { 1_000_000_000 }
 
     func shouldUseAppManagedWakePlaybackFallback(
         applicationState: UIApplication.State
@@ -60,6 +62,7 @@ extension PTTViewModel {
         guard isJoined, activeChannelId == contactID else { return false }
         guard systemSessionMatches(contactID) else { return false }
         guard !isTransmitting else { return false }
+        guard !transmitDomainSnapshot.hasTransmitIntent(for: contactID) else { return false }
         guard mediaSessionContactID == contactID else { return false }
         guard mediaConnectionState == .connected else { return false }
         guard let channel = selectedChannelSnapshot(for: contactID),
@@ -71,7 +74,7 @@ extension PTTViewModel {
 
     func peerIsRoutableForReceiverAudioReadiness(for contactID: UUID) -> Bool {
         guard let channel = selectedChannelSnapshot(for: contactID) else { return false }
-        return channel.membership.hasPeerMembership && channel.membership.peerDeviceConnected
+        return channel.membership.hasPeerMembership
     }
 
     func syncLocalReceiverAudioReadinessSignal(for contactID: UUID, reason: String) async {
@@ -110,6 +113,21 @@ extension PTTViewModel {
             return
         }
 
+        guard backend.isWebSocketConnected else {
+            backend.ensureWebSocketConnected()
+            diagnostics.record(
+                .websocket,
+                message: "Deferred receiver audio readiness publish until WebSocket reconnects",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "handle": contact.handle,
+                    "state": isReady ? "ready" : "not-ready",
+                    "reason": effectiveReason,
+                ]
+            )
+            return
+        }
+
         do {
             try await backend.waitForWebSocketConnection()
             try await backend.sendSignal(
@@ -139,6 +157,20 @@ extension PTTViewModel {
             )
             captureDiagnosticsState("receiver-audio-readiness:published")
         } catch {
+            if case TurboBackendError.webSocketUnavailable = error {
+                backend.ensureWebSocketConnected()
+                diagnostics.record(
+                    .websocket,
+                    message: "Deferred receiver audio readiness publish until WebSocket reconnects",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "handle": contact.handle,
+                        "state": isReady ? "ready" : "not-ready",
+                        "reason": effectiveReason,
+                    ]
+                )
+                return
+            }
             diagnostics.record(
                 .websocket,
                 level: .error,
@@ -154,10 +186,25 @@ extension PTTViewModel {
         }
     }
 
-    func prewarmLocalMediaIfNeeded(for contactID: UUID) async {
+    func prewarmLocalMediaIfNeeded(
+        for contactID: UUID,
+        applicationState: UIApplication.State? = nil
+    ) async {
+        let applicationState = applicationState ?? UIApplication.shared.applicationState
         guard isJoined, activeChannelId == contactID else { return }
         guard systemSessionMatches(contactID) else { return }
         guard !isTransmitting else { return }
+        guard applicationState == .active else {
+            diagnostics.record(
+                .media,
+                message: "Deferred interactive audio prewarm until app is foregrounded",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "applicationState": String(describing: applicationState)
+                ]
+            )
+            return
+        }
 
         let startupContext = MediaSessionStartupContext(
             contactID: contactID,
@@ -184,6 +231,38 @@ extension PTTViewModel {
             startupMode: .interactive
         )
         updateStatusForSelectedContact()
+    }
+
+    func deferInteractivePrewarmUntilPTTAudioDeactivation(for contactID: UUID) {
+        mediaRuntime.requestInteractivePrewarmAfterAudioDeactivation(for: contactID)
+        mediaRuntime.replaceInteractivePrewarmRecoveryTask(with: Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: self.deferredInteractivePrewarmRecoveryDelayNanoseconds)
+            guard !Task.isCancelled else { return }
+            await self.recoverDeferredInteractivePrewarmWithoutPTTDeactivationIfNeeded(for: contactID)
+        })
+    }
+
+    func recoverDeferredInteractivePrewarmWithoutPTTDeactivationIfNeeded(
+        for contactID: UUID,
+        applicationState: UIApplication.State? = nil
+    ) async {
+        let applicationState = applicationState ?? UIApplication.shared.applicationState
+        guard mediaRuntime.pendingInteractivePrewarmAfterAudioDeactivationContactID == contactID else { return }
+        guard !isPTTAudioSessionActive else { return }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return }
+        guard isJoined, activeChannelId == contactID else { return }
+        guard systemSessionMatches(contactID) else { return }
+        guard !isTransmitting else { return }
+        guard applicationState == .active else { return }
+
+        _ = mediaRuntime.takePendingInteractivePrewarmAfterAudioDeactivationContactID()
+        diagnostics.record(
+            .media,
+            message: "Recovering deferred interactive audio prewarm without PTT deactivation callback",
+            metadata: ["contactId": contactID.uuidString]
+        )
+        await prewarmLocalMediaIfNeeded(for: contactID)
     }
 
     func resumeInteractiveAudioPrewarmIfNeeded(
@@ -238,18 +317,21 @@ extension PTTViewModel {
         selectedContactID: UUID?,
         refreshedContactID: UUID,
         backendChannelStatus: String,
-        transmitPhase: TransmitPhase,
-        systemIsTransmitting: Bool
+        transmitSnapshot: TransmitDomainSnapshot
     ) -> Bool {
         guard selectedContactID == refreshedContactID else { return false }
         if backendChannelStatus == ConversationState.transmitting.rawValue {
             return true
         }
-        if systemIsTransmitting {
+        if transmitSnapshot.isSystemTransmitting {
+            return true
+        }
+        if transmitSnapshot.activeContactID == refreshedContactID,
+           transmitSnapshot.isPressActive {
             return true
         }
 
-        switch transmitPhase {
+        switch transmitSnapshot.phase {
         case .idle:
             return false
         case .requesting(let contactID), .active(let contactID), .stopping(let contactID):
@@ -265,6 +347,22 @@ extension PTTViewModel {
         guard let contact = selectedContact else {
             statusMessage = "Pick a contact"
             diagnostics.record(.media, message: "Ignored begin transmit request", metadata: ["reason": "no-selected-contact"])
+            return
+        }
+        guard !transmitRuntime.isPressingTalk else {
+            diagnostics.record(
+                .media,
+                message: "Ignored begin transmit request",
+                metadata: ["reason": "local-press-already-active", "contact": contact.handle]
+            )
+            return
+        }
+        guard !transmitRuntime.requiresReleaseBeforeNextPress else {
+            diagnostics.record(
+                .media,
+                message: "Ignored begin transmit request",
+                metadata: ["reason": "requires-fresh-press-after-unexpected-end", "contact": contact.handle]
+            )
             return
         }
         let transmit = transmitServices
@@ -348,6 +446,10 @@ extension PTTViewModel {
             usesLocalHTTPBackend: usesLocalHTTPBackend,
             backendSupportsWebSocket: backend.supportsWebSocket
         )
+        // Latch the press locally before the async reducer runs so a single
+        // hold gesture cannot enqueue multiple begin-transmit attempts.
+        transmitRuntime.markPressBegan()
+        transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
         updateStatusForSelectedContact()
         captureDiagnosticsState("transmit-begin:requested")
         Task {
@@ -356,7 +458,12 @@ extension PTTViewModel {
         }
     }
 
+    func noteTransmitTouchReleased() {
+        transmitRuntime.noteTouchReleased()
+    }
+
     func endTransmit() {
+        transmitRuntime.noteTouchReleased()
         guard isJoined else { return }
         let hasPendingOrActiveTransmit =
             transmitCoordinator.state.isPressingTalk
@@ -366,10 +473,9 @@ extension PTTViewModel {
         diagnostics.record(.media, message: "End transmit requested")
         // Clear the local press latch immediately so a system-end callback racing
         // with release does not look like an unexpected end that should be retried.
-        transmitRuntime.sync(
-            activeTarget: transmitCoordinator.state.activeTarget,
-            isPressingTalk: false
-        )
+        transmitRuntime.markExplicitStopRequested()
+        transmitRuntime.markPressEnded()
+        transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
         Task {
             await transmitCoordinator.handle(.releaseRequested)
             syncTransmitState()
@@ -407,6 +513,35 @@ extension PTTViewModel {
                     deviceID: response.targetDeviceId,
                     channelID: request.backendChannelID
                 )
+                await MainActor.run {
+                    self.transmitRuntime.syncActiveTarget(target)
+                    self.diagnostics.record(
+                        .media,
+                        message: "Backend transmit lease granted",
+                        metadata: [
+                            "contactId": target.contactID.uuidString,
+                            "channelId": target.channelID,
+                            "startedAt": response.startedAt,
+                            "expiresAt": response.expiresAt,
+                            "targetDeviceId": response.targetDeviceId,
+                        ]
+                    )
+                    // The backend lease starts as soon as beginTransmit succeeds.
+                    // Keep it alive from that point, not from later PTT activation
+                    // callbacks, which can land seconds later on a cold wake path.
+                    if self.transmitRuntime.isPressingTalk {
+                        self.diagnostics.record(
+                            .media,
+                            message: "Starting transmit lease renewal after backend grant",
+                            metadata: [
+                                "contactId": target.contactID.uuidString,
+                                "channelId": target.channelID,
+                                "source": "begin-transmit",
+                            ]
+                        )
+                        self.startRenewingTransmit(target)
+                    }
+                }
                 await transmitCoordinator.handle(.beginSucceeded(target, request))
                 syncTransmitState()
             } catch {
@@ -417,7 +552,7 @@ extension PTTViewModel {
                         metadata: ["contact": request.contactHandle, "channelId": request.backendChannelID]
                     )
                     if await recoverTransmitBeginMembershipLoss(request: request, backend: backend) {
-                        transmit.replaceBeginTask(nil)
+                        transmit.finishBeginTask()
                         return
                     }
                 }
@@ -427,7 +562,7 @@ extension PTTViewModel {
                 statusMessage = "Transmit failed: \(message)"
                 diagnostics.record(.media, level: .error, message: "Transmit failed", metadata: ["contact": request.contactHandle, "error": message])
             }
-            transmit.replaceBeginTask(nil)
+            transmit.finishBeginTask()
         })
     }
 
@@ -444,6 +579,30 @@ extension PTTViewModel {
                 deviceID: response.targetDeviceId,
                 channelID: request.backendChannelID
             )
+            transmitRuntime.syncActiveTarget(target)
+            diagnostics.record(
+                .media,
+                message: "Backend transmit lease granted",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "startedAt": response.startedAt,
+                    "expiresAt": response.expiresAt,
+                    "targetDeviceId": response.targetDeviceId,
+                ]
+            )
+            if transmitRuntime.isPressingTalk {
+                diagnostics.record(
+                    .media,
+                    message: "Starting transmit lease renewal after recovered backend grant",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "source": "membership-recovery",
+                    ]
+                )
+                startRenewingTransmit(target)
+            }
             diagnostics.record(
                 .media,
                 message: "Recovered transmit membership drift",
@@ -480,6 +639,10 @@ extension PTTViewModel {
             }
             do {
                 try pttSystemClient.beginTransmitting(channelUUID: channelUUID)
+                // Keep the backend transmit lease alive during the cold PTT
+                // activation window instead of waiting for later audio-session
+                // callbacks, which can arrive after the initial lease expires.
+                startRenewingTransmit(target)
             } catch {
                 let message = error.localizedDescription
                 statusMessage = message
@@ -493,9 +656,15 @@ extension PTTViewModel {
     }
 
     func activeTransmitTarget(for systemChannelUUID: UUID) -> TransmitTarget? {
-        guard let activeTarget = transmitCoordinator.state.activeTarget else { return nil }
-        guard channelUUID(for: activeTarget.contactID) == systemChannelUUID else { return nil }
-        return activeTarget
+        if let activeTarget = transmitCoordinator.state.activeTarget,
+           channelUUID(for: activeTarget.contactID) == systemChannelUUID {
+            return activeTarget
+        }
+        if let runtimeTarget = transmitRuntime.activeTarget,
+           channelUUID(for: runtimeTarget.contactID) == systemChannelUUID {
+            return runtimeTarget
+        }
+        return nil
     }
 
     func completeSystemTransmitActivation(channelUUID: UUID) async {
@@ -576,15 +745,13 @@ extension PTTViewModel {
                 ]
             )
             backendServices?.ensureWebSocketConnected()
-            await refreshContactSummaries()
-            await refreshChannelState(for: wake.contactID)
             let contactID = wake.contactID
             diagnostics.record(
                 .media,
                 message: "Recreating media session after PTT audio activation",
                 metadata: ["contactId": contactID.uuidString]
             )
-            closeMediaSession()
+            closeMediaSession(deactivateAudioSession: false)
             await ensureMediaSession(
                 for: contactID,
                 activationMode: .systemActivated,
@@ -611,6 +778,7 @@ extension PTTViewModel {
                 )
             }
             captureDiagnosticsState("ptt-wake:audio-activated")
+            schedulePostWakeBackendRefresh(for: contactID)
         }
 
         if activeTarget == nil,
@@ -638,6 +806,20 @@ extension PTTViewModel {
            let activeTarget {
             configureOutgoingAudioRoute(target: activeTarget)
             await completeSystemTransmitActivation(channelUUID: activeSystemChannelUUID)
+        }
+    }
+
+    func schedulePostWakeBackendRefresh(for contactID: UUID) {
+        diagnostics.record(
+            .backend,
+            message: "Deferring wake backend refresh off audio activation critical path",
+            metadata: ["contactId": contactID.uuidString]
+        )
+        Task { [weak self] in
+            guard let self else { return }
+            await refreshContactSummaries()
+            await refreshChannelState(for: contactID)
+            captureDiagnosticsState("ptt-wake:post-activation-refresh")
         }
     }
 
@@ -713,20 +895,37 @@ extension PTTViewModel {
         applyPreferredAudioOutputRoute()
     }
 
-    func handleDeactivatedAudioSession(_ audioSession: AVAudioSession) async {
+    func handleDeactivatedAudioSession(
+        _ audioSession: AVAudioSession,
+        applicationState: UIApplication.State? = nil
+    ) async {
+        let applicationState = applicationState ?? UIApplication.shared.applicationState
         let _ = audioSession
         if !pttCoordinator.state.isTransmitting {
             try? await mediaServices.session()?.stopSendingAudio()
         }
-        pttWakeRuntime.clearAll()
-        if let contactID = mediaRuntime.takePendingInteractivePrewarmAfterAudioDeactivationContactID() {
+        mediaRuntime.replaceInteractivePrewarmRecoveryTask(with: nil)
+        pttWakeRuntime.clearAll(clearSuppression: false)
+        if let contactID = mediaRuntime.pendingInteractivePrewarmAfterAudioDeactivationContactID {
+            guard applicationState == .active else {
+                diagnostics.record(
+                    .media,
+                    message: "Deferred interactive audio prewarm after PTT audio deactivation until foreground",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "applicationState": String(describing: applicationState)
+                    ]
+                )
+                return
+            }
+            _ = mediaRuntime.takePendingInteractivePrewarmAfterAudioDeactivationContactID()
             diagnostics.record(
                 .media,
                 message: "Resuming deferred interactive audio prewarm after PTT audio deactivation",
                 metadata: ["contactId": contactID.uuidString]
             )
             try? await Task.sleep(nanoseconds: 200_000_000)
-            await prewarmLocalMediaIfNeeded(for: contactID)
+            await prewarmLocalMediaIfNeeded(for: contactID, applicationState: applicationState)
         }
     }
 
@@ -775,20 +974,35 @@ extension PTTViewModel {
 
         guard pttWakeRuntime.shouldBufferAudioChunk(for: contactID) else { return }
         let bufferedChunkCount = pttWakeRuntime.bufferedAudioChunkCount(for: contactID)
-        guard bufferedChunkCount > 0 else { return }
         guard shouldUseAppManagedWakePlaybackFallback(applicationState: applicationState) else {
             pttWakeRuntime.markFallbackDeferredUntilForeground(for: contactID)
             diagnostics.record(
                 .media,
-                message: "PTT activation fallback deferred until app is active",
+                level: .error,
+                message: "PTT system audio activation timed out while app remained backgrounded",
                 metadata: [
                     "contactId": contactID.uuidString,
                     "reason": reason,
                     "applicationState": String(describing: applicationState),
-                    "bufferedChunkCount": String(bufferedChunkCount)
+                    "bufferedChunkCount": String(bufferedChunkCount),
+                    "pendingWakeChannelUUID": pttWakeRuntime.pendingIncomingPush?.channelUUID.uuidString ?? "none",
+                    "pendingWakeActivationState": String(describing: pttWakeRuntime.pendingIncomingPush?.activationState ?? .signalBuffered),
                 ]
             )
             captureDiagnosticsState("ptt-wake:fallback-deferred")
+            return
+        }
+        guard bufferedChunkCount > 0 else {
+            diagnostics.record(
+                .media,
+                message: "PTT activation timed out before buffered audio arrived",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "applicationState": String(describing: applicationState),
+                ]
+            )
+            captureDiagnosticsState("ptt-wake:fallback-timeout-no-audio")
             return
         }
 
@@ -859,10 +1073,77 @@ extension PTTViewModel {
         )
     }
 
+    func reconcileExplicitTransmitStopIfNeeded(
+        target: TransmitTarget,
+        source: String
+    ) async {
+        guard !usesLocalHTTPBackend else { return }
+        guard pttCoordinator.state.isTransmitting else { return }
+        guard let systemChannelUUID = pttCoordinator.state.systemChannelUUID,
+              channelUUID(for: target.contactID) == systemChannelUUID else {
+            return
+        }
+
+        diagnostics.record(
+            .pushToTalk,
+            message: "Reconciling explicit transmit stop without system callback",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelUUID": systemChannelUUID.uuidString,
+                "source": source,
+            ]
+        )
+        await pttCoordinator.handle(
+            .didEndTransmitting(
+                channelUUID: systemChannelUUID,
+                source: source
+            )
+        )
+        syncPTTState()
+        captureDiagnosticsState("transmit-stop:reconciled")
+    }
+
+    func finalizeExplicitTransmitStopLocallyIfNeeded(
+        target: TransmitTarget,
+        source: String
+    ) async {
+        await reconcileExplicitTransmitStopIfNeeded(
+            target: target,
+            source: source
+        )
+
+        let shouldCompleteStop =
+            transmitCoordinator.state.activeTarget == target
+            || transmitRuntime.activeTarget == target
+            || {
+                switch transmitCoordinator.state.phase {
+                case .stopping(let contactID):
+                    return contactID == target.contactID
+                case .idle, .requesting, .active:
+                    return false
+                }
+            }()
+        guard shouldCompleteStop else { return }
+
+        diagnostics.record(
+            .pushToTalk,
+            message: "Finalizing explicit transmit stop locally",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "source": source,
+            ]
+        )
+        await transmitCoordinator.handle(.stopCompleted)
+        syncTransmitState()
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("transmit-stop:completed-locally")
+    }
+
     private func performStopTransmit(_ target: TransmitTarget) async {
         let transmit = transmitServices
         let media = mediaServices
-        transmit.clearPendingWork()
+        transmit.cancelRenewTask()
 
         if usesLocalHTTPBackend {
             isTransmitting = false
@@ -874,8 +1155,29 @@ extension PTTViewModel {
 
         do {
             try? await media.session()?.stopSendingAudio()
+            await finalizeExplicitTransmitStopLocallyIfNeeded(
+                target: target,
+                source: "explicit-stop-local-complete"
+            )
             if let backend = backendServices {
+                diagnostics.record(
+                    .media,
+                    message: "Ending transmit on backend",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "webSocketConnected": String(backend.isWebSocketConnected),
+                    ]
+                )
                 _ = try await backend.endTransmit(channelId: target.channelID)
+                diagnostics.record(
+                    .media,
+                    message: "Ended transmit on backend",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                    ]
+                )
                 if backend.supportsWebSocket && backend.isWebSocketConnected {
                     try? await backend.sendSignal(
                         TurboSignalEnvelope(
@@ -891,25 +1193,66 @@ extension PTTViewModel {
                 }
             }
             await refreshChannelState(for: target.contactID)
-            await transmitCoordinator.handle(.stopCompleted)
-            syncTransmitState()
         } catch {
+            guard !isExpectedBackendSyncCancellation(error) else {
+                await refreshChannelState(for: target.contactID)
+                updateStatusForSelectedContact()
+                return
+            }
             let message = error.localizedDescription
-            statusMessage = "Stop failed: \(message)"
+            statusMessage = "Stop cleanup failed: \(message)"
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Transmit stop cleanup failed after local completion",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "error": message,
+                ]
+            )
             await refreshChannelState(for: target.contactID)
-            await transmitCoordinator.handle(.stopFailed(message))
-            syncTransmitState()
         }
 
         updateStatusForSelectedContact()
     }
 
     private func performAbortTransmit(_ target: TransmitTarget) async {
-        transmitServices.clearPendingWork()
+        transmitServices.cancelRenewTask()
         try? await mediaServices.session()?.stopSendingAudio()
 
         if let backend = backendServices {
+            diagnostics.record(
+                .media,
+                message: "Aborting transmit on backend",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "webSocketConnected": String(backend.isWebSocketConnected),
+                ]
+            )
             _ = try? await backend.endTransmit(channelId: target.channelID)
+            diagnostics.record(
+                .media,
+                message: "Aborted transmit on backend",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                ]
+            )
+            if backend.supportsWebSocket && backend.isWebSocketConnected {
+                try? await backend.sendSignal(
+                    TurboSignalEnvelope(
+                        type: .transmitStop,
+                        channelId: target.channelID,
+                        fromUserId: backend.currentUserID ?? "",
+                        fromDeviceId: backend.deviceID,
+                        toUserId: target.userID,
+                        toDeviceId: target.deviceID,
+                        payload: "ptt-end"
+                    )
+                )
+            }
         }
 
         await refreshChannelState(for: target.contactID)
@@ -917,65 +1260,169 @@ extension PTTViewModel {
         updateStatusForSelectedContact()
     }
 
+    private func currentTransmitLeaseRenewalContext(
+        for target: TransmitTarget
+    ) -> (systemTransmitDurationMs: String, webSocketConnected: Bool)? {
+        guard transmitCoordinator.state.isPressingTalk,
+              transmitServices.activeTarget()?.channelID == target.channelID else { return nil }
+        return (
+            systemTransmitDurationMs: transmitRuntime.currentSystemTransmitDurationMilliseconds().map(String.init) ?? "unknown",
+            webSocketConnected: backendServices?.isWebSocketConnected == true
+        )
+    }
+
+    private func renewTransmitLeaseOnBackend(
+        channelId: String
+    ) async throws -> TurboRenewTransmitResponse {
+        guard let backend = backendServices else {
+            throw TurboBackendError.invalidConfiguration
+        }
+        return try await backend.renewTransmit(channelId: channelId)
+    }
+
     private func startRenewingTransmit(_ target: TransmitTarget) {
         let transmit = transmitServices
-        transmit.replaceRenewTask(nil)
-        guard let backend = backendServices else { return }
-        transmit.replaceRenewTask(Task { [weak self] in
+        let renewIntervalNanoseconds = transmitLeaseRenewIntervalNanoseconds
+        if transmitRuntime.renewTask != nil,
+           transmitRuntime.renewTaskChannelID == target.channelID {
+            return
+        }
+        transmit.replaceRenewTask(nil, nil)
+        transmit.replaceRenewTask(Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                try? await Task.sleep(nanoseconds: renewIntervalNanoseconds)
                 guard !Task.isCancelled else { return }
-                guard transmitCoordinator.state.isPressingTalk,
-                      transmit.activeTarget()?.channelID == target.channelID else { return }
+                guard let context = await self.currentTransmitLeaseRenewalContext(for: target) else { return }
+                let renewStartedAt = Date()
                 do {
-                    _ = try await backend.renewTransmit(channelId: target.channelID)
-                } catch {
-                    if isExpectedBackendSyncCancellation(error)
-                        || !transmitCoordinator.state.isPressingTalk
-                        || !pttCoordinator.state.isTransmitting {
-                        return
+                    await MainActor.run {
+                        self.diagnostics.record(
+                            .media,
+                            message: "Renewing transmit lease",
+                            metadata: [
+                                "contactId": target.contactID.uuidString,
+                                "channelId": target.channelID,
+                                "systemTransmitDurationMs": context.systemTransmitDurationMs,
+                                "webSocketConnected": String(context.webSocketConnected),
+                            ]
+                        )
                     }
-                    if shouldTreatTransmitLeaseLossAsStop(error) {
-                        if !usesLocalHTTPBackend,
-                           let channelUUID = channelUUID(for: target.contactID) {
-                            try? pttSystemClient.stopTransmitting(channelUUID: channelUUID)
-                        }
-                        if backend.supportsWebSocket && backend.isWebSocketConnected {
-                            try? await backend.sendSignal(
-                                TurboSignalEnvelope(
-                                    type: .transmitStop,
-                                    channelId: target.channelID,
-                                    fromUserId: backend.currentUserID ?? "",
-                                    fromDeviceId: backend.deviceID,
-                                    toUserId: target.userID,
-                                    toDeviceId: target.deviceID,
-                                    payload: "ptt-end"
-                                )
+                    let response = try await self.renewTransmitLeaseOnBackend(channelId: target.channelID)
+                    let renewDurationMs = Int(Date().timeIntervalSince(renewStartedAt) * 1000)
+                    await MainActor.run {
+                        self.diagnostics.record(
+                            .media,
+                            message: "Transmit lease renewed",
+                            metadata: [
+                                "contactId": target.contactID.uuidString,
+                                "channelId": target.channelID,
+                                "systemTransmitDurationMs": context.systemTransmitDurationMs,
+                                "renewDurationMs": String(renewDurationMs),
+                                "expiresAt": response.expiresAt,
+                            ]
+                        )
+                    }
+                } catch {
+                    let renewDurationMs = Int(Date().timeIntervalSince(renewStartedAt) * 1000)
+                    let currentSystemTransmitDurationMs = await MainActor.run {
+                        self.transmitRuntime.currentSystemTransmitDurationMilliseconds().map(String.init) ?? "unknown"
+                    }
+                    let shouldTreatAsCancellation = await MainActor.run {
+                        self.isExpectedBackendSyncCancellation(error)
+                            || !self.transmitCoordinator.state.isPressingTalk
+                            || !self.pttCoordinator.state.isTransmitting
+                    }
+                    if shouldTreatAsCancellation {
+                        await MainActor.run {
+                            self.diagnostics.record(
+                                .media,
+                                message: "Transmit lease renewal cancelled",
+                                metadata: [
+                                    "contactId": target.contactID.uuidString,
+                                    "channelId": target.channelID,
+                                    "renewDurationMs": String(renewDurationMs),
+                                    "systemTransmitDurationMs": currentSystemTransmitDurationMs,
+                                    "error": error.localizedDescription,
+                                ]
                             )
                         }
+                        return
+                    }
+                    let shouldTreatAsLeaseLoss = await MainActor.run {
+                        self.shouldTreatTransmitLeaseLossAsStop(error)
+                    }
+                    if shouldTreatAsLeaseLoss {
                         await MainActor.run {
-                            self.isTransmitting = false
+                            self.diagnostics.record(
+                                .media,
+                                level: .error,
+                                message: "Transmit lease lost during renewal",
+                                metadata: [
+                                    "contactId": target.contactID.uuidString,
+                                    "channelId": target.channelID,
+                                    "renewDurationMs": String(renewDurationMs),
+                                    "systemTransmitDurationMs": currentSystemTransmitDurationMs,
+                                    "error": error.localizedDescription,
+                                ]
+                            )
                         }
-                        await transmitCoordinator.handle(.stopCompleted)
-                        syncTransmitState()
-                        await refreshChannelState(for: target.contactID)
-                        updateStatusForSelectedContact()
+                        await self.handleTransmitLeaseLossDuringRenewal(target: target)
                         return
                     }
                     let message = error.localizedDescription
                     await MainActor.run {
                         self.statusMessage = "Transmit lease expired: \(message)"
                         self.isTransmitting = false
-                        self.diagnostics.record(.media, level: .error, message: "Transmit lease renewal failed", metadata: ["channelId": target.channelID, "error": message])
+                        self.diagnostics.record(
+                            .media,
+                            level: .error,
+                            message: "Transmit lease renewal failed",
+                            metadata: [
+                                "contactId": target.contactID.uuidString,
+                                "channelId": target.channelID,
+                                "renewDurationMs": String(renewDurationMs),
+                                "systemTransmitDurationMs": currentSystemTransmitDurationMs,
+                                "error": message,
+                            ]
+                        )
                     }
-                    await transmitCoordinator.handle(.renewalFailed(message))
-                    syncTransmitState()
-                    await refreshChannelState(for: target.contactID)
+                    await self.transmitCoordinator.handle(.renewalFailed(message))
+                    await self.refreshChannelState(for: target.contactID)
+                    await MainActor.run {
+                        self.syncTransmitState()
+                    }
                     return
                 }
             }
-        })
+        }, target.channelID)
+    }
+
+    private func handleTransmitLeaseLossDuringRenewal(target: TransmitTarget) async {
+        if !usesLocalHTTPBackend,
+           let channelUUID = channelUUID(for: target.contactID) {
+            try? pttSystemClient.stopTransmitting(channelUUID: channelUUID)
+        }
+        if let backend = backendServices,
+           backend.supportsWebSocket,
+           backend.isWebSocketConnected {
+            try? await backend.sendSignal(
+                TurboSignalEnvelope(
+                    type: .transmitStop,
+                    channelId: target.channelID,
+                    fromUserId: backend.currentUserID ?? "",
+                    fromDeviceId: backend.deviceID,
+                    toUserId: target.userID,
+                    toDeviceId: target.deviceID,
+                    payload: "ptt-end"
+                )
+            )
+        }
+        isTransmitting = false
+        await transmitCoordinator.handle(.stopCompleted)
+        await refreshChannelState(for: target.contactID)
+        syncTransmitState()
+        updateStatusForSelectedContact()
     }
 
     func mediaSession(_ session: MediaSession, didChange state: MediaConnectionState) {
@@ -986,7 +1433,12 @@ extension PTTViewModel {
         switch state {
         case .failed(let message):
             backendStatusMessage = "Media failed: \(message)"
-        case .connected, .closed, .idle, .preparing:
+        case .connected:
+            if let contactID = media.contactID(),
+               viewModelWakeStateNeedsClearingAfterRecovery(contactID: contactID) {
+                pttWakeRuntime.clear(for: contactID)
+            }
+        case .closed, .idle, .preparing:
             break
         }
         updateStatusForSelectedContact()
@@ -998,6 +1450,14 @@ extension PTTViewModel {
                 )
             }
         }
+    }
+
+    private func viewModelWakeStateNeedsClearingAfterRecovery(contactID: UUID) -> Bool {
+        pttWakeRuntime.incomingWakeActivationState(for: contactID) == .systemActivationInterruptedByTransmitEnd
+    }
+
+    private func shouldPreserveAudioSessionDuringMediaClose() -> Bool {
+        pttWakeRuntime.pendingIncomingPush != nil
     }
 
     func ensureMediaSession(
@@ -1094,7 +1554,22 @@ extension PTTViewModel {
         }
     }
 
-    func closeMediaSession() {
-        mediaServices.reset()
+    func closeMediaSession(deactivateAudioSession: Bool = true) {
+        let shouldDeactivateAudioSession =
+            deactivateAudioSession && !shouldPreserveAudioSessionDuringMediaClose()
+        if deactivateAudioSession && !shouldDeactivateAudioSession {
+            diagnostics.record(
+                .media,
+                message: "Preserving audio session during media close while wake activation is pending",
+                metadata: [
+                    "pendingWakeChannelUUID": pttWakeRuntime.pendingIncomingPush?.channelUUID.uuidString ?? "none",
+                    "pendingWakeContactID": pttWakeRuntime.pendingIncomingPush?.contactID.uuidString ?? "none",
+                    "pendingWakeActivationState": String(
+                        describing: pttWakeRuntime.pendingIncomingPush?.activationState ?? .signalBuffered
+                    ),
+                ]
+            )
+        }
+        mediaServices.reset(shouldDeactivateAudioSession)
     }
 }

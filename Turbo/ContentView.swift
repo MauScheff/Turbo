@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var viewModel = PTTViewModel()
+    @State private var viewModel: PTTViewModel
     @State private var isShowingSplash: Bool = true
     @State private var isShowingDevIdentitySheet: Bool = false
     @State private var isShowingDiagnostics: Bool = false
@@ -22,6 +22,11 @@ struct ContentView: View {
     @State private var isRequestingMicrophonePermission: Bool = false
     @State private var diagnosticsUploadStatus: String?
     @Environment(\.colorScheme) private var colorScheme
+
+    @MainActor
+    init(viewModel: PTTViewModel) {
+        _viewModel = State(initialValue: viewModel)
+    }
 
     var body: some View {
         Group {
@@ -120,10 +125,12 @@ struct ContentView: View {
                 isJoined: viewModel.isJoined,
                 activeChannelID: viewModel.activeChannelId,
                 isTransmitting: viewModel.isTransmitting,
+                isTransmitPressActive: viewModel.isTransmitPressActive,
                 selectedPeerState: viewModel.selectedPeerState(for:),
                 requestCooldownRemaining: viewModel.requestCooldownRemaining(for:now:),
                 joinChannel: viewModel.joinChannel,
                 beginTransmit: viewModel.beginTransmit,
+                noteTransmitTouchReleased: viewModel.noteTransmitTouchReleased,
                 endTransmit: viewModel.endTransmit
             )
         }
@@ -326,5 +333,5 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(viewModel: .shared)
 }

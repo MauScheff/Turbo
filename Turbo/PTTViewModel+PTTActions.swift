@@ -9,6 +9,109 @@ import Foundation
 import PushToTalk
 
 extension PTTViewModel {
+    func systemDescriptorName(for channelUUID: UUID) -> String {
+        PTTSystemDisplayPolicy.restoredDescriptorName(
+            channelUUID: channelUUID,
+            contacts: contacts,
+            fallbackName: channelName
+        )
+    }
+
+    func syncPTTSystemChannelDescriptor(_ channelUUID: UUID, reason: String) {
+        let descriptorName = systemDescriptorName(for: channelUUID)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await pttSystemClient.updateChannelDescriptor(name: descriptorName, channelUUID: channelUUID)
+                lastReportedPTTDescriptorName = descriptorName
+                lastReportedPTTDescriptorChannelUUID = channelUUID
+                lastReportedPTTDescriptorReason = reason
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Updated PTT channel descriptor",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "name": descriptorName,
+                        "reason": reason,
+                    ]
+                )
+            } catch {
+                diagnostics.record(
+                    .pushToTalk,
+                    level: .error,
+                    message: "Failed to update PTT channel descriptor",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "name": descriptorName,
+                        "reason": reason,
+                        "error": error.localizedDescription,
+                    ]
+                )
+            }
+        }
+    }
+
+    func syncPTTServiceStatus(reason: String) {
+        guard let channelUUID = pttCoordinator.state.systemChannelUUID else {
+            lastReportedPTTServiceStatus = nil
+            lastReportedPTTServiceStatusChannelUUID = nil
+            return
+        }
+
+        let status: PTServiceStatus
+        if usesLocalHTTPBackend {
+            status = .ready
+        } else if !backendRuntime.isReady {
+            status = .unavailable
+        } else if backendRuntime.isWebSocketConnected {
+            status = .ready
+        } else {
+            status = .connecting
+        }
+
+        guard lastReportedPTTServiceStatus != status
+            || lastReportedPTTServiceStatusChannelUUID != channelUUID else {
+            return
+        }
+
+        lastReportedPTTServiceStatus = status
+        lastReportedPTTServiceStatusChannelUUID = channelUUID
+        lastReportedPTTServiceStatusReason = reason
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await pttSystemClient.setServiceStatus(status, channelUUID: channelUUID)
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Updated PTT service status",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "status": String(describing: status),
+                        "reason": reason,
+                    ]
+                )
+            } catch {
+                if lastReportedPTTServiceStatusChannelUUID == channelUUID {
+                    lastReportedPTTServiceStatus = nil
+                    lastReportedPTTServiceStatusChannelUUID = nil
+                    lastReportedPTTServiceStatusReason = nil
+                }
+                diagnostics.record(
+                    .pushToTalk,
+                    level: .error,
+                    message: "Failed to update PTT service status",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "status": String(describing: status),
+                        "reason": reason,
+                        "error": error.localizedDescription,
+                    ]
+                )
+            }
+        }
+    }
+
     private func performReconciledTeardown(for contactID: UUID) {
         if selectedContactId == contactID {
             remoteTransmittingContactIDs.remove(contactID)
@@ -62,18 +165,22 @@ extension PTTViewModel {
         refreshMicrophonePermission()
         diagnostics.record(.app, message: "Initializing app")
         captureDiagnosticsState("app-initialize:start")
-        await configureBackendIfNeeded()
 
         do {
             try await pttSystemClient.configure(callbacks: pttSystemCallbacks)
             isReady = true
-            statusMessage = "Ready to connect"
             diagnostics.record(.pushToTalk, message: "PTT channel manager ready")
             captureDiagnosticsState("app-initialize:ptt-ready")
         } catch {
             statusMessage = "Failed to init: \(error.localizedDescription)"
             diagnostics.record(.pushToTalk, level: .error, message: "PTT init failed", metadata: ["error": error.localizedDescription])
             captureDiagnosticsState("app-initialize:ptt-failed")
+            return
+        }
+
+        await configureBackendIfNeeded()
+        if backendRuntime.isReady, selectedContact == nil {
+            statusMessage = "Ready to connect"
         }
     }
 

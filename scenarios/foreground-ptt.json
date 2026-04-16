@@ -45,8 +45,8 @@
         { "actor": "a", "type": "connect" }
       ],
       "expectEventually": {
-        "a": { "selectedHandle": "@blake", "phase": "ready", "isJoined": true, "canTransmitNow": true },
-        "b": { "selectedHandle": "@avery", "phase": "ready", "isJoined": true, "canTransmitNow": true }
+        "a": { "selectedHandle": "@blake", "phase": "ready", "isJoined": true, "canTransmitNow": true, "pttTokenRegistrationKind": "registered" },
+        "b": { "selectedHandle": "@avery", "phase": "ready", "isJoined": true, "canTransmitNow": true, "pttTokenRegistrationKind": "registered" }
       }
     },
     {

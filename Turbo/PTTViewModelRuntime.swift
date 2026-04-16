@@ -217,19 +217,66 @@ struct TransmitRuntimeState {
     var activeTarget: TransmitTarget?
     var beginTask: Task<Void, Never>?
     var renewTask: Task<Void, Never>?
+    var renewTaskChannelID: String?
+    var renewTaskGeneration: Int = 0
     var isPressingTalk: Bool = false
-    var unexpectedSystemEndRetryCount: Int = 0
+    var explicitStopRequested: Bool = false
+    var requiresReleaseBeforeNextPress: Bool = false
+    var interruptedContactID: UUID?
+    var lastSystemTransmitBeganAt: Date?
 
     var hasPendingBeginOrActiveTarget: Bool {
         beginTask != nil || activeTarget != nil
     }
 
-    mutating func sync(activeTarget: TransmitTarget?, isPressingTalk: Bool) {
-        self.activeTarget = activeTarget
-        self.isPressingTalk = isPressingTalk
-        if activeTarget == nil || !isPressingTalk {
-            unexpectedSystemEndRetryCount = 0
+    mutating func syncActiveTarget(_ activeTarget: TransmitTarget?) {
+        if let activeTarget {
+            self.activeTarget = activeTarget
+        } else if !isPressingTalk {
+            self.activeTarget = nil
         }
+    }
+
+    mutating func markPressBegan() {
+        guard !requiresReleaseBeforeNextPress else { return }
+        isPressingTalk = true
+        explicitStopRequested = false
+        interruptedContactID = nil
+    }
+
+    mutating func markPressEnded() {
+        isPressingTalk = false
+    }
+
+    mutating func markUnexpectedSystemEndRequiresRelease(contactID: UUID?) {
+        isPressingTalk = false
+        requiresReleaseBeforeNextPress = true
+        interruptedContactID = contactID
+    }
+
+    mutating func noteSystemTransmitBegan(at date: Date = Date()) {
+        lastSystemTransmitBeganAt = date
+    }
+
+    mutating func noteSystemTransmitEnded() {
+        lastSystemTransmitBeganAt = nil
+    }
+
+    func currentSystemTransmitDurationMilliseconds(at date: Date = Date()) -> Int? {
+        guard let lastSystemTransmitBeganAt else { return nil }
+        return Int(date.timeIntervalSince(lastSystemTransmitBeganAt) * 1000)
+    }
+
+    mutating func noteTouchReleased() {
+        requiresReleaseBeforeNextPress = false
+        interruptedContactID = nil
+    }
+
+    mutating func reconcileIdleState() {
+        isPressingTalk = false
+        explicitStopRequested = false
+        activeTarget = nil
+        lastSystemTransmitBeganAt = nil
     }
 
     mutating func replaceBeginTask(with task: Task<Void, Never>?) {
@@ -237,33 +284,98 @@ struct TransmitRuntimeState {
         beginTask = task
     }
 
-    mutating func replaceRenewTask(with task: Task<Void, Never>?) {
+    mutating func finishBeginTask() {
+        beginTask = nil
+    }
+
+    mutating func cancelBeginTask() {
+        beginTask?.cancel()
+        beginTask = nil
+    }
+
+    mutating func replaceRenewTask(with task: Task<Void, Never>?, channelID: String? = nil) {
         renewTask?.cancel()
         renewTask = task
+        renewTaskChannelID = channelID
+        if task != nil {
+            renewTaskGeneration += 1
+        }
+    }
+
+    mutating func cancelRenewTask() {
+        renewTask?.cancel()
+        renewTask = nil
+        renewTaskChannelID = nil
     }
 
     mutating func clearPendingWork() {
-        replaceBeginTask(with: nil)
-        replaceRenewTask(with: nil)
+        cancelBeginTask()
+        cancelRenewTask()
     }
 
-    func shouldRetryUnexpectedSystemEnd(maxRetries: Int) -> Bool {
-        isPressingTalk && activeTarget != nil && unexpectedSystemEndRetryCount < maxRetries
-    }
-
-    mutating func markUnexpectedSystemEndRetry() {
-        unexpectedSystemEndRetryCount += 1
-    }
-
-    mutating func clearUnexpectedSystemEndRetry() {
-        unexpectedSystemEndRetryCount = 0
+    mutating func markExplicitStopRequested() {
+        explicitStopRequested = true
     }
 
     mutating func reset() {
         isPressingTalk = false
+        explicitStopRequested = false
+        requiresReleaseBeforeNextPress = false
+        interruptedContactID = nil
         activeTarget = nil
-        unexpectedSystemEndRetryCount = 0
+        lastSystemTransmitBeganAt = nil
+        renewTaskGeneration = 0
         clearPendingWork()
+    }
+}
+
+enum TransmitDomainPhase: Equatable {
+    case idle
+    case requesting(contactID: UUID)
+    case active(contactID: UUID)
+    case stopping(contactID: UUID)
+}
+
+struct TransmitDomainSnapshot: Equatable {
+    let phase: TransmitDomainPhase
+    let isPressActive: Bool
+    let explicitStopRequested: Bool
+    let isSystemTransmitting: Bool
+    let activeTarget: TransmitTarget?
+    let interruptedContactID: UUID?
+    let requiresReleaseBeforeNextPress: Bool
+
+    var activeContactID: UUID? {
+        switch phase {
+        case .idle:
+            return nil
+        case .requesting(let contactID), .active(let contactID), .stopping(let contactID):
+            return contactID
+        }
+    }
+
+    func hasTransmitIntent(for contactID: UUID) -> Bool {
+        guard !explicitStopRequested else { return false }
+        switch phase {
+        case .requesting(let activeContactID), .active(let activeContactID):
+            return activeContactID == contactID
+        case .idle, .stopping:
+            return false
+        }
+    }
+
+    func isStopping(for contactID: UUID) -> Bool {
+        guard explicitStopRequested else { return false }
+        switch phase {
+        case .stopping(let activeContactID):
+            return activeContactID == contactID
+        case .idle, .requesting, .active:
+            return false
+        }
+    }
+
+    func requiresFreshPress(for contactID: UUID) -> Bool {
+        requiresReleaseBeforeNextPress && interruptedContactID == contactID
     }
 }
 
@@ -276,9 +388,214 @@ enum IncomingWakePlaybackMode: Equatable {
 enum IncomingWakeActivationState: Equatable {
     case signalBuffered
     case awaitingSystemActivation
-    case fallbackDeferredUntilForeground
+    case systemActivationTimedOutWaitingForForeground
+    case systemActivationInterruptedByTransmitEnd
     case appManagedFallback
     case systemActivated
+}
+
+struct WakeReceiveContext: Equatable {
+    let contactID: UUID
+    let channelUUID: UUID
+    let payload: TurboPTTPushPayload
+}
+
+enum WakeReceiveState: Equatable {
+    case idle
+    case signalBuffered(WakeReceiveContext, bufferedAudioChunks: [String])
+    case awaitingSystemActivation(WakeReceiveContext, bufferedAudioChunks: [String])
+    case systemActivationTimedOutWaitingForForeground(WakeReceiveContext, bufferedAudioChunks: [String])
+    case systemActivationInterruptedByTransmitEnd(WakeReceiveContext)
+    case appManagedFallback(WakeReceiveContext, bufferedAudioChunks: [String])
+    case systemActivated(WakeReceiveContext, bufferedAudioChunks: [String])
+
+    var context: WakeReceiveContext? {
+        switch self {
+        case .idle:
+            return nil
+        case .signalBuffered(let context, _),
+             .awaitingSystemActivation(let context, _),
+             .systemActivationTimedOutWaitingForForeground(let context, _),
+             .systemActivationInterruptedByTransmitEnd(let context),
+             .appManagedFallback(let context, _),
+             .systemActivated(let context, _):
+            return context
+        }
+    }
+
+    var activationState: IncomingWakeActivationState? {
+        switch self {
+        case .idle:
+            return nil
+        case .signalBuffered:
+            return .signalBuffered
+        case .awaitingSystemActivation:
+            return .awaitingSystemActivation
+        case .systemActivationTimedOutWaitingForForeground:
+            return .systemActivationTimedOutWaitingForForeground
+        case .systemActivationInterruptedByTransmitEnd:
+            return .systemActivationInterruptedByTransmitEnd
+        case .appManagedFallback:
+            return .appManagedFallback
+        case .systemActivated:
+            return .systemActivated
+        }
+    }
+
+    var playbackMode: IncomingWakePlaybackMode? {
+        switch self {
+        case .idle:
+            return nil
+        case .signalBuffered, .awaitingSystemActivation, .systemActivationTimedOutWaitingForForeground:
+            return .awaitingPTTActivation
+        case .systemActivationInterruptedByTransmitEnd:
+            return nil
+        case .appManagedFallback:
+            return .appManagedFallback
+        case .systemActivated:
+            return .systemActivated
+        }
+    }
+
+    var bufferedAudioChunks: [String] {
+        switch self {
+        case .idle:
+            return []
+        case .signalBuffered(_, let bufferedAudioChunks),
+             .awaitingSystemActivation(_, let bufferedAudioChunks),
+             .systemActivationTimedOutWaitingForForeground(_, let bufferedAudioChunks),
+             .appManagedFallback(_, let bufferedAudioChunks),
+             .systemActivated(_, let bufferedAudioChunks):
+            return bufferedAudioChunks
+        case .systemActivationInterruptedByTransmitEnd:
+            return []
+        }
+    }
+
+    var hasConfirmedIncomingPush: Bool {
+        switch self {
+        case .idle, .signalBuffered:
+            return false
+        case .awaitingSystemActivation,
+             .systemActivationTimedOutWaitingForForeground,
+             .systemActivationInterruptedByTransmitEnd,
+             .appManagedFallback,
+             .systemActivated:
+            return true
+        }
+    }
+
+    var allowsBufferedAudioUntilActivation: Bool {
+        switch self {
+        case .signalBuffered, .awaitingSystemActivation, .systemActivationTimedOutWaitingForForeground:
+            return true
+        case .idle, .systemActivationInterruptedByTransmitEnd, .appManagedFallback, .systemActivated:
+            return false
+        }
+    }
+
+    func storingBufferedAudioChunk(
+        _ payload: String,
+        maximumBufferedAudioChunks: Int
+    ) -> WakeReceiveState {
+        guard allowsBufferedAudioUntilActivation,
+              let context else {
+            return self
+        }
+        var nextBufferedAudioChunks = bufferedAudioChunks
+        nextBufferedAudioChunks.append(payload)
+        if nextBufferedAudioChunks.count > maximumBufferedAudioChunks {
+            nextBufferedAudioChunks.removeFirst(
+                nextBufferedAudioChunks.count - maximumBufferedAudioChunks
+            )
+        }
+
+        switch self {
+        case .signalBuffered:
+            return .signalBuffered(context, bufferedAudioChunks: nextBufferedAudioChunks)
+        case .awaitingSystemActivation:
+            return .awaitingSystemActivation(context, bufferedAudioChunks: nextBufferedAudioChunks)
+        case .systemActivationTimedOutWaitingForForeground:
+            return .systemActivationTimedOutWaitingForForeground(context, bufferedAudioChunks: nextBufferedAudioChunks)
+        case .idle, .systemActivationInterruptedByTransmitEnd, .appManagedFallback, .systemActivated:
+            return self
+        }
+    }
+
+    func clearingBufferedAudioChunks() -> WakeReceiveState {
+        guard let context else { return self }
+        switch self {
+        case .signalBuffered:
+            return .signalBuffered(context, bufferedAudioChunks: [])
+        case .awaitingSystemActivation:
+            return .awaitingSystemActivation(context, bufferedAudioChunks: [])
+        case .systemActivationTimedOutWaitingForForeground:
+            return .systemActivationTimedOutWaitingForForeground(context, bufferedAudioChunks: [])
+        case .systemActivationInterruptedByTransmitEnd:
+            return .systemActivationInterruptedByTransmitEnd(context)
+        case .appManagedFallback:
+            return .appManagedFallback(context, bufferedAudioChunks: [])
+        case .systemActivated:
+            return .systemActivated(context, bufferedAudioChunks: [])
+        case .idle:
+            return self
+        }
+    }
+
+    func confirmingIncomingPush(
+        channelUUID: UUID,
+        payload: TurboPTTPushPayload
+    ) -> WakeReceiveState {
+        guard let context,
+              context.channelUUID == channelUUID else {
+            return self
+        }
+        return .awaitingSystemActivation(
+            WakeReceiveContext(
+                contactID: context.contactID,
+                channelUUID: context.channelUUID,
+                payload: payload
+            ),
+            bufferedAudioChunks: bufferedAudioChunks
+        )
+    }
+
+    func markingAudioSessionActivated(channelUUID: UUID) -> WakeReceiveState {
+        guard let context,
+              context.channelUUID == channelUUID else {
+            return self
+        }
+        return .systemActivated(context, bufferedAudioChunks: bufferedAudioChunks)
+    }
+
+    func markingFallbackDeferred(contactID: UUID) -> WakeReceiveState {
+        guard let context,
+              context.contactID == contactID else {
+            return self
+        }
+        return .systemActivationTimedOutWaitingForForeground(context, bufferedAudioChunks: bufferedAudioChunks)
+    }
+
+    func markingSystemActivationInterruptedByTransmitEnd(contactID: UUID) -> WakeReceiveState {
+        guard let context,
+              context.contactID == contactID else {
+            return self
+        }
+        switch self {
+        case .signalBuffered, .awaitingSystemActivation, .systemActivationTimedOutWaitingForForeground:
+            return .systemActivationInterruptedByTransmitEnd(context)
+        case .idle, .systemActivationInterruptedByTransmitEnd, .appManagedFallback, .systemActivated:
+            return self
+        }
+    }
+
+    func markingAppManagedFallbackStarted(contactID: UUID) -> WakeReceiveState {
+        guard let context,
+              context.contactID == contactID else {
+            return self
+        }
+        return .appManagedFallback(context, bufferedAudioChunks: bufferedAudioChunks)
+    }
 }
 
 struct PendingIncomingPTTPush: Equatable {
@@ -289,113 +606,193 @@ struct PendingIncomingPTTPush: Equatable {
     var playbackMode: IncomingWakePlaybackMode = .awaitingPTTActivation
     var activationState: IncomingWakeActivationState = .signalBuffered
     var bufferedAudioChunks: [String] = []
+
+    init(
+        contactID: UUID,
+        channelUUID: UUID,
+        payload: TurboPTTPushPayload,
+        hasConfirmedIncomingPush: Bool = false,
+        playbackMode: IncomingWakePlaybackMode = .awaitingPTTActivation,
+        activationState: IncomingWakeActivationState = .signalBuffered,
+        bufferedAudioChunks: [String] = []
+    ) {
+        self.contactID = contactID
+        self.channelUUID = channelUUID
+        self.payload = payload
+        self.hasConfirmedIncomingPush = hasConfirmedIncomingPush
+        self.playbackMode = playbackMode
+        self.activationState = activationState
+        self.bufferedAudioChunks = bufferedAudioChunks
+    }
+
+    init(state: WakeReceiveState) {
+        let context = state.context!
+        self.contactID = context.contactID
+        self.channelUUID = context.channelUUID
+        self.payload = context.payload
+        self.hasConfirmedIncomingPush = state.hasConfirmedIncomingPush
+        self.playbackMode = state.playbackMode ?? .awaitingPTTActivation
+        self.activationState = state.activationState ?? .signalBuffered
+        self.bufferedAudioChunks = state.bufferedAudioChunks
+    }
 }
 
 final class PTTWakeRuntimeState {
     private let maximumBufferedAudioChunks = 12
-    var pendingIncomingPush: PendingIncomingPTTPush?
+    var wakeReceiveState: WakeReceiveState = .idle
     private var playbackFallbackTasks: [UUID: Task<Void, Never>] = [:]
+    private var suppressedProvisionalWakeCandidateContactIDs: Set<UUID> = []
+
+    var pendingIncomingPush: PendingIncomingPTTPush? {
+        switch wakeReceiveState {
+        case .idle, .systemActivationInterruptedByTransmitEnd:
+            return nil
+        case .signalBuffered, .awaitingSystemActivation, .systemActivationTimedOutWaitingForForeground, .appManagedFallback, .systemActivated:
+            break
+        }
+        return PendingIncomingPTTPush(state: wakeReceiveState)
+    }
 
     func store(_ push: PendingIncomingPTTPush) {
-        pendingIncomingPush = push
+        let context = WakeReceiveContext(
+            contactID: push.contactID,
+            channelUUID: push.channelUUID,
+            payload: push.payload
+        )
+        switch push.activationState {
+        case .signalBuffered:
+            wakeReceiveState = .signalBuffered(
+                context,
+                bufferedAudioChunks: push.bufferedAudioChunks
+            )
+        case .awaitingSystemActivation:
+            wakeReceiveState = .awaitingSystemActivation(
+                context,
+                bufferedAudioChunks: push.bufferedAudioChunks
+            )
+        case .systemActivationTimedOutWaitingForForeground:
+            wakeReceiveState = .systemActivationTimedOutWaitingForForeground(
+                context,
+                bufferedAudioChunks: push.bufferedAudioChunks
+            )
+        case .systemActivationInterruptedByTransmitEnd:
+            wakeReceiveState = .systemActivationInterruptedByTransmitEnd(context)
+        case .appManagedFallback:
+            wakeReceiveState = .appManagedFallback(
+                context,
+                bufferedAudioChunks: push.bufferedAudioChunks
+            )
+        case .systemActivated:
+            wakeReceiveState = .systemActivated(
+                context,
+                bufferedAudioChunks: push.bufferedAudioChunks
+            )
+        }
     }
 
     func confirmIncomingPush(for channelUUID: UUID, payload: TurboPTTPushPayload) {
-        guard var pendingIncomingPush,
-              pendingIncomingPush.channelUUID == channelUUID else {
-            return
-        }
-        pendingIncomingPush.hasConfirmedIncomingPush = true
-        pendingIncomingPush = PendingIncomingPTTPush(
-            contactID: pendingIncomingPush.contactID,
-            channelUUID: pendingIncomingPush.channelUUID,
-            payload: payload,
-            hasConfirmedIncomingPush: true,
-            playbackMode: pendingIncomingPush.playbackMode,
-            activationState: .awaitingSystemActivation,
-            bufferedAudioChunks: pendingIncomingPush.bufferedAudioChunks
+        wakeReceiveState = wakeReceiveState.confirmingIncomingPush(
+            channelUUID: channelUUID,
+            payload: payload
         )
-        self.pendingIncomingPush = pendingIncomingPush
     }
 
     func markAudioSessionActivated(for channelUUID: UUID) {
-        guard var pendingIncomingPush,
-              pendingIncomingPush.channelUUID == channelUUID else {
-            return
-        }
-        pendingIncomingPush.playbackMode = .systemActivated
-        pendingIncomingPush.activationState = .systemActivated
-        self.pendingIncomingPush = pendingIncomingPush
+        wakeReceiveState = wakeReceiveState.markingAudioSessionActivated(
+            channelUUID: channelUUID
+        )
     }
 
     func markAppManagedFallbackStarted(for contactID: UUID) {
-        guard var pendingIncomingPush,
-              pendingIncomingPush.contactID == contactID else {
-            return
-        }
-        pendingIncomingPush.playbackMode = .appManagedFallback
-        pendingIncomingPush.activationState = .appManagedFallback
-        self.pendingIncomingPush = pendingIncomingPush
+        wakeReceiveState = wakeReceiveState.markingAppManagedFallbackStarted(
+            contactID: contactID
+        )
     }
 
     func markFallbackDeferredUntilForeground(for contactID: UUID) {
-        guard var pendingIncomingPush,
-              pendingIncomingPush.contactID == contactID else {
-            return
-        }
-        pendingIncomingPush.activationState = .fallbackDeferredUntilForeground
-        self.pendingIncomingPush = pendingIncomingPush
+        wakeReceiveState = wakeReceiveState.markingFallbackDeferred(
+            contactID: contactID
+        )
+    }
+
+    func markSystemActivationInterruptedByTransmitEnd(for contactID: UUID) {
+        replacePlaybackFallbackTask(for: contactID, with: nil)
+        wakeReceiveState = wakeReceiveState.markingSystemActivationInterruptedByTransmitEnd(
+            contactID: contactID
+        )
     }
 
     func shouldBufferAudioChunk(for contactID: UUID) -> Bool {
-        guard let pendingIncomingPush else { return false }
-        return pendingIncomingPush.contactID == contactID
-            && pendingIncomingPush.playbackMode == .awaitingPTTActivation
+        guard let context = wakeReceiveState.context else { return false }
+        return context.contactID == contactID
+            && wakeReceiveState.allowsBufferedAudioUntilActivation
     }
 
     func hasPendingWake(for contactID: UUID) -> Bool {
         pendingIncomingPush?.contactID == contactID
     }
 
-    func hasConfirmedIncomingPush(for contactID: UUID) -> Bool {
-        guard let pendingIncomingPush,
-              pendingIncomingPush.contactID == contactID else {
+    func suppressProvisionalWakeCandidate(for contactID: UUID) {
+        suppressedProvisionalWakeCandidateContactIDs.insert(contactID)
+    }
+
+    func clearProvisionalWakeCandidateSuppression(for contactID: UUID) {
+        suppressedProvisionalWakeCandidateContactIDs.remove(contactID)
+    }
+
+    func shouldSuppressProvisionalWakeCandidate(for contactID: UUID) -> Bool {
+        suppressedProvisionalWakeCandidateContactIDs.contains(contactID)
+    }
+
+    func shouldIgnoreDuplicateIncomingPush(
+        for contactID: UUID,
+        channelUUID: UUID,
+        payload: TurboPTTPushPayload
+    ) -> Bool {
+        guard let context = wakeReceiveState.context,
+              context.contactID == contactID,
+              context.channelUUID == channelUUID,
+              context.payload == payload else {
             return false
         }
-        return pendingIncomingPush.hasConfirmedIncomingPush
+        return wakeReceiveState.hasConfirmedIncomingPush
+    }
+
+    func hasConfirmedIncomingPush(for contactID: UUID) -> Bool {
+        guard let context = wakeReceiveState.context,
+              context.contactID == contactID else {
+            return false
+        }
+        return wakeReceiveState.hasConfirmedIncomingPush
     }
 
     func bufferAudioChunk(_ payload: String, for contactID: UUID) {
-        guard var pendingIncomingPush,
-              pendingIncomingPush.contactID == contactID else {
+        guard let context = wakeReceiveState.context,
+              context.contactID == contactID else {
             return
         }
-        pendingIncomingPush.bufferedAudioChunks.append(payload)
-        if pendingIncomingPush.bufferedAudioChunks.count > maximumBufferedAudioChunks {
-            pendingIncomingPush.bufferedAudioChunks.removeFirst(
-                pendingIncomingPush.bufferedAudioChunks.count - maximumBufferedAudioChunks
-            )
-        }
-        self.pendingIncomingPush = pendingIncomingPush
+        wakeReceiveState = wakeReceiveState.storingBufferedAudioChunk(
+            payload,
+            maximumBufferedAudioChunks: maximumBufferedAudioChunks
+        )
     }
 
     func takeBufferedAudioChunks(for contactID: UUID) -> [String] {
-        guard var pendingIncomingPush,
-              pendingIncomingPush.contactID == contactID else {
+        guard let context = wakeReceiveState.context,
+              context.contactID == contactID else {
             return []
         }
-        let bufferedAudioChunks = pendingIncomingPush.bufferedAudioChunks
-        pendingIncomingPush.bufferedAudioChunks.removeAll(keepingCapacity: false)
-        self.pendingIncomingPush = pendingIncomingPush
+        let bufferedAudioChunks = wakeReceiveState.bufferedAudioChunks
+        wakeReceiveState = wakeReceiveState.clearingBufferedAudioChunks()
         return bufferedAudioChunks
     }
 
     func bufferedAudioChunkCount(for contactID: UUID) -> Int {
-        guard let pendingIncomingPush,
-              pendingIncomingPush.contactID == contactID else {
+        guard let context = wakeReceiveState.context,
+              context.contactID == contactID else {
             return 0
         }
-        return pendingIncomingPush.bufferedAudioChunks.count
+        return wakeReceiveState.bufferedAudioChunks.count
     }
 
     func replacePlaybackFallbackTask(for contactID: UUID, with task: Task<Void, Never>?) {
@@ -417,34 +814,37 @@ final class PTTWakeRuntimeState {
 
     func clear(for contactID: UUID) {
         replacePlaybackFallbackTask(for: contactID, with: nil)
-        guard pendingIncomingPush?.contactID == contactID else { return }
-        pendingIncomingPush = nil
+        guard wakeReceiveState.context?.contactID == contactID else { return }
+        wakeReceiveState = .idle
     }
 
-    func clearAll() {
+    func clearAll(clearSuppression: Bool = true) {
         for contactID in playbackFallbackTasks.keys {
             replacePlaybackFallbackTask(for: contactID, with: nil)
         }
-        pendingIncomingPush = nil
+        wakeReceiveState = .idle
+        if clearSuppression {
+            suppressedProvisionalWakeCandidateContactIDs.removeAll(keepingCapacity: false)
+        }
     }
 
     func incomingWakeActivationState(for contactID: UUID) -> IncomingWakeActivationState? {
-        guard let pendingIncomingPush,
-              pendingIncomingPush.contactID == contactID else {
+        guard let context = wakeReceiveState.context,
+              context.contactID == contactID else {
             return nil
         }
-        return pendingIncomingPush.activationState
+        return wakeReceiveState.activationState
     }
 
     func mediaSessionActivationMode(for contactID: UUID) -> MediaSessionActivationMode {
-        guard let pendingIncomingPush,
-              pendingIncomingPush.contactID == contactID else {
+        guard let context = wakeReceiveState.context,
+              context.contactID == contactID else {
             return .appManaged
         }
-        switch pendingIncomingPush.playbackMode {
+        switch wakeReceiveState.playbackMode {
         case .systemActivated:
             return .systemActivated
-        case .awaitingPTTActivation, .appManagedFallback:
+        case .awaitingPTTActivation, .appManagedFallback, nil:
             return .appManaged
         }
     }
@@ -535,10 +935,10 @@ final class MediaRuntimeState {
         return now.timeIntervalSince(failure.occurredAt) < cooldown
     }
 
-    func reset() {
+    func reset(deactivateAudioSession: Bool = true) {
         interactivePrewarmRecoveryTask?.cancel()
         interactivePrewarmRecoveryTask = nil
-        session?.close()
+        session?.close(deactivateAudioSession: deactivateAudioSession)
         session = nil
         contactID = nil
         connectionState = .idle
@@ -736,7 +1136,10 @@ struct TransmitServices {
     let hasPendingBeginOrActiveTarget: () -> Bool
     let activeTarget: () -> TransmitTarget?
     let replaceBeginTask: (Task<Void, Never>?) -> Void
-    let replaceRenewTask: (Task<Void, Never>?) -> Void
+    let finishBeginTask: () -> Void
+    let cancelBeginTask: () -> Void
+    let replaceRenewTask: (Task<Void, Never>?, String?) -> Void
+    let cancelRenewTask: () -> Void
     let clearPendingWork: () -> Void
     let reset: () -> Void
 }
@@ -755,5 +1158,5 @@ struct MediaServices {
     let markStartupSucceeded: () -> Void
     let markStartupFailed: (MediaSessionStartupContext, String) -> Void
     let replaceSendAudioChunk: ((@Sendable (String) async throws -> Void)?) -> Void
-    let reset: () -> Void
+    let reset: (Bool) -> Void
 }

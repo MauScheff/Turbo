@@ -207,12 +207,14 @@ struct TurboTalkControlsView: View {
     let isJoined: Bool
     let activeChannelID: UUID?
     let isTransmitting: Bool
+    let isTransmitPressActive: Bool
     let selectedPeerState: (UUID) -> SelectedPeerState
     let requestCooldownRemaining: (UUID, Date) -> Int?
     let joinChannel: () -> Void
     let beginTransmit: () -> Void
+    let noteTransmitTouchReleased: () -> Void
     let endTransmit: () -> Void
-    @State private var holdToTalkPressActive = false
+    @State private var holdToTalkGestureState = HoldToTalkGestureState()
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
@@ -227,34 +229,41 @@ struct TurboTalkControlsView: View {
                         isTransmitting: isTransmitting,
                         requestCooldownRemaining: cooldownRemaining
                     )
+                    let effectiveGestureIsActive = isTransmitPressActive
+                    let displayedPrimaryAction = HoldToTalkButtonPolicy.displayAction(
+                        primaryAction,
+                        gestureIsActive: effectiveGestureIsActive
+                    )
+                    let shouldRenderHoldToTalkControl = HoldToTalkButtonPolicy.shouldRenderHoldToTalkControl(
+                        primaryAction,
+                        gestureIsActive: effectiveGestureIsActive
+                    )
 
-                    if primaryAction.kind == .holdToTalk {
-                        Text(primaryAction.label)
+                    if shouldRenderHoldToTalkControl {
+                        Text(displayedPrimaryAction.label)
                             .font(.title3.weight(.semibold))
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity, minHeight: 72)
                             .background(
                                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(primaryActionTint(primaryAction.style))
-                                    .opacity(primaryAction.isEnabled ? 1 : 0.45)
+                                    .fill(primaryActionTint(displayedPrimaryAction.style))
+                                    .opacity(displayedPrimaryAction.isEnabled ? 1 : 0.45)
                             )
                             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                             .gesture(
                                 DragGesture(minimumDistance: 0)
                                     .onChanged { _ in
-                                        guard primaryAction.isEnabled else { return }
-                                        guard !holdToTalkPressActive else { return }
-                                        holdToTalkPressActive = true
+                                        guard holdToTalkGestureState.beginIfAllowed(isEnabled: primaryAction.isEnabled) else { return }
                                         beginTransmit()
                                     }
                                     .onEnded { _ in
-                                        guard holdToTalkPressActive else { return }
-                                        holdToTalkPressActive = false
+                                        noteTransmitTouchReleased()
+                                        guard holdToTalkGestureState.endTouch() else { return }
                                         endTransmit()
                                     }
                             )
                             .accessibilityAddTraits(.isButton)
-                            .opacity(primaryAction.isEnabled ? 1 : 0.8)
+                            .opacity(displayedPrimaryAction.isEnabled ? 1 : 0.8)
                     } else {
                         Button(action: joinChannel) {
                             Text(primaryAction.label)
@@ -282,11 +291,21 @@ struct TurboTalkControlsView: View {
             }
         }
         .onChange(of: selectedContactID) { _, _ in
-            holdToTalkPressActive = false
+            if holdToTalkGestureState.cancel() {
+                endTransmit()
+            }
         }
-        .onChange(of: isTransmitting) { _, isTransmitting in
-            if !isTransmitting {
-                holdToTalkPressActive = false
+        .onChange(of: isTransmitPressActive) { _, isActive in
+            holdToTalkGestureState.handleMachinePressChanged(isActive: isActive)
+        }
+        .onChange(of: isJoined) { _, joined in
+            if !joined {
+                _ = holdToTalkGestureState.cancel()
+            }
+        }
+        .onDisappear {
+            if holdToTalkGestureState.cancel() {
+                endTransmit()
             }
         }
     }
@@ -300,6 +319,67 @@ struct TurboTalkControlsView: View {
         case .muted:
             return .gray
         }
+    }
+}
+
+struct HoldToTalkGestureState: Equatable {
+    var isTrackingTouch = false
+    var requiresReleaseBeforeNextPress = false
+
+    mutating func beginIfAllowed(isEnabled: Bool) -> Bool {
+        guard isEnabled else { return false }
+        guard !isTrackingTouch else { return false }
+        guard !requiresReleaseBeforeNextPress else { return false }
+        isTrackingTouch = true
+        return true
+    }
+
+    mutating func endTouch() -> Bool {
+        let shouldEndTransmit = isTrackingTouch
+        isTrackingTouch = false
+        requiresReleaseBeforeNextPress = false
+        return shouldEndTransmit
+    }
+
+    mutating func handleMachinePressChanged(isActive: Bool) {
+        if !isActive && isTrackingTouch {
+            isTrackingTouch = false
+            requiresReleaseBeforeNextPress = true
+        }
+    }
+
+    mutating func cancel() -> Bool {
+        let shouldEndTransmit = isTrackingTouch
+        isTrackingTouch = false
+        requiresReleaseBeforeNextPress = false
+        return shouldEndTransmit
+    }
+}
+
+enum HoldToTalkButtonPolicy {
+    static func shouldRenderHoldToTalkControl(
+        _ primaryAction: ConversationPrimaryAction,
+        gestureIsActive: Bool
+    ) -> Bool {
+        gestureIsActive || primaryAction.kind == .holdToTalk
+    }
+
+    static func displayAction(
+        _ primaryAction: ConversationPrimaryAction,
+        gestureIsActive: Bool
+    ) -> ConversationPrimaryAction {
+        guard shouldRenderHoldToTalkControl(primaryAction, gestureIsActive: gestureIsActive) else {
+            return primaryAction
+        }
+        guard gestureIsActive else {
+            return primaryAction
+        }
+        return ConversationPrimaryAction(
+            kind: .holdToTalk,
+            label: "Release To Stop",
+            isEnabled: primaryAction.isEnabled,
+            style: .active
+        )
     }
 }
 

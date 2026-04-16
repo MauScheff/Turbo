@@ -47,6 +47,10 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         return response
     }
 
+    func setRuntimeConfigForTesting(_ config: TurboBackendRuntimeConfig) {
+        runtimeConfig = config
+    }
+
     func authenticate() async throws -> TurboAuthSessionResponse {
         try await request(path: "/v1/auth/session", method: "POST")
     }

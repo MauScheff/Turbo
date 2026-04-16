@@ -1,6 +1,6 @@
 import Foundation
 
-struct TransmitRequestContext: Equatable {
+struct TransmitRequestContext: Equatable, Sendable {
     let contactID: UUID
     let contactHandle: String
     let backendChannelID: String
@@ -10,7 +10,7 @@ struct TransmitRequestContext: Equatable {
     let backendSupportsWebSocket: Bool
 }
 
-struct TransmitTarget: Equatable {
+struct TransmitTarget: Equatable, Sendable {
     let contactID: UUID
     let userID: String
     let deviceID: String

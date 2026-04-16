@@ -23,6 +23,13 @@ extension PTTViewModel {
             receivedIncomingPush: { [weak self] channelUUID, payload in
                 self?.handleReceivedIncomingPTTPush(channelUUID: channelUUID, payload: payload)
             },
+            willReturnIncomingPushResult: { [weak self] channelUUID, payload, result in
+                self?.handleWillReturnIncomingPushResult(
+                    channelUUID: channelUUID,
+                    payload: payload,
+                    result: result
+                )
+            },
             didJoinChannel: { [weak self] channelUUID, reason in
                 self?.handleDidJoinChannel(channelUUID, reason: reason)
             },
@@ -53,6 +60,9 @@ extension PTTViewModel {
             didDeactivateAudioSession: { [weak self] audioSession in
                 self?.handleDidDeactivateAudioSession(audioSession)
             },
+            willRequestRestoredChannelDescriptor: { [weak self] channelUUID in
+                self?.handleWillRequestRestoredChannelDescriptor(channelUUID)
+            },
             descriptorForRestoredChannel: { [weak self] channelUUID in
                 self?.channelDescriptorForRestoredChannel(channelUUID)
                     ?? PTChannelDescriptor(name: "Restored session", image: nil)
@@ -69,7 +79,16 @@ extension PTTViewModel {
             contacts.first(where: { $0.id == activeContactID })?.backendChannelId
         }
         pushTokenHex = tokenHex
-        print("PTT push token:", pushTokenHex)
+        diagnostics.record(
+            .pushToTalk,
+            message: "Received ephemeral PTT token",
+            metadata: [
+                "backendChannelId": backendChannelID ?? "none",
+                "tokenPrefix": String(tokenHex.prefix(8)),
+                "activeContactId": activeChannelId?.uuidString ?? "none",
+                "systemChannelUUID": pttCoordinator.state.systemChannelUUID?.uuidString ?? "none",
+            ]
+        )
         Task {
             await pttSystemPolicyCoordinator.handle(
                 .ephemeralTokenReceived(tokenHex: tokenHex, backendChannelID: backendChannelID)
@@ -77,6 +96,29 @@ extension PTTViewModel {
             syncPTTSystemPolicyState()
             captureDiagnosticsState("ptt-callback:token")
         }
+    }
+
+    func handleWillReturnIncomingPushResult(
+        channelUUID: UUID,
+        payload: TurboPTTPushPayload,
+        result: String
+    ) {
+        let contactID =
+            contactId(for: channelUUID)
+            ?? contacts.first(where: { $0.backendChannelId == payload.channelId })?.id
+        diagnostics.record(
+            .pushToTalk,
+            message: "Returning incoming PTT push result",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "event": payload.event.rawValue,
+                "result": result,
+                "applicationState": String(describing: UIApplication.shared.applicationState),
+                "contactId": contactID?.uuidString ?? "none",
+                "systemChannelUUID": pttCoordinator.state.systemChannelUUID?.uuidString ?? "none",
+                "pendingWakeChannelUUID": pttWakeRuntime.pendingIncomingPush?.channelUUID.uuidString ?? "none",
+            ]
+        )
     }
 
     func handleReceivedIncomingPTTPush(channelUUID: UUID, payload: TurboPTTPushPayload) {
@@ -101,8 +143,29 @@ extension PTTViewModel {
             return
         }
 
+        if shouldArmWakeFlowForIncomingPush,
+           payload.event == .transmitStart,
+           pttWakeRuntime.shouldIgnoreDuplicateIncomingPush(
+                for: contactID,
+                channelUUID: channelUUID,
+                payload: payload
+           ) {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Ignored duplicate incoming PTT push while wake is already pending",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "event": payload.event.rawValue,
+                ]
+            )
+            captureDiagnosticsState("ptt-callback:incoming-push-duplicate")
+            return
+        }
+
         switch payload.event {
         case .transmitStart:
+            pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
             markRemoteAudioActivity(for: contactID)
             if shouldArmWakeFlowForIncomingPush {
                 if pttWakeRuntime.hasPendingWake(for: contactID) {
@@ -129,6 +192,15 @@ extension PTTViewModel {
                     ]
                 )
                 scheduleWakePlaybackFallback(for: contactID)
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Reinforcing active remote participant during incoming push",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                        "participant": payload.participantName,
+                    ]
+                )
                 Task { [weak self] in
                     await self?.reinforceIncomingPushRemoteParticipant(
                         channelUUID: channelUUID,
@@ -152,6 +224,7 @@ extension PTTViewModel {
                 selectedContactId = contactID
             }
         case .leaveChannel:
+            pttWakeRuntime.suppressProvisionalWakeCandidate(for: contactID)
             clearRemoteAudioActivity(for: contactID)
             pttWakeRuntime.clear(for: contactID)
         }
@@ -159,39 +232,16 @@ extension PTTViewModel {
         updateStatusForSelectedContact()
         captureDiagnosticsState("ptt-callback:incoming-push")
 
-        Task { [weak self] in
-            guard let self else { return }
-            if shouldArmWakeFlowForIncomingPush,
-               let backendServices,
-               backendServices.supportsWebSocket {
-                backendServices.ensureWebSocketConnected()
-                do {
-                    try await backendServices.waitForWebSocketConnection()
-                    diagnostics.record(
-                        .websocket,
-                        message: "WebSocket connected for incoming PTT push",
-                        metadata: [
-                            "contactId": contactID.uuidString,
-                            "channelUUID": channelUUID.uuidString,
-                        ]
-                    )
-                } catch {
-                    diagnostics.record(
-                        .websocket,
-                        level: .error,
-                        message: "WebSocket reconnection failed for incoming PTT push",
-                        metadata: [
-                            "contactId": contactID.uuidString,
-                            "channelUUID": channelUUID.uuidString,
-                            "error": error.localizedDescription,
-                        ]
-                    )
-                }
-            }
-            if shouldArmWakeFlowForIncomingPush {
-                await refreshContactSummaries()
-                await refreshChannelState(for: contactID)
-            }
+        if shouldArmWakeFlowForIncomingPush {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Deferring incoming-push backend sync until PTT audio activation",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "event": payload.event.rawValue,
+                ]
+            )
         }
     }
 
@@ -253,6 +303,8 @@ extension PTTViewModel {
                 )
             )
             syncPTTState()
+            syncPTTSystemChannelDescriptor(channelUUID, reason: "did-join")
+            syncPTTServiceStatus(reason: "did-join")
             diagnostics.record(
                 .pushToTalk,
                 message: "Joined channel",
@@ -282,6 +334,8 @@ extension PTTViewModel {
                 sessionCoordinator.clearLeaveAction(for: contactID)
             }
             syncPTTState()
+            lastReportedPTTServiceStatus = nil
+            lastReportedPTTServiceStatusChannelUUID = nil
             diagnostics.record(
                 .pushToTalk,
                 message: "Left channel",
@@ -340,25 +394,39 @@ extension PTTViewModel {
 
     func handleDidBeginTransmitting(_ channelUUID: UUID, source: String) {
         Task {
+            let callbackTarget = activeTransmitTarget(for: channelUUID)
             await pttCoordinator.handle(
                 .didBeginTransmitting(
                     channelUUID: channelUUID,
                     source: source
                 )
             )
+            transmitRuntime.noteSystemTransmitBegan()
             syncPTTState()
             diagnostics.record(
                 .pushToTalk,
                 message: "System transmit began",
-                metadata: ["channelUUID": channelUUID.uuidString, "source": source]
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "source": source,
+                    "applicationState": String(describing: UIApplication.shared.applicationState),
+                    "activeContactId": callbackTarget?.contactID.uuidString ?? "none",
+                    "activeChannelId": callbackTarget?.channelID ?? "none",
+                    "pttServiceStatus": lastReportedPTTServiceStatus.map(String.init(describing:)) ?? "none",
+                    "pttServiceStatusReason": lastReportedPTTServiceStatusReason ?? "none",
+                    "pttDescriptorName": lastReportedPTTDescriptorName ?? "none",
+                    "pttDescriptorReason": lastReportedPTTDescriptorReason ?? "none",
+                    "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
+                ]
             )
-            transmitRuntime.clearUnexpectedSystemEndRetry()
             captureDiagnosticsState("ptt-callback:transmit-began")
         }
     }
 
     func handleDidEndTransmitting(_ channelUUID: UUID, source: String) {
         Task {
+            let matchingActiveTarget = activeTransmitTarget(for: channelUUID)
+            let transmitDurationMilliseconds = transmitRuntime.currentSystemTransmitDurationMilliseconds()
             await pttCoordinator.handle(
                 .didEndTransmitting(
                     channelUUID: channelUUID,
@@ -369,41 +437,56 @@ extension PTTViewModel {
             diagnostics.record(
                 .pushToTalk,
                 message: "System transmit ended",
-                metadata: ["channelUUID": channelUUID.uuidString, "source": source]
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "source": source,
+                    "transmitPressActive": String(transmitRuntime.isPressingTalk),
+                    "explicitStopRequested": String(transmitRuntime.explicitStopRequested),
+                    "hasMatchingActiveTarget": String(matchingActiveTarget != nil),
+                    "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
+                    "applicationState": String(describing: UIApplication.shared.applicationState),
+                    "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
+                    "activeContactId": matchingActiveTarget?.contactID.uuidString ?? "none",
+                    "activeChannelId": matchingActiveTarget?.channelID ?? "none",
+                    "pttServiceStatus": lastReportedPTTServiceStatus.map(String.init(describing:)) ?? "none",
+                    "pttServiceStatusReason": lastReportedPTTServiceStatusReason ?? "none",
+                    "pttDescriptorName": lastReportedPTTDescriptorName ?? "none",
+                    "pttDescriptorReason": lastReportedPTTDescriptorReason ?? "none",
+                    "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
+                ]
             )
-            if transmitRuntime.shouldRetryUnexpectedSystemEnd(maxRetries: 1),
-               activeTransmitTarget(for: channelUUID) != nil {
-                transmitRuntime.markUnexpectedSystemEndRetry()
+            if !transmitRuntime.explicitStopRequested,
+               matchingActiveTarget != nil,
+               transmitRuntime.isPressingTalk {
+                transmitRuntime.markUnexpectedSystemEndRequiresRelease(
+                    contactID: matchingActiveTarget?.contactID
+                )
+                transmitRuntime.syncActiveTarget(matchingActiveTarget)
                 diagnostics.record(
                     .pushToTalk,
-                    message: "Retrying unexpected system transmit end while press is still active",
-                    metadata: ["channelUUID": channelUUID.uuidString, "source": source]
+                    message: "Unexpected system transmit end requires fresh press",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "source": source,
+                        "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
+                        "applicationState": String(describing: UIApplication.shared.applicationState),
+                        "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
+                        "activeContactId": matchingActiveTarget?.contactID.uuidString ?? "none",
+                        "activeChannelId": matchingActiveTarget?.channelID ?? "none",
+                        "pttServiceStatus": lastReportedPTTServiceStatus.map(String.init(describing:)) ?? "none",
+                        "pttServiceStatusReason": lastReportedPTTServiceStatusReason ?? "none",
+                        "pttDescriptorName": lastReportedPTTDescriptorName ?? "none",
+                        "pttDescriptorReason": lastReportedPTTDescriptorReason ?? "none",
+                        "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
+                    ]
                 )
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                if transmitRuntime.isPressingTalk,
-                   activeTransmitTarget(for: channelUUID) != nil {
-                    do {
-                        try pttSystemClient.beginTransmitting(channelUUID: channelUUID)
-                        captureDiagnosticsState("ptt-callback:transmit-end-retry")
-                        return
-                    } catch {
-                        diagnostics.record(
-                            .pushToTalk,
-                            level: .error,
-                            message: "Failed to retry transmit after unexpected system end",
-                            metadata: [
-                                "channelUUID": channelUUID.uuidString,
-                                "source": source,
-                                "error": formatPTTError(error)
-                            ]
-                        )
-                    }
-                }
+                syncTransmitState()
             }
-            if activeTransmitTarget(for: channelUUID) != nil {
+            if matchingActiveTarget != nil {
                 await transmitCoordinator.handle(.systemEnded)
                 syncTransmitState()
             }
+            transmitRuntime.noteSystemTransmitEnded()
             captureDiagnosticsState("ptt-callback:transmit-ended")
         }
     }
@@ -470,8 +553,19 @@ extension PTTViewModel {
 
     func handleRestoredChannel(_ channelUUID: UUID) {
         let contactID = contactId(for: channelUUID)
+        diagnostics.record(
+            .pushToTalk,
+            message: "Restored PTT channel",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "contactId": contactID?.uuidString ?? "none",
+                "applicationState": String(describing: UIApplication.shared.applicationState),
+            ]
+        )
         pttCoordinator.send(.restoredChannel(channelUUID: channelUUID, contactID: contactID))
         syncPTTState()
+        syncPTTSystemChannelDescriptor(channelUUID, reason: "restored-channel")
+        syncPTTServiceStatus(reason: "restored-channel")
         if let contactID {
             Task {
                 await prewarmLocalMediaIfNeeded(for: contactID)
@@ -481,10 +575,18 @@ extension PTTViewModel {
     }
 
     func handleDidActivateAudioSession(_ audioSession: AVAudioSession) {
+        isPTTAudioSessionActive = true
         diagnostics.record(
             .pushToTalk,
             message: "PTT audio session activated",
-            metadata: audioSessionDiagnostics(audioSession)
+            metadata: audioSessionDiagnostics(audioSession).merging(
+                [
+                    "applicationState": String(describing: UIApplication.shared.applicationState),
+                    "pendingWakeChannelUUID": pttWakeRuntime.pendingIncomingPush?.channelUUID.uuidString ?? "none",
+                    "pendingWakeContactId": pttWakeRuntime.pendingIncomingPush?.contactID.uuidString ?? "none",
+                ],
+                uniquingKeysWith: { _, new in new }
+            )
         )
         Task {
             await handleActivatedAudioSession(audioSession)
@@ -493,10 +595,18 @@ extension PTTViewModel {
     }
 
     func handleDidDeactivateAudioSession(_ audioSession: AVAudioSession) {
+        isPTTAudioSessionActive = false
         diagnostics.record(
             .pushToTalk,
             message: "PTT audio session deactivated",
-            metadata: audioSessionDiagnostics(audioSession)
+            metadata: audioSessionDiagnostics(audioSession).merging(
+                [
+                    "applicationState": String(describing: UIApplication.shared.applicationState),
+                    "pendingWakeChannelUUID": pttWakeRuntime.pendingIncomingPush?.channelUUID.uuidString ?? "none",
+                    "pendingWakeContactId": pttWakeRuntime.pendingIncomingPush?.contactID.uuidString ?? "none",
+                ],
+                uniquingKeysWith: { _, new in new }
+            )
         )
         Task {
             await handleDeactivatedAudioSession(audioSession)
@@ -520,12 +630,21 @@ extension PTTViewModel {
         audioSessionDiagnostics(AVAudioSession.sharedInstance())
     }
 
-    func channelDescriptorForRestoredChannel(_ channelUUID: UUID) -> PTChannelDescriptor {
-        let name = PTTSystemDisplayPolicy.restoredDescriptorName(
-            channelUUID: channelUUID,
-            contacts: contacts,
-            fallbackName: channelName
+    func handleWillRequestRestoredChannelDescriptor(_ channelUUID: UUID) {
+        diagnostics.record(
+            .pushToTalk,
+            message: "PTT restored channel descriptor requested",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "contactId": contactId(for: channelUUID)?.uuidString ?? "none",
+                "applicationState": String(describing: UIApplication.shared.applicationState),
+            ]
         )
+    }
+
+    func channelDescriptorForRestoredChannel(_ channelUUID: UUID) -> PTChannelDescriptor {
+        let name = systemDescriptorName(for: channelUUID)
+        // TODO: Return a cached per-channel image once we persist it locally.
         return PTChannelDescriptor(name: name, image: nil)
     }
 

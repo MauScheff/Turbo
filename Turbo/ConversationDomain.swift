@@ -302,6 +302,7 @@ enum SelectedPeerWaitingReason: Equatable {
     case pendingJoin
     case disconnecting
     case localSessionTransition
+    case releaseRequiredAfterInterruptedTransmit
     case localAudioPrewarm
     case systemWakeActivation
     case wakePlaybackDeferredUntilForeground
@@ -604,6 +605,8 @@ struct ConversationDerivationContext: Equatable {
     let contactIsOnline: Bool
     let isJoined: Bool
     let localIsTransmitting: Bool
+    let localIsStopping: Bool
+    let localRequiresFreshPress: Bool
     let peerSignalIsTransmitting: Bool
     let activeChannelID: UUID?
     let systemSessionMatchesContact: Bool
@@ -623,6 +626,8 @@ struct ConversationDerivationContext: Equatable {
         contactIsOnline: Bool,
         isJoined: Bool,
         localIsTransmitting: Bool = false,
+        localIsStopping: Bool = false,
+        localRequiresFreshPress: Bool = false,
         peerSignalIsTransmitting: Bool = false,
         activeChannelID: UUID?,
         systemSessionMatchesContact: Bool,
@@ -641,6 +646,8 @@ struct ConversationDerivationContext: Equatable {
         self.contactIsOnline = contactIsOnline
         self.isJoined = isJoined
         self.localIsTransmitting = localIsTransmitting
+        self.localIsStopping = localIsStopping
+        self.localRequiresFreshPress = localRequiresFreshPress
         self.peerSignalIsTransmitting = peerSignalIsTransmitting
         self.activeChannelID = activeChannelID
         self.systemSessionMatchesContact = systemSessionMatchesContact
@@ -966,6 +973,14 @@ enum ConversationStateMachine {
                     style: .muted
                 )
             }
+            if case .waitingForPeer(reason: .releaseRequiredAfterInterruptedTransmit) = selectedPeerState.detail {
+                return ConversationPrimaryAction(
+                    kind: .holdToTalk,
+                    label: "Release To Retry",
+                    isEnabled: false,
+                    style: .muted
+                )
+            }
             return primaryAction(
                 conversationState: selectedPeerState.conversationState,
                 isSelectedChannelJoined: isSelectedChannelJoined,
@@ -1020,7 +1035,7 @@ enum ConversationStateMachine {
 
         let localSessionActive = context.localSessionReadiness != .none
 
-        if context.localIsTransmitting && localSessionActive {
+        if (context.localIsTransmitting || context.localIsStopping) && localSessionActive {
             return .none
         }
 
@@ -1083,22 +1098,40 @@ private extension ConversationStateMachine {
 
         let sessionTransmitReady = effectivePeerDeviceConnected
 
-        if context.peerSignalIsTransmitting,
-           let incomingWakeActivationState = context.incomingWakeActivationState {
+        if let incomingWakeActivationState = context.incomingWakeActivationState {
             switch incomingWakeActivationState {
             case .signalBuffered, .awaitingSystemActivation:
                 return (
                     .waitingForPeer(reason: .systemWakeActivation),
                     "Waiting for system audio activation..."
                 )
-            case .fallbackDeferredUntilForeground:
+            case .systemActivationTimedOutWaitingForForeground:
                 return (
                     .waitingForPeer(reason: .wakePlaybackDeferredUntilForeground),
-                    "Wake received. Unlock to resume audio."
+                    "Wake received, but system audio never activated. Unlock to resume audio."
+                )
+            case .systemActivationInterruptedByTransmitEnd:
+                return (
+                    .waitingForPeer(reason: .wakePlaybackDeferredUntilForeground),
+                    "Wake ended before system audio activated."
                 )
             case .appManagedFallback, .systemActivated:
                 break
             }
+        }
+
+        if context.localIsStopping {
+            return (
+                .waitingForPeer(reason: .localSessionTransition),
+                "Stopping..."
+            )
+        }
+
+        if context.localRequiresFreshPress {
+            return (
+                .waitingForPeer(reason: .releaseRequiredAfterInterruptedTransmit),
+                "Release and press again."
+            )
         }
 
         if sessionTransmitReady && context.localIsTransmitting {
@@ -1129,7 +1162,10 @@ private extension ConversationStateMachine {
             case .ready:
                 break
             case .wakeCapable:
-                return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+                if case .wakeCapable = context.remoteWakeCapabilityState {
+                    return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+                }
+                return (.waitingForPeer(reason: .remoteAudioPrewarm), "Waiting for \(context.contactName)'s audio...")
             case .waiting, .unknown:
                 if !peerDeviceConnected,
                    case .wakeCapable = context.remoteWakeCapabilityState {

@@ -33,6 +33,7 @@ Use these docs as the primary authority for their respective concerns:
   - Unison syntax, semantics, and language-reference guidance
 - `SWIFT.md`
   - app/client architecture, state management boundaries, and implementation guidance
+  - includes the default thin-UI / canonical-state-machine / ADT-first architecture pattern we want to apply broadly
 - `APP_STATE.md`
   - app-visible session phases, state derivation, and PTT journey examples
 - `SWIFT_DEBUGGING.md`

@@ -43,6 +43,8 @@ enum AudioOutputPreference: String, Equatable {
 @MainActor
 @Observable
 final class PTTViewModel: NSObject, MediaSessionDelegate {
+    static let shared = PTTViewModel()
+
     var isReady: Bool = false
     var isJoined: Bool = false
     var isTransmitting: Bool = false
@@ -70,6 +72,13 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var localReceiverAudioReadinessPublications: [UUID: ReceiverAudioReadinessPublication] = [:]
     var remoteTransmittingContactIDs: Set<UUID> = []
     var remoteAudioSilenceTasks: [UUID: Task<Void, Never>] = [:]
+    var isPTTAudioSessionActive: Bool = false
+    var lastReportedPTTServiceStatus: PTServiceStatus?
+    var lastReportedPTTServiceStatusChannelUUID: UUID?
+    var lastReportedPTTServiceStatusReason: String?
+    var lastReportedPTTDescriptorName: String?
+    var lastReportedPTTDescriptorChannelUUID: UUID?
+    var lastReportedPTTDescriptorReason: String?
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
     var automaticDiagnosticsPublishEnabled: Bool = true
     var microphonePermission: AVAudioApplication.recordPermission = AVAudioApplication.shared.recordPermission
@@ -129,11 +138,59 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         sessionCoordinator.pendingJoinContactID
     }
 
-    func syncTransmitState() {
-        transmitRuntime.sync(
-            activeTarget: transmitCoordinator.state.activeTarget,
-            isPressingTalk: transmitCoordinator.state.isPressingTalk
+    var transmitDomainSnapshot: TransmitDomainSnapshot {
+        let coordinatorState = transmitCoordinator.state
+        let runtime = transmitRuntime
+        let activeTarget = coordinatorState.activeTarget ?? runtime.activeTarget
+        let fallbackContactID =
+            activeTarget?.contactID
+            ?? (pttCoordinator.state.isTransmitting ? pttCoordinator.state.activeContactID : nil)
+
+        let phase: TransmitDomainPhase
+        if runtime.explicitStopRequested, let contactID = fallbackContactID {
+            phase = .stopping(contactID: contactID)
+        } else if pttCoordinator.state.isTransmitting, let contactID = pttCoordinator.state.activeContactID ?? fallbackContactID {
+            phase = .active(contactID: contactID)
+        } else {
+            switch coordinatorState.phase {
+            case .idle:
+                if let contactID = fallbackContactID, runtime.isPressingTalk {
+                    phase = .requesting(contactID: contactID)
+                } else {
+                    phase = .idle
+                }
+            case .requesting(let contactID):
+                phase = .requesting(contactID: contactID)
+            case .active(let contactID):
+                phase = runtime.explicitStopRequested ? .stopping(contactID: contactID) : .active(contactID: contactID)
+            case .stopping(let contactID):
+                phase = .stopping(contactID: contactID)
+            }
+        }
+
+        return TransmitDomainSnapshot(
+            phase: phase,
+            isPressActive: !runtime.explicitStopRequested && (runtime.isPressingTalk || coordinatorState.isPressingTalk),
+            explicitStopRequested: runtime.explicitStopRequested,
+            isSystemTransmitting: pttCoordinator.state.isTransmitting,
+            activeTarget: activeTarget,
+            interruptedContactID: runtime.interruptedContactID,
+            requiresReleaseBeforeNextPress: runtime.requiresReleaseBeforeNextPress
         )
+    }
+
+    var isTransmitPressActive: Bool {
+        transmitDomainSnapshot.isPressActive
+    }
+
+    func syncTransmitState() {
+        if !isTransmitting,
+           !transmitCoordinator.state.isPressingTalk,
+           transmitCoordinator.state.phase == .idle,
+           !transmitRuntime.hasPendingBeginOrActiveTarget {
+            transmitRuntime.reconcileIdleState()
+        }
+        transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
         updateStatusForSelectedContact()
         captureDiagnosticsState("transmit-sync")
     }
@@ -300,8 +357,17 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             replaceBeginTask: { [weak self] task in
                 self?.transmitRuntime.replaceBeginTask(with: task)
             },
-            replaceRenewTask: { [weak self] task in
-                self?.transmitRuntime.replaceRenewTask(with: task)
+            finishBeginTask: { [weak self] in
+                self?.transmitRuntime.finishBeginTask()
+            },
+            cancelBeginTask: { [weak self] in
+                self?.transmitRuntime.cancelBeginTask()
+            },
+            replaceRenewTask: { [weak self] task, channelID in
+                self?.transmitRuntime.replaceRenewTask(with: task, channelID: channelID)
+            },
+            cancelRenewTask: { [weak self] in
+                self?.transmitRuntime.cancelRenewTask()
             },
             clearPendingWork: { [weak self] in
                 self?.transmitRuntime.clearPendingWork()
@@ -350,8 +416,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             replaceSendAudioChunk: { [weak self] handler in
                 self?.mediaRuntime.replaceSendAudioChunk(with: handler)
             },
-            reset: { [weak self] in
-                self?.mediaRuntime.reset()
+            reset: { [weak self] deactivateAudioSession in
+                self?.mediaRuntime.reset(deactivateAudioSession: deactivateAudioSession)
             }
         )
     }
@@ -443,7 +509,16 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             backendPeerDeviceConnected: selectedChannelProjection.map { $0.membership.peerDeviceConnected },
             remoteAudioReadiness: selectedChannelProjection.map { String(describing: $0.remoteAudioReadiness) },
             remoteWakeCapability: selectedChannelProjection.map { String(describing: $0.remoteWakeCapability) },
+            remoteWakeCapabilityKind: selectedChannelProjection.map {
+                switch $0.remoteWakeCapability {
+                case .unavailable:
+                    return "unavailable"
+                case .wakeCapable:
+                    return "wake-capable"
+                }
+            },
             backendCanTransmit: selectedChannelProjection.map(\.canTransmit),
+            pttTokenRegistrationKind: pttSystemPolicyCoordinator.state.tokenRegistrationKind,
             incomingWakeActivationState: selectedContact.flatMap { contact in
                 pttWakeRuntime.incomingWakeActivationState(for: contact.id).map { String(describing: $0) }
             },
@@ -503,6 +578,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "backendMode": backendRuntime.mode,
             "systemSession": String(describing: systemSessionState),
             "pttClientMode": pttSystemClient.modeDescription,
+            "pttTokenRegistration": pttSystemPolicyCoordinator.state.tokenRegistrationDescription,
+            "pttTokenRegistrationKind": pttSystemPolicyCoordinator.state.tokenRegistrationKind,
+            "pttUploadedBackendChannelId": pttSystemPolicyCoordinator.state.uploadedBackendChannelID ?? "none",
+            "pttTokenUploadError": pttSystemPolicyCoordinator.state.lastTokenUploadError ?? "none",
             "pendingIncomingPush": pttWakeRuntime.pendingIncomingPush.map { push in
                 "\(push.payload.event.rawValue):\(contacts.first(where: { $0.id == push.contactID })?.handle ?? push.contactID.uuidString)"
             } ?? "none",
@@ -523,6 +602,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "backendPeerDeviceConnected": selectedSession.backendPeerDeviceConnected.map(String.init(describing:)) ?? "none",
             "remoteAudioReadiness": selectedSession.remoteAudioReadiness ?? "unknown",
             "remoteWakeCapability": selectedSession.remoteWakeCapability ?? "unavailable",
+            "remoteWakeCapabilityKind": selectedSession.remoteWakeCapabilityKind ?? "unavailable",
             "backendCanTransmit": selectedSession.backendCanTransmit.map(String.init(describing:)) ?? "none",
             "status": statusMessage,
             "backendStatus": backendStatusMessage

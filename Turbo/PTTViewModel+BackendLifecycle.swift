@@ -68,16 +68,45 @@ extension PTTViewModel {
                 pttSystemPolicyCoordinator.send(.tokenUploadFailed("Backend unavailable"))
                 return
             }
+            diagnostics.record(
+                .pushToTalk,
+                message: "Uploading ephemeral PTT token",
+                metadata: [
+                    "backendChannelId": request.backendChannelID,
+                    "tokenPrefix": String(request.tokenHex.prefix(8)),
+                    "systemChannelUUID": pttCoordinator.state.systemChannelUUID?.uuidString ?? "none",
+                ]
+            )
             do {
                 _ = try await backend.uploadEphemeralToken(
                     channelId: request.backendChannelID,
                     token: request.tokenHex
                 )
                 pttSystemPolicyCoordinator.send(.tokenUploadFinished(request))
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Uploaded ephemeral PTT token",
+                    metadata: [
+                        "backendChannelId": request.backendChannelID,
+                        "tokenPrefix": String(request.tokenHex.prefix(8)),
+                        "systemChannelUUID": pttCoordinator.state.systemChannelUUID?.uuidString ?? "none",
+                    ]
+                )
             } catch {
                 let message = error.localizedDescription
                 pttSystemPolicyCoordinator.send(.tokenUploadFailed(message))
                 statusMessage = "Token upload failed: \(message)"
+                diagnostics.record(
+                    .pushToTalk,
+                    level: .error,
+                    message: "Ephemeral PTT token upload failed",
+                    metadata: [
+                        "backendChannelId": request.backendChannelID,
+                        "tokenPrefix": String(request.tokenHex.prefix(8)),
+                        "systemChannelUUID": pttCoordinator.state.systemChannelUUID?.uuidString ?? "none",
+                        "error": message,
+                    ]
+                )
             }
         }
     }
@@ -121,6 +150,7 @@ extension PTTViewModel {
                 message: "Backend connected",
                 metadata: ["mode": runtimeConfig.mode, "handle": session.handle, "deviceId": client.deviceID]
             )
+            syncPTTServiceStatus(reason: "backend-connected")
             captureDiagnosticsState("backend-config:connected")
         } catch {
             resetBackendRuntimeForReconnect()
@@ -132,6 +162,7 @@ extension PTTViewModel {
                 message: "Backend connection failed",
                 metadata: ["error": error.localizedDescription]
             )
+            syncPTTServiceStatus(reason: "backend-connect-failed")
             captureDiagnosticsState("backend-config:failed")
         }
     }
@@ -254,6 +285,12 @@ extension PTTViewModel {
         pttCoordinator.reset()
         tearDownTransmitRuntime(resetCoordinator: true)
         closeMediaSession()
+        for task in remoteAudioSilenceTasks.values {
+            task.cancel()
+        }
+        remoteAudioSilenceTasks = [:]
+        remoteTransmittingContactIDs = []
+        isPTTAudioSessionActive = false
         selectedContactId = nil
         syncPTTState()
         sessionCoordinator.reset()
@@ -266,6 +303,7 @@ extension PTTViewModel {
         clearTrackedContacts()
         resetTransportFaults()
         contacts = []
+        diagnostics.clear()
         statusMessage = "Initializing..."
         captureDiagnosticsState("local-state-reset")
     }
@@ -288,6 +326,8 @@ extension PTTViewModel {
         switch state {
         case .idle:
             backendStatusMessage = backendRuntime.isReady ? "Reconnecting WebSocket..." : "WebSocket disconnected"
+            localReceiverAudioReadinessPublications = [:]
+            syncPTTServiceStatus(reason: "websocket-idle")
             let shouldResetTransmitSession = shouldResetTransmitSessionOnWebSocketIdle(
                 hasPendingBeginOrActiveTransmit: transmitServices.hasPendingBeginOrActiveTarget(),
                 systemIsTransmitting: pttCoordinator.state.isTransmitting
@@ -302,12 +342,14 @@ extension PTTViewModel {
             captureDiagnosticsState("websocket:idle")
         case .connecting:
             backendStatusMessage = "Connecting WebSocket..."
+            syncPTTServiceStatus(reason: "websocket-connecting")
             captureDiagnosticsState("websocket:connecting")
         case .connected:
             if backendStatusMessage.hasPrefix("WebSocket")
                 || backendStatusMessage == "Connected (retrying sync)" {
                 backendStatusMessage = "Connected"
             }
+            syncPTTServiceStatus(reason: "websocket-connected")
             captureDiagnosticsState("websocket:connected")
             Task {
                 await backendSyncCoordinator.handle(.webSocketStateChanged(state, selectedContactID: selectedContactId))

@@ -5,11 +5,183 @@ struct PTTTokenUploadRequest: Equatable {
     let tokenHex: String
 }
 
+enum PTTTokenRegistrationState: Equatable {
+    case idle
+    case tokenKnown(tokenHex: String, backendChannelID: String?)
+    case uploadPending(PTTTokenUploadRequest)
+    case registered(PTTTokenUploadRequest)
+    case uploadFailed(
+        latestTokenHex: String,
+        backendChannelID: String?,
+        attemptedRequest: PTTTokenUploadRequest?,
+        message: String
+    )
+
+    var latestTokenHex: String? {
+        switch self {
+        case .idle:
+            return nil
+        case .tokenKnown(let tokenHex, _):
+            return tokenHex
+        case .uploadPending(let request), .registered(let request):
+            return request.tokenHex
+        case .uploadFailed(let latestTokenHex, _, _, _):
+            return latestTokenHex
+        }
+    }
+
+    var backendChannelID: String? {
+        switch self {
+        case .idle:
+            return nil
+        case .tokenKnown(_, let backendChannelID):
+            return backendChannelID
+        case .uploadPending(let request), .registered(let request):
+            return request.backendChannelID
+        case .uploadFailed(_, let backendChannelID, _, _):
+            return backendChannelID
+        }
+    }
+
+    var uploadedRequest: PTTTokenUploadRequest? {
+        guard case .registered(let request) = self else { return nil }
+        return request
+    }
+
+    var pendingRequest: PTTTokenUploadRequest? {
+        guard case .uploadPending(let request) = self else { return nil }
+        return request
+    }
+
+    var attemptedRequest: PTTTokenUploadRequest? {
+        switch self {
+        case .uploadPending(let request), .registered(let request):
+            return request
+        case .uploadFailed(_, _, let attemptedRequest, _):
+            return attemptedRequest
+        case .idle, .tokenKnown:
+            return nil
+        }
+    }
+
+    var lastErrorMessage: String? {
+        guard case .uploadFailed(_, _, _, let message) = self else { return nil }
+        return message
+    }
+
+    var diagnosticsDescription: String {
+        switch self {
+        case .idle:
+            return "idle"
+        case .tokenKnown(_, let backendChannelID):
+            return "token-known(channel: \(backendChannelID ?? "none"))"
+        case .uploadPending(let request):
+            return "upload-pending(channel: \(request.backendChannelID))"
+        case .registered(let request):
+            return "registered(channel: \(request.backendChannelID))"
+        case .uploadFailed(_, let backendChannelID, _, _):
+            return "upload-failed(channel: \(backendChannelID ?? "none"))"
+        }
+    }
+
+    var kindDescription: String {
+        switch self {
+        case .idle:
+            return "idle"
+        case .tokenKnown:
+            return "token-known"
+        case .uploadPending:
+            return "upload-pending"
+        case .registered:
+            return "registered"
+        case .uploadFailed:
+            return "upload-failed"
+        }
+    }
+}
+
 struct PTTSystemPolicyState: Equatable {
-    var latestTokenHex: String = ""
-    var lastTokenUploadError: String?
-    var uploadedTokenHex: String?
-    var uploadedBackendChannelID: String?
+    var tokenRegistration: PTTTokenRegistrationState = .idle
+
+    init(
+        tokenRegistration: PTTTokenRegistrationState = .idle
+    ) {
+        self.tokenRegistration = tokenRegistration
+    }
+
+    init(
+        latestTokenHex: String = "",
+        lastTokenUploadError: String? = nil,
+        uploadedTokenHex: String? = nil,
+        uploadedBackendChannelID: String? = nil
+    ) {
+        if let uploadedTokenHex,
+           let uploadedBackendChannelID {
+            let request = PTTTokenUploadRequest(
+                backendChannelID: uploadedBackendChannelID,
+                tokenHex: uploadedTokenHex
+            )
+            if let lastTokenUploadError {
+                tokenRegistration = .uploadFailed(
+                    latestTokenHex: latestTokenHex.isEmpty ? uploadedTokenHex : latestTokenHex,
+                    backendChannelID: uploadedBackendChannelID,
+                    attemptedRequest: request,
+                    message: lastTokenUploadError
+                )
+            } else {
+                tokenRegistration = .registered(request)
+            }
+            return
+        }
+
+        guard !latestTokenHex.isEmpty else {
+            tokenRegistration = .idle
+            return
+        }
+
+        if let lastTokenUploadError {
+            tokenRegistration = .uploadFailed(
+                latestTokenHex: latestTokenHex,
+                backendChannelID: uploadedBackendChannelID,
+                attemptedRequest: uploadedBackendChannelID.map {
+                    PTTTokenUploadRequest(
+                        backendChannelID: $0,
+                        tokenHex: latestTokenHex
+                    )
+                },
+                message: lastTokenUploadError
+            )
+        } else {
+            tokenRegistration = .tokenKnown(
+                tokenHex: latestTokenHex,
+                backendChannelID: uploadedBackendChannelID
+            )
+        }
+    }
+
+    var latestTokenHex: String {
+        tokenRegistration.latestTokenHex ?? ""
+    }
+
+    var lastTokenUploadError: String? {
+        tokenRegistration.lastErrorMessage
+    }
+
+    var uploadedTokenHex: String? {
+        tokenRegistration.uploadedRequest?.tokenHex
+    }
+
+    var uploadedBackendChannelID: String? {
+        tokenRegistration.uploadedRequest?.backendChannelID
+    }
+
+    var tokenRegistrationDescription: String {
+        tokenRegistration.diagnosticsDescription
+    }
+
+    var tokenRegistrationKind: String {
+        tokenRegistration.kindDescription
+    }
 
     static let initial = PTTSystemPolicyState()
 }
@@ -41,47 +213,65 @@ enum PTTSystemPolicyReducer {
 
         switch event {
         case .ephemeralTokenReceived(let tokenHex, let backendChannelID):
-            nextState.latestTokenHex = tokenHex
-            nextState.lastTokenUploadError = nil
-            if let backendChannelID,
-               nextState.uploadedTokenHex != tokenHex || nextState.uploadedBackendChannelID != backendChannelID {
-                effects.append(
-                    .uploadEphemeralToken(
-                        PTTTokenUploadRequest(
-                            backendChannelID: backendChannelID,
-                            tokenHex: tokenHex
-                        )
-                    )
-                )
+            nextState.tokenRegistration = .tokenKnown(
+                tokenHex: tokenHex,
+                backendChannelID: backendChannelID
+            )
+            if let request = uploadRequestIfNeeded(
+                latestTokenHex: tokenHex,
+                backendChannelID: backendChannelID,
+                registeredRequest: state.tokenRegistration.uploadedRequest
+            ) {
+                nextState.tokenRegistration = .uploadPending(request)
+                effects.append(.uploadEphemeralToken(request))
             }
 
         case .backendChannelReady(let backendChannelID):
-            nextState.lastTokenUploadError = nil
-            if !nextState.latestTokenHex.isEmpty,
-               nextState.uploadedTokenHex != nextState.latestTokenHex || nextState.uploadedBackendChannelID != backendChannelID {
-                effects.append(
-                    .uploadEphemeralToken(
-                        PTTTokenUploadRequest(
-                            backendChannelID: backendChannelID,
-                            tokenHex: nextState.latestTokenHex
-                        )
-                    )
+            if let latestTokenHex = state.tokenRegistration.latestTokenHex {
+                nextState.tokenRegistration = .tokenKnown(
+                    tokenHex: latestTokenHex,
+                    backendChannelID: backendChannelID
                 )
+                if let request = uploadRequestIfNeeded(
+                    latestTokenHex: latestTokenHex,
+                    backendChannelID: backendChannelID,
+                    registeredRequest: state.tokenRegistration.uploadedRequest
+                ) {
+                    nextState.tokenRegistration = .uploadPending(request)
+                    effects.append(.uploadEphemeralToken(request))
+                }
             }
 
         case .tokenUploadFinished(let request):
-            nextState.lastTokenUploadError = nil
-            nextState.uploadedTokenHex = request.tokenHex
-            nextState.uploadedBackendChannelID = request.backendChannelID
+            nextState.tokenRegistration = .registered(request)
 
         case .tokenUploadFailed(let message):
-            nextState.lastTokenUploadError = message
+            nextState.tokenRegistration = .uploadFailed(
+                latestTokenHex: state.tokenRegistration.latestTokenHex ?? "",
+                backendChannelID: state.tokenRegistration.backendChannelID,
+                attemptedRequest: state.tokenRegistration.attemptedRequest,
+                message: message
+            )
 
         case .reset:
             nextState = .initial
         }
 
         return PTTSystemPolicyTransition(state: nextState, effects: effects)
+    }
+
+    private static func uploadRequestIfNeeded(
+        latestTokenHex: String,
+        backendChannelID: String?,
+        registeredRequest: PTTTokenUploadRequest?
+    ) -> PTTTokenUploadRequest? {
+        guard let backendChannelID else { return nil }
+        let request = PTTTokenUploadRequest(
+            backendChannelID: backendChannelID,
+            tokenHex: latestTokenHex
+        )
+        guard registeredRequest != request else { return nil }
+        return request
     }
 }
 

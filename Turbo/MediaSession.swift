@@ -23,6 +23,7 @@ struct MediaSessionAudioConfiguration: Equatable {
     let category: AVAudioSession.Category
     let mode: AVAudioSession.Mode
     let options: AVAudioSession.CategoryOptions
+    let shouldConfigureSession: Bool
     let shouldActivateSession: Bool
 }
 
@@ -31,7 +32,10 @@ enum MediaSessionAudioPolicy {
         activationMode: MediaSessionActivationMode,
         startupMode: MediaSessionStartupMode
     ) -> MediaSessionAudioConfiguration {
-        let shouldActivateSession = activationMode == .appManaged
+        // Keep the category aligned with Apple's PTT guidance, but only let
+        // app-managed interactive sessions activate the audio session directly.
+        let shouldActivateSession = activationMode == .appManaged && startupMode == .interactive
+        let shouldConfigureSession = !(activationMode == .systemActivated && startupMode == .playbackOnly)
 
         switch startupMode {
         case .interactive:
@@ -39,13 +43,15 @@ enum MediaSessionAudioPolicy {
                 category: .playAndRecord,
                 mode: .default,
                 options: [.defaultToSpeaker, .allowBluetoothHFP],
+                shouldConfigureSession: shouldConfigureSession,
                 shouldActivateSession: shouldActivateSession
             )
         case .playbackOnly:
             return MediaSessionAudioConfiguration(
-                category: .playback,
+                category: .playAndRecord,
                 mode: .default,
-                options: [],
+                options: [.defaultToSpeaker, .allowBluetoothHFP],
+                shouldConfigureSession: shouldConfigureSession,
                 shouldActivateSession: shouldActivateSession
             )
         }
@@ -68,7 +74,13 @@ protocol MediaSession: AnyObject {
     func startSendingAudio() async throws
     func stopSendingAudio() async throws
     func receiveRemoteAudioChunk(_ payload: String) async
-    func close()
+    func close(deactivateAudioSession: Bool)
+}
+
+extension MediaSession {
+    func close() {
+        close(deactivateAudioSession: true)
+    }
 }
 
 func makeDefaultMediaSession(
@@ -121,7 +133,7 @@ final class StubRelayMediaSession: MediaSession {
 
     func receiveRemoteAudioChunk(_ payload: String) async {}
 
-    func close() {
+    func close(deactivateAudioSession _: Bool) {
         isStarted = false
         state = .closed
     }

@@ -17,6 +17,7 @@ enum PTTSystemClientError: LocalizedError {
 struct PTTSystemClientCallbacks {
     let receivedEphemeralPushToken: (Data) -> Void
     let receivedIncomingPush: (UUID, TurboPTTPushPayload) -> Void
+    let willReturnIncomingPushResult: (UUID, TurboPTTPushPayload, String) -> Void
     let didJoinChannel: (UUID, String) -> Void
     let didLeaveChannel: (UUID, String) -> Void
     let failedToJoinChannel: (UUID, Error) -> Void
@@ -27,6 +28,7 @@ struct PTTSystemClientCallbacks {
     let failedToStopTransmitting: (UUID, Error) -> Void
     let didActivateAudioSession: (AVAudioSession) -> Void
     let didDeactivateAudioSession: (AVAudioSession) -> Void
+    let willRequestRestoredChannelDescriptor: (UUID) -> Void
     let descriptorForRestoredChannel: (UUID) -> PTChannelDescriptor
     let restoredChannel: (UUID) -> Void
 }
@@ -42,6 +44,8 @@ protocol PTTSystemClientProtocol: AnyObject {
     func beginTransmitting(channelUUID: UUID) throws
     func stopTransmitting(channelUUID: UUID) throws
     func setActiveRemoteParticipant(name: String?, channelUUID: UUID) async throws
+    func setServiceStatus(_ status: PTServiceStatus, channelUUID: UUID) async throws
+    func updateChannelDescriptor(name: String, channelUUID: UUID) async throws
 }
 
 @MainActor
@@ -58,12 +62,19 @@ private final class ApplePTTSystemClientAdapter: NSObject, PTChannelManagerDeleg
 
     func handleIncomingPush(channelUUID: UUID, payload: TurboPTTPushPayload) -> PTPushResult {
         let result: PTPushResult
+        let resultDescription: String
         switch payload.event {
         case .transmitStart:
+            // TODO: Populate the participant image from a locally cached contact
+            // avatar once we persist and restore that metadata on device.
             result = .activeRemoteParticipant(PTParticipant(name: payload.participantName, image: nil))
+            resultDescription = "activeRemoteParticipant"
         case .leaveChannel:
             result = .leaveChannel
+            resultDescription = "leaveChannel"
         }
+
+        callbacks.willReturnIncomingPushResult(channelUUID, payload, resultDescription)
 
         // Return the system result first and defer app-owned bookkeeping so the
         // PushToTalk wake callback stays on the fast path.
@@ -128,6 +139,7 @@ private final class ApplePTTSystemClientAdapter: NSObject, PTChannelManagerDeleg
     }
 
     func channelDescriptor(restoredChannelUUID channelUUID: UUID) -> PTChannelDescriptor {
+        callbacks.willRequestRestoredChannelDescriptor(channelUUID)
         callbacks.restoredChannel(channelUUID)
         return callbacks.descriptorForRestoredChannel(channelUUID)
     }
@@ -178,8 +190,39 @@ final class ApplePTTSystemClient: PTTSystemClientProtocol {
     func setActiveRemoteParticipant(name: String?, channelUUID: UUID) async throws {
         guard let manager else { throw PTTSystemClientError.notReady }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            // TODO: Populate the participant image from a locally cached contact
+            // avatar once we persist and restore that metadata on device.
             let participant = name.map { PTParticipant(name: $0, image: nil) }
             manager.setActiveRemoteParticipant(participant, channelUUID: channelUUID) { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
+    }
+
+    func setServiceStatus(_ status: PTServiceStatus, channelUUID: UUID) async throws {
+        guard let manager else { throw PTTSystemClientError.notReady }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            manager.setServiceStatus(status, channelUUID: channelUUID) { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
+    }
+
+    func updateChannelDescriptor(name: String, channelUUID: UUID) async throws {
+        guard let manager else { throw PTTSystemClientError.notReady }
+        // TODO: Persist and restore per-channel images so system UI can show a
+        // stable channel icon instead of the current text-only descriptor.
+        let descriptor = PTChannelDescriptor(name: name, image: nil)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            manager.setChannelDescriptor(descriptor, channelUUID: channelUUID) { error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else {
@@ -195,6 +238,7 @@ final class SimulatorPTTSystemClient: PTTSystemClientProtocol {
     private var callbacks: PTTSystemClientCallbacks?
     private var activeChannelUUID: UUID?
     private var isTransmitting: Bool = false
+    private var ephemeralTokenVersion: Int = 0
     private let audioSession = AVAudioSession.sharedInstance()
 
     var isReady: Bool {
@@ -221,6 +265,12 @@ final class SimulatorPTTSystemClient: PTTSystemClientProtocol {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 150_000_000)
             callbacks.didJoinChannel(channelUUID, "simulator")
+            ephemeralTokenVersion += 1
+            let tokenSeed = "\(channelUUID.uuidString)-\(ephemeralTokenVersion)"
+            if let tokenData = tokenSeed.data(using: .utf8) {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                callbacks.receivedEphemeralPushToken(tokenData)
+            }
         }
     }
 
@@ -275,6 +325,10 @@ final class SimulatorPTTSystemClient: PTTSystemClientProtocol {
     }
 
     func setActiveRemoteParticipant(name _: String?, channelUUID _: UUID) async throws {}
+
+    func setServiceStatus(_ status: PTServiceStatus, channelUUID _: UUID) async throws {}
+
+    func updateChannelDescriptor(name _: String, channelUUID _: UUID) async throws {}
 }
 
 @MainActor

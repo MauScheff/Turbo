@@ -47,7 +47,8 @@ extension PTTViewModel {
     }
 
     func conversationContext(for contact: Contact) -> ConversationDerivationContext {
-        ConversationDerivationContext(
+        let transmitSnapshot = transmitDomainSnapshot
+        return ConversationDerivationContext(
             contactID: contact.id,
             selectedContactID: selectedContactId,
             baseState: selectedContactId == contact.id
@@ -56,7 +57,9 @@ extension PTTViewModel {
             contactName: contact.name,
             contactIsOnline: contactSummaryByContactID[contact.id]?.isOnline ?? contact.isOnline,
             isJoined: isJoined,
-            localIsTransmitting: isTransmitting,
+            localIsTransmitting: transmitSnapshot.hasTransmitIntent(for: contact.id),
+            localIsStopping: transmitSnapshot.isStopping(for: contact.id),
+            localRequiresFreshPress: transmitSnapshot.requiresFreshPress(for: contact.id),
             peerSignalIsTransmitting: remoteTransmittingContactIDs.contains(contact.id),
             activeChannelID: activeChannelId,
             systemSessionMatchesContact: systemSessionMatches(contact.id),
@@ -106,6 +109,7 @@ extension PTTViewModel {
             selectedPeerCoordinator.send(.selectedContactChanged(nil))
             return
         }
+        let transmitSnapshot = transmitDomainSnapshot
 
         let relationship = relationshipState(for: contact.id)
         selectedPeerCoordinator.send(
@@ -123,6 +127,9 @@ extension PTTViewModel {
         selectedPeerCoordinator.send(
             .localSessionUpdated(
                 isJoined: isJoined,
+                localIsTransmitting: transmitSnapshot.hasTransmitIntent(for: contact.id),
+                localIsStopping: transmitSnapshot.isStopping(for: contact.id),
+                localRequiresFreshPress: transmitSnapshot.requiresFreshPress(for: contact.id),
                 activeChannelID: activeChannelId,
                 pendingAction: sessionCoordinator.pendingAction,
                 localJoinFailure: pttCoordinator.state.lastJoinFailure

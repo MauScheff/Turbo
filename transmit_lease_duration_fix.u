@@ -1,0 +1,2 @@
+turbo.store.runtime.internal.leaseDuration : time.Duration
+turbo.store.runtime.internal.leaseDuration = time.Duration.seconds +8
