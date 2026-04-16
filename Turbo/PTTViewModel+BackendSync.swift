@@ -9,6 +9,91 @@ import Foundation
 import UIKit
 
 extension PTTViewModel {
+    func shouldResumeLocalInteractivePrewarmForRemoteReady(
+        contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState == .active else { return false }
+        guard selectedContactId == contactID else { return false }
+        guard isJoined, activeChannelId == contactID else { return false }
+        guard systemSessionMatches(contactID) else { return false }
+        guard !isTransmitting else { return false }
+        guard !transmitCoordinator.state.isPressingTalk else { return false }
+        guard !isPTTAudioSessionActive else { return false }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
+        guard !remoteTransmittingContactIDs.contains(contactID) else { return false }
+
+        switch localMediaWarmupState(for: contactID) {
+        case .cold, .failed:
+            return true
+        case .prewarming, .ready:
+            return false
+        }
+    }
+
+    func resumeLocalInteractivePrewarmForRemoteReady(
+        contactID: UUID,
+        applicationState: UIApplication.State
+    ) async {
+        guard shouldResumeLocalInteractivePrewarmForRemoteReady(
+            contactID: contactID,
+            applicationState: applicationState
+        ) else { return }
+
+        diagnostics.record(
+            .media,
+            message: "Resuming local interactive audio prewarm after peer became ready",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "applicationState": String(describing: applicationState),
+            ]
+        )
+        await prewarmLocalMediaIfNeeded(for: contactID, applicationState: applicationState)
+        updateStatusForSelectedContact()
+    }
+
+    func shouldReleaseLocalInteractivePrewarmForRemoteBackgrounding(
+        contactID: UUID,
+        readinessSignalPayload: String,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard readinessSignalPayload == "app-background-media-closed" else { return false }
+        guard applicationState == .active else { return false }
+        guard mediaSessionContactID == contactID else { return false }
+        guard systemSessionMatches(contactID) else { return false }
+        guard isJoined, activeChannelId == contactID else { return false }
+        guard !isTransmitting else { return false }
+        guard !transmitCoordinator.state.isPressingTalk else { return false }
+        guard !isPTTAudioSessionActive else { return false }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
+        guard !remoteTransmittingContactIDs.contains(contactID) else { return false }
+        return true
+    }
+
+    func releaseLocalInteractivePrewarmForRemoteBackgrounding(
+        contactID: UUID,
+        readinessSignalPayload: String,
+        applicationState: UIApplication.State
+    ) {
+        guard shouldReleaseLocalInteractivePrewarmForRemoteBackgrounding(
+            contactID: contactID,
+            readinessSignalPayload: readinessSignalPayload,
+            applicationState: applicationState
+        ) else { return }
+
+        diagnostics.record(
+            .media,
+            message: "Released local interactive audio prewarm after peer backgrounded",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "applicationState": String(describing: applicationState),
+                "reason": readinessSignalPayload,
+            ]
+        )
+        closeMediaSession()
+        updateStatusForSelectedContact()
+    }
+
     func mergedChannelReadinessPreservingWakeCapableFallback(
         existing: TurboChannelReadinessResponse?,
         fetched: TurboChannelReadinessResponse?,
@@ -476,6 +561,7 @@ extension PTTViewModel {
                 await refreshChannelState(for: contactID)
             }
         case .receiverReady, .receiverNotReady:
+            let applicationState = UIApplication.shared.applicationState
             let readiness: RemoteAudioReadinessState = {
                 switch envelope.type {
                 case .receiverReady:
@@ -486,6 +572,13 @@ extension PTTViewModel {
                     return .unknown
                 }
             }()
+            if envelope.type == .receiverNotReady {
+                releaseLocalInteractivePrewarmForRemoteBackgrounding(
+                    contactID: contactID,
+                    readinessSignalPayload: envelope.payload,
+                    applicationState: applicationState
+                )
+            }
             if let existing = channelReadinessByContactID[contactID] {
                 backendSyncCoordinator.send(
                     .channelReadinessUpdated(
@@ -512,6 +605,12 @@ extension PTTViewModel {
                 captureDiagnosticsState("backend-signal:\(envelope.type.rawValue)")
             }
             Task {
+                if readiness == .ready {
+                    await resumeLocalInteractivePrewarmForRemoteReady(
+                        contactID: contactID,
+                        applicationState: applicationState
+                    )
+                }
                 await refreshChannelState(for: contactID)
             }
         case .audioChunk:

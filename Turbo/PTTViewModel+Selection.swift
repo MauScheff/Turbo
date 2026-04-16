@@ -60,6 +60,9 @@ extension PTTViewModel {
             localIsTransmitting: transmitSnapshot.hasTransmitIntent(for: contact.id),
             localIsStopping: transmitSnapshot.isStopping(for: contact.id),
             localRequiresFreshPress: transmitSnapshot.requiresFreshPress(for: contact.id),
+            localTransmitPhase: transmitSnapshot.phase,
+            localSystemIsTransmitting: transmitSnapshot.isSystemTransmitting,
+            localPTTAudioSessionActive: isPTTAudioSessionActive,
             peerSignalIsTransmitting: remoteTransmittingContactIDs.contains(contact.id),
             activeChannelID: activeChannelId,
             systemSessionMatchesContact: systemSessionMatches(contact.id),
@@ -133,6 +136,13 @@ extension PTTViewModel {
                 activeChannelID: activeChannelId,
                 pendingAction: sessionCoordinator.pendingAction,
                 localJoinFailure: pttCoordinator.state.lastJoinFailure
+            )
+        )
+        selectedPeerCoordinator.send(
+            .localTransmitContextUpdated(
+                phase: transmitSnapshot.phase,
+                systemIsTransmitting: transmitSnapshot.isSystemTransmitting,
+                pttAudioSessionActive: isPTTAudioSessionActive
             )
         )
         selectedPeerCoordinator.send(

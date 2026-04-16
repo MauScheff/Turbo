@@ -14,6 +14,9 @@ struct SelectedPeerSessionState: Equatable {
     var localIsTransmitting: Bool = false
     var localIsStopping: Bool = false
     var localRequiresFreshPress: Bool = false
+    var localTransmitPhase: TransmitDomainPhase = .idle
+    var localSystemIsTransmitting: Bool = false
+    var localPTTAudioSessionActive: Bool = false
     var activeChannelID: UUID?
     var systemSessionMatchesContact: Bool = false
     var systemSessionState: SystemPTTSessionState = .none
@@ -41,6 +44,11 @@ enum SelectedPeerEvent: Equatable {
         activeChannelID: UUID?,
         pendingAction: PendingSessionAction,
         localJoinFailure: PTTJoinFailure?
+    )
+    case localTransmitContextUpdated(
+        phase: TransmitDomainPhase,
+        systemIsTransmitting: Bool,
+        pttAudioSessionActive: Bool
     )
     case systemSessionUpdated(SystemPTTSessionState, matchesSelectedContact: Bool)
     case mediaStateUpdated(MediaConnectionState)
@@ -100,6 +108,14 @@ enum SelectedPeerReducer {
             nextState.activeChannelID = activeChannelID
             nextState.pendingAction = pendingAction
             nextState.localJoinFailure = localJoinFailure
+        case .localTransmitContextUpdated(
+            let phase,
+            let systemIsTransmitting,
+            let pttAudioSessionActive
+        ):
+            nextState.localTransmitPhase = phase
+            nextState.localSystemIsTransmitting = systemIsTransmitting
+            nextState.localPTTAudioSessionActive = pttAudioSessionActive
         case .systemSessionUpdated(let systemSessionState, let matchesSelectedContact):
             nextState.systemSessionState = systemSessionState
             nextState.systemSessionMatchesContact = matchesSelectedContact
@@ -148,6 +164,9 @@ enum SelectedPeerReducer {
             localIsTransmitting: state.localIsTransmitting,
             localIsStopping: state.localIsStopping,
             localRequiresFreshPress: state.localRequiresFreshPress,
+            localTransmitPhase: state.localTransmitPhase,
+            localSystemIsTransmitting: state.localSystemIsTransmitting,
+            localPTTAudioSessionActive: state.localPTTAudioSessionActive,
             activeChannelID: state.activeChannelID,
             systemSessionMatchesContact: state.systemSessionMatchesContact,
             systemSessionState: state.systemSessionState,

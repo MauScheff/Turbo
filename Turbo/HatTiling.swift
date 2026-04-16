@@ -148,6 +148,12 @@ enum HatTilingGenerator {
         return collectHatPolygons(from: .meta(tiles[tileIndex]))
     }
 
+    static func patchPolygons(level: Int) -> [[CGPoint]] {
+        let tiles = substitutedTiles(level: level)
+        let patch = constructPatch(tiles[0], tiles[1], tiles[2], tiles[3])
+        return collectHatPolygons(from: .meta(patch))
+    }
+
     static func boundingBox(for polygons: [[CGPoint]]) -> CGRect {
         guard let firstPoint = polygons.first?.first else { return .zero }
 

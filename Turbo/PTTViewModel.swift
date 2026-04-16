@@ -40,6 +40,28 @@ enum AudioOutputPreference: String, Equatable {
     }
 }
 
+struct AudioOutputRouteOverridePlan: Equatable {
+    let shouldApplySpeakerOverride: Bool
+
+    static func forCurrentRoute(
+        preference: AudioOutputPreference,
+        category: AVAudioSession.Category,
+        outputPortTypes: [AVAudioSession.Port]
+    ) -> AudioOutputRouteOverridePlan {
+        guard preference == .speaker else {
+            return AudioOutputRouteOverridePlan(shouldApplySpeakerOverride: false)
+        }
+        guard category == .playAndRecord else {
+            return AudioOutputRouteOverridePlan(shouldApplySpeakerOverride: false)
+        }
+
+        let speakerAlreadyActive = outputPortTypes.contains(.builtInSpeaker)
+        return AudioOutputRouteOverridePlan(
+            shouldApplySpeakerOverride: !speakerAlreadyActive
+        )
+    }
+}
+
 @MainActor
 @Observable
 final class PTTViewModel: NSObject, MediaSessionDelegate {

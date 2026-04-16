@@ -401,6 +401,7 @@ extension PTTViewModel {
                     source: source
                 )
             )
+            transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
             transmitRuntime.noteSystemTransmitBegan()
             syncPTTState()
             diagnostics.record(
@@ -486,12 +487,14 @@ extension PTTViewModel {
                 await transmitCoordinator.handle(.systemEnded)
                 syncTransmitState()
             }
+            transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
             transmitRuntime.noteSystemTransmitEnded()
             captureDiagnosticsState("ptt-callback:transmit-ended")
         }
     }
 
     func handleFailedToBeginTransmitting(_ channelUUID: UUID, error: any Error) {
+        transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
         cancelPendingTransmitWork()
         if isRecoverablePTTChannelUnavailable(error),
            let contactID = contactId(for: channelUUID) {

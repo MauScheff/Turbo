@@ -218,6 +218,7 @@ struct TransmitRuntimeState {
     var beginTask: Task<Void, Never>?
     var renewTask: Task<Void, Never>?
     var renewTaskChannelID: String?
+    var pendingSystemBeginChannelUUID: UUID?
     var renewTaskGeneration: Int = 0
     var isPressingTalk: Bool = false
     var explicitStopRequested: Bool = false
@@ -255,11 +256,27 @@ struct TransmitRuntimeState {
     }
 
     mutating func noteSystemTransmitBegan(at date: Date = Date()) {
+        pendingSystemBeginChannelUUID = nil
         lastSystemTransmitBeganAt = date
     }
 
     mutating func noteSystemTransmitEnded() {
+        pendingSystemBeginChannelUUID = nil
         lastSystemTransmitBeganAt = nil
+    }
+
+    mutating func noteSystemTransmitBeginRequested(channelUUID: UUID) {
+        pendingSystemBeginChannelUUID = channelUUID
+    }
+
+    mutating func clearPendingSystemTransmitBegin(channelUUID: UUID? = nil) {
+        guard let pendingSystemBeginChannelUUID else { return }
+        guard channelUUID == nil || pendingSystemBeginChannelUUID == channelUUID else { return }
+        self.pendingSystemBeginChannelUUID = nil
+    }
+
+    func isSystemTransmitBeginPending(channelUUID: UUID) -> Bool {
+        pendingSystemBeginChannelUUID == channelUUID
     }
 
     func currentSystemTransmitDurationMilliseconds(at date: Date = Date()) -> Int? {
@@ -276,6 +293,7 @@ struct TransmitRuntimeState {
         isPressingTalk = false
         explicitStopRequested = false
         activeTarget = nil
+        pendingSystemBeginChannelUUID = nil
         lastSystemTransmitBeganAt = nil
     }
 
@@ -323,6 +341,7 @@ struct TransmitRuntimeState {
         requiresReleaseBeforeNextPress = false
         interruptedContactID = nil
         activeTarget = nil
+        pendingSystemBeginChannelUUID = nil
         lastSystemTransmitBeganAt = nil
         renewTaskGeneration = 0
         clearPendingWork()

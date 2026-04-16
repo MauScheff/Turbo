@@ -517,6 +517,9 @@ extension PTTViewModel {
         transmit.replaceBeginTask(Task { [weak self] in
             guard let self else { return }
             do {
+                try await MainActor.run {
+                    try self.requestSystemTransmitHandoffIfNeeded(for: request)
+                }
                 if request.backendSupportsWebSocket {
                     try await backend.waitForWebSocketConnection()
                 }
@@ -568,6 +571,10 @@ extension PTTViewModel {
                 }
                 await transmitCoordinator.handle(.beginSucceeded(target, request))
                 syncTransmitState()
+                await completeDeferredSystemTransmitActivationIfReady(
+                    request: request,
+                    target: target
+                )
             } catch {
                 if shouldTreatTransmitBeginMembershipLossAsRecoverable(error) {
                     diagnostics.record(
@@ -579,6 +586,12 @@ extension PTTViewModel {
                         transmit.finishBeginTask()
                         return
                     }
+                }
+                await MainActor.run {
+                    self.cancelRequestedSystemTransmitHandoffIfNeeded(
+                        channelUUID: request.channelUUID,
+                        reason: "backend-begin-failed"
+                    )
                 }
                 let message = error.localizedDescription
                 await transmitCoordinator.handle(.beginFailed(message))
@@ -644,6 +657,10 @@ extension PTTViewModel {
             )
             await transmitCoordinator.handle(.beginSucceeded(target, request))
             syncTransmitState()
+            await completeDeferredSystemTransmitActivationIfReady(
+                request: request,
+                target: target
+            )
             return true
         } catch {
             diagnostics.record(
@@ -663,41 +680,99 @@ extension PTTViewModel {
             startRenewingTransmit(target)
             isTransmitting = true
         } else {
-            guard let channelUUID = request.channelUUID else {
+            guard request.channelUUID != nil else {
                 let message = "PTT channel is not ready"
                 statusMessage = message
                 await transmitCoordinator.handle(.stopFailed(message))
                 syncTransmitState()
                 return
             }
-            do {
-                if shouldClosePrewarmedMediaBeforeSystemTransmit(for: request.contactID) {
-                    diagnostics.record(
-                        .media,
-                        message: "Closing app-managed media session before system transmit handoff",
-                        metadata: [
-                            "contactId": request.contactID.uuidString,
-                            "channelUUID": channelUUID.uuidString,
-                            "mediaState": String(describing: mediaConnectionState),
-                        ]
-                    )
-                    closeMediaSession()
-                }
-                try pttSystemClient.beginTransmitting(channelUUID: channelUUID)
-                // Keep the backend transmit lease alive during the cold PTT
-                // activation window instead of waiting for later audio-session
-                // callbacks, which can arrive after the initial lease expires.
-                startRenewingTransmit(target)
-            } catch {
-                let message = error.localizedDescription
-                statusMessage = message
-                await transmitCoordinator.handle(.stopFailed(message))
-                syncTransmitState()
-                return
-            }
+            // Keep the backend transmit lease alive during the cold PTT
+            // activation window instead of waiting for later audio-session
+            // callbacks, which can arrive after the initial lease expires.
+            startRenewingTransmit(target)
+            await completeDeferredSystemTransmitActivationIfReady(
+                request: request,
+                target: target
+            )
         }
 
         await refreshChannelState(for: request.contactID)
+    }
+
+    private func requestSystemTransmitHandoffIfNeeded(
+        for request: TransmitRequestContext
+    ) throws {
+        guard !request.usesLocalHTTPBackend else { return }
+        guard let channelUUID = request.channelUUID else { return }
+        guard !pttCoordinator.state.isTransmitting || pttCoordinator.state.systemChannelUUID != channelUUID else { return }
+        guard !transmitRuntime.isSystemTransmitBeginPending(channelUUID: channelUUID) else { return }
+
+        if shouldClosePrewarmedMediaBeforeSystemTransmit(for: request.contactID) {
+            diagnostics.record(
+                .media,
+                message: "Closing app-managed media session before system transmit handoff",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "mediaState": String(describing: mediaConnectionState),
+                ]
+            )
+            closeMediaSession()
+        }
+
+        diagnostics.record(
+            .pushToTalk,
+            message: "Requesting system transmit handoff",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "channelUUID": channelUUID.uuidString,
+                "source": "parallel-begin",
+            ]
+        )
+        transmitRuntime.noteSystemTransmitBeginRequested(channelUUID: channelUUID)
+        do {
+            try pttSystemClient.beginTransmitting(channelUUID: channelUUID)
+        } catch {
+            transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
+            throw error
+        }
+    }
+
+    private func cancelRequestedSystemTransmitHandoffIfNeeded(
+        channelUUID: UUID?,
+        reason: String
+    ) {
+        guard let channelUUID else { return }
+        let hadPendingBegin = transmitRuntime.isSystemTransmitBeginPending(channelUUID: channelUUID)
+        let isActiveSystemTransmit =
+            pttCoordinator.state.systemChannelUUID == channelUUID
+            && (pttCoordinator.state.isTransmitting || isPTTAudioSessionActive)
+        guard hadPendingBegin || isActiveSystemTransmit else { return }
+
+        transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
+        diagnostics.record(
+            .pushToTalk,
+            message: "Cancelling requested system transmit handoff",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "reason": reason,
+                "hadPendingBegin": String(hadPendingBegin),
+                "isActiveSystemTransmit": String(isActiveSystemTransmit),
+            ]
+        )
+        try? pttSystemClient.stopTransmitting(channelUUID: channelUUID)
+    }
+
+    private func completeDeferredSystemTransmitActivationIfReady(
+        request: TransmitRequestContext,
+        target: TransmitTarget
+    ) async {
+        guard !request.usesLocalHTTPBackend else { return }
+        guard let channelUUID = request.channelUUID else { return }
+        guard pttCoordinator.state.systemChannelUUID == channelUUID else { return }
+        guard isPTTAudioSessionActive else { return }
+        await completeSystemTransmitActivation(channelUUID: channelUUID)
     }
 
     func activeTransmitTarget(for systemChannelUUID: UUID) -> TransmitTarget? {
@@ -886,7 +961,13 @@ extension PTTViewModel {
     }
 
     func applyPreferredAudioOutputRoute(to audioSession: AVAudioSession = .sharedInstance()) {
-        guard audioSession.category == .playAndRecord else {
+        let overridePlan = AudioOutputRouteOverridePlan.forCurrentRoute(
+            preference: audioOutputPreference,
+            category: audioSession.category,
+            outputPortTypes: audioSession.currentRoute.outputs.map(\.portType)
+        )
+        guard overridePlan.shouldApplySpeakerOverride else {
+            guard audioSession.category != .playAndRecord else { return }
             diagnostics.record(
                 .media,
                 message: "Skipped preferred audio output route override until play-and-record session is active",

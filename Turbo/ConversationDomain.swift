@@ -312,6 +312,13 @@ enum SelectedPeerWaitingReason: Equatable {
     case peerReadyToConnect
 }
 
+enum StartingTransmitStage: Equatable {
+    case requestingLease
+    case awaitingSystemTransmit
+    case awaitingAudioSession
+    case awaitingAudioConnection(mediaState: MediaConnectionState)
+}
+
 enum LocalMediaWarmupState: Equatable {
     case cold
     case prewarming
@@ -340,7 +347,7 @@ enum SelectedPeerDetail: Equatable {
     case waitingForPeer(reason: SelectedPeerWaitingReason)
     case localJoinFailed(recoveryMessage: String)
     case ready
-    case startingTransmit(mediaState: MediaConnectionState)
+    case startingTransmit(stage: StartingTransmitStage)
     case transmitting
     case receiving
     case blockedByOtherSession
@@ -476,7 +483,7 @@ struct SelectedPeerState: Equatable {
         case .ready:
             return .ready
         case .startingTransmit:
-            return .startingTransmit(mediaState: .preparing)
+            return .startingTransmit(stage: .awaitingAudioConnection(mediaState: .preparing))
         case .transmitting:
             return .transmitting
         case .receiving:
@@ -607,6 +614,9 @@ struct ConversationDerivationContext: Equatable {
     let localIsTransmitting: Bool
     let localIsStopping: Bool
     let localRequiresFreshPress: Bool
+    let localTransmitPhase: TransmitDomainPhase
+    let localSystemIsTransmitting: Bool
+    let localPTTAudioSessionActive: Bool
     let peerSignalIsTransmitting: Bool
     let activeChannelID: UUID?
     let systemSessionMatchesContact: Bool
@@ -628,6 +638,9 @@ struct ConversationDerivationContext: Equatable {
         localIsTransmitting: Bool = false,
         localIsStopping: Bool = false,
         localRequiresFreshPress: Bool = false,
+        localTransmitPhase: TransmitDomainPhase = .idle,
+        localSystemIsTransmitting: Bool = false,
+        localPTTAudioSessionActive: Bool = false,
         peerSignalIsTransmitting: Bool = false,
         activeChannelID: UUID?,
         systemSessionMatchesContact: Bool,
@@ -648,6 +661,9 @@ struct ConversationDerivationContext: Equatable {
         self.localIsTransmitting = localIsTransmitting
         self.localIsStopping = localIsStopping
         self.localRequiresFreshPress = localRequiresFreshPress
+        self.localTransmitPhase = localTransmitPhase
+        self.localSystemIsTransmitting = localSystemIsTransmitting
+        self.localPTTAudioSessionActive = localPTTAudioSessionActive
         self.peerSignalIsTransmitting = peerSignalIsTransmitting
         self.activeChannelID = activeChannelID
         self.systemSessionMatchesContact = systemSessionMatchesContact
@@ -1135,14 +1151,26 @@ private extension ConversationStateMachine {
         }
 
         if sessionTransmitReady && context.localIsTransmitting {
-            switch context.mediaState {
-            case .connected:
-                return (.transmitting, "Talking to \(context.contactName)")
-            case .preparing, .idle, .closed:
-                return (.startingTransmit(mediaState: context.mediaState), "Establishing audio...")
-            case .failed:
-                return (.startingTransmit(mediaState: context.mediaState), "Audio unavailable")
+            if let stage = context.startingTransmitStage {
+                switch stage {
+                case .requestingLease:
+                    return (.startingTransmit(stage: stage), "Requesting transmit...")
+                case .awaitingSystemTransmit:
+                    return (.startingTransmit(stage: stage), "Waking \(context.contactName)...")
+                case .awaitingAudioSession:
+                    return (.startingTransmit(stage: stage), "Waiting for microphone...")
+                case .awaitingAudioConnection(let mediaState):
+                    switch mediaState {
+                    case .failed:
+                        return (.startingTransmit(stage: stage), "Audio unavailable")
+                    case .preparing, .idle, .closed:
+                        return (.startingTransmit(stage: stage), "Establishing audio...")
+                    case .connected:
+                        break
+                    }
+                }
             }
+            return (.transmitting, "Talking to \(context.contactName)")
         }
 
         if sessionTransmitReady && context.peerSignalIsTransmitting {
@@ -1150,6 +1178,14 @@ private extension ConversationStateMachine {
         }
 
         if sessionTransmitReady && canTransmit {
+            switch context.remoteAudioReadinessState {
+            case .wakeCapable:
+                if case .wakeCapable = context.remoteWakeCapabilityState {
+                    return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+                }
+            case .ready, .waiting, .unknown:
+                break
+            }
             switch context.localMediaWarmupState {
             case .cold, .prewarming:
                 return (.waitingForPeer(reason: .localAudioPrewarm), "Preparing audio...")
@@ -1194,14 +1230,26 @@ private extension ConversationStateMachine {
             guard sessionTransmitReady else {
                 return (.waitingForPeer(reason: .backendSessionTransition), "Establishing connection...")
             }
-            switch context.mediaState {
-            case .connected:
-                return (.transmitting, "Talking to \(context.contactName)")
-            case .preparing, .idle, .closed:
-                return (.startingTransmit(mediaState: context.mediaState), "Establishing audio...")
-            case .failed:
-                return (.startingTransmit(mediaState: context.mediaState), "Audio unavailable")
+            if let stage = context.startingTransmitStage {
+                switch stage {
+                case .requestingLease:
+                    return (.startingTransmit(stage: stage), "Requesting transmit...")
+                case .awaitingSystemTransmit:
+                    return (.startingTransmit(stage: stage), "Waking \(context.contactName)...")
+                case .awaitingAudioSession:
+                    return (.startingTransmit(stage: stage), "Waiting for microphone...")
+                case .awaitingAudioConnection(let mediaState):
+                    switch mediaState {
+                    case .failed:
+                        return (.startingTransmit(stage: stage), "Audio unavailable")
+                    case .preparing, .idle, .closed:
+                        return (.startingTransmit(stage: stage), "Establishing audio...")
+                    case .connected:
+                        break
+                    }
+                }
             }
+            return (.transmitting, "Talking to \(context.contactName)")
         case .ready where canTransmit:
             return (.ready, "Connected")
         case .waitingForSelf, .waitingForPeer, .ready:
@@ -1277,6 +1325,32 @@ private extension ConversationDerivationContext {
         return canTransmit
             && localMediaWarmupState == .ready
             && remoteAudioReadinessState == .ready
+    }
+
+    var startingTransmitStage: StartingTransmitStage? {
+        guard localIsTransmitting else { return nil }
+
+        if !localSystemIsTransmitting {
+            switch localTransmitPhase {
+            case .requesting:
+                return .requestingLease
+            case .active:
+                return .awaitingSystemTransmit
+            case .idle, .stopping:
+                return .awaitingSystemTransmit
+            }
+        }
+
+        guard localPTTAudioSessionActive else {
+            return .awaitingAudioSession
+        }
+
+        switch mediaState {
+        case .connected:
+            return nil
+        case .preparing, .idle, .closed, .failed:
+            return .awaitingAudioConnection(mediaState: mediaState)
+        }
     }
 }
 

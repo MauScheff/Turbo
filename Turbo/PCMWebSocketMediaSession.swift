@@ -11,6 +11,7 @@ actor AudioChunkSender {
     private let transportAvailabilityMaxAttempts = 20
     private var pendingPayloads: [String] = []
     private var isDraining = false
+    private var shouldImmediatelyFlushNextPayload = true
 
     init(
         sendChunk: (@Sendable (String) async throws -> Void)?,
@@ -37,6 +38,7 @@ actor AudioChunkSender {
     func reset() {
         pendingPayloads.removeAll(keepingCapacity: false)
         isDraining = false
+        shouldImmediatelyFlushNextPayload = true
     }
 
     private func drain() async {
@@ -56,14 +58,22 @@ actor AudioChunkSender {
             }
         }
         isDraining = false
+        shouldImmediatelyFlushNextPayload = true
     }
 
     private func nextTransportPayload() async -> String {
-        if pendingPayloads.count < maximumPayloadsPerMessage {
+        let shouldImmediatelyFlush = shouldImmediatelyFlushNextPayload
+        shouldImmediatelyFlushNextPayload = false
+
+        if !shouldImmediatelyFlush,
+           pendingPayloads.count < maximumPayloadsPerMessage {
             try? await Task.sleep(nanoseconds: payloadBatchCollectionNanoseconds)
         }
 
-        let batchCount = min(maximumPayloadsPerMessage, pendingPayloads.count)
+        let batchCount =
+            shouldImmediatelyFlush
+            ? 1
+            : min(maximumPayloadsPerMessage, pendingPayloads.count)
         let batch = Array(pendingPayloads.prefix(batchCount))
         pendingPayloads.removeFirst(batchCount)
         return AudioChunkPayloadCodec.encode(batch)
@@ -100,6 +110,21 @@ struct CaptureRouteRefreshPlan: Equatable {
             shouldResetEngine: engineIsRunning,
             shouldRemoveInputTap: inputTapInstalled,
             shouldRestartEngine: engineIsRunning || !engineIsRunning
+        )
+    }
+}
+
+struct CaptureTransmitStartPlan: Equatable {
+    let shouldRefreshRoute: Bool
+
+    static func forCurrentCapturePath(
+        isCaptureReady: Bool,
+        engineIsRunning: Bool,
+        inputTapInstalled: Bool,
+        hasCaptureConverter: Bool
+    ) -> CaptureTransmitStartPlan {
+        CaptureTransmitStartPlan(
+            shouldRefreshRoute: !isCaptureReady || !engineIsRunning || !inputTapInstalled || !hasCaptureConverter
         )
     }
 }
@@ -295,7 +320,15 @@ final class PCMWebSocketMediaSession: MediaSession {
             try await start(activationMode: .appManaged, startupMode: .interactive)
         }
         resetCaptureReportingBudgets()
-        try refreshCapturePathForCurrentRoute()
+        let captureStartPlan = CaptureTransmitStartPlan.forCurrentCapturePath(
+            isCaptureReady: isCaptureReady,
+            engineIsRunning: captureEngine.isRunning,
+            inputTapInstalled: inputTapInstalled,
+            hasCaptureConverter: captureConverter != nil
+        )
+        if captureStartPlan.shouldRefreshRoute {
+            try refreshCapturePathForCurrentRoute()
+        }
         await audioChunkSender.updateSendChunk(currentSendAudioChunk)
         await report(
             "Starting audio capture with transport state",
