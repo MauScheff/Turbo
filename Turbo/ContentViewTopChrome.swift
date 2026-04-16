@@ -168,6 +168,7 @@ struct TurboSplashView<LookupBar: View>: View {
     let currentDevUserHandle: String
     let lookupBar: LookupBar
     let onShowIdentity: () -> Void
+    let onShowCallPrototype: () -> Void
     let onConnect: () -> Void
 
     init(
@@ -176,6 +177,7 @@ struct TurboSplashView<LookupBar: View>: View {
         currentDevUserHandle: String,
         @ViewBuilder lookupBar: () -> LookupBar,
         onShowIdentity: @escaping () -> Void,
+        onShowCallPrototype: @escaping () -> Void,
         onConnect: @escaping () -> Void
     ) {
         self.wordmarkName = wordmarkName
@@ -183,6 +185,7 @@ struct TurboSplashView<LookupBar: View>: View {
         self.currentDevUserHandle = currentDevUserHandle
         self.lookupBar = lookupBar()
         self.onShowIdentity = onShowIdentity
+        self.onShowCallPrototype = onShowCallPrototype
         self.onConnect = onConnect
     }
 
@@ -217,6 +220,15 @@ struct TurboSplashView<LookupBar: View>: View {
                     .frame(maxWidth: .infinity, minHeight: 52)
             }
             .buttonStyle(.borderedProminent)
+            .padding(.horizontal, 24)
+
+            Button(action: onShowCallPrototype) {
+                Text("See Call View")
+                    .font(.callout.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 52)
+            }
+            .buttonStyle(.bordered)
+            .tint(.white)
             .padding(.horizontal, 24)
 
             Spacer()

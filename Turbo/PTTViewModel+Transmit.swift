@@ -233,6 +233,20 @@ extension PTTViewModel {
         updateStatusForSelectedContact()
     }
 
+    func shouldClosePrewarmedMediaBeforeSystemTransmit(for contactID: UUID) -> Bool {
+        guard mediaServices.hasSession() else { return false }
+        guard mediaSessionContactID == contactID else { return false }
+        guard !isPTTAudioSessionActive else { return false }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
+
+        switch mediaConnectionState {
+        case .connected, .preparing:
+            return true
+        case .idle, .failed, .closed:
+            return false
+        }
+    }
+
     func deferInteractivePrewarmUntilPTTAudioDeactivation(for contactID: UUID) {
         mediaRuntime.requestInteractivePrewarmAfterAudioDeactivation(for: contactID)
         mediaRuntime.replaceInteractivePrewarmRecoveryTask(with: Task { [weak self] in
@@ -540,6 +554,16 @@ extension PTTViewModel {
                             ]
                         )
                         self.startRenewingTransmit(target)
+                    } else {
+                        self.diagnostics.record(
+                            .media,
+                            message: "Backend transmit lease granted after release; stopping immediately",
+                            metadata: [
+                                "contactId": target.contactID.uuidString,
+                                "channelId": target.channelID,
+                                "source": "begin-transmit",
+                            ]
+                        )
                     }
                 }
                 await transmitCoordinator.handle(.beginSucceeded(target, request))
@@ -602,6 +626,16 @@ extension PTTViewModel {
                     ]
                 )
                 startRenewingTransmit(target)
+            } else {
+                diagnostics.record(
+                    .media,
+                    message: "Recovered backend transmit lease granted after release; stopping immediately",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "source": "membership-recovery",
+                    ]
+                )
             }
             diagnostics.record(
                 .media,
@@ -624,9 +658,8 @@ extension PTTViewModel {
     }
 
     private func performActivateTransmit(_ request: TransmitRequestContext, target: TransmitTarget) async {
-        configureOutgoingAudioRoute(target: target)
-
         if request.usesLocalHTTPBackend {
+            configureOutgoingAudioRoute(target: target)
             startRenewingTransmit(target)
             isTransmitting = true
         } else {
@@ -638,6 +671,18 @@ extension PTTViewModel {
                 return
             }
             do {
+                if shouldClosePrewarmedMediaBeforeSystemTransmit(for: request.contactID) {
+                    diagnostics.record(
+                        .media,
+                        message: "Closing app-managed media session before system transmit handoff",
+                        metadata: [
+                            "contactId": request.contactID.uuidString,
+                            "channelUUID": channelUUID.uuidString,
+                            "mediaState": String(describing: mediaConnectionState),
+                        ]
+                    )
+                    closeMediaSession()
+                }
                 try pttSystemClient.beginTransmitting(channelUUID: channelUUID)
                 // Keep the backend transmit lease alive during the cold PTT
                 // activation window instead of waiting for later audio-session

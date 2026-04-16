@@ -2725,6 +2725,31 @@ struct TurboTests {
         _ = await task.result
     }
 
+    @MainActor
+    @Test func systemTransmitClosesPrewarmedMediaSessionBeforeHandoff() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+
+        viewModel.mediaRuntime.contactID = contactID
+        viewModel.mediaRuntime.connectionState = .connected
+        viewModel.mediaRuntime.session = StubRelayMediaSession()
+
+        #expect(viewModel.shouldClosePrewarmedMediaBeforeSystemTransmit(for: contactID))
+    }
+
+    @MainActor
+    @Test func systemTransmitDoesNotCloseMediaSessionDuringPTTAudioActivation() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+
+        viewModel.mediaRuntime.contactID = contactID
+        viewModel.mediaRuntime.connectionState = .connected
+        viewModel.mediaRuntime.session = StubRelayMediaSession()
+        viewModel.isPTTAudioSessionActive = true
+
+        #expect(!viewModel.shouldClosePrewarmedMediaBeforeSystemTransmit(for: contactID))
+    }
+
     @Test func transmitReducerLateGrantAfterReleaseStopsImmediately() {
         let request = makeTransmitRequest()
         let target = TransmitTarget(

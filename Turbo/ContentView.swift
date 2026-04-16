@@ -7,9 +7,15 @@
 
 import SwiftUI
 
+private enum ContentRoute {
+    case splash
+    case live
+    case callPrototype
+}
+
 struct ContentView: View {
     @State private var viewModel: PTTViewModel
-    @State private var isShowingSplash: Bool = true
+    @State private var route: ContentRoute = .splash
     @State private var isShowingDevIdentitySheet: Bool = false
     @State private var isShowingDiagnostics: Bool = false
     @State private var draftDevUserHandle: String = ""
@@ -30,17 +36,22 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if isShowingSplash {
+            switch route {
+            case .splash:
                 splashView
-            } else {
+            case .live:
                 mainView
+            case .callPrototype:
+                callPrototypeView
             }
         }
         .task {
             await viewModel.initializeIfNeeded()
         }
         .onChange(of: viewModel.selectedContactId) { _, _ in
-            isShowingSplash = false
+            if route != .callPrototype {
+                route = .live
+            }
         }
         .sheet(isPresented: $isShowingDevIdentitySheet) {
             TurboDevIdentitySheet(
@@ -87,7 +98,7 @@ struct ContentView: View {
                 microphonePermissionStatus: viewModel.microphonePermissionStatusText,
                 needsMicrophonePermission: viewModel.needsMicrophonePermission,
                 onBack: {
-                    isShowingSplash = true
+                    route = .splash
                     draftPeerHandle = ""
                     isRestartingLocalSession = true
                     Task {
@@ -150,11 +161,24 @@ struct ContentView: View {
                 draftDevUserHandle = viewModel.currentDevUserHandle
                 isShowingDevIdentitySheet = true
             },
+            onShowCallPrototype: {
+                route = .callPrototype
+            },
             onConnect: {
-                isShowingSplash = false
+                route = .live
                 if let contact = viewModel.selectedContact {
                     viewModel.selectContact(contact)
                 }
+            }
+        )
+    }
+
+    private var callPrototypeView: some View {
+        TurboCallPrototypeView(
+            contactName: callPrototypeName,
+            contactHandle: callPrototypeHandle,
+            onClose: {
+                route = .splash
             }
         )
     }
@@ -184,7 +208,7 @@ struct ContentView: View {
             await viewModel.openContact(handle: handle)
             await MainActor.run {
                 isOpeningPeer = false
-                isShowingSplash = false
+                route = .live
             }
         }
     }
@@ -205,9 +229,43 @@ struct ContentView: View {
             await MainActor.run {
                 draftPeerHandle = ""
                 isResettingDevState = false
-                isShowingSplash = false
+                route = .live
             }
         }
+    }
+
+    private var callPrototypeName: String {
+        if let selectedContact = viewModel.selectedContact {
+            return selectedContact.name
+        }
+
+        let trimmedDraftHandle = draftPeerHandle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedDraftHandle.isEmpty {
+            return Contact.displayName(for: trimmedDraftHandle)
+        }
+
+        if let quickPeerHandle = viewModel.quickPeerHandles.first {
+            return Contact.displayName(for: quickPeerHandle)
+        }
+
+        return "Avery"
+    }
+
+    private var callPrototypeHandle: String {
+        if let selectedContact = viewModel.selectedContact {
+            return selectedContact.handle
+        }
+
+        let trimmedDraftHandle = draftPeerHandle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedDraftHandle.isEmpty {
+            return Contact.normalizedHandle(trimmedDraftHandle)
+        }
+
+        if let quickPeerHandle = viewModel.quickPeerHandles.first {
+            return Contact.normalizedHandle(quickPeerHandle)
+        }
+
+        return "@avery"
     }
 
     private func saveDevIdentity() {
