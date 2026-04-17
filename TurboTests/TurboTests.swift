@@ -587,6 +587,7 @@ struct TurboTests {
     @MainActor
     @Test func receiverNotReadyBackgroundClosureReleasesLocalInteractivePrewarm() async {
         let viewModel = PTTViewModel()
+        viewModel.applicationStateOverride = .active
         let contactID = UUID()
         let channelUUID = UUID()
         viewModel.contacts = [
@@ -641,6 +642,7 @@ struct TurboTests {
     @MainActor
     @Test func receiverReadySignalResumesLocalInteractivePrewarmAfterBackgroundClosure() async {
         let viewModel = PTTViewModel()
+        viewModel.applicationStateOverride = .active
         let contactID = UUID()
         let channelUUID = UUID()
         viewModel.contacts = [
@@ -2188,6 +2190,44 @@ struct TurboTests {
         #expect(action.style == .muted)
     }
 
+    @Test func blockedRequestedPrimaryActionAllowsRequestAgainAfterCooldownExpires() {
+        let action = ConversationStateMachine.primaryAction(
+            selectedPeerState: SelectedPeerState(
+                relationship: .outgoingRequest(requestCount: 1),
+                phase: .blockedByOtherSession,
+                statusMessage: "Another session is active",
+                canTransmitNow: false
+            ),
+            isSelectedChannelJoined: false,
+            isTransmitting: false,
+            requestCooldownRemaining: nil
+        )
+
+        #expect(action.kind == .connect)
+        #expect(action.label == "Request Again")
+        #expect(action.isEnabled)
+        #expect(action.style == .muted)
+    }
+
+    @Test func blockedRequestedPrimaryActionStaysDisabledDuringCooldown() {
+        let action = ConversationStateMachine.primaryAction(
+            selectedPeerState: SelectedPeerState(
+                relationship: .outgoingRequest(requestCount: 1),
+                phase: .blockedByOtherSession,
+                statusMessage: "Another session is active",
+                canTransmitNow: false
+            ),
+            isSelectedChannelJoined: false,
+            isTransmitting: false,
+            requestCooldownRemaining: 12
+        )
+
+        #expect(action.kind == .connect)
+        #expect(action.label == "Request again in 12s")
+        #expect(action.isEnabled == false)
+        #expect(action.style == .muted)
+    }
+
     @Test func selectedPeerReducerClearsStateOnDeselection() {
         let contactID = UUID()
         let selection = SelectedPeerSelection(
@@ -2741,6 +2781,19 @@ struct TurboTests {
         #expect(transition.effects == [.beginTransmit(request)])
     }
 
+    @Test func transmitReducerSystemPressRequestEmitsBeginEffect() {
+        let request = makeTransmitRequest()
+
+        let transition = TransmitReducer.reduce(
+            state: .initial,
+            event: .systemPressRequested(request)
+        )
+
+        #expect(transition.state.phase == .requesting(contactID: request.contactID))
+        #expect(transition.state.isPressingTalk)
+        #expect(transition.effects == [.beginTransmit(request)])
+    }
+
     @Test func transmitReducerBeginSuccessEmitsActivationWhileStillPressing() {
         let request = makeTransmitRequest()
         let requestingState = TransmitReducer.reduce(
@@ -3235,17 +3288,17 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func websocketIdleDuringTransmitStillResetsTransmitSession() {
+    @Test func websocketIdleDuringTransmitDoesNotResetTransmitSession() {
         let viewModel = PTTViewModel()
 
         #expect(
-            viewModel.shouldResetTransmitSessionOnWebSocketIdle(
+            !viewModel.shouldResetTransmitSessionOnWebSocketIdle(
                 hasPendingBeginOrActiveTransmit: true,
                 systemIsTransmitting: false
             )
         )
         #expect(
-            viewModel.shouldResetTransmitSessionOnWebSocketIdle(
+            !viewModel.shouldResetTransmitSessionOnWebSocketIdle(
                 hasPendingBeginOrActiveTransmit: false,
                 systemIsTransmitting: true
             )
@@ -4251,6 +4304,7 @@ struct TurboTests {
     @MainActor
     @Test func appActivationResumesInteractiveAudioPrewarmForAlignedSelectedSession() async {
         let viewModel = PTTViewModel()
+        viewModel.applicationStateOverride = .active
         let contactID = UUID()
         let channelUUID = UUID()
         let contact = Contact(
@@ -4290,6 +4344,7 @@ struct TurboTests {
     @MainActor
     @Test func deferredInteractiveAudioPrewarmRecoversWithoutPTTDeactivationCallback() async {
         let viewModel = PTTViewModel()
+        viewModel.applicationStateOverride = .active
         let contactID = UUID()
         let channelUUID = UUID()
         let contact = Contact(
@@ -4677,6 +4732,54 @@ struct TurboTests {
         #expect(decoded == ["chunk-1", "chunk-2", "chunk-3"])
     }
 
+    @Test func playbackBufferReceivePlanStartsNodeWithoutDuplicatingCurrentBuffer() {
+        #expect(
+            PCMWebSocketMediaSession.playbackBufferReceivePlan(
+                isPlayerNodePlaying: false,
+                playbackIOCycleAvailable: true
+            ) == .scheduleAndStartNode
+        )
+        #expect(
+            PCMWebSocketMediaSession.playbackBufferReceivePlan(
+                isPlayerNodePlaying: true,
+                playbackIOCycleAvailable: true
+            ) == .scheduleOnly
+        )
+        #expect(
+            PCMWebSocketMediaSession.playbackBufferReceivePlan(
+                isPlayerNodePlaying: false,
+                playbackIOCycleAvailable: false
+            ) == .deferUntilIOCycle
+        )
+    }
+
+    @Test func audioChunkSenderWaitsForShortPacketizationWindowUntilBatchIsFull() {
+        #expect(
+            AudioChunkSender.shouldWaitForMorePayloads(
+                pendingPayloadCount: 1,
+                maximumPayloadsPerMessage: 4
+            )
+        )
+        #expect(
+            AudioChunkSender.shouldWaitForMorePayloads(
+                pendingPayloadCount: 3,
+                maximumPayloadsPerMessage: 4
+            )
+        )
+        #expect(
+            !AudioChunkSender.shouldWaitForMorePayloads(
+                pendingPayloadCount: 4,
+                maximumPayloadsPerMessage: 4
+            )
+        )
+        #expect(
+            !AudioChunkSender.shouldWaitForMorePayloads(
+                pendingPayloadCount: 0,
+                maximumPayloadsPerMessage: 4
+            )
+        )
+    }
+
     @Test func audioChunkSenderBatchesNearbyPayloadsIntoSingleTransportSend() async {
         actor Recorder {
             var payloads: [String] = []
@@ -4707,7 +4810,7 @@ struct TurboTests {
         #expect(transportPayloads.count < 3)
     }
 
-    @Test func audioChunkSenderImmediatelyFlushesFirstPayloadInBurst() async {
+    @Test func audioChunkSenderBuffersSinglePayloadForShortPacketizationWindow() async {
         actor Recorder {
             var payloads: [String] = []
 
@@ -4732,9 +4835,13 @@ struct TurboTests {
         try? await Task.sleep(nanoseconds: 50_000_000)
 
         let transportPayloads = await recorder.snapshot()
-        #expect(transportPayloads == ["chunk-1"])
+        #expect(transportPayloads.isEmpty)
 
         _ = await enqueue
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let flushedPayloads = await recorder.snapshot()
+        #expect(flushedPayloads == ["chunk-1"])
     }
 
     @Test func audioChunkSenderUsesUpdatedTransportHandler() async {
@@ -6093,6 +6200,89 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func systemTransmitBeginWithoutLocalPressStartsSystemOriginatedTransmitRequest() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+
+        viewModel.transmitCoordinator.effectHandler = nil
+        viewModel.applyAuthenticatedBackendSession(
+            client: TurboBackendClient(config: makeUnreachableBackendConfig()),
+            userID: "self-user",
+            mode: "cloud"
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-avery",
+                remoteUserId: "peer-user"
+            )
+        ]
+        await viewModel.pttCoordinator.handle(
+            .didJoinChannel(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "test"
+            )
+        )
+        viewModel.syncPTTState()
+
+        viewModel.handleDidBeginTransmitting(channelUUID, source: "system-ui")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(viewModel.transmitCoordinator.state.phase == .requesting(contactID: contactID))
+        #expect(viewModel.transmitCoordinator.state.isPressingTalk)
+        #expect(viewModel.transmitCoordinator.state.pendingRequest?.channelUUID == channelUUID)
+        #expect(viewModel.transmitRuntime.isPressingTalk)
+    }
+
+    @MainActor
+    @Test func systemTransmitEndClearsPendingSystemOriginatedRequestBeforeBackendGrant() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+
+        viewModel.transmitCoordinator.effectHandler = nil
+        viewModel.applyAuthenticatedBackendSession(
+            client: TurboBackendClient(config: makeUnreachableBackendConfig()),
+            userID: "self-user",
+            mode: "cloud"
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-avery",
+                remoteUserId: "peer-user"
+            )
+        ]
+        await viewModel.pttCoordinator.handle(
+            .didJoinChannel(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "test"
+            )
+        )
+        viewModel.syncPTTState()
+
+        viewModel.handleDidBeginTransmitting(channelUUID, source: "system-ui")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        viewModel.handleDidEndTransmitting(channelUUID, source: "system-ui")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(viewModel.transmitCoordinator.state.phase == .idle)
+        #expect(viewModel.transmitCoordinator.state.pendingRequest == nil)
+        #expect(viewModel.transmitCoordinator.state.isPressingTalk == false)
+    }
+
+    @MainActor
     @Test func resetLocalDevStateClearsVisibleSessionErrorsAndTransientState() {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -6321,6 +6511,112 @@ struct TurboTests {
         )
     }
 
+    @MainActor
+    @Test func applicationDidBecomeActiveRequestsBackendPollForSelectedContact() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.selectedContactId = contactID
+
+        var capturedEffects: [BackendSyncEffect] = []
+        viewModel.backendSyncCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        await viewModel.handleApplicationDidBecomeActive()
+
+        #expect(
+            capturedEffects == [
+                .ensureWebSocketConnected,
+                .heartbeatPresence,
+                .refreshContactSummaries,
+                .refreshInvites,
+                .refreshChannelState(contactID)
+            ]
+        )
+    }
+
+    @MainActor
+    @Test func applicationDidBecomeActiveClearsBadgeAndDeliveredNotifications() async {
+        let viewModel = PTTViewModel()
+        var badgeCounts: [Int] = []
+        var clearNotificationsCallCount = 0
+        viewModel.setApplicationBadgeCount = { badgeCounts.append($0) }
+        viewModel.clearDeliveredNotifications = { clearNotificationsCallCount += 1 }
+
+        await viewModel.handleApplicationDidBecomeActive()
+
+        #expect(badgeCounts == [0])
+        #expect(clearNotificationsCallCount == 1)
+    }
+
+    @MainActor
+    @Test func foregroundPresencePublishingRequiresActiveApplicationState() {
+        let viewModel = PTTViewModel()
+
+        #expect(viewModel.shouldPublishForegroundPresence(applicationState: .active))
+        #expect(viewModel.shouldPublishForegroundPresence(applicationState: .inactive) == false)
+        #expect(viewModel.shouldPublishForegroundPresence(applicationState: .background) == false)
+    }
+
+    @MainActor
+    @Test func talkRequestBadgeCountUsesUniqueIncomingContacts() {
+        let viewModel = PTTViewModel()
+        let firstContactID = UUID()
+        let secondContactID = UUID()
+
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [
+                    BackendInviteUpdate(
+                        contactID: firstContactID,
+                        invite: makeInvite(direction: "incoming", requestCount: 3)
+                    ),
+                    BackendInviteUpdate(
+                        contactID: secondContactID,
+                        invite: makeInvite(direction: "incoming", requestCount: 1)
+                    ),
+                ],
+                outgoing: [],
+                now: .now
+            )
+        )
+
+        #expect(viewModel.pendingIncomingTalkRequestBadgeCount == 2)
+    }
+
+    @MainActor
+    @Test func talkRequestBadgeSyncAppliesUniqueIncomingContactCountWhileBackgrounded() {
+        let viewModel = PTTViewModel()
+        let firstContactID = UUID()
+        let secondContactID = UUID()
+        var badgeCounts: [Int] = []
+        var clearNotificationsCallCount = 0
+        viewModel.setApplicationBadgeCount = { badgeCounts.append($0) }
+        viewModel.clearDeliveredNotifications = { clearNotificationsCallCount += 1 }
+
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [
+                    BackendInviteUpdate(
+                        contactID: firstContactID,
+                        invite: makeInvite(direction: "incoming", requestCount: 4)
+                    ),
+                    BackendInviteUpdate(
+                        contactID: secondContactID,
+                        invite: makeInvite(direction: "incoming", requestCount: 1)
+                    ),
+                ],
+                outgoing: [],
+                now: .now
+            )
+        )
+
+        viewModel.syncTalkRequestNotificationBadge(applicationState: .background)
+
+        #expect(badgeCounts == [2])
+        #expect(clearNotificationsCallCount == 0)
+    }
+
     @Test func backendSyncReducerContactSummaryUpdateReplacesSnapshot() {
         let contactID = UUID()
         let summary = makeContactSummary(channelId: "channel-1")
@@ -6390,6 +6686,61 @@ struct TurboTests {
 
         #expect(transition.state.syncState.outgoingInvites[contactID] == invite)
         #expect(transition.state.syncState.requestCooldownDeadlines[contactID] == now.addingTimeInterval(30))
+        #expect(transition.state.syncState.requestCooldownSourceKeys[contactID] == "\(invite.inviteId)|\(invite.requestCount)|\(invite.updatedAt ?? invite.createdAt)")
+    }
+
+    @Test func backendSyncReducerInviteRefreshDoesNotRestartCooldownForSameOutgoingInvite() {
+        let contactID = UUID()
+        let invite = makeInvite(direction: "outgoing", inviteId: "invite-1")
+        let originalNow = Date(timeIntervalSince1970: 1_000)
+        let laterNow = originalNow.addingTimeInterval(31)
+        var state = BackendSyncSessionState()
+        state.syncState.outgoingInvites[contactID] = invite
+        state.syncState.requestCooldownDeadlines[contactID] = originalNow.addingTimeInterval(30)
+        state.syncState.requestCooldownSourceKeys[contactID] =
+            "\(invite.inviteId)|\(invite.requestCount)|\(invite.updatedAt ?? invite.createdAt)"
+
+        let transition = BackendSyncReducer.reduce(
+            state: state,
+            event: .invitesUpdated(
+                incoming: [],
+                outgoing: [BackendInviteUpdate(contactID: contactID, invite: invite)],
+                now: laterNow
+            )
+        )
+
+        #expect(transition.state.syncState.requestCooldownDeadlines[contactID] == nil)
+        #expect(transition.state.syncState.requestCooldownSourceKeys[contactID] == "\(invite.inviteId)|\(invite.requestCount)|\(invite.updatedAt ?? invite.createdAt)")
+    }
+
+    @Test func backendSyncReducerInviteRefreshRestartsCooldownForUpdatedOutgoingInvite() {
+        let contactID = UUID()
+        let originalInvite = makeInvite(direction: "outgoing", inviteId: "invite-1")
+        let updatedInvite = makeInvite(
+            direction: "outgoing",
+            inviteId: "invite-1",
+            requestCount: 2,
+            updatedAt: "2026-04-17T21:00:00Z"
+        )
+        let originalNow = Date(timeIntervalSince1970: 1_000)
+        let laterNow = originalNow.addingTimeInterval(31)
+        var state = BackendSyncSessionState()
+        state.syncState.outgoingInvites[contactID] = originalInvite
+        state.syncState.requestCooldownDeadlines[contactID] = originalNow.addingTimeInterval(30)
+        state.syncState.requestCooldownSourceKeys[contactID] =
+            "\(originalInvite.inviteId)|\(originalInvite.requestCount)|\(originalInvite.updatedAt ?? originalInvite.createdAt)"
+
+        let transition = BackendSyncReducer.reduce(
+            state: state,
+            event: .invitesUpdated(
+                incoming: [],
+                outgoing: [BackendInviteUpdate(contactID: contactID, invite: updatedInvite)],
+                now: laterNow
+            )
+        )
+
+        #expect(transition.state.syncState.requestCooldownDeadlines[contactID] == laterNow.addingTimeInterval(30))
+        #expect(transition.state.syncState.requestCooldownSourceKeys[contactID] == "\(updatedInvite.inviteId)|\(updatedInvite.requestCount)|\(updatedInvite.updatedAt ?? updatedInvite.createdAt)")
     }
 
     @Test func backendSyncReducerInviteFailurePreservesLastKnownRequests() {
@@ -6537,6 +6888,148 @@ struct TurboTests {
         #expect(path == "/v1/users/by-handle/@blake/presence")
         #expect(path.contains("/presence"))
         #expect(path.contains("/presence/") == false)
+    }
+
+    @MainActor
+    @Test func contactPresencePresentationUsesSummaryOnlineBadgeForForegroundPeer() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: ContactDirectory.stableChannelUUID(for: "channel-blake"),
+                backendChannelId: "channel-blake",
+                remoteUserId: "user-blake"
+            )
+        ]
+        let summary = TurboContactSummaryResponse(
+                userId: "user-blake",
+                handle: "@blake",
+                displayName: "Blake",
+                channelId: "channel-blake",
+                isOnline: true,
+                hasIncomingRequest: false,
+                hasOutgoingRequest: false,
+                requestCount: 0,
+                isActiveConversation: false,
+                badgeStatus: "online",
+                membershipPayload: TurboChannelMembershipPayload(
+                    kind: "peer-only",
+                    peerDeviceConnected: false
+                )
+            )
+        viewModel.backendSyncCoordinator.send(
+            .contactSummariesUpdated([
+                BackendContactSummaryUpdate(contactID: contactID, summary: summary)
+            ])
+        )
+
+        #expect(viewModel.contactPresencePresentation(for: contactID) == .connected)
+    }
+
+    @MainActor
+    @Test func contactPresencePresentationTreatsIdleDisconnectedSummaryAsAvailable() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: ContactDirectory.stableChannelUUID(for: "channel-blake"),
+                backendChannelId: "channel-blake",
+                remoteUserId: "user-blake"
+            )
+        ]
+        let summary = TurboContactSummaryResponse(
+            userId: "user-blake",
+            handle: "@blake",
+            displayName: "Blake",
+            channelId: "channel-blake",
+            isOnline: true,
+            hasIncomingRequest: false,
+            hasOutgoingRequest: false,
+            requestCount: 0,
+            isActiveConversation: false,
+            badgeStatus: "idle",
+            membershipPayload: TurboChannelMembershipPayload(
+                kind: "peer-only",
+                peerDeviceConnected: false
+            )
+        )
+        viewModel.backendSyncCoordinator.send(
+            .contactSummariesUpdated([
+                BackendContactSummaryUpdate(contactID: contactID, summary: summary)
+            ])
+        )
+
+        #expect(viewModel.contactPresencePresentation(for: contactID) == .available)
+    }
+
+    @MainActor
+    @Test func contactPresencePresentationTreatsFallbackPresenceAsOnlineWithoutSummary() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: ContactDirectory.stableChannelUUID(for: "channel-blake"),
+                backendChannelId: nil,
+                remoteUserId: "user-blake"
+            )
+        ]
+
+        #expect(viewModel.contactPresencePresentation(for: contactID) == .connected)
+    }
+
+    @MainActor
+    @Test func selectedPeerIdleStatusDoesNotSayOnlineWhenSummaryIsIdleAndMembershipIsDisconnected() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: ContactDirectory.stableChannelUUID(for: "channel-blake"),
+            backendChannelId: "channel-blake",
+            remoteUserId: "user-blake"
+        )
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        let summary = TurboContactSummaryResponse(
+                userId: "user-blake",
+                handle: "@blake",
+                displayName: "Blake",
+                channelId: "channel-blake",
+                isOnline: true,
+                hasIncomingRequest: false,
+                hasOutgoingRequest: false,
+                requestCount: 0,
+                isActiveConversation: false,
+                badgeStatus: "idle",
+                membershipPayload: TurboChannelMembershipPayload(
+                    kind: "peer-only",
+                    peerDeviceConnected: false
+                )
+            )
+        viewModel.backendSyncCoordinator.send(
+            .contactSummariesUpdated([
+                BackendContactSummaryUpdate(contactID: contactID, summary: summary)
+            ])
+        )
+
+        let state = viewModel.selectedPeerState(for: contactID)
+
+        #expect(state.phase == .idle)
+        #expect(state.statusMessage == "Ready to connect")
     }
 
     @MainActor
@@ -7405,6 +7898,117 @@ struct TurboTests {
         let viewModel = PTTViewModel()
 
         #expect(viewModel.isExpectedBackendSyncCancellation(TurboBackendError.server("boom")) == false)
+    }
+
+    @Test func talkRequestSurfaceShowsNewestUnsurfacedInviteWhenAppIsActive() {
+        let older = IncomingTalkRequestCandidate(
+            contact: Contact(
+                id: UUID(),
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID()
+            ),
+            invite: makeInvite(
+                direction: "incoming",
+                inviteId: "invite-older",
+                fromHandle: "@avery",
+                createdAt: "2026-04-17T19:00:00Z",
+                updatedAt: "2026-04-17T19:00:00Z"
+            )
+        )
+        let newer = IncomingTalkRequestCandidate(
+            contact: Contact(
+                id: UUID(),
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: UUID()
+            ),
+            invite: makeInvite(
+                direction: "incoming",
+                inviteId: "invite-newer",
+                fromHandle: "@blake",
+                createdAt: "2026-04-17T19:02:00Z",
+                updatedAt: "2026-04-17T19:02:00Z"
+            )
+        )
+
+        let nextState = TalkRequestSurfaceReducer.reduce(
+            state: TalkRequestSurfaceState(),
+            event: .invitesUpdated(
+                candidates: [older, newer],
+                selectedContactID: nil,
+                applicationIsActive: true
+            )
+        )
+
+        #expect(nextState.activeIncomingRequest?.inviteID == "invite-newer")
+        #expect(nextState.surfacedInviteIDs == Set(["invite-newer"]))
+    }
+
+    @Test func talkRequestSurfaceDefersUntilAppBecomesActive() {
+        let candidate = IncomingTalkRequestCandidate(
+            contact: Contact(
+                id: UUID(),
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID()
+            ),
+            invite: makeInvite(
+                direction: "incoming",
+                inviteId: "invite-1",
+                fromHandle: "@avery",
+                createdAt: "2026-04-17T19:00:00Z",
+                updatedAt: "2026-04-17T19:00:00Z"
+            )
+        )
+
+        let backgroundState = TalkRequestSurfaceReducer.reduce(
+            state: TalkRequestSurfaceState(),
+            event: .invitesUpdated(
+                candidates: [candidate],
+                selectedContactID: nil,
+                applicationIsActive: false
+            )
+        )
+        let activeState = TalkRequestSurfaceReducer.reduce(
+            state: backgroundState,
+            event: .invitesUpdated(
+                candidates: [candidate],
+                selectedContactID: nil,
+                applicationIsActive: true
+            )
+        )
+
+        #expect(backgroundState.activeIncomingRequest == nil)
+        #expect(backgroundState.surfacedInviteIDs.isEmpty)
+        #expect(activeState.activeIncomingRequest?.inviteID == "invite-1")
+    }
+
+    @Test func openingRequestContactClearsBannerAndMarksInviteSurfaced() {
+        let contactID = UUID()
+        let inviteID = "invite-1"
+        let initialState = TalkRequestSurfaceState(
+            activeIncomingRequest: IncomingTalkRequestSurface(
+                contactID: contactID,
+                inviteID: inviteID,
+                contactName: "Avery",
+                contactHandle: "@avery",
+                requestCount: 1,
+                recencyKey: "2026-04-17T19:00:00Z"
+            ),
+            surfacedInviteIDs: []
+        )
+
+        let nextState = TalkRequestSurfaceReducer.reduce(
+            state: initialState,
+            event: .contactOpened(contactID: contactID, inviteID: inviteID)
+        )
+
+        #expect(nextState.activeIncomingRequest == nil)
+        #expect(nextState.surfacedInviteIDs == Set([inviteID]))
     }
 
     @Test func backendCommandReducerLeaveFailureClearsOperationAndStoresError() {
@@ -9697,19 +10301,27 @@ private func makeContactSummary(channelId: String?) -> TurboContactSummaryRespon
     )
 }
 
-private func makeInvite(direction: String) -> TurboInviteResponse {
+private func makeInvite(
+    direction: String,
+    inviteId: String = UUID().uuidString,
+    fromHandle: String = "@self",
+    toHandle: String = "@avery",
+    requestCount: Int = 1,
+    createdAt: String = "2026-04-08T00:00:00Z",
+    updatedAt: String? = nil
+) -> TurboInviteResponse {
     TurboInviteResponse(
-        inviteId: UUID().uuidString,
+        inviteId: inviteId,
         fromUserId: "user-self",
-        fromHandle: "@self",
+        fromHandle: fromHandle,
         toUserId: "user-peer",
-        toHandle: "@avery",
+        toHandle: toHandle,
         channelId: "channel-1",
         status: "pending",
         direction: direction,
-        requestCount: 1,
-        createdAt: "2026-04-08T00:00:00Z",
-        updatedAt: nil,
+        requestCount: requestCount,
+        createdAt: createdAt,
+        updatedAt: updatedAt,
         targetAvailability: nil,
         shouldAutoJoinPeer: nil,
         accepted: nil,

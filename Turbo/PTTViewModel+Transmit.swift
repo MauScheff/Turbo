@@ -91,7 +91,7 @@ extension PTTViewModel {
         let peerWasRoutable = peerIsRoutableForReceiverAudioReadiness(for: contactID)
         let effectiveReason: String = {
             guard !isReady else { return reason }
-            let appState = UIApplication.shared.applicationState
+            let appState = currentApplicationState()
             guard appState != .active else { return reason }
             if reason == "app-background-media-closed" || reason.hasPrefix("media-") {
                 return "app-background-media-closed"
@@ -190,7 +190,7 @@ extension PTTViewModel {
         for contactID: UUID,
         applicationState: UIApplication.State? = nil
     ) async {
-        let applicationState = applicationState ?? UIApplication.shared.applicationState
+        let applicationState = applicationState ?? currentApplicationState()
         guard isJoined, activeChannelId == contactID else { return }
         guard systemSessionMatches(contactID) else { return }
         guard !isTransmitting else { return }
@@ -261,7 +261,7 @@ extension PTTViewModel {
         for contactID: UUID,
         applicationState: UIApplication.State? = nil
     ) async {
-        let applicationState = applicationState ?? UIApplication.shared.applicationState
+        let applicationState = applicationState ?? currentApplicationState()
         guard mediaRuntime.pendingInteractivePrewarmAfterAudioDeactivationContactID == contactID else { return }
         guard !isPTTAudioSessionActive else { return }
         guard pttWakeRuntime.pendingIncomingPush == nil else { return }
@@ -470,6 +470,80 @@ extension PTTViewModel {
             await transmitCoordinator.handle(.pressRequested(request))
             syncTransmitState()
         }
+    }
+
+    func handleSystemOriginatedBeginTransmitIfNeeded(
+        channelUUID: UUID,
+        source: String
+    ) {
+        guard !usesLocalHTTPBackend else { return }
+        guard !transmitRuntime.isPressingTalk else { return }
+        guard !transmitCoordinator.state.isPressingTalk else { return }
+        guard !transmitServices.hasPendingBeginOrActiveTarget() else { return }
+        guard let request = systemOriginatedTransmitRequest(for: channelUUID) else {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "System-originated transmit began without resolvable backend request context",
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "source": source,
+                    "applicationState": String(describing: UIApplication.shared.applicationState),
+                ]
+            )
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Beginning backend transmit after system-originated handoff",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "channelUUID": channelUUID.uuidString,
+                "channelId": request.backendChannelID,
+                "source": source,
+            ]
+        )
+        if selectedContactId == nil {
+            selectedContactId = request.contactID
+        }
+        transmitRuntime.markPressBegan()
+        transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("transmit-begin:system-originated")
+        Task {
+            await transmitCoordinator.handle(.systemPressRequested(request))
+            syncTransmitState()
+        }
+    }
+
+    func systemOriginatedTransmitRequest(for channelUUID: UUID) -> TransmitRequestContext? {
+        guard isJoined else { return nil }
+        guard let contactID = contactId(for: channelUUID),
+              activeChannelId == contactID,
+              let contact = contacts.first(where: { $0.id == contactID }),
+              let backendChannelId = contact.backendChannelId,
+              let remoteUserID = contact.remoteUserId,
+              let backend = backendServices else {
+            return nil
+        }
+
+        return TransmitRequestContext(
+            contactID: contact.id,
+            contactHandle: contact.handle,
+            backendChannelID: backendChannelId,
+            remoteUserID: remoteUserID,
+            channelUUID: channelUUID,
+            usesLocalHTTPBackend: usesLocalHTTPBackend,
+            backendSupportsWebSocket: backend.supportsWebSocket
+        )
+    }
+
+    func hasPendingTransmitLifecycle(for systemChannelUUID: UUID) -> Bool {
+        if activeTransmitTarget(for: systemChannelUUID) != nil {
+            return true
+        }
+        return transmitCoordinator.state.pendingRequest?.channelUUID == systemChannelUUID
     }
 
     func noteTransmitTouchReleased() {
@@ -1085,7 +1159,7 @@ extension PTTViewModel {
         await runWakePlaybackFallbackIfNeeded(
             for: contactID,
             reason: "ptt-activation-timeout",
-            applicationState: UIApplication.shared.applicationState
+            applicationState: currentApplicationState()
         )
     }
 

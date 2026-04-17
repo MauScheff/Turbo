@@ -1,6 +1,12 @@
 import Foundation
 import AVFAudio
 
+enum PlaybackBufferReceivePlan: Equatable {
+    case deferUntilIOCycle
+    case scheduleAndStartNode
+    case scheduleOnly
+}
+
 actor AudioChunkSender {
     private var sendChunk: (@Sendable (String) async throws -> Void)?
     private let reportFailure: @Sendable (String) async -> Void
@@ -11,7 +17,6 @@ actor AudioChunkSender {
     private let transportAvailabilityMaxAttempts = 20
     private var pendingPayloads: [String] = []
     private var isDraining = false
-    private var shouldImmediatelyFlushNextPayload = true
 
     init(
         sendChunk: (@Sendable (String) async throws -> Void)?,
@@ -38,7 +43,6 @@ actor AudioChunkSender {
     func reset() {
         pendingPayloads.removeAll(keepingCapacity: false)
         isDraining = false
-        shouldImmediatelyFlushNextPayload = true
     }
 
     private func drain() async {
@@ -58,25 +62,27 @@ actor AudioChunkSender {
             }
         }
         isDraining = false
-        shouldImmediatelyFlushNextPayload = true
     }
 
     private func nextTransportPayload() async -> String {
-        let shouldImmediatelyFlush = shouldImmediatelyFlushNextPayload
-        shouldImmediatelyFlushNextPayload = false
-
-        if !shouldImmediatelyFlush,
-           pendingPayloads.count < maximumPayloadsPerMessage {
+        if Self.shouldWaitForMorePayloads(
+            pendingPayloadCount: pendingPayloads.count,
+            maximumPayloadsPerMessage: maximumPayloadsPerMessage
+        ) {
             try? await Task.sleep(nanoseconds: payloadBatchCollectionNanoseconds)
         }
 
-        let batchCount =
-            shouldImmediatelyFlush
-            ? 1
-            : min(maximumPayloadsPerMessage, pendingPayloads.count)
+        let batchCount = min(maximumPayloadsPerMessage, pendingPayloads.count)
         let batch = Array(pendingPayloads.prefix(batchCount))
         pendingPayloads.removeFirst(batchCount)
         return AudioChunkPayloadCodec.encode(batch)
+    }
+
+    nonisolated static func shouldWaitForMorePayloads(
+        pendingPayloadCount: Int,
+        maximumPayloadsPerMessage: Int
+    ) -> Bool {
+        pendingPayloadCount > 0 && pendingPayloadCount < maximumPayloadsPerMessage
     }
 
     private func waitForTransportIfNeeded() async -> (@Sendable (String) async throws -> Void)? {
@@ -695,7 +701,11 @@ final class PCMWebSocketMediaSession: MediaSession {
 
         let playbackBuffer = try makePlaybackBuffer(from: sourceBuffer)
         try startPlaybackEngineIfNeeded()
-        if !startPlaybackNodeIfPossible(with: playbackBuffer) {
+        switch Self.playbackBufferReceivePlan(
+            isPlayerNodePlaying: playerNode.isPlaying,
+            playbackIOCycleAvailable: playbackIOCycleAvailable
+        ) {
+        case .deferUntilIOCycle:
             enqueuePendingPlaybackBuffer(playbackBuffer)
             requestPlaybackStartWhenReady()
             Task {
@@ -705,8 +715,13 @@ final class PCMWebSocketMediaSession: MediaSession {
                 )
             }
             return
+        case .scheduleAndStartNode:
+            schedulePlaybackBuffer(playbackBuffer)
+            startPlaybackNode()
+            drainPendingPlaybackBuffers()
+        case .scheduleOnly:
+            schedulePlaybackBuffer(playbackBuffer)
         }
-        schedulePlaybackBuffer(playbackBuffer)
     }
 
     private func schedulePlaybackBuffer(_ playbackBuffer: AVAudioPCMBuffer) {
@@ -722,18 +737,22 @@ final class PCMWebSocketMediaSession: MediaSession {
         }
     }
 
-    private func startPlaybackNodeIfPossible(with playbackBuffer: AVAudioPCMBuffer) -> Bool {
-        if playerNode.isPlaying {
-            return true
+    static func playbackBufferReceivePlan(
+        isPlayerNodePlaying: Bool,
+        playbackIOCycleAvailable: Bool
+    ) -> PlaybackBufferReceivePlan {
+        if isPlayerNodePlaying {
+            return .scheduleOnly
         }
-        guard playbackIOCycleAvailable else { return false }
-        schedulePlaybackBuffer(playbackBuffer)
+        guard playbackIOCycleAvailable else { return .deferUntilIOCycle }
+        return .scheduleAndStartNode
+    }
+
+    private func startPlaybackNode() {
         playerNode.play()
         Task {
             await report("Playback node started", metadata: [:])
         }
-        drainPendingPlaybackBuffers()
-        return true
     }
 
     private func makePlaybackBuffer(from sourceBuffer: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {

@@ -10,6 +10,7 @@ import Observation
 import PushToTalk
 import AVFAudio
 import UIKit
+import UserNotifications
 
 enum AudioOutputPreference: String, Equatable {
     case speaker
@@ -72,6 +73,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var isTransmitting: Bool = false
     var statusMessage: String = "Initializing..."
     var pushTokenHex: String = ""
+    var alertPushTokenHex: String = ""
     var contacts: [Contact] = []
     var selectedContactId: UUID?
     var activeChannelId: UUID?
@@ -88,6 +90,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     let selfCheckCoordinator = DevSelfCheckCoordinator()
     let pttSystemPolicyCoordinator = PTTSystemPolicyCoordinator()
     var backendRuntime = BackendRuntimeState()
+    var talkRequestSurfaceState = TalkRequestSurfaceState()
     var transmitRuntime = TransmitRuntimeState()
     var pttWakeRuntime = PTTWakeRuntimeState()
     var mediaRuntime = MediaRuntimeState()
@@ -104,7 +107,18 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
     var automaticDiagnosticsPublishEnabled: Bool = true
     var microphonePermission: AVAudioApplication.recordPermission = AVAudioApplication.shared.recordPermission
+    var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     var audioOutputPreference: AudioOutputPreference = .loadStored()
+    var pendingTalkRequestNotificationHandle: String?
+    var applicationStateOverride: UIApplication.State?
+    @ObservationIgnored
+    var setApplicationBadgeCount: @MainActor (Int) -> Void = { count in
+        UNUserNotificationCenter.current().setBadgeCount(count)
+    }
+    @ObservationIgnored
+    var clearDeliveredNotifications: @MainActor () -> Void = {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+    }
 
     override init() {
         pttSystemClient = makeDefaultPTTSystemClient()
@@ -138,6 +152,14 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+
+    func currentApplicationState() -> UIApplication.State {
+        applicationStateOverride ?? UIApplication.shared.applicationState
+    }
+
+    func shouldPublishForegroundPresence(applicationState: UIApplication.State? = nil) -> Bool {
+        (applicationState ?? currentApplicationState()) == .active
     }
 
     func syncPTTState() {
@@ -827,15 +849,29 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             metadata: [:]
         )
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.resumeBufferedWakePlaybackIfNeeded(
-                reason: "application-became-active",
-                applicationState: .active
-            )
-            await self.resumeInteractiveAudioPrewarmIfNeeded(
-                reason: "application-became-active",
-                applicationState: .active
-            )
+            await self?.handleApplicationDidBecomeActive()
+        }
+    }
+
+    func handleApplicationDidBecomeActive() async {
+        backendServices?.resumeWebSocket()
+        clearTalkRequestNotifications()
+        reconcileTalkRequestSurface(applicationState: .active)
+        await resumeBufferedWakePlaybackIfNeeded(
+            reason: "application-became-active",
+            applicationState: .active
+        )
+        await resumeInteractiveAudioPrewarmIfNeeded(
+            reason: "application-became-active",
+            applicationState: .active
+        )
+        await backendSyncCoordinator.handle(.pollRequested(selectedContactID: selectedContactId))
+    }
+
+    func handleApplicationDidEnterBackground() async {
+        if let backend = backendServices {
+            _ = try? await backend.offlinePresence()
+            backend.suspendWebSocket()
         }
     }
 
@@ -868,6 +904,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                 reason: "application-did-enter-background",
                 applicationState: .background
             )
+            await self.handleApplicationDidEnterBackground()
         }
     }
 }

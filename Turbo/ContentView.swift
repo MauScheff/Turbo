@@ -48,6 +48,20 @@ struct ContentView: View {
         .task {
             await viewModel.initializeIfNeeded()
         }
+        .overlay(alignment: .top) {
+            if route != .callPrototype,
+               let activeIncomingTalkRequest = viewModel.activeIncomingTalkRequest {
+                TurboIncomingTalkRequestBanner(
+                    request: activeIncomingTalkRequest,
+                    onDismiss: viewModel.dismissIncomingTalkRequestSurface,
+                    onOpen: viewModel.openActiveIncomingTalkRequest
+                )
+                .padding(.horizontal)
+                .padding(.top, route == .splash ? 18 : 10)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.28, dampingFraction: 0.9), value: viewModel.activeIncomingTalkRequest?.id)
         .onChange(of: viewModel.selectedContactId) { _, _ in
             if route != .callPrototype {
                 route = .live
@@ -381,9 +395,12 @@ struct ContentView: View {
             }
             return ContactStatusPillModel(text: text, tint: .orange)
         default:
-            if contact.isOnline {
-                return ContactStatusPillModel(text: "Online", tint: .blue)
-            } else {
+            switch viewModel.contactPresencePresentation(for: contact.id) {
+            case .connected:
+                return ContactStatusPillModel(text: "Online", tint: .green)
+            case .available:
+                return ContactStatusPillModel(text: "Available", tint: .mint)
+            case .offline:
                 return ContactStatusPillModel(text: "Offline", tint: .gray)
             }
         }

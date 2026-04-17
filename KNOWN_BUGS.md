@@ -2,6 +2,37 @@
 
 ## Reliability
 
+### Cloudflare APNs worker token reuse is best-effort, not coordinated
+
+Status:
+- open
+- documented on April 17, 2026 after fixing `TooManyProviderTokenUpdates` rejects in the interim Worker sender
+
+Symptoms:
+- long-idle background wake can still fail intermittently even when the sender path is otherwise healthy
+- one observed failure class returned APNs reason `TooManyProviderTokenUpdates`
+- the current Worker now reuses the APNs provider token in module-scope memory, but that reuse only applies while requests keep landing on the same warm isolate
+
+What is already true:
+- the Worker no longer mints a brand-new APNs provider JWT on every wake send
+- the current implementation caches both the imported signing key and provider token for 30 minutes inside a warm isolate
+- this is enough for the current prototype because it removes the clearly pathological per-request token churn
+
+Why this is still not a full fix:
+- Cloudflare Worker global state is isolate-local, not durable
+- requests are not guaranteed to hit the same isolate
+- isolate lifetime is not stable or controllable enough to treat module-scope cache as authoritative coordination
+- a cold start or different isolate can still mint a fresh APNs provider token earlier than ideal
+
+Current workaround:
+1. rely on the current Worker cache for prototype/device iteration
+2. if background wake becomes flaky again, inspect merged diagnostics for APNs wake outcomes before blaming client state
+
+What to investigate later:
+- move APNs provider-token reuse to a more explicit coordination surface if this remains a real reliability issue
+- likely options are a Durable Object, another backend-owned shared cache, or full migration back to direct Unison-owned APNs send once the hosted runtime path is ready
+- if we keep the Worker path longer-term, add explicit observability for token refresh cadence versus APNs rejection reasons
+
 ### Session recovery can degrade into false backend failure until a backend reset
 
 Status:

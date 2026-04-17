@@ -956,6 +956,15 @@ enum ConversationStateMachine {
     ) -> ConversationPrimaryAction {
         switch selectedPeerState.phase {
         case .blockedByOtherSession, .systemMismatch:
+            if selectedPeerState.conversationState == .requested {
+                return primaryAction(
+                    conversationState: .requested,
+                    isSelectedChannelJoined: isSelectedChannelJoined,
+                    canTransmitNow: false,
+                    isTransmitting: isTransmitting,
+                    requestCooldownRemaining: requestCooldownRemaining
+                )
+            }
             return ConversationPrimaryAction(
                 kind: .connect,
                 label: talkButtonLabel(

@@ -159,7 +159,7 @@ extension PTTViewModel {
     }
 
     private func shouldTreatIncomingSignalAsWakeCandidate(for contactID: UUID) -> Bool {
-        guard UIApplication.shared.applicationState != .active else { return false }
+        guard currentApplicationState() != .active else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         guard !pttWakeRuntime.shouldSuppressProvisionalWakeCandidate(for: contactID) else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
@@ -183,7 +183,7 @@ extension PTTViewModel {
     func prefersForegroundAppManagedReceivePlayback(for contactID: UUID) -> Bool {
         prefersForegroundAppManagedReceivePlayback(
             for: contactID,
-            applicationState: UIApplication.shared.applicationState
+            applicationState: currentApplicationState()
         )
     }
 
@@ -199,7 +199,7 @@ extension PTTViewModel {
     func shouldUseSystemActivatedReceivePlayback(for contactID: UUID) -> Bool {
         shouldUseSystemActivatedReceivePlayback(
             for: contactID,
-            applicationState: UIApplication.shared.applicationState
+            applicationState: currentApplicationState()
         )
     }
 
@@ -369,6 +369,7 @@ extension PTTViewModel {
         case .ensureWebSocketConnected:
             backendServices?.ensureWebSocketConnected()
         case .heartbeatPresence:
+            guard shouldPublishForegroundPresence() else { return }
             _ = try? await backendServices?.heartbeatPresence()
         case .refreshContactSummaries:
             await refreshContactSummaries()
@@ -546,7 +547,7 @@ extension PTTViewModel {
                     envelope.type == .transmitStart
                     && shouldSetSystemRemoteParticipantFromSignalPath(
                         for: contactID,
-                        applicationState: UIApplication.shared.applicationState
+                        applicationState: currentApplicationState()
                     )
                 let shouldClearRemoteParticipant =
                     envelope.type == .transmitStop
@@ -561,7 +562,7 @@ extension PTTViewModel {
                 await refreshChannelState(for: contactID)
             }
         case .receiverReady, .receiverNotReady:
-            let applicationState = UIApplication.shared.applicationState
+            let applicationState = currentApplicationState()
             let readiness: RemoteAudioReadinessState = {
                 switch envelope.type {
                 case .receiverReady:
@@ -620,7 +621,7 @@ extension PTTViewModel {
                 metadata: ["channelId": envelope.channelId, "fromDeviceId": envelope.fromDeviceId]
             )
             Task {
-                let applicationState = UIApplication.shared.applicationState
+                let applicationState = currentApplicationState()
                 let shouldRepairRemoteParticipant =
                     !remoteTransmittingContactIDs.contains(contactID)
                     && shouldSetSystemRemoteParticipantFromSignalPath(
@@ -928,6 +929,8 @@ extension PTTViewModel {
             let incomingUpdates = nextIncoming.map { BackendInviteUpdate(contactID: $0.key, invite: $0.value) }
             let outgoingUpdates = nextOutgoing.map { BackendInviteUpdate(contactID: $0.key, invite: $0.value) }
             backendSyncCoordinator.send(.invitesUpdated(incoming: incomingUpdates, outgoing: outgoingUpdates, now: .now))
+            syncTalkRequestNotificationBadge()
+            reconcileTalkRequestSurface()
             pruneContactsToAuthoritativeState()
             updateStatusForSelectedContact()
             captureDiagnosticsState("backend-sync:invites")

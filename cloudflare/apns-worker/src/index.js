@@ -8,6 +8,10 @@
  */
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
+const APNS_JWT_REFRESH_INTERVAL_SECONDS = 30 * 60;
+
+let cachedApnsJwt = null;
+let cachedImportedSigningKey = null;
 
 /**
  * @typedef {{
@@ -126,7 +130,7 @@ function validateSendRequest(body) {
  * @param {Env} env
  */
 async function sendApns(body, env) {
-  const jwt = await makeApnsJwt(env);
+  const jwt = await currentApnsJwt(env);
   const topic = resolveTopic(body);
   const sandbox = resolveSandbox(body, env);
   const host = sandbox ? "api.sandbox.push.apple.com" : "api.push.apple.com";
@@ -232,28 +236,91 @@ function parseApnsReason(text) {
 async function makeApnsJwt(env) {
   const teamId = must(env.TURBO_APNS_TEAM_ID, "Missing TURBO_APNS_TEAM_ID");
   const keyId = must(env.TURBO_APNS_KEY_ID, "Missing TURBO_APNS_KEY_ID");
+  const issuedAt = nowInSeconds();
+  const signingKey = await importedApnsSigningKey(env);
+  return makeApnsJwtForSigningKey({ teamId, keyId, issuedAt, signingKey });
+}
+
+/**
+ * Reuse the provider token for a bounded window instead of minting one per push.
+ * Apple explicitly recommends token reuse; refreshing on every request can trigger
+ * TooManyProviderTokenUpdates under bursty background traffic.
+ *
+ * @param {Env} env
+ */
+async function currentApnsJwt(env) {
+  const teamId = must(env.TURBO_APNS_TEAM_ID, "Missing TURBO_APNS_TEAM_ID");
+  const keyId = must(env.TURBO_APNS_KEY_ID, "Missing TURBO_APNS_KEY_ID");
   const privateKeyPem = must(env.TURBO_APNS_PRIVATE_KEY, "Missing TURBO_APNS_PRIVATE_KEY");
+  const cacheKey = `${teamId}\u0000${keyId}\u0000${privateKeyPem}`;
+  const issuedAt = nowInSeconds();
 
-  const header = { alg: "ES256", kid: keyId };
-  const claims = { iss: teamId, iat: Math.floor(Date.now() / 1000) };
-  const encodedHeader = base64UrlEncode(utf8Bytes(JSON.stringify(header)));
-  const encodedClaims = base64UrlEncode(utf8Bytes(JSON.stringify(claims)));
-  const signingInput = `${encodedHeader}.${encodedClaims}`;
+  if (
+    cachedApnsJwt
+    && cachedApnsJwt.cacheKey === cacheKey
+    && issuedAt - cachedApnsJwt.issuedAt < APNS_JWT_REFRESH_INTERVAL_SECONDS
+  ) {
+    return cachedApnsJwt.token;
+  }
 
-  const key = await crypto.subtle.importKey(
+  const token = await makeApnsJwt(env);
+  cachedApnsJwt = { cacheKey, token, issuedAt };
+  return token;
+}
+
+/**
+ * @param {Env} env
+ */
+async function importedApnsSigningKey(env) {
+  const privateKeyPem = must(env.TURBO_APNS_PRIVATE_KEY, "Missing TURBO_APNS_PRIVATE_KEY");
+  if (
+    cachedImportedSigningKey
+    && cachedImportedSigningKey.privateKeyPem === privateKeyPem
+  ) {
+    return cachedImportedSigningKey.promise;
+  }
+
+  const promise = crypto.subtle.importKey(
     "pkcs8",
     pemToArrayBuffer(privateKeyPem),
     { name: "ECDSA", namedCurve: "P-256" },
     false,
     ["sign"],
   );
+  cachedImportedSigningKey = { privateKeyPem, promise };
+  return promise;
+}
+
+/**
+ * @param {{
+ *   teamId: string,
+ *   keyId: string,
+ *   issuedAt: number,
+ *   signingKey: CryptoKey
+ * }} args
+ */
+async function makeApnsJwtForSigningKey({ teamId, keyId, issuedAt, signingKey }) {
+  const header = { alg: "ES256", kid: keyId };
+  const claims = { iss: teamId, iat: issuedAt };
+  const encodedHeader = base64UrlEncode(utf8Bytes(JSON.stringify(header)));
+  const encodedClaims = base64UrlEncode(utf8Bytes(JSON.stringify(claims)));
+  const signingInput = `${encodedHeader}.${encodedClaims}`;
   const derSignature = await crypto.subtle.sign(
     { name: "ECDSA", hash: "SHA-256" },
-    key,
+    signingKey,
     utf8Bytes(signingInput),
   );
   const rawSignature = derToRawEcdsaSignature(new Uint8Array(derSignature), 32);
   return `${signingInput}.${base64UrlEncode(rawSignature)}`;
+}
+
+function nowInSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function resetCachesForTests() {
+  cachedApnsJwt = null;
+  cachedImportedSigningKey = null;
 }
 
 /**
@@ -386,3 +453,11 @@ function jsonResponse(status, body) {
     headers: JSON_HEADERS,
   });
 }
+
+export const __test = {
+  APNS_JWT_REFRESH_INTERVAL_SECONDS,
+  currentApnsJwt,
+  makeApnsJwt,
+  resetCachesForTests,
+  sendApns,
+};

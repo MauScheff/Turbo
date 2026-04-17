@@ -36,6 +36,7 @@ struct TransmitSessionState: Equatable {
 
 enum TransmitEvent: Equatable {
     case pressRequested(TransmitRequestContext)
+    case systemPressRequested(TransmitRequestContext)
     case beginSucceeded(TransmitTarget, TransmitRequestContext)
     case beginFailed(String)
     case releaseRequested
@@ -69,6 +70,16 @@ enum TransmitReducer {
 
         switch event {
         case .pressRequested(let request):
+            guard canBegin(from: nextState, request: request) else {
+                return TransmitTransition(state: nextState)
+            }
+            nextState.phase = .requesting(contactID: request.contactID)
+            nextState.isPressingTalk = true
+            nextState.pendingRequest = request
+            nextState.lastError = nil
+            effects.append(.beginTransmit(request))
+
+        case .systemPressRequested(let request):
             guard canBegin(from: nextState, request: request) else {
                 return TransmitTransition(state: nextState)
             }

@@ -7,6 +7,12 @@
 
 import Foundation
 
+enum ContactPresencePresentation: Equatable {
+    case connected
+    case available
+    case offline
+}
+
 extension PTTViewModel {
     var contactSummaryByContactID: [UUID: TurboContactSummaryResponse] {
         backendSyncCoordinator.state.syncState.contactSummaries
@@ -55,7 +61,7 @@ extension PTTViewModel {
                 ? selectedPeerBaseState(for: contact.id, relationship: relationshipState(for: contact.id))
                 : listConversationState(for: contact.id),
             contactName: contact.name,
-            contactIsOnline: contactSummaryByContactID[contact.id]?.isOnline ?? contact.isOnline,
+            contactIsOnline: contactPresencePresentation(for: contact.id) == .connected,
             isJoined: isJoined,
             localIsTransmitting: transmitSnapshot.hasTransmitIntent(for: contact.id),
             localIsStopping: transmitSnapshot.isStopping(for: contact.id),
@@ -120,7 +126,7 @@ extension PTTViewModel {
                 SelectedPeerSelection(
                     contactID: contact.id,
                     contactName: contact.name,
-                    contactIsOnline: contactSummaryByContactID[contact.id]?.isOnline ?? contact.isOnline
+                    contactIsOnline: contactPresencePresentation(for: contact.id) == .connected
                 )
             )
         )
@@ -215,6 +221,35 @@ extension PTTViewModel {
         return remaining
     }
 
+    func contactPresencePresentation(for contactID: UUID) -> ContactPresencePresentation {
+        let rawPresenceOnline = contactSummaryByContactID[contactID]?.isOnline
+            ?? contacts.first(where: { $0.id == contactID })?.isOnline
+            ?? false
+
+        if let channelSnapshot = selectedChannelSnapshot(for: contactID) {
+            return channelSnapshot.membership.peerDeviceConnected ? .connected : (rawPresenceOnline ? .available : .offline)
+        }
+
+        if let summary = contactSummaryByContactID[contactID] {
+            switch summary.badge {
+            case .online:
+                return .connected
+            case .offline:
+                return .offline
+            case .idle, .unknown:
+                break
+            default:
+                return rawPresenceOnline ? .available : .offline
+            }
+
+            if summary.channelId != nil {
+                return summary.membership.peerDeviceConnected ? .connected : (rawPresenceOnline ? .available : .offline)
+            }
+        }
+
+        return rawPresenceOnline ? .connected : .offline
+    }
+
     var visibleContacts: [Contact] {
         contacts.filter { contact in
             contact.handle != currentDevUserHandle
@@ -226,10 +261,23 @@ extension PTTViewModel {
 
     var sortedContacts: [Contact] {
         visibleContacts.sorted { lhs, rhs in
-            if lhs.isOnline != rhs.isOnline {
-                return lhs.isOnline && !rhs.isOnline
+            let lhsPresence = contactPresencePresentation(for: lhs.id)
+            let rhsPresence = contactPresencePresentation(for: rhs.id)
+            if lhsPresence != rhsPresence {
+                return presenceSortRank(lhsPresence) < presenceSortRank(rhsPresence)
             }
             return lhs.name < rhs.name
+        }
+    }
+
+    private func presenceSortRank(_ presence: ContactPresencePresentation) -> Int {
+        switch presence {
+        case .connected:
+            return 0
+        case .available:
+            return 1
+        case .offline:
+            return 2
         }
     }
 
@@ -296,6 +344,10 @@ extension PTTViewModel {
 
     func selectContact(_ contact: Contact) {
         trackContact(contact.id)
+        markTalkRequestSurfaceOpened(
+            for: contact.id,
+            inviteID: incomingInviteByContactID[contact.id]?.inviteId
+        )
         selectedContactId = contact.id
         sessionCoordinator.select(contactID: contact.id)
         diagnostics.record(.state, message: "Selected contact", metadata: ["handle": contact.handle])

@@ -9,6 +9,11 @@ struct BackendSyncState: Equatable {
     var incomingInvites: [UUID: TurboInviteResponse] = [:]
     var outgoingInvites: [UUID: TurboInviteResponse] = [:]
     var requestCooldownDeadlines: [UUID: Date] = [:]
+    var requestCooldownSourceKeys: [UUID: String] = [:]
+
+    private func requestCooldownSourceKey(for invite: TurboInviteResponse) -> String {
+        "\(invite.inviteId)|\(invite.requestCount)|\(invite.updatedAt ?? invite.createdAt)"
+    }
 
     mutating func applyContactSummaries(_ summaries: [UUID: TurboContactSummaryResponse]) {
         contactSummaries = summaries
@@ -34,6 +39,7 @@ struct BackendSyncState: Equatable {
         if !channelState.requestRelationship.hasOutgoingRequest {
             outgoingInvites[contactID] = nil
             requestCooldownDeadlines[contactID] = nil
+            requestCooldownSourceKeys[contactID] = nil
         }
     }
 
@@ -54,8 +60,14 @@ struct BackendSyncState: Equatable {
         incomingInvites = incoming
         outgoingInvites = outgoing
         requestCooldownDeadlines = requestCooldownDeadlines.filter { outgoing.keys.contains($0.key) && $0.value > now }
-        for contactID in outgoing.keys where requestCooldownDeadlines[contactID] == nil {
-            requestCooldownDeadlines[contactID] = now.addingTimeInterval(30)
+        requestCooldownSourceKeys = requestCooldownSourceKeys.filter { outgoing.keys.contains($0.key) }
+
+        for (contactID, invite) in outgoing {
+            let sourceKey = requestCooldownSourceKey(for: invite)
+            if requestCooldownSourceKeys[contactID] != sourceKey {
+                requestCooldownDeadlines[contactID] = now.addingTimeInterval(30)
+            }
+            requestCooldownSourceKeys[contactID] = sourceKey
         }
     }
 
@@ -63,6 +75,7 @@ struct BackendSyncState: Equatable {
         incomingInvites = [:]
         outgoingInvites = [:]
         requestCooldownDeadlines = [:]
+        requestCooldownSourceKeys = [:]
     }
 
     mutating func reset(statusMessage: String) {
@@ -74,6 +87,7 @@ struct BackendSyncState: Equatable {
         incomingInvites = [:]
         outgoingInvites = [:]
         requestCooldownDeadlines = [:]
+        requestCooldownSourceKeys = [:]
     }
 
     mutating func applyRecoverableSyncFailureStatus(_ message: String) {

@@ -1021,8 +1021,8 @@ struct BackendServices {
         try await client.authenticate()
     }
 
-    func registerDevice(label: String?) async throws -> TurboDeviceRegistrationResponse {
-        try await client.registerDevice(label: label)
+    func registerDevice(label: String?, alertPushToken: String?) async throws -> TurboDeviceRegistrationResponse {
+        try await client.registerDevice(label: label, alertPushToken: alertPushToken)
     }
 
     func resetDevState() async throws -> TurboResetStateResponse {
@@ -1047,6 +1047,10 @@ struct BackendServices {
 
     func heartbeatPresence() async throws -> TurboPresenceHeartbeatResponse {
         try await client.heartbeatPresence()
+    }
+
+    func offlinePresence() async throws -> TurboPresenceHeartbeatResponse {
+        try await client.offlinePresence()
     }
 
     func lookupUser(handle: String) async throws -> TurboUserLookupResponse {

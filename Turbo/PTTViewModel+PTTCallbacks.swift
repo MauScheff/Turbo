@@ -411,7 +411,7 @@ extension PTTViewModel {
                     "channelUUID": channelUUID.uuidString,
                     "source": source,
                     "applicationState": String(describing: UIApplication.shared.applicationState),
-                    "activeContactId": callbackTarget?.contactID.uuidString ?? "none",
+                    "activeContactId": (callbackTarget?.contactID ?? contactId(for: channelUUID))?.uuidString ?? "none",
                     "activeChannelId": callbackTarget?.channelID ?? "none",
                     "pttServiceStatus": lastReportedPTTServiceStatus.map(String.init(describing:)) ?? "none",
                     "pttServiceStatusReason": lastReportedPTTServiceStatusReason ?? "none",
@@ -420,6 +420,12 @@ extension PTTViewModel {
                     "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
                 ]
             )
+            if callbackTarget == nil {
+                handleSystemOriginatedBeginTransmitIfNeeded(
+                    channelUUID: channelUUID,
+                    source: source
+                )
+            }
             captureDiagnosticsState("ptt-callback:transmit-began")
         }
     }
@@ -427,6 +433,7 @@ extension PTTViewModel {
     func handleDidEndTransmitting(_ channelUUID: UUID, source: String) {
         Task {
             let matchingActiveTarget = activeTransmitTarget(for: channelUUID)
+            let hasPendingLifecycle = hasPendingTransmitLifecycle(for: channelUUID)
             let transmitDurationMilliseconds = transmitRuntime.currentSystemTransmitDurationMilliseconds()
             await pttCoordinator.handle(
                 .didEndTransmitting(
@@ -444,6 +451,7 @@ extension PTTViewModel {
                     "transmitPressActive": String(transmitRuntime.isPressingTalk),
                     "explicitStopRequested": String(transmitRuntime.explicitStopRequested),
                     "hasMatchingActiveTarget": String(matchingActiveTarget != nil),
+                    "hasPendingLifecycle": String(hasPendingLifecycle),
                     "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
                     "applicationState": String(describing: UIApplication.shared.applicationState),
                     "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
@@ -483,7 +491,7 @@ extension PTTViewModel {
                 )
                 syncTransmitState()
             }
-            if matchingActiveTarget != nil {
+            if hasPendingLifecycle {
                 await transmitCoordinator.handle(.systemEnded)
                 syncTransmitState()
             }

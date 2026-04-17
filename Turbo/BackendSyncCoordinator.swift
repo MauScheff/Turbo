@@ -119,6 +119,8 @@ enum BackendSyncReducer {
         case .outgoingInviteSeeded(let contactID, let invite, let now):
             nextState.syncState.outgoingInvites[contactID] = invite
             nextState.syncState.requestCooldownDeadlines[contactID] = now.addingTimeInterval(30)
+            nextState.syncState.requestCooldownSourceKeys[contactID] =
+                "\(invite.inviteId)|\(invite.requestCount)|\(invite.updatedAt ?? invite.createdAt)"
         }
 
         return BackendSyncTransition(state: nextState, effects: effects)

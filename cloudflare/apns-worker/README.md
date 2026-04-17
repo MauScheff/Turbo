@@ -12,6 +12,7 @@ Turbo remains authoritative for:
 - wake event identity and diagnostics
 
 This Worker is only a transport adapter.
+It also owns APNs provider-token reuse so the backend does not accidentally churn JWTs on every wake send.
 
 ## Why this exists
 
@@ -63,6 +64,34 @@ Notes:
 - `topic` may be sent directly instead of `bundleId` + `topicSuffix`.
 - the generic shape is intentional so the same Worker can later send non-PTT APNs pushes too.
 
+Example alert push for an incoming talk request:
+
+```json
+{
+  "token": "<apns-device-token>",
+  "payload": {
+    "aps": {
+      "alert": {
+        "title": "@avery wants to talk",
+        "body": "Open BeepBeep to respond."
+      },
+      "badge": 2,
+      "sound": "default"
+    },
+    "event": "talk-request",
+    "inviteId": "invite-123",
+    "fromHandle": "@avery",
+    "channelId": "abc"
+  },
+  "pushType": "alert",
+  "bundleId": "com.rounded.Turbo",
+  "sandbox": true,
+  "priority": 10
+}
+```
+
+For talk requests, `aps.badge` should be the recipient's current count of unique pending incoming request senders.
+
 Response shape:
 
 ```json
@@ -101,6 +130,11 @@ On Worker exception:
   "error": "..."
 }
 ```
+
+Implementation note:
+
+- the Worker caches the imported signing key and reuses the APNs provider token for 30 minutes before refreshing
+- this avoids Apple `TooManyProviderTokenUpdates` rejections caused by minting a brand-new provider token on every push
 
 ## Secrets
 

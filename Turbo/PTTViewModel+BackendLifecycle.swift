@@ -51,7 +51,12 @@ extension PTTViewModel {
         hasPendingBeginOrActiveTransmit: Bool,
         systemIsTransmitting: Bool
     ) -> Bool {
-        hasPendingBeginOrActiveTransmit || systemIsTransmitting
+        let _ = hasPendingBeginOrActiveTransmit
+        let _ = systemIsTransmitting
+        // A transient control-plane reconnect should not forcibly end an
+        // active system transmit. Lease renewal is HTTP-backed and audio sends
+        // already wait briefly for the websocket to reconnect.
+        return false
     }
 
     func runSelfCheckEffect(_ effect: DevSelfCheckEffect) async {
@@ -132,7 +137,10 @@ extension PTTViewModel {
         do {
             let runtimeConfig = try await client.fetchRuntimeConfig()
             let session = try await client.authenticate()
-            _ = try await client.registerDevice(label: UIDevice.current.name)
+            _ = try await client.registerDevice(
+                label: UIDevice.current.name,
+                alertPushToken: alertPushTokenHex.isEmpty ? nil : alertPushTokenHex
+            )
             _ = try await client.heartbeatPresence()
             applyAuthenticatedBackendSession(
                 client: client,
@@ -143,6 +151,7 @@ extension PTTViewModel {
             backendSyncCoordinator.send(.bootstrapCompleted(mode: runtimeConfig.mode, handle: session.handle))
             await refreshContactSummaries()
             await refreshInvites()
+            await openPendingTalkRequestNotificationIfNeeded()
             startBackendPollingIfNeeded()
             statusMessage = selectedContact == nil ? "Ready to connect" : statusMessage
             diagnostics.record(

@@ -14,6 +14,58 @@ struct ContactStatusPillModel {
     let tint: Color
 }
 
+struct TurboIncomingTalkRequestBanner: View {
+    let request: IncomingTalkRequestSurface
+    let onDismiss: () -> Void
+    let onOpen: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(request.contactName) wants to talk")
+                    .font(.body.weight(.semibold))
+                Text(subtitleText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            if request.requestCount > 1 {
+                Text("\(request.requestCount)x")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.orange.opacity(0.14))
+                    .foregroundStyle(.orange)
+                    .clipShape(Capsule())
+            }
+
+            Button("Not now", action: onDismiss)
+                .buttonStyle(.bordered)
+
+            Button("Open", action: onOpen)
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial)
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.orange.opacity(0.18), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: .black.opacity(0.08), radius: 18, y: 10)
+    }
+
+    private var subtitleText: String {
+        if request.requestCount > 1 {
+            return "\(request.contactHandle) has asked \(request.requestCount) times."
+        }
+        return "\(request.contactHandle) sent you a talk request."
+    }
+}
+
 struct TurboContactListView: View {
     let selectedContactID: UUID?
     let activeContact: Contact?

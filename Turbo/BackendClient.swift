@@ -76,11 +76,15 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         return try await request(path: "/v1/dev/diagnostics/latest/\(escapedDeviceID)/")
     }
 
-    func registerDevice(label: String?) async throws -> TurboDeviceRegistrationResponse {
+    func registerDevice(label: String?, alertPushToken: String?) async throws -> TurboDeviceRegistrationResponse {
         try await request(
             path: "/v1/devices/register",
             method: "POST",
-            body: TurboRegisterDeviceRequest(deviceId: config.deviceID, deviceLabel: label)
+            body: TurboRegisterDeviceRequest(
+                deviceId: config.deviceID,
+                deviceLabel: label,
+                alertPushToken: alertPushToken
+            )
         )
     }
 
@@ -95,6 +99,14 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     func heartbeatPresence() async throws -> TurboPresenceHeartbeatResponse {
         try await request(
             path: "/v1/presence/heartbeat",
+            method: "POST",
+            body: TurboChannelDeviceRequest(deviceId: config.deviceID)
+        )
+    }
+
+    func offlinePresence() async throws -> TurboPresenceHeartbeatResponse {
+        try await request(
+            path: "/v1/presence/offline",
             method: "POST",
             body: TurboChannelDeviceRequest(deviceId: config.deviceID)
         )
@@ -146,7 +158,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         try await request(
             path: "/v1/invites",
             method: "POST",
-            body: TurboDirectChannelRequest(otherHandle: otherHandle)
+            body: TurboCreateInviteRequest(otherHandle: otherHandle, deviceId: config.deviceID)
         )
     }
 
@@ -472,10 +484,16 @@ private struct TurboEmptyRequest: Encodable {}
 private struct TurboRegisterDeviceRequest: Encodable {
     let deviceId: String
     let deviceLabel: String?
+    let alertPushToken: String?
 }
 
 private struct TurboDirectChannelRequest: Encodable {
     let otherHandle: String
+}
+
+private struct TurboCreateInviteRequest: Encodable {
+    let otherHandle: String
+    let deviceId: String
 }
 
 private struct TurboChannelDeviceRequest: Encodable {
