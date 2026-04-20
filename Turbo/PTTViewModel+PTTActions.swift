@@ -7,8 +7,27 @@
 
 import Foundation
 import PushToTalk
+import UIKit
 
 extension PTTViewModel {
+    func desiredPTTServiceStatus() -> PTServiceStatus? {
+        guard pttCoordinator.state.systemChannelUUID != nil else { return nil }
+
+        if usesLocalHTTPBackend {
+            return .ready
+        }
+
+        guard backendRuntime.isReady else {
+            return .unavailable
+        }
+
+        if currentApplicationState() != .active {
+            return .ready
+        }
+
+        return backendRuntime.isWebSocketConnected ? .ready : .connecting
+    }
+
     func systemDescriptorName(for channelUUID: UUID) -> String {
         PTTSystemDisplayPolicy.restoredDescriptorName(
             channelUUID: channelUUID,
@@ -58,15 +77,10 @@ extension PTTViewModel {
             return
         }
 
-        let status: PTServiceStatus
-        if usesLocalHTTPBackend {
-            status = .ready
-        } else if !backendRuntime.isReady {
-            status = .unavailable
-        } else if backendRuntime.isWebSocketConnected {
-            status = .ready
-        } else {
-            status = .connecting
+        guard let status = desiredPTTServiceStatus() else {
+            lastReportedPTTServiceStatus = nil
+            lastReportedPTTServiceStatusChannelUUID = nil
+            return
         }
 
         guard lastReportedPTTServiceStatus != status
@@ -114,7 +128,7 @@ extension PTTViewModel {
 
     private func performReconciledTeardown(for contactID: UUID) {
         if selectedContactId == contactID {
-            remoteTransmittingContactIDs.remove(contactID)
+            clearRemoteAudioActivity(for: contactID)
         }
         resetTransmitRuntimeOnly()
         closeMediaSession()
@@ -188,7 +202,7 @@ extension PTTViewModel {
         guard let activeSystemChannelUUID = pttCoordinator.state.systemChannelUUID else { return }
         sessionCoordinator.markExplicitLeave(contactID: selectedContactId)
         if let selectedContactId {
-            remoteTransmittingContactIDs.remove(selectedContactId)
+            clearRemoteAudioActivity(for: selectedContactId)
         }
         diagnostics.record(.channel, message: "Ending system session", metadata: ["channelUUID": activeSystemChannelUUID.uuidString])
 
@@ -229,7 +243,7 @@ extension PTTViewModel {
     func performDisconnect() {
         sessionCoordinator.markExplicitLeave(contactID: selectedContactId)
         if let selectedContactId {
-            remoteTransmittingContactIDs.remove(selectedContactId)
+            clearRemoteAudioActivity(for: selectedContactId)
         }
         resetTransmitRuntimeOnly()
         closeMediaSession()
@@ -344,7 +358,7 @@ extension PTTViewModel {
             sessionCoordinator.markReconciledTeardown(contactID: contactID)
             diagnostics.record(
                 .state,
-                message: "Tearing down drifted local session",
+                message: "Tearing down invalid local session after system mismatch",
                 metadata: ["contactId": contactID.uuidString]
             )
             captureDiagnosticsState("selected-peer-effect:teardown-local")
@@ -368,11 +382,19 @@ extension PTTViewModel {
         case .syncLeftChannel(let contactID, let autoRejoinContactID):
             tearDownTransmitRuntime(resetCoordinator: true)
             closeMediaSession()
-            if let contactID,
+            let shouldPropagateBackendLeave =
+                autoRejoinContactID != nil
+                || (contactID.map { sessionCoordinator.pendingAction.isLeaveInFlight(for: $0) } ?? false)
+
+            if shouldPropagateBackendLeave,
+               let contactID,
                let contact = contacts.first(where: { $0.id == contactID }),
                let backendChannelId = contact.backendChannelId {
                 let request = BackendLeaveRequest(contactID: contactID, backendChannelID: backendChannelId)
                 await backendCommandCoordinator.handle(.leaveRequested(request))
+            } else if let contactID {
+                await refreshChannelState(for: contactID)
+                await refreshContactSummaries()
             }
             if let autoRejoinContactID,
                let contact = contacts.first(where: { $0.id == autoRejoinContactID }) {
@@ -380,7 +402,7 @@ extension PTTViewModel {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     requestBackendJoin(for: contact)
                 }
-            } else {
+            } else if shouldPropagateBackendLeave {
                 backendSyncCoordinator.send(.clearAllChannelStates)
             }
             updateStatusForSelectedContact()
@@ -399,10 +421,30 @@ extension PTTViewModel {
             return
         }
 
-        if sessionCoordinator.pendingJoinContactID == contact.id {
+        let stalePendingJoinWithoutLocalSessionEvidence =
+            sessionCoordinator.pendingJoinContactID == contact.id
+            && !systemSessionMatches(contact.id)
+            && !(isJoined && activeChannelId == contact.id)
+            && pttCoordinator.state.systemChannelUUID == nil
+
+        if sessionCoordinator.pendingJoinContactID == contact.id,
+           !stalePendingJoinWithoutLocalSessionEvidence {
             statusMessage = "Connecting..."
             captureDiagnosticsState("ptt-join:dedup-pending")
             return
+        }
+
+        if stalePendingJoinWithoutLocalSessionEvidence {
+            sessionCoordinator.clearPendingJoin(for: contact.id)
+            diagnostics.record(
+                .pushToTalk,
+                message: "Retrying stale pending local join",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "channelUUID": contact.channelId.uuidString,
+                ]
+            )
+            captureDiagnosticsState("ptt-join:retry-stale-pending")
         }
 
         let localSessionAlreadyActive =

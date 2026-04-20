@@ -94,6 +94,8 @@ enum PTTReducer {
         case .restoredChannel(let channelUUID, let contactID):
             nextState.systemChannelUUID = channelUUID
             nextState.activeContactID = contactID
+            nextState.isJoined = true
+            nextState.isTransmitting = false
             nextState.lastError = nil
             nextState.lastJoinFailure = nil
 

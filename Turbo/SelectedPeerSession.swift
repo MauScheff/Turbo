@@ -11,12 +11,8 @@ struct SelectedPeerSessionState: Equatable {
     var relationship: PairRelationshipState = .none
     var baseState: ConversationState = .idle
     var isJoined: Bool = false
-    var localIsTransmitting: Bool = false
-    var localIsStopping: Bool = false
-    var localRequiresFreshPress: Bool = false
-    var localTransmitPhase: TransmitDomainPhase = .idle
-    var localSystemIsTransmitting: Bool = false
-    var localPTTAudioSessionActive: Bool = false
+    var localTransmit: LocalTransmitProjection = .idle
+    var peerSignalIsTransmitting: Bool = false
     var activeChannelID: UUID?
     var systemSessionMatchesContact: Bool = false
     var systemSessionState: SystemPTTSessionState = .none
@@ -25,6 +21,10 @@ struct SelectedPeerSessionState: Equatable {
     var channel: ChannelReadinessSnapshot?
     var mediaState: MediaConnectionState = .idle
     var incomingWakeActivationState: IncomingWakeActivationState?
+    var hadConnectedSessionContinuity = false
+    var durableSessionProjection: DurableSessionProjection = .inactive
+    var connectedExecutionProjection: ConnectedExecutionProjection?
+    var connectedControlPlaneProjection: ConnectedControlPlaneProjection = .unavailable
     var selectedPeerState: SelectedPeerState = .initial
     var reconciliationAction: SessionReconciliationAction = .none
 
@@ -38,18 +38,12 @@ enum SelectedPeerEvent: Equatable {
     case channelUpdated(ChannelReadinessSnapshot?)
     case localSessionUpdated(
         isJoined: Bool,
-        localIsTransmitting: Bool,
-        localIsStopping: Bool,
-        localRequiresFreshPress: Bool,
         activeChannelID: UUID?,
         pendingAction: PendingSessionAction,
         localJoinFailure: PTTJoinFailure?
     )
-    case localTransmitContextUpdated(
-        phase: TransmitDomainPhase,
-        systemIsTransmitting: Bool,
-        pttAudioSessionActive: Bool
-    )
+    case localTransmitUpdated(LocalTransmitProjection)
+    case peerSignalTransmittingUpdated(Bool)
     case systemSessionUpdated(SystemPTTSessionState, matchesSelectedContact: Bool)
     case mediaStateUpdated(MediaConnectionState)
     case incomingWakeActivationStateUpdated(IncomingWakeActivationState?)
@@ -81,11 +75,18 @@ enum SelectedPeerReducer {
 
         switch event {
         case .selectedContactChanged(let selection):
-            nextState = selection.map { selection in
-                var resetState = SelectedPeerSessionState.initial
-                resetState.selection = selection
-                return resetState
-            } ?? .initial
+            switch selection {
+            case .none:
+                nextState = .initial
+            case .some(let selection):
+                if nextState.selection?.contactID == selection.contactID {
+                    nextState.selection = selection
+                } else {
+                    var resetState = SelectedPeerSessionState.initial
+                    resetState.selection = selection
+                    nextState = resetState
+                }
+            }
         case .relationshipUpdated(let relationship):
             nextState.relationship = relationship
         case .baseStateUpdated(let baseState):
@@ -94,28 +95,18 @@ enum SelectedPeerReducer {
             nextState.channel = channel
         case .localSessionUpdated(
             let isJoined,
-            let localIsTransmitting,
-            let localIsStopping,
-            let localRequiresFreshPress,
             let activeChannelID,
             let pendingAction,
             let localJoinFailure
         ):
             nextState.isJoined = isJoined
-            nextState.localIsTransmitting = localIsTransmitting
-            nextState.localIsStopping = localIsStopping
-            nextState.localRequiresFreshPress = localRequiresFreshPress
             nextState.activeChannelID = activeChannelID
             nextState.pendingAction = pendingAction
             nextState.localJoinFailure = localJoinFailure
-        case .localTransmitContextUpdated(
-            let phase,
-            let systemIsTransmitting,
-            let pttAudioSessionActive
-        ):
-            nextState.localTransmitPhase = phase
-            nextState.localSystemIsTransmitting = systemIsTransmitting
-            nextState.localPTTAudioSessionActive = pttAudioSessionActive
+        case .localTransmitUpdated(let localTransmit):
+            nextState.localTransmit = localTransmit
+        case .peerSignalTransmittingUpdated(let peerSignalIsTransmitting):
+            nextState.peerSignalIsTransmitting = peerSignalIsTransmitting
         case .systemSessionUpdated(let systemSessionState, let matchesSelectedContact):
             nextState.systemSessionState = systemSessionState
             nextState.systemSessionMatchesContact = matchesSelectedContact
@@ -149,10 +140,16 @@ enum SelectedPeerReducer {
 
     private static func recomputeDerivedState(_ state: inout SelectedPeerSessionState) {
         guard let selection = state.selection else {
+            state.hadConnectedSessionContinuity = false
+            state.durableSessionProjection = .inactive
+            state.connectedExecutionProjection = nil
+            state.connectedControlPlaneProjection = .unavailable
             state.selectedPeerState = .initial
             state.reconciliationAction = .none
             return
         }
+
+        let hadConnectedSessionContinuity = state.hadConnectedSessionContinuity
 
         let context = ConversationDerivationContext(
             contactID: selection.contactID,
@@ -161,12 +158,8 @@ enum SelectedPeerReducer {
             contactName: selection.contactName,
             contactIsOnline: selection.contactIsOnline,
             isJoined: state.isJoined,
-            localIsTransmitting: state.localIsTransmitting,
-            localIsStopping: state.localIsStopping,
-            localRequiresFreshPress: state.localRequiresFreshPress,
-            localTransmitPhase: state.localTransmitPhase,
-            localSystemIsTransmitting: state.localSystemIsTransmitting,
-            localPTTAudioSessionActive: state.localPTTAudioSessionActive,
+            localTransmit: state.localTransmit,
+            peerSignalIsTransmitting: state.peerSignalIsTransmitting,
             activeChannelID: state.activeChannelID,
             systemSessionMatchesContact: state.systemSessionMatchesContact,
             systemSessionState: state.systemSessionState,
@@ -186,25 +179,93 @@ enum SelectedPeerReducer {
                 }
             }(),
             incomingWakeActivationState: state.incomingWakeActivationState,
+            hadConnectedSessionContinuity: hadConnectedSessionContinuity,
             channel: state.channel
         )
 
-        state.selectedPeerState = ConversationStateMachine.selectedPeerState(
+        let projection = ConversationStateMachine.projection(
             for: context,
             relationship: state.relationship
         )
-        state.reconciliationAction = ConversationStateMachine.reconciliationAction(for: context)
+        state.hadConnectedSessionContinuity = updatedConnectedSessionContinuity(
+            previous: hadConnectedSessionContinuity,
+            projection: projection,
+            channel: state.channel
+        )
+        state.durableSessionProjection = projection.durableSession
+        state.connectedExecutionProjection = projection.connectedExecution
+        state.connectedControlPlaneProjection = projection.connectedControlPlane
+        state.selectedPeerState = projection.selectedPeerState
+        state.reconciliationAction = projection.reconciliationAction
+
+        if shouldProjectWakeReadyForConnectedDegradation(
+            state: state,
+            projection: projection
+        ) {
+            state.connectedControlPlaneProjection = .wakeReady
+            state.selectedPeerState = SelectedPeerState(
+                contactID: selection.contactID,
+                contactName: selection.contactName,
+                relationship: state.relationship,
+                detail: .wakeReady,
+                statusMessage: "Hold to talk to wake \(selection.contactName)",
+                canTransmitNow: false
+            )
+        }
+    }
+
+    private static func updatedConnectedSessionContinuity(
+        previous: Bool,
+        projection: SelectedPeerProjection,
+        channel: ChannelReadinessSnapshot?
+    ) -> Bool {
+        if projection.durableSession == .inactive,
+           channel?.membership.hasLocalMembership != true {
+            switch projection.selectedPeerState.phase {
+            case .idle, .requested, .incomingRequest, .peerReady:
+                return false
+            case .waitingForPeer, .wakeReady, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+                break
+            }
+        }
+
+        if projection.durableSession == .connected {
+            switch projection.selectedPeerState.phase {
+            case .wakeReady, .ready, .startingTransmit, .transmitting, .receiving:
+                return true
+            case .idle, .requested, .incomingRequest, .peerReady, .waitingForPeer, .localJoinFailed, .blockedByOtherSession, .systemMismatch:
+                break
+            }
+        }
+
+        return previous
+    }
+
+    private static func shouldProjectWakeReadyForConnectedDegradation(
+        state: SelectedPeerSessionState,
+        projection: SelectedPeerProjection
+    ) -> Bool {
+        guard state.hadConnectedSessionContinuity,
+              projection.durableSession == .connected,
+              projection.connectedExecution == nil,
+              state.channel?.membership == .selfOnly,
+              case .wakeCapable = state.channel?.remoteWakeCapability,
+              case .waitingForPeer(reason: .backendSessionTransition) = projection.selectedPeerState.detail else {
+            return false
+        }
+
+        return true
     }
 
     private static func joinEffect(for state: SelectedPeerSessionState) -> SelectedPeerEffect? {
         guard let contactID = state.selection?.contactID else { return nil }
 
-        switch state.selectedPeerState.phase {
-        case .idle, .requested, .incomingRequest:
+        switch (state.durableSessionProjection, state.selectedPeerState.phase) {
+        case (.inactive, .idle), (.inactive, .requested), (.inactive, .incomingRequest):
             return .requestConnection(contactID: contactID)
-        case .peerReady:
+        case (.inactive, .peerReady):
             return .joinReadyPeer(contactID: contactID)
-        case .wakeReady, .waitingForPeer, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+        case (.transitioning, _), (.connected, _), (.blockedByOtherSession, _), (.systemMismatch, _), (.localJoinFailed, _), (.pendingJoin, _), (.disconnecting, _), (.inactive, _):
             return nil
         }
     }
@@ -227,12 +288,14 @@ enum SelectedPeerReducer {
     }
 
     private static func reconciliationEffect(for state: SelectedPeerSessionState) -> SelectedPeerEffect? {
-        switch state.reconciliationAction {
-        case .none:
+        switch (state.durableSessionProjection, state.reconciliationAction) {
+        case (_, .none):
             return nil
-        case .restoreLocalSession(let contactID):
+        case (.connected, .restoreLocalSession), (.disconnecting, .restoreLocalSession):
+            return nil
+        case (_, .restoreLocalSession(let contactID)):
             return .restoreLocalSession(contactID: contactID)
-        case .teardownSelectedSession(let contactID):
+        case (_, .teardownSelectedSession(let contactID)):
             if state.pendingAction.isLeaveInFlight(for: contactID) {
                 return nil
             }

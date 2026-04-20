@@ -10,7 +10,9 @@ enum PlaybackBufferReceivePlan: Equatable {
 actor AudioChunkSender {
     private var sendChunk: (@Sendable (String) async throws -> Void)?
     private let reportFailure: @Sendable (String) async -> Void
-    private let maximumPendingPayloads = 8
+    // Wake transmit can legitimately buffer a few seconds of speech while the
+    // background receiver re-establishes its playback path after PTT activation.
+    private let maximumPendingPayloads = 128
     private let maximumPayloadsPerMessage = 4
     private let payloadBatchCollectionNanoseconds: UInt64 = 220_000_000
     private let transportAvailabilityPollNanoseconds: UInt64 = 50_000_000

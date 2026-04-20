@@ -44,6 +44,27 @@ When changing backend storage or query paths in this repo:
 
 If a hosted failure looks like an intermittent server error, check transaction shape and table-scan behavior before blaming the platform.
 
+## Backend invariants
+
+Yes, the backend needs the same invariant discipline for backend-owned truth, but not a separate invariant system.
+
+Use the same pattern described in [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md):
+
+- when the backend is authoritative for a fact, detect the invariant at the backend seam
+- emit a stable invariant ID for the broken truth through `turbo.service.internal.appendInvariantEvent`
+- keep backend dev invariant events visible through `/v1/dev/invariant-events/recent`
+- prefer `backend.*` or `channel.*` IDs for backend-owned rules
+- keep the same invariant ID aligned across backend diagnostics, merged diagnostics, and regressions
+
+Typical backend-owned invariants here include:
+
+- single active transmitter per channel
+- canonical readiness consistency
+- valid wake-target selection
+- request or membership projections that must not contradict stored backend truth
+
+Do not make the client prove a rule that only the backend can know.
+
 ## Verification loops
 
 Deploy / probe:

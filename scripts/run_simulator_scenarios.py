@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Turbo simulator scenarios with locking and transient retries.")
     parser.add_argument("--project", default="Turbo.xcodeproj")
     parser.add_argument("--scheme", default="BeepBeep")
-    parser.add_argument("--destination", default="platform=iOS Simulator,name=iPhone 17,OS=26.4")
+    parser.add_argument("--destination", default="platform=iOS Simulator,name=iPhone 17")
     parser.add_argument("--derived-data", default="/tmp/turbo-dd-simulator-scenario")
     parser.add_argument("--scenario", default="")
     parser.add_argument("--base-url", required=True)

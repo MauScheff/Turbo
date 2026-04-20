@@ -18,6 +18,9 @@ Detailed guidance lives in:
 - Teach as you go.
 - Prefer structural improvements over tactical patches that increase coupling or ambiguity.
 - For Unison syntax and semantics, treat [`UNISON_LANGUAGE.md`](/Users/mau/Development/Turbo/UNISON_LANGUAGE.md) as authoritative.
+- The structure is the answer.
+- When a bug report is really a broken invariant, translate the plain-language report into a typed invariant using [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md), add detection at the authoritative seam, and make it show up in merged diagnostics plus a regression.
+- When searching broadly, use [`BACKEND_STRUCTURE.md`](/Users/mau/Development/Turbo/BACKEND_STRUCTURE.md) as a quick backend index, then use the Unison MCP to explore the backend authoritatively when you need the current structure or deeper detail.
 
 # How To Work
 
@@ -116,6 +119,7 @@ Then load additional docs only as needed:
 - read [`UNISON.md`](/Users/mau/Development/Turbo/UNISON.md) for Unison code, backend contracts, or Unison-specific workflow rules
 - read [`UNISON_LANGUAGE.md`](/Users/mau/Development/Turbo/UNISON_LANGUAGE.md) only when you need Unison syntax, semantics, or language-reference details
 - read [`BACKEND.md`](/Users/mau/Development/Turbo/BACKEND.md) for routes, cloud storage, deploy/probe flows, APNs wake delivery, or backend schema/query design
+- read [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md) for invariant IDs, diagnostics-backed rule encoding, and regression workflow
 - read [`PRODUCT_BRIEF.md`](/Users/mau/Development/Turbo/PRODUCT_BRIEF.md) for product messaging, positioning, or user/audience context
 
 For backend architecture background, also read:
@@ -165,6 +169,13 @@ Use [`BACKEND.md`](/Users/mau/Development/Turbo/BACKEND.md) for:
 - route/deploy/probe loops
 - APNs wake-target and backend transmit-target debugging
 
+Use [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md) for:
+
+- invariant naming and scope rules
+- where invariant checks belong
+- how to emit typed invariant violations into diagnostics
+- how to connect violations to simulator scenarios and lower-level regressions
+
 Use [`handoffs/README.md`](/Users/mau/Development/Turbo/handoffs/README.md) and [`handoffs/TEMPLATE.md`](/Users/mau/Development/Turbo/handoffs/TEMPLATE.md) for:
 
 - session handoff conventions
@@ -187,6 +198,10 @@ Use [`handoffs/README.md`](/Users/mau/Development/Turbo/handoffs/README.md) and 
 - mixed app/backend bug:
   - read [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md), [`UNISON.md`](/Users/mau/Development/Turbo/UNISON.md), [`SWIFT.md`](/Users/mau/Development/Turbo/SWIFT.md), [`SWIFT_DEBUGGING.md`](/Users/mau/Development/Turbo/SWIFT_DEBUGGING.md), and [`BACKEND.md`](/Users/mau/Development/Turbo/BACKEND.md)
   - read [`UNISON_LANGUAGE.md`](/Users/mau/Development/Turbo/UNISON_LANGUAGE.md) only when needed
+- invariant or diagnostics-rule task:
+  - read [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md)
+  - read [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md) when the invariant is distributed or scenario-backed
+  - read [`SWIFT.md`](/Users/mau/Development/Turbo/SWIFT.md) and/or [`BACKEND.md`](/Users/mau/Development/Turbo/BACKEND.md) for the subsystem that owns the rule
 
 # Repo Defaults
 

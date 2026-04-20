@@ -1,0 +1,432 @@
+type turbo.domain.DevInvariantEvent
+  = DevInvariantEvent UserId Text Text Text Text (Optional Text) Instant
+
+turbo.domain.DevInvariantEvent.doc =
+  {{
+  {type turbo.domain.DevInvariantEvent} stores one backend-visible invariant
+  violation for an authenticated user.
+
+  The event carries a stable invariant id plus a short scope, source, message,
+  and optional metadata blob so merged diagnostics can surface backend-owned
+  contract failures alongside app diagnostics.
+  }}
+
+turbo.store.devInvariantEvents.tables.recentByUser :
+  Database -> OrderedTable UserId [DevInvariantEvent]
+turbo.store.devInvariantEvents.tables.recentByUser db =
+  OrderedTable.named db "turboDevInvariantEventsRecentByUser_v1" Universal.ordering
+
+turbo.store.devInvariantEvents.appendRecent :
+  Database
+  -> UserId
+  -> Text
+  -> Text
+  -> Text
+  -> Text
+  -> Optional Text
+  -> '{Exception, Storage, Remote} DevInvariantEvent
+turbo.store.devInvariantEvents.appendRecent
+  db
+  userId
+  invariantId
+  scope
+  source
+  message
+  metadata =
+  do
+    use List ++
+    existing = turbo.store.devInvariantEvents.listRecent db userId ()
+    event =
+      turbo.domain.DevInvariantEvent.DevInvariantEvent
+        userId
+        invariantId
+        scope
+        source
+        message
+        metadata
+        now!
+    updated = List.takeEnd 50 (existing ++ [event])
+    _ = OrderedTable.write (turbo.store.devInvariantEvents.tables.recentByUser db) userId updated
+    event
+
+turbo.store.devInvariantEvents.listRecent :
+  Database -> UserId -> '{Exception, Remote} [DevInvariantEvent]
+turbo.store.devInvariantEvents.listRecent db userId =
+  do
+    match OrderedTable.tryRead (turbo.store.devInvariantEvents.tables.recentByUser db) userId with
+      Some events -> events
+      None        -> []
+
+turbo.store.devInvariantEvents.clearRecent :
+  Database -> '{Exception, Storage, Remote} Nat
+turbo.store.devInvariantEvents.clearRecent db =
+  do
+    rows =
+      Stream.toList
+        (OrderedTable.toStream
+          (turbo.store.devInvariantEvents.tables.recentByUser db))
+    _ = List.foreach (turbo.store.devInvariantEvents.internal.clearRow db) rows
+    List.size rows
+
+turbo.store.devInvariantEvents.internal.clearRow :
+  Database
+  -> (UserId, [DevInvariantEvent])
+  ->{Exception, Storage, Remote} ()
+turbo.store.devInvariantEvents.internal.clearRow db = cases
+  (userId, _) ->
+    OrderedTable.delete (turbo.store.devInvariantEvents.tables.recentByUser db) userId
+
+turbo.service.dev.invariantEvents.internal.eventJson :
+  DevInvariantEvent -> Json
+turbo.service.dev.invariantEvents.internal.eventJson = cases
+  DevInvariantEvent userId invariantId scope source message metadata recordedAt ->
+    object.empty
+      |> addText "userId" (UserId.toText userId)
+      |> addText "invariantId" invariantId
+      |> addText "scope" scope
+      |> addText "source" source
+      |> addText "message" message
+      |> addOptionalText "metadata" metadata
+      |> addText "recordedAt" (Instant.toText recordedAt)
+
+turbo.service.dev.recentInvariantEvents :
+  Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.dev.recentInvariantEvents db =
+  do
+    use Parser /
+    use object empty
+    noCapture GET (s "v1" / s "dev" / s "invariant-events" / s "recent")
+    match requireUser db () with
+      Left err          -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        events = turbo.store.devInvariantEvents.listRecent db currentUserId ()
+        ok.json
+          (empty
+            |> addText "status" "ok"
+            |> object.add
+                 "events"
+                 (Json.array
+                   (List.map
+                     turbo.service.dev.invariantEvents.internal.eventJson
+                     events)))
+
+turbo.service.dev.uploadInvariantEvent :
+  Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.dev.uploadInvariantEvent db =
+  do
+    use Map get
+    use Parser /
+    use object empty
+    noCapture POST (s "v1" / s "dev" / s "invariant-events")
+    match requireUser db () with
+      Left err          -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        fields = decodeJson (Decoder.object Decoder.text)
+        match
+          ( get "invariantId" fields
+          , get "scope" fields
+          , get "source" fields
+          , get "message" fields
+          ) with
+          (Some invariantId, Some scope, Some source, Some message) ->
+            event =
+              turbo.store.devInvariantEvents.appendRecent
+                db
+                currentUserId
+                invariantId
+                scope
+                source
+                message
+                (get "metadata" fields)
+                ()
+            ok.json
+              (empty
+                |> addText "status" "uploaded"
+                |> object.add
+                     "event"
+                     (turbo.service.dev.invariantEvents.internal.eventJson event))
+          _                                                ->
+            badRequest.json
+              (empty
+                |> addText
+                     "error"
+                     "missing invariantId, scope, source, or message")
+
+turbo.service.internal.appendInvariantEvent :
+  Database
+  -> UserId
+  -> Text
+  -> Text
+  -> Text
+  -> Text
+  -> Optional Text
+  -> '{Exception, Storage, Remote} ()
+turbo.service.internal.appendInvariantEvent
+  db
+  userId
+  invariantId
+  scope
+  source
+  message
+  metadata =
+  do
+    _ =
+      turbo.store.devInvariantEvents.appendRecent
+        db
+        userId
+        invariantId
+        scope
+        source
+        message
+        metadata
+        ()
+    ()
+
+turbo.service.channels.pttPushTarget :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.pttPushTarget db =
+  do
+    use Parser /
+    use Text ++
+    use Text ==
+    use object empty
+    channelIdText =
+      route GET (s "v1" / s "channels" / Parser.text / s "ptt-push-target")
+    match requireUser db () with
+      Left err          -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        currentHandle =
+          (User _ handleText _ _ _) = currentUser
+          handleText
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match currentTransmit db channelId () with
+            None ->
+              notFound.json (empty |> addText "error" "no active transmit state")
+            Some
+              (TransmitState _
+                fromUserId
+                fromDeviceId
+                toUserId
+                toDeviceId
+                startedAt
+                expiresAt) ->
+              if UserId.toText fromUserId == UserId.toText currentUserId then
+                tokenRecord =
+                  match tokens.get db channelId toUserId toDeviceId () with
+                    Some record -> Some record
+                    None        -> latestForUserInChannel db channelId toUserId ()
+                match tokenRecord with
+                  None ->
+                    metadata =
+                      "channelId="
+                        ++ channelIdText
+                        ++ " senderDeviceId="
+                        ++ DeviceId.toText fromDeviceId
+                        ++ " targetUserId="
+                        ++ UserId.toText toUserId
+                        ++ " targetDeviceId="
+                        ++ DeviceId.toText toDeviceId
+                        ++ " startedAt="
+                        ++ Instant.toText startedAt
+                    _ =
+                      turbo.service.internal.appendInvariantEvent
+                        db
+                        currentUserId
+                        "backend.ptt_push_target_missing_token"
+                        "backend"
+                        "backend"
+                        "active transmit did not have a token-backed wake target"
+                        (Some metadata)
+                        ()
+                    notFound.json (empty |> addText "error" "no target ptt token")
+                  Some (EphemeralToken _ _ tokenDeviceId token _) ->
+                    ok.json
+                      (empty
+                        |> addText "channelId" channelIdText
+                        |> addText "event" "transmit-start"
+                        |> addText "activeSpeaker" currentHandle
+                        |> addText "senderUserId" (UserId.toText fromUserId)
+                        |> addText
+                             "senderDeviceId"
+                             (DeviceId.toText fromDeviceId)
+                        |> addText "targetUserId" (UserId.toText toUserId)
+                        |> addText
+                             "targetDeviceId"
+                             (DeviceId.toText tokenDeviceId)
+                        |> addText "startedAt" (Instant.toText startedAt)
+                        |> addText "expiresAt" (Instant.toText expiresAt)
+                        |> addText "token" token)
+              else
+                unauthorized.json
+                  (empty
+                    |> addText "error" "active transmit not owned by caller")
+
+type turbo.service.dev.internal.ResetSummary
+  = ResetSummary Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat
+
+turbo.service.dev.internal.performReset :
+  Database -> '{Exception, Storage, Remote} turbo.service.dev.internal.ResetSummary
+turbo.service.dev.internal.performReset db =
+  do
+    use List foreach size
+    use OrderedTable toStream
+    use Stream toList
+    runtimeRows = toList (toStream (turbo.store.runtime.tables.byChannel db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deleteRuntimeRow db)
+        runtimeRows
+    presenceRows = toList (toStream (turbo.store.presence.tables.byDevice db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deletePresenceRow db)
+        presenceRows
+    tokenRows =
+      toList
+        (toStream
+          (turbo.store.tokens.tables.byChannelUserDevice db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deleteTokenRow db)
+        tokenRows
+    inviteIdRows = toList (toStream (turbo.store.invites.tables.byId db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deleteInviteIdRow db)
+        inviteIdRows
+    inviteFromRows =
+      toList (toStream (turbo.store.invites.tables.byFromCreatedAt db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deleteInviteFromRow db)
+        inviteFromRows
+    inviteToRows =
+      toList (toStream (turbo.store.invites.tables.byToCreatedAt db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deleteInviteToRow db)
+        inviteToRows
+    membershipRows =
+      toList (toStream (turbo.store.memberships.tables.byChannelUser db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deleteMembershipRow db)
+        membershipRows
+    sessionRows = toList (toStream (turbo.store.sessions.tables.byDevice db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deleteSessionRow db)
+        sessionRows
+    channelRows = toList (toStream (turbo.store.channels.tables.byId db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deleteChannelRow db)
+        channelRows
+    participantRows =
+      toList
+        (toStream
+          (turbo.store.channels.tables.byParticipantCreatedAt db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deleteChannelParticipantRow db)
+        participantRows
+    userPairRows =
+      toList (toStream (turbo.store.channels.tables.byUserPair db))
+    _ =
+      foreach
+        (turbo.service.dev.internal.deleteChannelUserPairRow db)
+        userPairRows
+    wakeJobRowCount = turbo.store.wakeJobs.clearPending db ()
+    wakeEventRowCount = turbo.store.devWakeEvents.clearRecent db ()
+    invariantEventRowCount = turbo.store.devInvariantEvents.clearRecent db ()
+    ResetSummary
+      (size runtimeRows)
+      (size presenceRows)
+      (size tokenRows)
+      (size inviteIdRows)
+      (size inviteFromRows)
+      (size inviteToRows)
+      (size membershipRows)
+      (size sessionRows)
+      0
+      (size channelRows)
+      (size userPairRows)
+      wakeJobRowCount
+      wakeEventRowCount
+      invariantEventRowCount
+
+turbo.service.dev.internal.resetSummaryJson :
+  Text -> turbo.service.dev.internal.ResetSummary -> Json
+turbo.service.dev.internal.resetSummaryJson status = cases
+  ResetSummary
+    runtimeCount
+    presenceCount
+    tokenCount
+    inviteIdCount
+    inviteFromCount
+    inviteToCount
+    membershipCount
+    sessionCount
+    socketCount
+    channelCount
+    userPairCount
+    wakeJobRowCount
+    wakeEventRowCount
+    invariantEventRowCount ->
+      object.empty
+        |> addText "status" status
+        |> addNat "clearedTransmitStates" runtimeCount
+        |> addNat "clearedPresenceEntries" presenceCount
+        |> addNat "clearedTokenEntries" tokenCount
+        |> addNat "clearedInviteByIdEntries" inviteIdCount
+        |> addNat "clearedInviteByFromEntries" inviteFromCount
+        |> addNat "clearedInviteByToEntries" inviteToCount
+        |> addNat "clearedMemberships" membershipCount
+        |> addNat "clearedSessions" sessionCount
+        |> addNat "clearedSockets" socketCount
+        |> addNat "clearedChannels" channelCount
+        |> addNat "clearedChannelUserPairEntries" userPairCount
+        |> addNat "clearedWakeJobs" wakeJobRowCount
+        |> addNat "clearedWakeEventRows" wakeEventRowCount
+        |> addNat "clearedInvariantEventRows" invariantEventRowCount
+
+turbo.service.routes.dev :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.dev db =
+  use Route or
+  or
+    (turbo.service.dev.deployStamp db)
+    (or
+      (turbo.service.dev.seed db)
+      (or
+        (turbo.service.dev.resetAll db)
+        (or
+          (turbo.service.dev.resetState db)
+          (or
+            (turbo.service.dev.uploadDiagnostics db)
+            (or
+              (turbo.service.dev.latestDiagnostics db)
+              (or
+                (turbo.service.dev.latestDiagnosticsForCurrentUser db)
+                (or
+                  (turbo.service.dev.runtimeInspection db)
+                  (or
+                    (turbo.service.dev.uploadWakeEvent db)
+                    (or
+                      (turbo.service.dev.recentWakeEvents db)
+                      (or
+                        (turbo.service.dev.uploadInvariantEvent db)
+                        (turbo.service.dev.recentInvariantEvents db))))))))))

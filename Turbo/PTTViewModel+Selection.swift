@@ -14,6 +14,14 @@ enum ContactPresencePresentation: Equatable {
 }
 
 extension PTTViewModel {
+    func localTransmitProjection(for contactID: UUID) -> LocalTransmitProjection {
+        transmitDomainSnapshot.localTransmitProjection(
+            for: contactID,
+            mediaState: mediaConnectionState,
+            pttAudioSessionActive: isPTTAudioSessionActive
+        )
+    }
+
     var contactSummaryByContactID: [UUID: TurboContactSummaryResponse] {
         backendSyncCoordinator.state.syncState.contactSummaries
     }
@@ -53,7 +61,6 @@ extension PTTViewModel {
     }
 
     func conversationContext(for contact: Contact) -> ConversationDerivationContext {
-        let transmitSnapshot = transmitDomainSnapshot
         return ConversationDerivationContext(
             contactID: contact.id,
             selectedContactID: selectedContactId,
@@ -61,14 +68,9 @@ extension PTTViewModel {
                 ? selectedPeerBaseState(for: contact.id, relationship: relationshipState(for: contact.id))
                 : listConversationState(for: contact.id),
             contactName: contact.name,
-            contactIsOnline: contactPresencePresentation(for: contact.id) == .connected,
+            contactIsOnline: selectedConversationPresenceIsOnline(for: contact.id),
             isJoined: isJoined,
-            localIsTransmitting: transmitSnapshot.hasTransmitIntent(for: contact.id),
-            localIsStopping: transmitSnapshot.isStopping(for: contact.id),
-            localRequiresFreshPress: transmitSnapshot.requiresFreshPress(for: contact.id),
-            localTransmitPhase: transmitSnapshot.phase,
-            localSystemIsTransmitting: transmitSnapshot.isSystemTransmitting,
-            localPTTAudioSessionActive: isPTTAudioSessionActive,
+            localTransmit: localTransmitProjection(for: contact.id),
             peerSignalIsTransmitting: remoteTransmittingContactIDs.contains(contact.id),
             activeChannelID: activeChannelId,
             systemSessionMatchesContact: systemSessionMatches(contact.id),
@@ -78,6 +80,9 @@ extension PTTViewModel {
             mediaState: mediaConnectionState,
             localMediaWarmupState: localMediaWarmupState(for: contact.id),
             incomingWakeActivationState: pttWakeRuntime.incomingWakeActivationState(for: contact.id),
+            hadConnectedSessionContinuity: selectedContactId == contact.id
+                ? selectedPeerCoordinator.state.hadConnectedSessionContinuity
+                : false,
             channel: selectedChannelSnapshot(for: contact.id)
         )
     }
@@ -118,7 +123,7 @@ extension PTTViewModel {
             selectedPeerCoordinator.send(.selectedContactChanged(nil))
             return
         }
-        let transmitSnapshot = transmitDomainSnapshot
+        let localTransmit = localTransmitProjection(for: contact.id)
 
         let relationship = relationshipState(for: contact.id)
         selectedPeerCoordinator.send(
@@ -126,7 +131,7 @@ extension PTTViewModel {
                 SelectedPeerSelection(
                     contactID: contact.id,
                     contactName: contact.name,
-                    contactIsOnline: contactPresencePresentation(for: contact.id) == .connected
+                    contactIsOnline: selectedConversationPresenceIsOnline(for: contact.id)
                 )
             )
         )
@@ -136,20 +141,14 @@ extension PTTViewModel {
         selectedPeerCoordinator.send(
             .localSessionUpdated(
                 isJoined: isJoined,
-                localIsTransmitting: transmitSnapshot.hasTransmitIntent(for: contact.id),
-                localIsStopping: transmitSnapshot.isStopping(for: contact.id),
-                localRequiresFreshPress: transmitSnapshot.requiresFreshPress(for: contact.id),
                 activeChannelID: activeChannelId,
                 pendingAction: sessionCoordinator.pendingAction,
                 localJoinFailure: pttCoordinator.state.lastJoinFailure
             )
         )
+        selectedPeerCoordinator.send(.localTransmitUpdated(localTransmit))
         selectedPeerCoordinator.send(
-            .localTransmitContextUpdated(
-                phase: transmitSnapshot.phase,
-                systemIsTransmitting: transmitSnapshot.isSystemTransmitting,
-                pttAudioSessionActive: isPTTAudioSessionActive
-            )
+            .peerSignalTransmittingUpdated(remoteTransmittingContactIDs.contains(contact.id))
         )
         selectedPeerCoordinator.send(
             .systemSessionUpdated(
@@ -166,20 +165,38 @@ extension PTTViewModel {
     }
 
     func selectedPeerState(for contactID: UUID) -> SelectedPeerState {
+        selectedPeerProjection(for: contactID).selectedPeerState
+    }
+
+    func selectedPeerProjection(for contactID: UUID) -> SelectedPeerProjection {
         if selectedContactId == contactID {
             syncSelectedPeerSession()
-            return selectedPeerCoordinator.state.selectedPeerState
+            let state = selectedPeerCoordinator.state
+            return SelectedPeerProjection(
+                durableSession: state.durableSessionProjection,
+                connectedExecution: state.connectedExecutionProjection,
+                connectedControlPlane: state.connectedControlPlaneProjection,
+                selectedPeerState: state.selectedPeerState,
+                reconciliationAction: state.reconciliationAction
+            )
         }
 
         guard let contact = contacts.first(where: { $0.id == contactID }) else {
-            return SelectedPeerState(
+            let selectedPeerState = SelectedPeerState(
                 relationship: .none,
                 phase: .idle,
                 statusMessage: "Ready to connect",
                 canTransmitNow: false
             )
+            return SelectedPeerProjection(
+                durableSession: .inactive,
+                connectedExecution: nil,
+                connectedControlPlane: .unavailable,
+                selectedPeerState: selectedPeerState,
+                reconciliationAction: .none
+            )
         }
-        return ConversationStateMachine.selectedPeerState(
+        return ConversationStateMachine.projection(
             for: conversationContext(for: contact),
             relationship: relationshipState(for: contactID)
         )
@@ -248,6 +265,10 @@ extension PTTViewModel {
         }
 
         return rawPresenceOnline ? .connected : .offline
+    }
+
+    func selectedConversationPresenceIsOnline(for contactID: UUID) -> Bool {
+        contactPresencePresentation(for: contactID) != .offline
     }
 
     var visibleContacts: [Contact] {

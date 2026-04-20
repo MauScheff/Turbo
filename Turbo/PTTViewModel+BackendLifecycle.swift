@@ -294,11 +294,7 @@ extension PTTViewModel {
         pttCoordinator.reset()
         tearDownTransmitRuntime(resetCoordinator: true)
         closeMediaSession()
-        for task in remoteAudioSilenceTasks.values {
-            task.cancel()
-        }
-        remoteAudioSilenceTasks = [:]
-        remoteTransmittingContactIDs = []
+        receiveExecutionCoordinator.send(.reset)
         isPTTAudioSessionActive = false
         selectedContactId = nil
         syncPTTState()
@@ -308,7 +304,7 @@ extension PTTViewModel {
         selfCheckCoordinator.send(.reset)
         pttSystemPolicyCoordinator.send(.reset)
         pttWakeRuntime.clearAll()
-        localReceiverAudioReadinessPublications = [:]
+        controlPlaneCoordinator.send(.reset)
         clearTrackedContacts()
         resetTransportFaults()
         contacts = []
@@ -335,10 +331,10 @@ extension PTTViewModel {
         switch state {
         case .idle:
             backendStatusMessage = backendRuntime.isReady ? "Reconnecting WebSocket..." : "WebSocket disconnected"
-            localReceiverAudioReadinessPublications = [:]
+            controlPlaneCoordinator.send(.webSocketStateChanged(.idle))
             syncPTTServiceStatus(reason: "websocket-idle")
             let shouldResetTransmitSession = shouldResetTransmitSessionOnWebSocketIdle(
-                hasPendingBeginOrActiveTransmit: transmitServices.hasPendingBeginOrActiveTarget(),
+                hasPendingBeginOrActiveTransmit: hasPendingBeginOrActiveTransmit,
                 systemIsTransmitting: pttCoordinator.state.isTransmitting
             )
             if shouldResetTransmitSession {
@@ -362,6 +358,7 @@ extension PTTViewModel {
             captureDiagnosticsState("websocket:connected")
             Task {
                 await backendSyncCoordinator.handle(.webSocketStateChanged(state, selectedContactID: selectedContactId))
+                await controlPlaneCoordinator.handle(.webSocketStateChanged(state))
                 let readinessContactIDs = Set([selectedContactId, activeChannelId, mediaSessionContactID].compactMap { $0 })
                 for contactID in readinessContactIDs {
                     await syncLocalReceiverAudioReadinessSignal(

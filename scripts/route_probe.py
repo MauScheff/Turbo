@@ -324,6 +324,13 @@ def require_wake_events_payload(payload: dict[str, Any], *, expected_status: str
     return events
 
 
+def require_invariant_events_payload(payload: dict[str, Any], *, expected_status: str) -> list[dict[str, Any]]:
+    require(payload.get("status") == expected_status, f"unexpected invariant-events payload: {payload}")
+    events = payload.get("events")
+    require(isinstance(events, list), f"invariant-events response missing events list: {payload}")
+    return events
+
+
 async def receive_json_or_timeout(connection, timeout_seconds: int) -> dict:
     try:
         raw = await asyncio.wait_for(connection.recv(), timeout=timeout_seconds)
@@ -898,6 +905,79 @@ async def main() -> int:
                 for event in recent_wake_events
             ),
             f"wake events did not include uploaded row: {recent_wake_events}",
+        )
+
+        invariant_probe_id = uuid.uuid4().hex
+        invariant_metadata = f"probeId={invariant_probe_id} channelId={channel_id}"
+        invariant_events_before = run_check(
+            results,
+            "invariant-events:recent:before-upload",
+            lambda: request(
+                args.base_url,
+                "/v1/dev/invariant-events/recent",
+                caller["handle"],
+                insecure=args.insecure,
+            ),
+        )
+        require_invariant_events_payload(invariant_events_before, expected_status="ok")
+
+        invariant_event_upload = run_check(
+            results,
+            "invariant-events:upload",
+            lambda: request(
+                args.base_url,
+                "/v1/dev/invariant-events",
+                caller["handle"],
+                method="POST",
+                body={
+                    "invariantId": "route-probe.synthetic_violation",
+                    "scope": "backend",
+                    "source": "route-probe",
+                    "message": "synthetic invariant event",
+                    "metadata": invariant_metadata,
+                },
+                insecure=args.insecure,
+            ),
+        )
+        uploaded_invariant_event = invariant_event_upload.get("event")
+        require(
+            invariant_event_upload.get("status") == "uploaded",
+            f"unexpected invariant event upload payload: {invariant_event_upload}",
+        )
+        require(
+            isinstance(uploaded_invariant_event, dict),
+            f"invariant event upload missing event payload: {invariant_event_upload}",
+        )
+        require(
+            uploaded_invariant_event.get("invariantId") == "route-probe.synthetic_violation",
+            f"invariant event upload mismatched invariant id: {uploaded_invariant_event}",
+        )
+        require(
+            uploaded_invariant_event.get("metadata") == invariant_metadata,
+            f"invariant event upload mismatched metadata: {uploaded_invariant_event}",
+        )
+
+        invariant_events_after = run_check(
+            results,
+            "invariant-events:recent:after-upload",
+            lambda: request(
+                args.base_url,
+                "/v1/dev/invariant-events/recent",
+                caller["handle"],
+                insecure=args.insecure,
+            ),
+        )
+        recent_invariant_events = require_invariant_events_payload(invariant_events_after, expected_status="ok")
+        require(
+            any(
+                isinstance(event, dict)
+                and event.get("invariantId") == "route-probe.synthetic_violation"
+                and event.get("scope") == "backend"
+                and event.get("source") == "route-probe"
+                and event.get("metadata") == invariant_metadata
+                for event in recent_invariant_events
+            ),
+            f"invariant events did not include uploaded row: {recent_invariant_events}",
         )
 
         post_direct_summaries = run_check(

@@ -109,9 +109,11 @@ Important operational commands:
 - `just simulator-scenario-suite`
 - `just simulator-scenario-suite-hosted-smoke`
 - `just simulator-scenario-merge`
+- `just simulator-scenario-merge-strict`
 - `just simulator-scenario-local`
 - `just simulator-scenario-suite-local`
 - `just simulator-scenario-merge-local`
+- `just simulator-scenario-merge-local-strict`
 - `just swift-test-target <name>`
 - `direnv exec . just ptt-push-target <channel_id> <backend> <sender>`
 - `direnv exec . just ptt-apns-worker`
@@ -150,6 +152,7 @@ For distributed app/backend flows that do not require a physical device, prefer 
 - Swift test execution of `TurboTests/SimulatorScenarioTests`
 - `just simulator-scenario <scenario>` or `just simulator-scenario-suite`
 - merged diagnostics via `just simulator-scenario-merge`
+- strict invariant checking via `just simulator-scenario-merge-strict`
 - typed state-machine projections captured in diagnostics snapshots and asserted by scenarios
 
 `just simulator-scenario-suite` is the canonical full run. It executes the dedicated simulator scenario suite with no runtime filter, which means every checked-in `scenarios/*.json` file is exercised automatically.
@@ -192,7 +195,7 @@ This makes the standard loop:
 1. reproduce
 2. run the scenario or probe
 3. merge diagnostics
-4. inspect timeline
+4. inspect timeline and invariant violations
 
 Prefer that over guessing from screenshots or manual tap-through notes.
 
@@ -201,6 +204,7 @@ Scenario runs are stricter than normal app debugging:
 - normal debug builds may auto-publish diagnostics opportunistically
 - simulator scenarios publish explicit scenario-tagged diagnostics artifacts and verify exact-device reads against those artifacts
 - scenario view models disable automatic diagnostics publishing so scenario verification does not get overwritten by later background uploads from the same simulator identity
+- merged diagnostics now also parse explicit `INVARIANT VIOLATIONS` sections, derive pair-level violations, support `--json`, and can fail non-zero with `--fail-on-violations`
 
 `just route-probe` should be treated as a semantic probe, not just a route-existence check. In particular, diagnostics upload/latest routes should round-trip the exact `deviceId` and `appVersion` that were just written.
 

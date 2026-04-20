@@ -17,6 +17,7 @@ The app side currently proves out Apple's PushToTalk framework integration. The 
 - `BACKEND.md`: backend/control-plane/storage/query guidance.
 - `TOOLING.md`: tooling, operational entrypoints, and infrastructure overview.
 - `STATE_MACHINE_TESTING.md`: canonical scenario-driven state-machine testing workflow.
+- `INVARIANTS.md`: invariant rule catalog and diagnostics-backed regression guidance.
 - `.agents/`: supporting Unison language and workflow notes.
 
 ## Docs ownership
@@ -42,6 +43,8 @@ Use these docs as the primary authority for their respective concerns:
   - backend/control-plane scope, storage/query rules, and backend operational guidance
 - `STATE_MACHINE_TESTING.md`
   - the default distributed bug reproduction, proof, and regression-testing model
+- `INVARIANTS.md`
+  - how invariant IDs, typed violation logging, merged diagnostics checks, and regression expectations are encoded
 - `handoffs/README.md`
   - handoff conventions and how to use the timestamped handoff log
 - `handoffs/*.md`
@@ -131,6 +134,7 @@ Then load only the docs needed for the task:
 - Read `SWIFT_DEBUGGING.md` for simulator/device/PTT/audio debugging.
 - Read `BACKEND.md` for backend/cloud/storage/route work.
 - Read `STATE_MACHINE_TESTING.md` when the task is about distributed bugs, scenario design, or proof loops.
+- Read `INVARIANTS.md` when the task is about invariant design, diagnostics-backed regression rules, or merged diagnostics checks.
 - Read `Server/backend_architecture.md` if you need backend structure or Unison deployment context.
 
 Treat the backend as control-plane-only unless the user explicitly changes scope.

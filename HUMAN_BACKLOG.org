@@ -1,0 +1,15 @@
+#+title: Human Backlog
+* When A invites/requests B, then B accepts and goes into the connection (ready), then A "joins" and while this is happening, B already has the hold to talk button enabled and it says "Hold to talk to wake every", which is not true because avery is not sleeping, and we shouldn't be able to hold to talk yet because avery isn't ready.
+* Foreground connected back and forth works, then avery sleeps, on blake it says Connecting... and target user has no connected receiving device on this channel, and button says "Waiting for Peer".
+* Blake says hold to talk to wake avery but avery hasn't connected.
+* HTTP3 P2P
+* Pushes late?
+* Hold to talk to wake before other is ready.
+* Presence edge cases
+* Push notifications always work
+** Background
+** Foreground (seemed stale like always there)
+* When connecting goes through available
+* Bad backend state could say Available instead of online
+* Showing hold to talk before ready.
+* Detect app kill and kill connections.

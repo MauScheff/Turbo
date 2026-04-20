@@ -9,6 +9,59 @@ import Foundation
 import UIKit
 
 extension PTTViewModel {
+    private var remoteAudioSilenceTimeoutNanoseconds: UInt64 { 1_500_000_000 }
+
+    func runReceiveExecutionEffect(_ effect: ReceiveExecutionEffect) {
+        switch effect {
+        case .scheduleRemoteSilenceTimeout(let contactID):
+            let task = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: self?.remoteAudioSilenceTimeoutNanoseconds ?? 0)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self?.handleRemoteAudioSilenceTimeout(for: contactID)
+                }
+            }
+            receiveExecutionRuntime.replaceRemoteAudioSilenceTask(for: contactID, with: task)
+
+        case .cancelRemoteSilenceTimeout(let contactID):
+            receiveExecutionRuntime.replaceRemoteAudioSilenceTask(for: contactID, with: nil)
+
+        case .cancelAllRemoteSilenceTimeouts:
+            receiveExecutionRuntime.cancelAllRemoteAudioSilenceTasks()
+        }
+    }
+
+    func handleRemoteAudioSilenceTimeout(for contactID: UUID) {
+        receiveExecutionRuntime.replaceRemoteAudioSilenceTask(for: contactID, with: nil)
+        receiveExecutionCoordinator.send(.silenceTimeoutElapsed(contactID: contactID))
+        diagnostics.record(
+            .media,
+            message: "Remote audio activity timed out",
+            metadata: ["contactId": contactID.uuidString]
+        )
+
+        switch pttWakeRuntime.incomingWakeActivationState(for: contactID) {
+        case .systemActivated, .appManagedFallback:
+            pttWakeRuntime.clear(for: contactID)
+            diagnostics.record(
+                .pushToTalk,
+                message: "Cleared completed wake state after remote audio activity ended",
+                metadata: ["contactId": contactID.uuidString]
+            )
+        case .signalBuffered,
+             .awaitingSystemActivation,
+             .systemActivationTimedOutWaitingForForeground,
+             .systemActivationInterruptedByTransmitEnd,
+             .none:
+            break
+        }
+
+        if selectedContactId == contactID {
+            updateStatusForSelectedContact()
+            captureDiagnosticsState("remote-audio:cleared")
+        }
+    }
+
     func shouldResumeLocalInteractivePrewarmForRemoteReady(
         contactID: UUID,
         applicationState: UIApplication.State
@@ -97,20 +150,55 @@ extension PTTViewModel {
     func mergedChannelReadinessPreservingWakeCapableFallback(
         existing: TurboChannelReadinessResponse?,
         fetched: TurboChannelReadinessResponse?,
-        peerDeviceConnected: Bool
+        peerDeviceConnected: Bool,
+        peerMembershipPresent: Bool = true,
+        existingSessionWasRoutable: Bool = false
     ) -> TurboChannelReadinessResponse? {
         guard let fetched else { return existing }
         guard let existing else { return fetched }
-        guard !peerDeviceConnected else { return fetched }
         guard case .wakeCapable(let existingTargetDeviceId) = existing.remoteWakeCapability else {
             return fetched
         }
 
+        let existingWakeFallbackWasAuthoritative: Bool = {
+            if existingSessionWasRoutable {
+                return true
+            }
+            switch existing.statusView {
+            case .ready, .selfTransmitting, .peerTransmitting:
+                return true
+            case .waitingForSelf, .waitingForPeer, .unknown:
+                return false
+            }
+        }()
+
+        let fetchedLooksLikeTransientBackgroundDrift: Bool = {
+            guard !fetched.canTransmit else { return false }
+            switch fetched.statusView {
+            case .waitingForSelf, .waitingForPeer:
+                return true
+            case .ready, .selfTransmitting, .peerTransmitting, .unknown:
+                return false
+            }
+        }()
+
+        let shouldPreserveWakeCapableFallback =
+            peerMembershipPresent
+            && (
+                !peerDeviceConnected
+                || (existingWakeFallbackWasAuthoritative && fetchedLooksLikeTransientBackgroundDrift)
+            )
+        guard shouldPreserveWakeCapableFallback else { return fetched }
+
         var merged = fetched
 
-        if existing.remoteAudioReadiness == .wakeCapable,
-           fetched.remoteAudioReadiness == .waiting {
-            merged = merged.settingRemoteAudioReadiness(.wakeCapable)
+        if existing.remoteAudioReadiness == .wakeCapable {
+            switch fetched.remoteAudioReadiness {
+            case .waiting, .unknown:
+                merged = merged.settingRemoteAudioReadiness(.wakeCapable)
+            case .ready, .wakeCapable:
+                break
+            }
         }
 
         if case .unavailable = fetched.remoteWakeCapability {
@@ -267,27 +355,86 @@ extension PTTViewModel {
     }
 
     func clearRemoteAudioActivity(for contactID: UUID) {
-        remoteAudioSilenceTasks[contactID]?.cancel()
-        remoteAudioSilenceTasks[contactID] = nil
-        remoteTransmittingContactIDs.remove(contactID)
+        receiveExecutionCoordinator.send(.remoteTransmitStopped(contactID: contactID))
+        if selectedContactId == contactID {
+            updateStatusForSelectedContact()
+            captureDiagnosticsState("remote-audio:cleared")
+        }
     }
 
-    func markRemoteAudioActivity(for contactID: UUID) {
-        remoteTransmittingContactIDs.insert(contactID)
-        remoteAudioSilenceTasks[contactID]?.cancel()
-        remoteAudioSilenceTasks[contactID] = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard let self else { return }
-                self.remoteAudioSilenceTasks[contactID] = nil
-                self.remoteTransmittingContactIDs.remove(contactID)
-                if self.selectedContactId == contactID {
-                    self.updateStatusForSelectedContact()
-                    self.captureDiagnosticsState("remote-audio:cleared")
-                }
+    func shouldRecoverRemoteTransmitStopFromChannelRefresh(
+        contactID: UUID,
+        existingChannelState: TurboChannelStateResponse?,
+        effectiveChannelState: TurboChannelStateResponse
+    ) -> Bool {
+        guard remoteTransmittingContactIDs.contains(contactID) else { return false }
+
+        let existingLookedLikeReceive =
+            existingChannelState?.conversationStatus == .receiving
+            || mediaSessionContactID == contactID
+            || isPTTAudioSessionActive
+        guard existingLookedLikeReceive else { return false }
+
+        return effectiveChannelState.conversationStatus != .receiving
+    }
+
+    func recoverRemoteTransmitStopFromChannelRefreshIfNeeded(
+        contactID: UUID,
+        existingChannelState: TurboChannelStateResponse?,
+        effectiveChannelState: TurboChannelStateResponse
+    ) async {
+        guard shouldRecoverRemoteTransmitStopFromChannelRefresh(
+            contactID: contactID,
+            existingChannelState: existingChannelState,
+            effectiveChannelState: effectiveChannelState
+        ) else { return }
+
+        diagnostics.record(
+            .backend,
+            message: "Recovered missing transmit-stop from channel refresh",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "previousStatus": existingChannelState?.status ?? "none",
+                "effectiveStatus": effectiveChannelState.status,
+            ]
+        )
+
+        let shouldClearRemoteParticipant = shouldClearSystemRemoteParticipantFromSignalPath(for: contactID)
+        clearRemoteAudioActivity(for: contactID)
+
+        let shouldRestoreInteractivePrewarm =
+            isJoined
+            && activeChannelId == contactID
+            && systemSessionMatches(contactID)
+            && !isTransmitting
+
+        if mediaSessionContactID == contactID && !isTransmitting {
+            closeMediaSession()
+            diagnostics.record(
+                .media,
+                message: "Closed receive media session after channel-refresh transmit stop recovery",
+                metadata: ["contactId": contactID.uuidString]
+            )
+            if shouldRestoreInteractivePrewarm {
+                deferInteractivePrewarmUntilPTTAudioDeactivation(for: contactID)
+                diagnostics.record(
+                    .media,
+                    message: "Deferred interactive audio prewarm after channel-refresh transmit stop recovery",
+                    metadata: ["contactId": contactID.uuidString]
+                )
             }
         }
+
+        if shouldClearRemoteParticipant {
+            await updateSystemRemoteParticipant(for: contactID, isActive: false)
+        }
+    }
+
+    func markRemoteAudioActivity(
+        for contactID: UUID,
+        source: RemoteReceiveActivitySource = .audioChunk
+    ) {
+        receiveExecutionCoordinator.send(.remoteActivityDetected(contactID: contactID, source: source))
         if selectedContactId == contactID {
             updateStatusForSelectedContact()
         }
@@ -362,6 +509,48 @@ extension PTTViewModel {
         return existingSessionReady
             && incomingLostMembership
             && transientStatuses.contains(incoming.status)
+    }
+
+    func effectiveChannelStatePreservingLiveMembership(
+        contactID: UUID,
+        existing: TurboChannelStateResponse?,
+        incoming: TurboChannelStateResponse
+    ) -> TurboChannelStateResponse {
+        guard let existing else { return incoming }
+        guard existing.channelId == incoming.channelId else { return incoming }
+
+        if shouldPreserveLiveChannelState(
+            contactID: contactID,
+            existing: existing,
+            incoming: incoming
+        ) {
+            return existing
+        }
+
+        let liveSessionActive =
+            shouldPreserveLocalSessionAfterChannelRefreshFailure(contactID: contactID)
+            || remoteTransmittingContactIDs.contains(contactID)
+        guard liveSessionActive else { return incoming }
+
+        let existingSessionReady =
+            existing.membership.hasLocalMembership
+            && existing.membership.hasPeerMembership
+            && (existing.membership.peerDeviceConnected || remoteTransmittingContactIDs.contains(contactID))
+        guard existingSessionReady else { return incoming }
+
+        let incomingDroppedOnlyPeerMembership =
+            incoming.membership.hasLocalMembership
+            && !incoming.membership.hasPeerMembership
+            && !incoming.membership.peerDeviceConnected
+        guard incomingDroppedOnlyPeerMembership else { return incoming }
+
+        let incomingLooksLikeActiveSessionReuse =
+            incoming.conversationStatus == .transmitting
+            || incoming.status == "connecting"
+            || incoming.status == ConversationState.waitingForPeer.rawValue
+        guard incomingLooksLikeActiveSessionReuse else { return incoming }
+
+        return incoming.settingMembership(existing.membership)
     }
 
     func runBackendSyncEffect(_ effect: BackendSyncEffect) async {
@@ -478,7 +667,7 @@ extension PTTViewModel {
         case .transmitStart, .transmitStop:
             if envelope.type == .transmitStart {
                 pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
-                markRemoteAudioActivity(for: contactID)
+                markRemoteAudioActivity(for: contactID, source: .transmitStartSignal)
                 if shouldTreatIncomingSignalAsWakeCandidate(for: contactID) {
                     ensurePendingWakeCandidate(
                         for: contactID,
@@ -581,10 +770,20 @@ extension PTTViewModel {
                 )
             }
             if let existing = channelReadinessByContactID[contactID] {
+                let updatedReadiness: TurboChannelReadinessResponse = {
+                    var next = existing.settingRemoteAudioReadiness(readiness)
+                    if envelope.type == .receiverNotReady,
+                       envelope.payload == "app-background-media-closed" {
+                        next = next.settingRemoteWakeCapability(
+                            .wakeCapable(targetDeviceId: envelope.fromDeviceId)
+                        )
+                    }
+                    return next
+                }()
                 backendSyncCoordinator.send(
                     .channelReadinessUpdated(
                         contactID: contactID,
-                        readiness: existing.settingRemoteAudioReadiness(readiness)
+                        readiness: updatedReadiness
                     )
                 )
             }
@@ -636,7 +835,7 @@ extension PTTViewModel {
                         senderDeviceId: envelope.fromDeviceId
                     )
                 }
-                markRemoteAudioActivity(for: contactID)
+                markRemoteAudioActivity(for: contactID, source: .audioChunk)
                 if selectedContactId == nil {
                     selectedContactId = contactID
                 }
@@ -767,6 +966,7 @@ extension PTTViewModel {
             let updates = nextSummaries.map { BackendContactSummaryUpdate(contactID: $0.key, summary: $0.value) }
             backendSyncCoordinator.send(.contactSummariesUpdated(updates))
             pruneContactsToAuthoritativeState()
+            _ = await resolveRestoredSystemSessionIfPossible(trigger: "contact-summaries")
             updateStatusForSelectedContact()
             captureDiagnosticsState("backend-sync:contact-summaries")
             await reconcileSelectedSessionIfNeeded()
@@ -800,19 +1000,26 @@ extension PTTViewModel {
             let channelState = try await channelStateTask
             let fetchedChannelReadiness = try? await channelReadinessTask
             let existingChannelState = backendSyncCoordinator.state.syncState.channelStates[contactID]
+            let effectiveChannelState = effectiveChannelStatePreservingLiveMembership(
+                contactID: contactID,
+                existing: existingChannelState,
+                incoming: channelState
+            )
+            await recoverRemoteTransmitStopFromChannelRefreshIfNeeded(
+                contactID: contactID,
+                existingChannelState: existingChannelState,
+                effectiveChannelState: effectiveChannelState
+            )
+            let existingSessionWasRoutable =
+                systemSessionMatches(contactID)
+                || (isJoined && activeChannelId == contactID)
             let effectiveChannelReadiness = mergedChannelReadinessPreservingWakeCapableFallback(
                 existing: channelReadinessByContactID[contactID],
                 fetched: fetchedChannelReadiness,
-                peerDeviceConnected: channelState.membership.peerDeviceConnected
+                peerDeviceConnected: effectiveChannelState.membership.peerDeviceConnected,
+                peerMembershipPresent: effectiveChannelState.membership.hasPeerMembership,
+                existingSessionWasRoutable: existingSessionWasRoutable
             )
-            let effectiveChannelState =
-                shouldPreserveLiveChannelState(
-                    contactID: contactID,
-                    existing: existingChannelState,
-                    incoming: channelState
-                )
-                ? existingChannelState ?? channelState
-                : channelState
             let localSessionEstablished =
                 systemSessionMatches(contactID)
                 || (isJoined && activeChannelId == contactID)
@@ -825,7 +1032,9 @@ extension PTTViewModel {
                 localSessionEstablished: localSessionEstablished,
                 localSessionCleared: localSessionCleared
             )
-            backendSyncCoordinator.send(.channelStateUpdated(contactID: contactID, channelState: channelState))
+            backendSyncCoordinator.send(
+                .channelStateUpdated(contactID: contactID, channelState: effectiveChannelState)
+            )
             if let effectiveChannelReadiness {
                 backendSyncCoordinator.send(
                     .channelReadinessUpdated(contactID: contactID, readiness: effectiveChannelReadiness)

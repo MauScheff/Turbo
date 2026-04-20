@@ -319,6 +319,79 @@ enum StartingTransmitStage: Equatable {
     case awaitingAudioConnection(mediaState: MediaConnectionState)
 }
 
+enum LocalTransmitProjection: Equatable {
+    case idle
+    case stopping
+    case releaseRequired
+    case starting(StartingTransmitStage)
+    case transmitting
+
+    var hasTransmitIntent: Bool {
+        switch self {
+        case .starting, .transmitting:
+            return true
+        case .idle, .stopping, .releaseRequired:
+            return false
+        }
+    }
+
+    var preservesConnectedSession: Bool {
+        switch self {
+        case .stopping, .starting, .transmitting:
+            return true
+        case .idle, .releaseRequired:
+            return false
+        }
+    }
+
+    var startingTransmitStage: StartingTransmitStage? {
+        guard case .starting(let stage) = self else { return nil }
+        return stage
+    }
+
+    static func legacy(
+        isTransmitting: Bool,
+        isStopping: Bool,
+        requiresFreshPress: Bool,
+        transmitPhase: TransmitDomainPhase,
+        systemIsTransmitting: Bool,
+        pttAudioSessionActive: Bool,
+        mediaState: MediaConnectionState
+    ) -> LocalTransmitProjection {
+        if isStopping {
+            return .stopping
+        }
+
+        if requiresFreshPress {
+            return .releaseRequired
+        }
+
+        guard isTransmitting else {
+            return .idle
+        }
+
+        if !systemIsTransmitting {
+            switch transmitPhase {
+            case .requesting:
+                return .starting(.requestingLease)
+            case .idle, .active, .stopping:
+                return .starting(.awaitingSystemTransmit)
+            }
+        }
+
+        guard pttAudioSessionActive else {
+            return .starting(.awaitingAudioSession)
+        }
+
+        switch mediaState {
+        case .connected:
+            return .transmitting
+        case .preparing, .idle, .closed, .failed:
+            return .starting(.awaitingAudioConnection(mediaState: mediaState))
+        }
+    }
+}
+
 enum LocalMediaWarmupState: Equatable {
     case cold
     case prewarming
@@ -535,6 +608,14 @@ struct ChannelReadinessSnapshot: Equatable {
             activeTransmitterUserId = channelState.statusView.activeTransmitterUserId
         }
     }
+
+    var remoteAudioReadyForLiveTransmit: Bool {
+        if remoteAudioReadiness == .ready {
+            return true
+        }
+
+        return membership.peerDeviceConnected && readinessStatus == .ready
+    }
 }
 
 enum LocalSessionReadiness: Equatable {
@@ -611,12 +692,7 @@ struct ConversationDerivationContext: Equatable {
     let contactName: String
     let contactIsOnline: Bool
     let isJoined: Bool
-    let localIsTransmitting: Bool
-    let localIsStopping: Bool
-    let localRequiresFreshPress: Bool
-    let localTransmitPhase: TransmitDomainPhase
-    let localSystemIsTransmitting: Bool
-    let localPTTAudioSessionActive: Bool
+    let localTransmit: LocalTransmitProjection
     let peerSignalIsTransmitting: Bool
     let activeChannelID: UUID?
     let systemSessionMatchesContact: Bool
@@ -626,6 +702,7 @@ struct ConversationDerivationContext: Equatable {
     let mediaState: MediaConnectionState
     let localMediaWarmupState: LocalMediaWarmupState
     let incomingWakeActivationState: IncomingWakeActivationState?
+    let hadConnectedSessionContinuity: Bool
     let channel: ChannelReadinessSnapshot?
 
     init(
@@ -635,6 +712,7 @@ struct ConversationDerivationContext: Equatable {
         contactName: String,
         contactIsOnline: Bool,
         isJoined: Bool,
+        localTransmit: LocalTransmitProjection? = nil,
         localIsTransmitting: Bool = false,
         localIsStopping: Bool = false,
         localRequiresFreshPress: Bool = false,
@@ -650,6 +728,7 @@ struct ConversationDerivationContext: Equatable {
         mediaState: MediaConnectionState = .idle,
         localMediaWarmupState: LocalMediaWarmupState = .cold,
         incomingWakeActivationState: IncomingWakeActivationState? = nil,
+        hadConnectedSessionContinuity: Bool = false,
         channel: ChannelReadinessSnapshot?
     ) {
         self.contactID = contactID
@@ -658,12 +737,15 @@ struct ConversationDerivationContext: Equatable {
         self.contactName = contactName
         self.contactIsOnline = contactIsOnline
         self.isJoined = isJoined
-        self.localIsTransmitting = localIsTransmitting
-        self.localIsStopping = localIsStopping
-        self.localRequiresFreshPress = localRequiresFreshPress
-        self.localTransmitPhase = localTransmitPhase
-        self.localSystemIsTransmitting = localSystemIsTransmitting
-        self.localPTTAudioSessionActive = localPTTAudioSessionActive
+        self.localTransmit = localTransmit ?? LocalTransmitProjection.legacy(
+            isTransmitting: localIsTransmitting,
+            isStopping: localIsStopping,
+            requiresFreshPress: localRequiresFreshPress,
+            transmitPhase: localTransmitPhase,
+            systemIsTransmitting: localSystemIsTransmitting,
+            pttAudioSessionActive: localPTTAudioSessionActive,
+            mediaState: mediaState
+        )
         self.peerSignalIsTransmitting = peerSignalIsTransmitting
         self.activeChannelID = activeChannelID
         self.systemSessionMatchesContact = systemSessionMatchesContact
@@ -673,6 +755,7 @@ struct ConversationDerivationContext: Equatable {
         self.mediaState = mediaState
         self.localMediaWarmupState = localMediaWarmupState
         self.incomingWakeActivationState = incomingWakeActivationState
+        self.hadConnectedSessionContinuity = hadConnectedSessionContinuity
         self.channel = channel
     }
 
@@ -683,6 +766,119 @@ struct ConversationDerivationContext: Equatable {
     var remoteWakeCapabilityState: RemoteWakeCapabilityState {
         channel?.remoteWakeCapability ?? .unavailable
     }
+
+    var localIsTransmitting: Bool {
+        localTransmit.hasTransmitIntent
+    }
+
+    var localIsStopping: Bool {
+        localTransmit == .stopping
+    }
+
+    var localRequiresFreshPress: Bool {
+        localTransmit == .releaseRequired
+    }
+
+    var explicitLeaveRequested: Bool {
+        switch pendingAction {
+        case .leave(.explicit(let contactID)):
+            return contactID == nil || contactID == self.contactID
+        case .none, .connect, .leave(.reconciledTeardown):
+            return false
+        }
+    }
+
+    var backendShowsConnectablePeerRecovery: Bool {
+        guard let channel else { return false }
+        if channel.membership.hasPeerMembership {
+            return true
+        }
+        return channel.canTransmit
+    }
+
+    var backendShowsWakeCapablePeerRecovery: Bool {
+        guard let channel else { return false }
+        guard !channel.membership.hasPeerMembership else { return false }
+        guard !channel.canTransmit else { return false }
+        if case .wakeCapable = channel.remoteWakeCapability {
+            return true
+        }
+        return false
+    }
+
+    var remoteAudioRecoveryAvailable: Bool {
+        switch remoteAudioReadinessState {
+        case .wakeCapable, .ready:
+            return true
+        case .unknown, .waiting:
+            return false
+        }
+    }
+
+    var pendingJoinIsStaleWithoutLocalSessionEvidence: Bool {
+        guard pendingAction.pendingJoinContactID == contactID else { return false }
+        guard localSessionReadiness == .none else { return false }
+        guard systemSessionState == .none else { return false }
+        guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness,
+              peerDeviceConnected,
+              readinessStatus == .ready else {
+            return false
+        }
+        return true
+    }
+
+    var backendReadyAutoRestoreAllowed: Bool {
+        if pendingAction.pendingJoinContactID == contactID {
+            return true
+        }
+        return hadConnectedSessionContinuity
+    }
+}
+
+enum DurableSessionProjection: Equatable {
+    case inactive
+    case transitioning
+    case connected
+    case blockedByOtherSession
+    case systemMismatch
+    case localJoinFailed(recoveryMessage: String)
+    case pendingJoin
+    case disconnecting
+
+    var localSessionPresent: Bool {
+        switch self {
+        case .transitioning, .connected, .disconnecting:
+            return true
+        case .inactive, .blockedByOtherSession, .systemMismatch, .localJoinFailed, .pendingJoin:
+            return false
+        }
+    }
+}
+
+enum ConnectedExecutionProjection: Equatable {
+    case wakeActivating
+    case wakeDeferredUntilForeground(message: String)
+    case stopping
+    case releaseRequired
+    case startingTransmit(StartingTransmitStage)
+    case transmitting
+}
+
+enum ConnectedControlPlaneProjection: Equatable {
+    case unavailable
+    case wakeReady
+    case waiting(reason: SelectedPeerWaitingReason, statusMessage: String)
+    case ready
+    case transmitting
+    case receiving
+}
+
+struct SelectedPeerProjection: Equatable {
+    let durableSession: DurableSessionProjection
+    let connectedExecution: ConnectedExecutionProjection?
+    let connectedControlPlane: ConnectedControlPlaneProjection
+    let selectedPeerState: SelectedPeerState
+    let reconciliationAction: SessionReconciliationAction
 }
 
 enum ConversationStateMachine {
@@ -731,8 +927,14 @@ enum ConversationStateMachine {
         for context: ConversationDerivationContext,
         relationship: PairRelationshipState
     ) -> SelectedPeerState {
+        projection(for: context, relationship: relationship).selectedPeerState
+    }
+
+    static func projection(
+        for context: ConversationDerivationContext,
+        relationship: PairRelationshipState
+    ) -> SelectedPeerProjection {
         let canTransmitNow = context.canTransmitNow
-        let leaveInFlight = context.pendingAction.isLeaveInFlight(for: context.contactID)
         let makeState: (SelectedPeerDetail, String, Bool) -> SelectedPeerState = { detail, statusMessage, canTransmitNow in
             SelectedPeerState(
                 contactID: context.contactID,
@@ -744,77 +946,133 @@ enum ConversationStateMachine {
             )
         }
 
-        switch context.systemSessionState {
-        case .active(let activeContactID, _) where activeContactID != context.contactID:
-            return makeState(.blockedByOtherSession, "Another session is active", false)
-        case .mismatched:
-            return makeState(.systemMismatch, "System session mismatch", false)
-        case .none, .active:
-            break
-        }
+        let durableSession = context.durableSessionProjection
+        let connectedExecution = context.connectedExecutionProjection
+        let connectedControlPlane = context.connectedControlPlaneProjection
+        let fallbackState: () -> SelectedPeerState = {
+            let localSessionActive = durableSession.localSessionPresent
 
-        if let localJoinFailure = context.localJoinFailure,
-           localJoinFailure.contactID == context.contactID,
-           localJoinFailure.reason.blocksAutomaticRestore {
-            return makeState(
-                .localJoinFailed(recoveryMessage: localJoinFailure.reason.recoveryMessage),
-                localJoinFailure.reason.recoveryMessage,
-                false
-            )
-        }
+            switch context.backendChannelReadiness {
+            case .peerOnly:
+                if !localSessionActive {
+                    return makeState(.peerReady, "\(context.contactName) is ready to connect", false)
+                }
+            case .selfOnly:
+                if localSessionActive,
+                   context.remoteAudioReadinessState == .wakeCapable,
+                   case .wakeCapable = context.remoteWakeCapabilityState {
+                    return makeState(.wakeReady, "Hold to talk to wake \(context.contactName)", false)
+                }
+                if localSessionActive
+                    || (
+                        context.backendChannelReadiness.hasLocalMembership
+                            && context.backendReadyAutoRestoreAllowed
+                    ) {
+                    return makeState(.waitingForPeer(reason: .backendSessionTransition), "Connecting...", false)
+                }
+            case .both:
+                if localSessionActive
+                    || (
+                        context.backendChannelReadiness.hasLocalMembership
+                            && context.backendReadyAutoRestoreAllowed
+                    ) {
+                    let reason: SelectedPeerWaitingReason =
+                        context.backendChannelReadiness.hasLocalMembership
+                        ? .peerReadyToConnect
+                        : .backendSessionTransition
+                    return makeState(.waitingForPeer(reason: reason), "Connecting...", false)
+                }
+            case .absent:
+                break
+            }
 
-        if context.pendingAction.pendingJoinContactID == context.contactID {
-            return makeState(.waitingForPeer(reason: .pendingJoin), "Connecting...", false)
-        }
-
-        let localSessionActive = context.localSessionReadiness != .none
-
-        if leaveInFlight && localSessionActive {
-            return makeState(.waitingForPeer(reason: .disconnecting), "Disconnecting...", false)
-        }
-
-        if let liveSessionState = liveSelectedSessionState(for: context) {
-            return makeState(liveSessionState.detail, liveSessionState.statusMessage, canTransmitNow)
-        }
-
-        switch context.backendChannelReadiness {
-        case .peerOnly:
-            if !localSessionActive {
+            // After backend resets or lagging summary refreshes, the backend can
+            // still report a durable channel status before membership fields are
+            // repopulated. Treat that as a connectable recovery state instead of
+            // falling all the way back to idle/requested.
+            if !localSessionActive,
+               context.channel?.readinessStatus == .waitingForSelf {
                 return makeState(.peerReady, "\(context.contactName) is ready to connect", false)
             }
-        case .selfOnly, .both:
-            if localSessionActive || context.backendChannelReadiness.hasLocalMembership {
-                let reason: SelectedPeerWaitingReason = context.backendChannelReadiness.hasLocalMembership ? .peerReadyToConnect : .backendSessionTransition
-                return makeState(.waitingForPeer(reason: reason), "Connecting...", false)
+
+            if let channelStatus = context.channel?.status,
+               context.backendShowsConnectablePeerRecovery
+                || (!localSessionActive && context.backendShowsWakeCapablePeerRecovery) {
+                switch channelStatus {
+                case .waitingForPeer, .ready, .transmitting, .receiving:
+                    if !localSessionActive {
+                        return makeState(.peerReady, "\(context.contactName) is ready to connect", false)
+                    }
+                    return makeState(.waitingForPeer(reason: .backendSessionTransition), "Connecting...", false)
+                case .idle, .requested, .incomingRequest:
+                    break
+                }
             }
-        case .absent:
-            break
+
+            if localSessionActive {
+                return makeState(.waitingForPeer(reason: .localSessionTransition), "Connecting...", false)
+            }
+
+            switch relationship {
+            case .incomingRequest, .mutualRequest:
+                return makeState(
+                    .incomingRequest(requestCount: relationship.requestCount ?? 1),
+                    "\(context.contactName) wants to talk",
+                    false
+                )
+            case .outgoingRequest:
+                return makeState(
+                    .requested(requestCount: relationship.requestCount ?? 1),
+                    "Requested \(context.contactName)",
+                    false
+                )
+            case .none:
+                return makeState(
+                    .idle(isOnline: context.contactIsOnline),
+                    context.contactIsOnline ? "\(context.contactName) is online" : "Ready to connect",
+                    false
+                )
+            }
         }
 
-        if localSessionActive {
-            return makeState(.waitingForPeer(reason: .localSessionTransition), "Connecting...", false)
-        }
+        let selectedPeerState: SelectedPeerState = {
+            switch durableSession {
+            case .blockedByOtherSession:
+                return makeState(.blockedByOtherSession, "Another session is active", false)
+            case .systemMismatch:
+                return makeState(.systemMismatch, "System session mismatch", false)
+            case .localJoinFailed(let recoveryMessage):
+                return makeState(
+                    .localJoinFailed(recoveryMessage: recoveryMessage),
+                    recoveryMessage,
+                    false
+                )
+            case .pendingJoin:
+                return makeState(.waitingForPeer(reason: .pendingJoin), "Connecting...", false)
+            case .disconnecting:
+                return makeState(.waitingForPeer(reason: .disconnecting), "Disconnecting...", false)
+            case .connected:
+                if let liveSessionState = connectedSelectedPeerState(
+                    contactName: context.contactName,
+                    connectedExecution: connectedExecution,
+                    connectedControlPlane: connectedControlPlane,
+                    durableSession: durableSession
+                ) {
+                    return makeState(liveSessionState.detail, liveSessionState.statusMessage, canTransmitNow)
+                }
+                return fallbackState()
+            case .inactive, .transitioning:
+                return fallbackState()
+            }
+        }()
 
-        switch relationship {
-        case .incomingRequest, .mutualRequest:
-            return makeState(
-                .incomingRequest(requestCount: relationship.requestCount ?? 1),
-                "\(context.contactName) wants to talk",
-                false
-            )
-        case .outgoingRequest:
-            return makeState(
-                .requested(requestCount: relationship.requestCount ?? 1),
-                "Requested \(context.contactName)",
-                false
-            )
-        case .none:
-            return makeState(
-                .idle(isOnline: context.contactIsOnline),
-                context.contactIsOnline ? "\(context.contactName) is online" : "Ready to connect",
-                false
-            )
-        }
+        return SelectedPeerProjection(
+            durableSession: durableSession,
+            connectedExecution: connectedExecution,
+            connectedControlPlane: connectedControlPlane,
+            selectedPeerState: selectedPeerState,
+            reconciliationAction: reconcileAction(for: context)
+        )
     }
 
     static func listConversationState(for summary: TurboContactSummaryResponse) -> ConversationState {
@@ -1025,11 +1283,18 @@ enum ConversationStateMachine {
     }
 
     static func reconciliationAction(for context: ConversationDerivationContext) -> SessionReconciliationAction {
+        reconcileAction(for: context)
+    }
+
+    private static func reconcileAction(
+        for context: ConversationDerivationContext
+    ) -> SessionReconciliationAction {
         guard context.selectedContactID == context.contactID else {
             return .none
         }
 
-        if context.pendingAction.pendingJoinContactID == context.contactID {
+        if context.pendingAction.pendingJoinContactID == context.contactID,
+           !context.pendingJoinIsStaleWithoutLocalSessionEvidence {
             return .none
         }
 
@@ -1043,24 +1308,18 @@ enum ConversationStateMachine {
             return .none
         }
 
-        let explicitLeaveRequested: Bool
-        switch context.pendingAction {
-        case .leave(.explicit(let contactID)):
-            explicitLeaveRequested = contactID == nil || contactID == context.contactID
-        case .none, .connect, .leave(.reconciledTeardown):
-            explicitLeaveRequested = false
-        }
+        let explicitLeaveRequested = context.explicitLeaveRequested
 
-        switch context.systemSessionState {
-        case .mismatched:
+        switch context.durableSessionProjection {
+        case .systemMismatch:
             return .teardownSelectedSession(contactID: context.contactID)
-        case .none, .active:
+        case .inactive, .transitioning, .connected, .blockedByOtherSession, .localJoinFailed, .pendingJoin, .disconnecting:
             break
         }
 
-        let localSessionActive = context.localSessionReadiness != .none
+        let localSessionActive = context.durableSessionProjection.localSessionPresent
 
-        if (context.localIsTransmitting || context.localIsStopping) && localSessionActive {
+        if context.localTransmit.preservesConnectedSession && localSessionActive {
             return .none
         }
 
@@ -1070,34 +1329,48 @@ enum ConversationStateMachine {
             return .teardownSelectedSession(contactID: context.contactID)
         }
 
+        let wakeRecoveryInFlight: Bool = {
+            switch context.incomingWakeActivationState {
+            case .signalBuffered, .awaitingSystemActivation, .appManagedFallback, .systemActivated:
+                return context.systemSessionMatchesContact
+            case .systemActivationTimedOutWaitingForForeground, .systemActivationInterruptedByTransmitEnd, .none:
+                return false
+            }
+        }()
+
+        if wakeRecoveryInFlight && localSessionActive {
+            return .none
+        }
+
         switch context.backendChannelReadiness {
         case .absent:
-            return localSessionActive ? .teardownSelectedSession(contactID: context.contactID) : .none
+            if localSessionActive,
+               context.channel != nil,
+               !context.backendShowsConnectablePeerRecovery,
+               !context.remoteAudioRecoveryAvailable,
+               !context.peerSignalIsTransmitting,
+               !explicitLeaveRequested {
+                return .teardownSelectedSession(contactID: context.contactID)
+            }
+            return .none
         case .peerOnly, .selfOnly, .both:
             break
         }
 
         let localRestoreInFlight =
             context.localSessionReadiness != .none
-            || context.pendingAction.pendingJoinContactID == context.contactID
+            || (
+                context.pendingAction.pendingJoinContactID == context.contactID
+                    && !context.pendingJoinIsStaleWithoutLocalSessionEvidence
+            )
 
         if case .both(let peerDeviceConnected, _, _) = context.backendChannelReadiness,
            peerDeviceConnected,
            context.localSessionReadiness != .aligned,
            !localRestoreInFlight,
+           context.backendReadyAutoRestoreAllowed,
            !explicitLeaveRequested {
             return .restoreLocalSession(contactID: context.contactID)
-        }
-
-        if !context.backendChannelReadiness.hasLocalMembership && localSessionActive {
-            let backendSessionClearlyGone =
-                !context.backendChannelReadiness.hasPeerMembership
-                && context.backendChannelReadiness.peerDeviceConnected == false
-                && context.backendChannelReadiness.readinessStatus?.isPeerTransmitting != true
-
-            if backendSessionClearlyGone {
-                return .teardownSelectedSession(contactID: context.contactID)
-            }
         }
 
         return .none
@@ -1105,171 +1378,281 @@ enum ConversationStateMachine {
 }
 
 private extension ConversationStateMachine {
-    static func liveSelectedSessionState(
-        for context: ConversationDerivationContext
+    static func connectedSelectedPeerState(
+        contactName: String,
+        connectedExecution: ConnectedExecutionProjection?,
+        connectedControlPlane: ConnectedControlPlaneProjection,
+        durableSession: DurableSessionProjection
     ) -> (detail: SelectedPeerDetail, statusMessage: String)? {
-        guard context.localSessionReadiness == .aligned,
-              case .both(let peerDeviceConnected, let canTransmit, let readinessStatus) = context.backendChannelReadiness,
-              let readinessStatus else {
+        guard durableSession == .connected else {
             return nil
         }
 
-        let effectivePeerDeviceConnected =
-            peerDeviceConnected
-            || context.remoteAudioReadinessState == .ready
-            || context.peerSignalIsTransmitting
-            || readinessStatus.isTransmitActive
-            || readinessStatus == .ready
-
-        let sessionTransmitReady = effectivePeerDeviceConnected
-
-        if let incomingWakeActivationState = context.incomingWakeActivationState {
-            switch incomingWakeActivationState {
-            case .signalBuffered, .awaitingSystemActivation:
+        if let executionProjection = connectedExecution {
+            switch executionProjection {
+            case .wakeActivating:
                 return (
                     .waitingForPeer(reason: .systemWakeActivation),
                     "Waiting for system audio activation..."
                 )
-            case .systemActivationTimedOutWaitingForForeground:
+            case .wakeDeferredUntilForeground(let message):
                 return (
                     .waitingForPeer(reason: .wakePlaybackDeferredUntilForeground),
-                    "Wake received, but system audio never activated. Unlock to resume audio."
+                    message
+                )
+            case .stopping:
+                return (
+                    .waitingForPeer(reason: .localSessionTransition),
+                    "Stopping..."
+                )
+            case .releaseRequired:
+                return (
+                    .waitingForPeer(reason: .releaseRequiredAfterInterruptedTransmit),
+                    "Release and press again."
+                )
+            case .startingTransmit(let stage):
+                switch stage {
+                case .requestingLease:
+                    return (.startingTransmit(stage: stage), "Requesting transmit...")
+                case .awaitingSystemTransmit:
+                    return (.startingTransmit(stage: stage), "Waking \(contactName)...")
+                case .awaitingAudioSession:
+                    return (.startingTransmit(stage: stage), "Waiting for microphone...")
+                case .awaitingAudioConnection(let mediaState):
+                    switch mediaState {
+                    case .failed:
+                        return (.startingTransmit(stage: stage), "Audio unavailable")
+                    case .preparing, .idle, .closed:
+                        return (.startingTransmit(stage: stage), "Establishing audio...")
+                    case .connected:
+                        return (.transmitting, "Talking to \(contactName)")
+                    }
+                }
+            case .transmitting:
+                return (.transmitting, "Talking to \(contactName)")
+            }
+        }
+
+        switch connectedControlPlane {
+        case .unavailable:
+            return nil
+        case .wakeReady:
+            return (.wakeReady, "Hold to talk to wake \(contactName)")
+        case .waiting(let reason, let statusMessage):
+            return (.waitingForPeer(reason: reason), statusMessage)
+        case .ready:
+            return (.ready, "Connected")
+        case .transmitting:
+            return (.transmitting, "Talking to \(contactName)")
+        case .receiving:
+            return (.receiving, "\(contactName) is talking")
+        }
+    }
+}
+
+private extension ConversationDerivationContext {
+    var durableSessionProjection: DurableSessionProjection {
+        switch systemSessionState {
+        case .active(let activeContactID, _) where activeContactID != contactID:
+            return .blockedByOtherSession
+        case .mismatched:
+            return .systemMismatch
+        case .none, .active:
+            break
+        }
+
+        if let localJoinFailure,
+           localJoinFailure.contactID == contactID,
+           localJoinFailure.reason.blocksAutomaticRestore {
+            return .localJoinFailed(recoveryMessage: localJoinFailure.reason.recoveryMessage)
+        }
+
+        if pendingAction.pendingJoinContactID == contactID {
+            return .pendingJoin
+        }
+
+        if pendingAction.isLeaveInFlight(for: contactID) {
+            return .disconnecting
+        }
+
+        switch localSessionReadiness {
+        case .none:
+            return .inactive
+        case .partial:
+            return .transitioning
+        case .aligned:
+            return .connected
+        }
+    }
+
+    var connectedExecutionProjection: ConnectedExecutionProjection? {
+        guard durableSessionProjection == .connected else { return nil }
+
+        if let incomingWakeActivationState {
+            switch incomingWakeActivationState {
+            case .signalBuffered, .awaitingSystemActivation:
+                return .wakeActivating
+            case .systemActivationTimedOutWaitingForForeground:
+                return .wakeDeferredUntilForeground(
+                    message: "Wake received, but system audio never activated. Unlock to resume audio."
                 )
             case .systemActivationInterruptedByTransmitEnd:
-                return (
-                    .waitingForPeer(reason: .wakePlaybackDeferredUntilForeground),
-                    "Wake ended before system audio activated."
+                return .wakeDeferredUntilForeground(
+                    message: "Wake ended before system audio activated."
                 )
             case .appManagedFallback, .systemActivated:
                 break
             }
         }
 
-        if context.localIsStopping {
-            return (
-                .waitingForPeer(reason: .localSessionTransition),
-                "Stopping..."
-            )
+        if localIsStopping {
+            return .stopping
         }
 
-        if context.localRequiresFreshPress {
-            return (
-                .waitingForPeer(reason: .releaseRequiredAfterInterruptedTransmit),
-                "Release and press again."
-            )
+        if localRequiresFreshPress {
+            return .releaseRequired
         }
 
-        if sessionTransmitReady && context.localIsTransmitting {
-            if let stage = context.startingTransmitStage {
-                switch stage {
-                case .requestingLease:
-                    return (.startingTransmit(stage: stage), "Requesting transmit...")
-                case .awaitingSystemTransmit:
-                    return (.startingTransmit(stage: stage), "Waking \(context.contactName)...")
-                case .awaitingAudioSession:
-                    return (.startingTransmit(stage: stage), "Waiting for microphone...")
-                case .awaitingAudioConnection(let mediaState):
-                    switch mediaState {
-                    case .failed:
-                        return (.startingTransmit(stage: stage), "Audio unavailable")
-                    case .preparing, .idle, .closed:
-                        return (.startingTransmit(stage: stage), "Establishing audio...")
-                    case .connected:
-                        break
-                    }
-                }
+        switch localTransmit {
+        case .starting(let stage):
+            return .startingTransmit(stage)
+        case .transmitting:
+            return .transmitting
+        case .idle, .stopping, .releaseRequired:
+            break
+        }
+
+        return nil
+    }
+
+    var connectedControlPlaneProjection: ConnectedControlPlaneProjection {
+        guard durableSessionProjection == .connected,
+              case .both(let peerDeviceConnected, let canTransmit, let readinessStatus) = backendChannelReadiness,
+              let readinessStatus else {
+            return .unavailable
+        }
+
+        let shouldPreferWakeReadyDespiteStalePeerConnectivity: Bool = {
+            guard case .wakeCapable = remoteWakeCapabilityState,
+                  !canTransmit else {
+                return false
             }
-            return (.transmitting, "Talking to \(context.contactName)")
+
+            switch readinessStatus {
+            case .waitingForSelf, .waitingForPeer:
+                switch remoteAudioReadinessState {
+                case .wakeCapable, .unknown:
+                    return true
+                case .ready, .waiting:
+                    return false
+                }
+            case .ready, .selfTransmitting, .peerTransmitting, .unknown:
+                return false
+            }
+        }()
+
+        let effectivePeerDeviceConnected =
+            peerDeviceConnected
+            || remoteAudioReadinessState == .ready
+            || peerSignalIsTransmitting
+            || readinessStatus.isTransmitActive
+            || readinessStatus == .ready
+
+        let sessionTransmitReady = effectivePeerDeviceConnected
+        let backendAuthoritativeRemoteAudioReady =
+            peerDeviceConnected
+            && readinessStatus == .ready
+
+        if sessionTransmitReady && peerSignalIsTransmitting {
+            return .receiving
         }
 
-        if sessionTransmitReady && context.peerSignalIsTransmitting {
-            return (.receiving, "\(context.contactName) is talking")
+        if shouldPreferWakeReadyDespiteStalePeerConnectivity {
+            return .wakeReady
         }
 
         if sessionTransmitReady && canTransmit {
-            switch context.remoteAudioReadinessState {
+            switch remoteAudioReadinessState {
             case .wakeCapable:
-                if case .wakeCapable = context.remoteWakeCapabilityState {
-                    return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+                if !peerDeviceConnected,
+                   case .wakeCapable = remoteWakeCapabilityState {
+                    return .wakeReady
                 }
             case .ready, .waiting, .unknown:
                 break
             }
-            switch context.localMediaWarmupState {
+
+            switch localMediaWarmupState {
             case .cold, .prewarming:
-                return (.waitingForPeer(reason: .localAudioPrewarm), "Preparing audio...")
+                return .waiting(reason: .localAudioPrewarm, statusMessage: "Preparing audio...")
             case .failed:
-                return (.waitingForPeer(reason: .localAudioPrewarm), "Audio unavailable")
+                return .waiting(reason: .localAudioPrewarm, statusMessage: "Audio unavailable")
             case .ready:
                 break
             }
-            switch context.remoteAudioReadinessState {
+
+            switch remoteAudioReadinessState {
             case .ready:
                 break
             case .wakeCapable:
-                if case .wakeCapable = context.remoteWakeCapabilityState {
-                    return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+                if backendAuthoritativeRemoteAudioReady {
+                    break
                 }
-                return (.waitingForPeer(reason: .remoteAudioPrewarm), "Waiting for \(context.contactName)'s audio...")
-            case .waiting, .unknown:
                 if !peerDeviceConnected,
-                   case .wakeCapable = context.remoteWakeCapabilityState {
-                    return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+                   case .wakeCapable = remoteWakeCapabilityState {
+                    return .wakeReady
                 }
-                return (.waitingForPeer(reason: .remoteAudioPrewarm), "Waiting for \(context.contactName)'s audio...")
+                return .waiting(
+                    reason: .remoteAudioPrewarm,
+                    statusMessage: "Waiting for \(contactName)'s audio..."
+                )
+            case .waiting, .unknown:
+                if backendAuthoritativeRemoteAudioReady {
+                    break
+                }
+                if !peerDeviceConnected,
+                   case .wakeCapable = remoteWakeCapabilityState {
+                    return .wakeReady
+                }
+                return .waiting(
+                    reason: .remoteAudioPrewarm,
+                    statusMessage: "Waiting for \(contactName)'s audio..."
+                )
             }
         }
 
         if !effectivePeerDeviceConnected {
-            switch context.remoteWakeCapabilityState {
+            switch remoteWakeCapabilityState {
             case .wakeCapable:
-                return (.wakeReady, "Hold to talk to wake \(context.contactName)")
+                return .wakeReady
             case .unavailable:
-                return (.waitingForPeer(reason: .remoteWakeUnavailable), "Waiting for \(context.contactName) to reconnect")
+                return .waiting(
+                    reason: .remoteWakeUnavailable,
+                    statusMessage: "Waiting for \(contactName) to reconnect"
+                )
             }
         }
 
         switch readinessStatus {
         case .peerTransmitting:
             guard sessionTransmitReady else {
-                return (.waitingForPeer(reason: .backendSessionTransition), "Establishing connection...")
+                return .waiting(reason: .backendSessionTransition, statusMessage: "Establishing connection...")
             }
-            return (.receiving, "\(context.contactName) is talking")
+            return .receiving
         case .selfTransmitting:
             guard sessionTransmitReady else {
-                return (.waitingForPeer(reason: .backendSessionTransition), "Establishing connection...")
+                return .waiting(reason: .backendSessionTransition, statusMessage: "Establishing connection...")
             }
-            if let stage = context.startingTransmitStage {
-                switch stage {
-                case .requestingLease:
-                    return (.startingTransmit(stage: stage), "Requesting transmit...")
-                case .awaitingSystemTransmit:
-                    return (.startingTransmit(stage: stage), "Waking \(context.contactName)...")
-                case .awaitingAudioSession:
-                    return (.startingTransmit(stage: stage), "Waiting for microphone...")
-                case .awaitingAudioConnection(let mediaState):
-                    switch mediaState {
-                    case .failed:
-                        return (.startingTransmit(stage: stage), "Audio unavailable")
-                    case .preparing, .idle, .closed:
-                        return (.startingTransmit(stage: stage), "Establishing audio...")
-                    case .connected:
-                        break
-                    }
-                }
-            }
-            return (.transmitting, "Talking to \(context.contactName)")
+            return .transmitting
         case .ready where canTransmit:
-            return (.ready, "Connected")
+            return .ready
         case .waitingForSelf, .waitingForPeer, .ready:
-            return (.waitingForPeer(reason: .backendSessionTransition), "Establishing connection...")
+            return .waiting(reason: .backendSessionTransition, statusMessage: "Establishing connection...")
         case .unknown:
-            return nil
+            return .unavailable
         }
     }
-}
 
-private extension ConversationDerivationContext {
     var effectivePeerDeviceConnectedForTransmit: Bool {
         guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness else {
             return false
@@ -1327,39 +1710,30 @@ private extension ConversationDerivationContext {
     var canTransmitNow: Bool {
         guard selectedContactID == contactID,
               localSessionReadiness == .aligned,
+              localTransmit == .idle,
               case .both(_, let canTransmit, _) = backendChannelReadiness,
               effectivePeerDeviceConnectedForTransmit else {
             return false
         }
         return canTransmit
             && localMediaWarmupState == .ready
-            && remoteAudioReadinessState == .ready
+            && remoteAudioReadyForTransmit
+    }
+
+    var remoteAudioReadyForTransmit: Bool {
+        if remoteAudioReadinessState == .ready {
+            return true
+        }
+
+        guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness else {
+            return false
+        }
+
+        return peerDeviceConnected && readinessStatus == .ready
     }
 
     var startingTransmitStage: StartingTransmitStage? {
-        guard localIsTransmitting else { return nil }
-
-        if !localSystemIsTransmitting {
-            switch localTransmitPhase {
-            case .requesting:
-                return .requestingLease
-            case .active:
-                return .awaitingSystemTransmit
-            case .idle, .stopping:
-                return .awaitingSystemTransmit
-            }
-        }
-
-        guard localPTTAudioSessionActive else {
-            return .awaitingAudioSession
-        }
-
-        switch mediaState {
-        case .connected:
-            return nil
-        case .preparing, .idle, .closed, .failed:
-            return .awaitingAudioConnection(mediaState: mediaState)
-        }
+        localTransmit.startingTransmitStage
     }
 }
 

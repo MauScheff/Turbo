@@ -11,8 +11,21 @@ import AVFAudio
 import UIKit
 
 extension PTTViewModel {
+    func resolvedSystemSessionContactID() -> UUID? {
+        if let activeContactID = pttCoordinator.state.activeContactID {
+            return activeContactID
+        }
+        guard let systemChannelUUID = pttCoordinator.state.systemChannelUUID else { return nil }
+        return contactId(for: systemChannelUUID)
+    }
+
+    func resolvedSystemSessionBackendChannelID() -> String? {
+        guard let contactID = resolvedSystemSessionContactID() else { return nil }
+        return contacts.first(where: { $0.id == contactID })?.backendChannelId
+    }
+
     private var shouldArmWakeFlowForIncomingPush: Bool {
-        UIApplication.shared.applicationState != .active
+        currentApplicationState() != .active
     }
 
     var pttSystemCallbacks: PTTSystemClientCallbacks {
@@ -75,9 +88,7 @@ extension PTTViewModel {
 
     func handleReceivedEphemeralPushToken(_ token: Data) {
         let tokenHex = PTTSystemDisplayPolicy.pushTokenHex(from: token)
-        let backendChannelID = activeChannelId.flatMap { activeContactID in
-            contacts.first(where: { $0.id == activeContactID })?.backendChannelId
-        }
+        let backendChannelID = resolvedSystemSessionBackendChannelID()
         pushTokenHex = tokenHex
         diagnostics.record(
             .pushToTalk,
@@ -95,6 +106,68 @@ extension PTTViewModel {
             )
             syncPTTSystemPolicyState()
             captureDiagnosticsState("ptt-callback:token")
+        }
+    }
+
+    @discardableResult
+    func resolveRestoredSystemSessionIfPossible(trigger: String) async -> UUID? {
+        guard case .mismatched(let channelUUID) = pttCoordinator.state.systemSessionState else {
+            return nil
+        }
+        guard let contactID = contactId(for: channelUUID),
+              let contact = contacts.first(where: { $0.id == contactID }) else {
+            return nil
+        }
+
+        pttCoordinator.send(.restoredChannel(channelUUID: channelUUID, contactID: contactID))
+        syncPTTState()
+        diagnostics.record(
+            .pushToTalk,
+            message: "Resolved restored PTT channel contact",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "contactId": contactID.uuidString,
+                "handle": contact.handle,
+                "trigger": trigger,
+            ]
+        )
+        syncPTTSystemChannelDescriptor(channelUUID, reason: "resolved-restored-channel")
+        syncPTTServiceStatus(reason: "resolved-restored-channel")
+        if let backendChannelID = contact.backendChannelId {
+            await pttSystemPolicyCoordinator.handle(.backendChannelReady(backendChannelID))
+            syncPTTSystemPolicyState()
+        }
+        await prewarmLocalMediaIfNeeded(for: contactID)
+        captureDiagnosticsState("ptt-callback:restored-resolved")
+        return contactID
+    }
+
+    func refreshWebSocketForIncomingPTTPushIfNeeded(
+        backendServices: BackendServices,
+        contactID: UUID,
+        channelUUID: UUID,
+        payload: TurboPTTPushPayload
+    ) {
+        guard backendServices.supportsWebSocket else { return }
+        let shouldForceReconnect =
+            shouldArmWakeFlowForIncomingPush
+            && backendServices.isWebSocketConnected
+        diagnostics.record(
+            .websocket,
+            message: shouldForceReconnect
+                ? "Refreshing WebSocket for incoming PTT push"
+                : "Resuming WebSocket for incoming PTT push",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelUUID": channelUUID.uuidString,
+                "event": payload.event.rawValue,
+                "forceReconnect": String(shouldForceReconnect),
+            ]
+        )
+        if shouldForceReconnect {
+            backendServices.forceReconnectWebSocket()
+        } else {
+            backendServices.resumeWebSocket()
         }
     }
 
@@ -166,7 +239,7 @@ extension PTTViewModel {
         switch payload.event {
         case .transmitStart:
             pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
-            markRemoteAudioActivity(for: contactID)
+            markRemoteAudioActivity(for: contactID, source: .incomingPush)
             if shouldArmWakeFlowForIncomingPush {
                 if pttWakeRuntime.hasPendingWake(for: contactID) {
                     pttWakeRuntime.confirmIncomingPush(for: channelUUID, payload: payload)
@@ -233,6 +306,15 @@ extension PTTViewModel {
         captureDiagnosticsState("ptt-callback:incoming-push")
 
         if shouldArmWakeFlowForIncomingPush {
+            if let backendServices,
+               backendServices.supportsWebSocket {
+                refreshWebSocketForIncomingPTTPushIfNeeded(
+                    backendServices: backendServices,
+                    contactID: contactID,
+                    channelUUID: channelUUID,
+                    payload: payload
+                )
+            }
             diagnostics.record(
                 .pushToTalk,
                 message: "Deferring incoming-push backend sync until PTT audio activation",
@@ -435,6 +517,7 @@ extension PTTViewModel {
             let matchingActiveTarget = activeTransmitTarget(for: channelUUID)
             let hasPendingLifecycle = hasPendingTransmitLifecycle(for: channelUUID)
             let transmitDurationMilliseconds = transmitRuntime.currentSystemTransmitDurationMilliseconds()
+            let applicationState = currentApplicationState()
             await pttCoordinator.handle(
                 .didEndTransmitting(
                     channelUUID: channelUUID,
@@ -453,7 +536,7 @@ extension PTTViewModel {
                     "hasMatchingActiveTarget": String(matchingActiveTarget != nil),
                     "hasPendingLifecycle": String(hasPendingLifecycle),
                     "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
-                    "applicationState": String(describing: UIApplication.shared.applicationState),
+                    "applicationState": String(describing: applicationState),
                     "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
                     "activeContactId": matchingActiveTarget?.contactID.uuidString ?? "none",
                     "activeChannelId": matchingActiveTarget?.channelID ?? "none",
@@ -464,13 +547,29 @@ extension PTTViewModel {
                     "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
                 ]
             )
-            if !transmitRuntime.explicitStopRequested,
-               matchingActiveTarget != nil,
-               transmitRuntime.isPressingTalk {
-                transmitRuntime.markUnexpectedSystemEndRequiresRelease(
-                    contactID: matchingActiveTarget?.contactID
+            switch transmitRuntime.handleSystemTransmitEnded(
+                applicationStateIsActive: applicationState == .active,
+                matchingActiveTarget: matchingActiveTarget
+            ) {
+            case .implicitRelease:
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Treating background system transmit end as implicit release",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "source": source,
+                        "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
+                        "applicationState": String(describing: applicationState),
+                        "activeContactId": matchingActiveTarget?.contactID.uuidString ?? "none",
+                        "activeChannelId": matchingActiveTarget?.channelID ?? "none",
+                        "pttServiceStatus": lastReportedPTTServiceStatus.map(String.init(describing:)) ?? "none",
+                        "pttServiceStatusReason": lastReportedPTTServiceStatusReason ?? "none",
+                        "pttDescriptorName": lastReportedPTTDescriptorName ?? "none",
+                        "pttDescriptorReason": lastReportedPTTDescriptorReason ?? "none",
+                        "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
+                    ]
                 )
-                transmitRuntime.syncActiveTarget(matchingActiveTarget)
+            case .requireFreshPress:
                 diagnostics.record(
                     .pushToTalk,
                     message: "Unexpected system transmit end requires fresh press",
@@ -478,7 +577,7 @@ extension PTTViewModel {
                         "channelUUID": channelUUID.uuidString,
                         "source": source,
                         "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
-                        "applicationState": String(describing: UIApplication.shared.applicationState),
+                        "applicationState": String(describing: applicationState),
                         "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
                         "activeContactId": matchingActiveTarget?.contactID.uuidString ?? "none",
                         "activeChannelId": matchingActiveTarget?.channelID ?? "none",
@@ -490,13 +589,13 @@ extension PTTViewModel {
                     ]
                 )
                 syncTransmitState()
+            case .none:
+                break
             }
             if hasPendingLifecycle {
                 await transmitCoordinator.handle(.systemEnded)
                 syncTransmitState()
             }
-            transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
-            transmitRuntime.noteSystemTransmitEnded()
             captureDiagnosticsState("ptt-callback:transmit-ended")
         }
     }
@@ -579,6 +678,10 @@ extension PTTViewModel {
         syncPTTServiceStatus(reason: "restored-channel")
         if let contactID {
             Task {
+                if let backendChannelID = contacts.first(where: { $0.id == contactID })?.backendChannelId {
+                    await pttSystemPolicyCoordinator.handle(.backendChannelReady(backendChannelID))
+                    syncPTTSystemPolicyState()
+                }
                 await prewarmLocalMediaIfNeeded(for: contactID)
             }
         }

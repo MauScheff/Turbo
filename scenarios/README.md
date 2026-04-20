@@ -30,6 +30,8 @@ For the repo-wide workflow and architectural intent behind these scenarios, read
   - fresh-contact projection regression: opening a peer before any direct channel exists must still surface backend presence correctly, so the selected peer shows online instead of offline
 - `foreground-ptt`
   - canonical foreground control-plane path: both peers open, converge to `ready`, then each side transmits once and returns to `ready`
+- `background_wake_refresh_stability`
+  - one ready peer backgrounds and publishes `receiver-not-ready(app-background-media-closed)`; the foreground peer must degrade to `wakeReady`, and explicit refresh/reconcile must preserve that wake-capable state instead of regressing to `waitingForPeer`
 - `peer_disconnect_before_second_join`
   - recipient accepts and joins first, then disconnects before the requester finishes the second join; both sides must converge back to idle without a stuck half-session
 - `request_accept_ready`
@@ -40,6 +42,8 @@ For the repo-wide workflow and architectural intent behind these scenarios, read
   - ready session torn down by the receiver without a transmit step
 - `request_accept_ready_refresh_stability`
   - both peers reach `ready`, then explicit summary/invite/channel refresh plus reconciliation must preserve the ready session instead of tearing it down
+- `request_accept_ready_receiver_ready_gate`
+  - delays the first `receiver-ready` delivery on both sides during the final join so the handshake must remain in `waitingForPeer` until backend/audio readiness really converges instead of drifting to `ready`, `wakeReady`, or optimistic hold-to-talk too early
 - `request_accept_ready_peer_transmit`
   - ready session where the recipient becomes the transmitter, then returns to `ready` and disconnects cleanly; this used to be a disabled regression and is now part of the default suite
 - `duplicate_connect_request_deduplicates`
@@ -105,6 +109,8 @@ Scenarios should increasingly assert typed machine projections instead of only s
   - every checked-in `scenarios/*.json` file runs automatically in sorted order
 - `just simulator-scenario-merge`
   - merges the latest exact-device diagnostics for `sim-scenario-avery` and `sim-scenario-blake`
+- `just simulator-scenario-merge-strict`
+  - runs the same merge read, but exits non-zero if invariant violations are present
 
 The scenario DSL supports both user-intent actions and control-plane forcing actions such as refreshes, waits, presence heartbeats, direct-channel establishment, websocket disconnect/reconnect, backend reconnect, and `restartApp`. Each action can also opt into deterministic fault scheduling with:
 
@@ -204,6 +210,8 @@ The hosted smoke subset is intentionally narrower than the local suite. Keep tra
 
 ## Scenario Diagnostics
 
-Scenario runs publish explicit diagnostics artifacts after the scenario completes. Those artifacts are what `just simulator-scenario-merge` and exact-device verification are meant to read back.
+Scenario runs publish explicit diagnostics artifacts after the scenario completes. Those artifacts are what `just simulator-scenario-merge`, `just simulator-scenario-merge-strict`, and exact-device verification are meant to read back.
 
 Normal debug builds may also auto-publish diagnostics during development, but simulator scenario view models disable that automatic publishing so the scenario-tagged artifact remains the authoritative write for the scenario lane.
+
+The merged diagnostics analyzer now reads explicit `INVARIANT VIOLATIONS` transcript sections, derives additional pair-level rules, and supports `--json` plus `--fail-on-violations` for agent and automation workflows.

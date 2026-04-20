@@ -10,11 +10,23 @@ import PushToTalk
 import AVFAudio
 import UIKit
 
+private actor OutgoingAudioInitialSendGate {
+    private var shouldAwaitInitialRemoteReady = true
+
+    func takeShouldAwaitInitialRemoteReady() -> Bool {
+        guard shouldAwaitInitialRemoteReady else { return false }
+        shouldAwaitInitialRemoteReady = false
+        return true
+    }
+}
+
 extension PTTViewModel {
     private var wakePlaybackFallbackDelayNanoseconds: UInt64 { 3_500_000_000 }
     private var mediaSessionRetryCooldown: TimeInterval { 0.75 }
     private var deferredInteractivePrewarmRecoveryDelayNanoseconds: UInt64 { 500_000_000 }
     private var transmitLeaseRenewIntervalNanoseconds: UInt64 { 1_000_000_000 }
+    private var remoteReceiverAudioReadyGateTimeoutNanoseconds: UInt64 { 3_500_000_000 }
+    private var remoteReceiverAudioReadyGatePollNanoseconds: UInt64 { 50_000_000 }
 
     func shouldUseAppManagedWakePlaybackFallback(
         applicationState: UIApplication.State
@@ -59,131 +71,82 @@ extension PTTViewModel {
     }
 
     func desiredLocalReceiverAudioReadiness(for contactID: UUID) -> Bool {
-        guard isJoined, activeChannelId == contactID else { return false }
-        guard systemSessionMatches(contactID) else { return false }
-        guard !isTransmitting else { return false }
-        guard !transmitDomainSnapshot.hasTransmitIntent(for: contactID) else { return false }
+        let projection = selectedPeerProjection(for: contactID)
+        guard projection.durableSession == .connected else { return false }
+        guard projection.connectedExecution == nil else { return false }
         guard mediaSessionContactID == contactID else { return false }
         guard mediaConnectionState == .connected else { return false }
-        guard let channel = selectedChannelSnapshot(for: contactID),
-              channel.membership.hasLocalMembership else {
-            return false
-        }
         return true
     }
 
     func peerIsRoutableForReceiverAudioReadiness(for contactID: UUID) -> Bool {
         guard let channel = selectedChannelSnapshot(for: contactID) else { return false }
-        return channel.membership.hasPeerMembership
+        if channel.membership.hasPeerMembership {
+            return true
+        }
+
+        if channel.membership.peerDeviceConnected {
+            return true
+        }
+
+        guard systemSessionMatches(contactID) else { return false }
+
+        if remoteTransmittingContactIDs.contains(contactID) {
+            return true
+        }
+
+        switch pttWakeRuntime.incomingWakeActivationState(for: contactID) {
+        case .signalBuffered, .awaitingSystemActivation, .appManagedFallback, .systemActivated:
+            return true
+        case .systemActivationTimedOutWaitingForForeground,
+             .systemActivationInterruptedByTransmitEnd,
+             .none:
+            return false
+        }
+    }
+
+    func shouldReassertBackendJoinAfterWake(for contactID: UUID) -> Bool {
+        guard backendServices != nil else { return false }
+        guard let contact = contacts.first(where: { $0.id == contactID }) else { return false }
+        guard contact.backendChannelId != nil, contact.remoteUserId != nil else { return false }
+        guard let channel = selectedChannelSnapshot(for: contactID) else { return false }
+        guard !channel.membership.hasLocalMembership else { return false }
+        return systemSessionMatches(contactID) || (isJoined && activeChannelId == contactID)
+    }
+
+    @discardableResult
+    func reassertBackendJoinAfterWakeIfNeeded(for contactID: UUID) async -> Bool {
+        guard shouldReassertBackendJoinAfterWake(for: contactID) else { return false }
+        guard let contact = contacts.first(where: { $0.id == contactID }) else { return false }
+        diagnostics.record(
+            .backend,
+            message: "Reasserting backend join after wake recovery",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "handle": contact.handle,
+                "applicationState": String(describing: currentApplicationState()),
+            ]
+        )
+        // A readiness publish sent before backend membership is repaired may be
+        // ignored by the control plane. Force a clean republish after rejoin.
+        controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
+        await reassertBackendJoin(for: contact)
+        return true
     }
 
     func syncLocalReceiverAudioReadinessSignal(for contactID: UUID, reason: String) async {
-        guard let contact = contacts.first(where: { $0.id == contactID }),
-              let backend = backendServices,
-              backend.supportsWebSocket,
-              let backendChannelId = contact.backendChannelId,
-              let remoteUserId = contact.remoteUserId else {
-            localReceiverAudioReadinessPublications[contactID] = nil
+        guard let intent = receiverAudioReadinessIntent(for: contactID, reason: reason) else {
+            controlPlaneCoordinator.send(.receiverAudioReadinessContextUnavailable(contactID: contactID))
             return
         }
 
-        let isReady = desiredLocalReceiverAudioReadiness(for: contactID)
-        let peerWasRoutable = peerIsRoutableForReceiverAudioReadiness(for: contactID)
-        let effectiveReason: String = {
-            guard !isReady else { return reason }
-            let appState = currentApplicationState()
-            guard appState != .active else { return reason }
-            if reason == "app-background-media-closed" || reason.hasPrefix("media-") {
-                return "app-background-media-closed"
-            }
-            return reason
-        }()
-
-        if !peerWasRoutable {
-            localReceiverAudioReadinessPublications[contactID] = ReceiverAudioReadinessPublication(
-                isReady: isReady,
-                peerWasRoutable: false
+        await controlPlaneCoordinator.handle(
+            .receiverAudioReadinessSyncRequested(
+                intent,
+                peerIsRoutable: peerIsRoutableForReceiverAudioReadiness(for: contactID),
+                webSocketConnected: backendServices?.isWebSocketConnected == true
             )
-            return
-        }
-
-        if let publication = localReceiverAudioReadinessPublications[contactID],
-           publication.isReady == isReady,
-           publication.peerWasRoutable {
-            return
-        }
-
-        guard backend.isWebSocketConnected else {
-            backend.ensureWebSocketConnected()
-            diagnostics.record(
-                .websocket,
-                message: "Deferred receiver audio readiness publish until WebSocket reconnects",
-                metadata: [
-                    "contactId": contactID.uuidString,
-                    "handle": contact.handle,
-                    "state": isReady ? "ready" : "not-ready",
-                    "reason": effectiveReason,
-                ]
-            )
-            return
-        }
-
-        do {
-            try await backend.waitForWebSocketConnection()
-            try await backend.sendSignal(
-                TurboSignalEnvelope(
-                    type: isReady ? .receiverReady : .receiverNotReady,
-                    channelId: backendChannelId,
-                    fromUserId: backend.currentUserID ?? "",
-                    fromDeviceId: backend.deviceID,
-                    toUserId: remoteUserId,
-                    toDeviceId: backend.deviceID,
-                    payload: effectiveReason
-                )
-            )
-            diagnostics.record(
-                .websocket,
-                message: "Published receiver audio readiness",
-                metadata: [
-                    "contactId": contactID.uuidString,
-                    "handle": contact.handle,
-                    "state": isReady ? "ready" : "not-ready",
-                    "reason": effectiveReason,
-                ]
-            )
-            localReceiverAudioReadinessPublications[contactID] = ReceiverAudioReadinessPublication(
-                isReady: isReady,
-                peerWasRoutable: true
-            )
-            captureDiagnosticsState("receiver-audio-readiness:published")
-        } catch {
-            if case TurboBackendError.webSocketUnavailable = error {
-                backend.ensureWebSocketConnected()
-                diagnostics.record(
-                    .websocket,
-                    message: "Deferred receiver audio readiness publish until WebSocket reconnects",
-                    metadata: [
-                        "contactId": contactID.uuidString,
-                        "handle": contact.handle,
-                        "state": isReady ? "ready" : "not-ready",
-                        "reason": effectiveReason,
-                    ]
-                )
-                return
-            }
-            diagnostics.record(
-                .websocket,
-                level: .error,
-                message: "Receiver audio readiness publish failed",
-                metadata: [
-                    "contactId": contactID.uuidString,
-                    "handle": contact.handle,
-                    "state": isReady ? "ready" : "not-ready",
-                    "reason": reason,
-                    "error": error.localizedDescription,
-                ]
-            )
-        }
+        )
     }
 
     func prewarmLocalMediaIfNeeded(
@@ -379,8 +342,7 @@ extension PTTViewModel {
             )
             return
         }
-        let transmit = transmitServices
-        guard !transmit.hasPendingBeginOrActiveTarget() else {
+        guard !hasPendingBeginOrActiveTransmit else {
             diagnostics.record(
                 .media,
                 message: "Ignored begin transmit request",
@@ -479,7 +441,7 @@ extension PTTViewModel {
         guard !usesLocalHTTPBackend else { return }
         guard !transmitRuntime.isPressingTalk else { return }
         guard !transmitCoordinator.state.isPressingTalk else { return }
-        guard !transmitServices.hasPendingBeginOrActiveTarget() else { return }
+        guard !hasPendingBeginOrActiveTransmit else { return }
         guard let request = systemOriginatedTransmitRequest(for: channelUUID) else {
             diagnostics.record(
                 .media,
@@ -540,10 +502,12 @@ extension PTTViewModel {
     }
 
     func hasPendingTransmitLifecycle(for systemChannelUUID: UUID) -> Bool {
-        if activeTransmitTarget(for: systemChannelUUID) != nil {
-            return true
-        }
-        return transmitCoordinator.state.pendingRequest?.channelUUID == systemChannelUUID
+        transmitProjection.hasPendingLifecycle(
+            for: systemChannelUUID,
+            channelUUIDForContact: { [weak self] contactID in
+                self?.channelUUID(for: contactID)
+            }
+        )
     }
 
     func noteTransmitTouchReleased() {
@@ -555,7 +519,7 @@ extension PTTViewModel {
         guard isJoined else { return }
         let hasPendingOrActiveTransmit =
             transmitCoordinator.state.isPressingTalk
-            || transmitServices.hasPendingBeginOrActiveTarget()
+            || hasPendingBeginOrActiveTransmit
             || isTransmitting
         guard hasPendingOrActiveTransmit else { return }
         diagnostics.record(.media, message: "End transmit requested")
@@ -574,7 +538,7 @@ extension PTTViewModel {
     func runTransmitEffect(_ effect: TransmitEffect) async {
         switch effect {
         case .beginTransmit(let request):
-            await performBeginTransmit(request)
+            transmitTaskCoordinator.send(.beginRequested(request))
         case .activateTransmit(let request, let target):
             await performActivateTransmit(request, target: target)
         case .stopTransmit(let target):
@@ -584,97 +548,151 @@ extension PTTViewModel {
         }
     }
 
-    private func performBeginTransmit(_ request: TransmitRequestContext) async {
-        guard let backend = backendServices else { return }
-        let transmit = transmitServices
+    func runTransmitTaskEffect(_ effect: TransmitTaskEffect) {
+        switch effect {
+        case .cancelBegin:
+            transmitTaskRuntime.cancelBeginTask()
+        case .startBegin(let workID, let request):
+            transmitTaskRuntime.replaceBeginTask(
+                with: Task { [weak self] in
+                    await self?.performBeginTransmit(request, workID: workID)
+                },
+                id: workID
+            )
+        case .cancelRenewal:
+            transmitTaskRuntime.cancelRenewalTask()
+        case .startRenewal(let workID, let target):
+            transmitTaskRuntime.replaceRenewalTask(
+                with: Task.detached(priority: .userInitiated) { [weak self] in
+                    await self?.performTransmitLeaseRenewal(for: target, workID: workID)
+                },
+                id: workID,
+                target: target
+            )
+        }
+    }
 
-        transmit.replaceBeginTask(Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await MainActor.run {
-                    try self.requestSystemTransmitHandoffIfNeeded(for: request)
-                }
-                if request.backendSupportsWebSocket {
-                    try await backend.waitForWebSocketConnection()
-                }
-                let response = try await backend.beginTransmit(channelId: request.backendChannelID)
-                let target = TransmitTarget(
+    private func resumeWebSocketBeforePTTTransportWaitIfNeeded(
+        _ backend: BackendServices,
+        contactID: UUID,
+        channelID: String,
+        reason: String
+    ) {
+        guard backend.supportsWebSocket else { return }
+        guard !backend.isWebSocketConnected else { return }
+        backend.resumeWebSocket()
+        diagnostics.record(
+            .websocket,
+            message: "Resuming WebSocket before PTT transport wait",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": channelID,
+                "reason": reason,
+                "applicationState": String(describing: currentApplicationState()),
+            ]
+        )
+    }
+
+    private func performBeginTransmit(_ request: TransmitRequestContext, workID: Int) async {
+        defer {
+            transmitTaskCoordinator.send(.beginFinished(id: workID))
+            syncTransmitState()
+        }
+        guard let backend = backendServices else { return }
+
+        do {
+            try requestSystemTransmitHandoffIfNeeded(for: request)
+            if request.backendSupportsWebSocket {
+                resumeWebSocketBeforePTTTransportWaitIfNeeded(
+                    backend,
                     contactID: request.contactID,
-                    userID: request.remoteUserID,
-                    deviceID: response.targetDeviceId,
-                    channelID: request.backendChannelID
+                    channelID: request.backendChannelID,
+                    reason: "begin-transmit"
                 )
-                await MainActor.run {
-                    self.transmitRuntime.syncActiveTarget(target)
-                    self.diagnostics.record(
-                        .media,
-                        message: "Backend transmit lease granted",
-                        metadata: [
-                            "contactId": target.contactID.uuidString,
-                            "channelId": target.channelID,
-                            "startedAt": response.startedAt,
-                            "expiresAt": response.expiresAt,
-                            "targetDeviceId": response.targetDeviceId,
-                        ]
-                    )
-                    // The backend lease starts as soon as beginTransmit succeeds.
-                    // Keep it alive from that point, not from later PTT activation
-                    // callbacks, which can land seconds later on a cold wake path.
-                    if self.transmitRuntime.isPressingTalk {
-                        self.diagnostics.record(
-                            .media,
-                            message: "Starting transmit lease renewal after backend grant",
-                            metadata: [
-                                "contactId": target.contactID.uuidString,
-                                "channelId": target.channelID,
-                                "source": "begin-transmit",
-                            ]
-                        )
-                        self.startRenewingTransmit(target)
-                    } else {
-                        self.diagnostics.record(
-                            .media,
-                            message: "Backend transmit lease granted after release; stopping immediately",
-                            metadata: [
-                                "contactId": target.contactID.uuidString,
-                                "channelId": target.channelID,
-                                "source": "begin-transmit",
-                            ]
-                        )
-                    }
-                }
-                await transmitCoordinator.handle(.beginSucceeded(target, request))
-                syncTransmitState()
-                await completeDeferredSystemTransmitActivationIfReady(
-                    request: request,
-                    target: target
-                )
-            } catch {
-                if shouldTreatTransmitBeginMembershipLossAsRecoverable(error) {
-                    diagnostics.record(
-                        .media,
-                        message: "Recovering transmit begin after membership drift",
-                        metadata: ["contact": request.contactHandle, "channelId": request.backendChannelID]
-                    )
-                    if await recoverTransmitBeginMembershipLoss(request: request, backend: backend) {
-                        transmit.finishBeginTask()
-                        return
-                    }
-                }
-                await MainActor.run {
-                    self.cancelRequestedSystemTransmitHandoffIfNeeded(
-                        channelUUID: request.channelUUID,
-                        reason: "backend-begin-failed"
-                    )
-                }
-                let message = error.localizedDescription
-                await transmitCoordinator.handle(.beginFailed(message))
-                syncTransmitState()
-                statusMessage = "Transmit failed: \(message)"
-                diagnostics.record(.media, level: .error, message: "Transmit failed", metadata: ["contact": request.contactHandle, "error": message])
             }
-            transmit.finishBeginTask()
-        })
+            // `beginTransmit` is an HTTP control-plane call that acquires the
+            // transmit lease and triggers APNs wake. Do not block that on
+            // websocket readiness, which can take several seconds on a cold
+            // background path. The later activation step still waits for the
+            // websocket before live audio signaling starts.
+            let response = try await backend.beginTransmit(channelId: request.backendChannelID)
+            let target = TransmitTarget(
+                contactID: request.contactID,
+                userID: request.remoteUserID,
+                deviceID: response.targetDeviceId,
+                channelID: request.backendChannelID
+            )
+            transmitRuntime.syncActiveTarget(target)
+            diagnostics.record(
+                .media,
+                message: "Backend transmit lease granted",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "startedAt": response.startedAt,
+                    "expiresAt": response.expiresAt,
+                    "targetDeviceId": response.targetDeviceId,
+                ]
+            )
+            // The backend lease starts as soon as beginTransmit succeeds.
+            // Keep it alive from that point, not from later PTT activation
+            // callbacks, which can land seconds later on a cold wake path.
+            if transmitRuntime.isPressingTalk {
+                diagnostics.record(
+                    .media,
+                    message: "Starting transmit lease renewal after backend grant",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "source": "begin-transmit",
+                    ]
+                )
+                startRenewingTransmit(target)
+            } else {
+                diagnostics.record(
+                    .media,
+                    message: "Backend transmit lease granted after release; stopping immediately",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "source": "begin-transmit",
+                    ]
+                )
+            }
+            await transmitCoordinator.handle(.beginSucceeded(target, request))
+            syncTransmitState()
+            await completeDeferredSystemTransmitActivationIfReady(
+                request: request,
+                target: target
+            )
+        } catch {
+            if Task.isCancelled || isExpectedBackendSyncCancellation(error) {
+                cancelRequestedSystemTransmitHandoffIfNeeded(
+                    channelUUID: request.channelUUID,
+                    reason: "backend-begin-cancelled"
+                )
+                return
+            }
+            if shouldTreatTransmitBeginMembershipLossAsRecoverable(error) {
+                diagnostics.record(
+                    .media,
+                    message: "Recovering transmit begin after membership drift",
+                    metadata: ["contact": request.contactHandle, "channelId": request.backendChannelID]
+                )
+                if await recoverTransmitBeginMembershipLoss(request: request, backend: backend) {
+                    return
+                }
+            }
+            cancelRequestedSystemTransmitHandoffIfNeeded(
+                channelUUID: request.channelUUID,
+                reason: "backend-begin-failed"
+            )
+            let message = error.localizedDescription
+            await transmitCoordinator.handle(.beginFailed(message))
+            syncTransmitState()
+            statusMessage = "Transmit failed: \(message)"
+            diagnostics.record(.media, level: .error, message: "Transmit failed", metadata: ["contact": request.contactHandle, "error": message])
+        }
     }
 
     private func recoverTransmitBeginMembershipLoss(
@@ -850,15 +868,12 @@ extension PTTViewModel {
     }
 
     func activeTransmitTarget(for systemChannelUUID: UUID) -> TransmitTarget? {
-        if let activeTarget = transmitCoordinator.state.activeTarget,
-           channelUUID(for: activeTarget.contactID) == systemChannelUUID {
-            return activeTarget
-        }
-        if let runtimeTarget = transmitRuntime.activeTarget,
-           channelUUID(for: runtimeTarget.contactID) == systemChannelUUID {
-            return runtimeTarget
-        }
-        return nil
+        transmitProjection.activeTarget(
+            for: systemChannelUUID,
+            channelUUIDForContact: { [weak self] contactID in
+                self?.channelUUID(for: contactID)
+            }
+        )
     }
 
     func completeSystemTransmitActivation(channelUUID: UUID) async {
@@ -873,6 +888,12 @@ extension PTTViewModel {
         }
 
         do {
+            resumeWebSocketBeforePTTTransportWaitIfNeeded(
+                backend,
+                contactID: target.contactID,
+                channelID: target.channelID,
+                reason: "system-transmit-activation"
+            )
             try await backend.waitForWebSocketConnection()
             configureOutgoingAudioRoute(target: target)
             await ensureMediaSession(
@@ -938,7 +959,9 @@ extension PTTViewModel {
                     "event": wake.payload.event.rawValue,
                 ]
             )
-            backendServices?.ensureWebSocketConnected()
+            // Background wake resumes a deliberately suspended control-plane socket.
+            // `ensureWebSocketConnected()` is a no-op while suspension is still set.
+            backendServices?.resumeWebSocket()
             let contactID = wake.contactID
             diagnostics.record(
                 .media,
@@ -1004,16 +1027,8 @@ extension PTTViewModel {
     }
 
     func schedulePostWakeBackendRefresh(for contactID: UUID) {
-        diagnostics.record(
-            .backend,
-            message: "Deferring wake backend refresh off audio activation critical path",
-            metadata: ["contactId": contactID.uuidString]
-        )
         Task { [weak self] in
-            guard let self else { return }
-            await refreshContactSummaries()
-            await refreshChannelState(for: contactID)
-            captureDiagnosticsState("ptt-wake:post-activation-refresh")
+            await self?.controlPlaneCoordinator.handle(.postWakeRepairRequested(contactID: contactID))
         }
     }
 
@@ -1247,8 +1262,15 @@ extension PTTViewModel {
         let fromDeviceID = backend.deviceID
         let toUserID = target.userID
         let toDeviceID = target.deviceID
+        let initialSendGate = OutgoingAudioInitialSendGate()
 
-        let sendAudioChunk: @Sendable (String) async throws -> Void = { payload in
+        let sendAudioChunk: @Sendable (String) async throws -> Void = { [weak self] payload in
+            if let self,
+               await initialSendGate.takeShouldAwaitInitialRemoteReady() {
+                _ = await self.waitForRemoteReceiverAudioReadinessBeforeSendingIfNeeded(
+                    target: target
+                )
+            }
             let envelope = TurboSignalEnvelope(
                 type: .audioChunk,
                 channelId: channelID,
@@ -1271,6 +1293,85 @@ extension PTTViewModel {
                 "deviceId": target.deviceID
             ]
         )
+    }
+
+    func waitForRemoteReceiverAudioReadinessBeforeSendingIfNeeded(
+        target: TransmitTarget,
+        timeoutNanoseconds: UInt64? = nil,
+        pollNanoseconds: UInt64? = nil
+    ) async -> Bool {
+        let timeoutNanoseconds = timeoutNanoseconds ?? remoteReceiverAudioReadyGateTimeoutNanoseconds
+        let pollNanoseconds = pollNanoseconds ?? remoteReceiverAudioReadyGatePollNanoseconds
+
+        guard let channelSnapshot = selectedChannelSnapshot(for: target.contactID) else {
+            return true
+        }
+        guard !channelSnapshot.remoteAudioReadyForLiveTransmit else {
+            return true
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Waiting for remote receiver audio readiness before sending outbound audio",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "remoteAudioReadiness": String(describing: channelSnapshot.remoteAudioReadiness),
+                "readinessStatus": String(describing: channelSnapshot.readinessStatus),
+                "peerDeviceConnected": String(channelSnapshot.membership.peerDeviceConnected),
+            ]
+        )
+
+        let startedAt = Date()
+        while transmitRuntime.isPressingTalk {
+            if selectedChannelSnapshot(for: target.contactID)?.remoteAudioReadyForLiveTransmit == true {
+                diagnostics.record(
+                    .media,
+                    message: "Remote receiver audio became ready; releasing outbound audio send gate",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                    ]
+                )
+                return true
+            }
+
+            if Date().timeIntervalSince(startedAt) >= Double(timeoutNanoseconds) / 1_000_000_000 {
+                let currentSnapshot = selectedChannelSnapshot(for: target.contactID)
+                diagnostics.recordInvariantViolation(
+                    invariantID: "transmit.outbound_audio_without_remote_receiver_ready",
+                    scope: .backend,
+                    message: "sender resumed outbound audio before remote receiver readiness recovered",
+                    metadata: [
+                        "reason": "remote-receiver-ready-gate-timeout",
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "selectedPeerPhase": String(describing: selectedPeerState(for: target.contactID).phase),
+                        "backendChannelStatus": currentSnapshot?.status?.rawValue ?? "none",
+                        "backendReadiness": currentSnapshot?.readinessStatus?.kind ?? "none",
+                        "remoteAudioReadiness": String(describing: currentSnapshot?.remoteAudioReadiness ?? .unknown),
+                        "peerDeviceConnected": String(currentSnapshot?.membership.peerDeviceConnected ?? false),
+                        "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                    ]
+                )
+                diagnostics.record(
+                    .media,
+                    level: .error,
+                    message: "Timed out waiting for remote receiver audio readiness; sending anyway",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                    ]
+                )
+                return false
+            }
+
+            try? await Task.sleep(nanoseconds: pollNanoseconds)
+        }
+
+        return false
     }
 
     func reconcileExplicitTransmitStopIfNeeded(
@@ -1341,9 +1442,8 @@ extension PTTViewModel {
     }
 
     private func performStopTransmit(_ target: TransmitTarget) async {
-        let transmit = transmitServices
         let media = mediaServices
-        transmit.cancelRenewTask()
+        transmitTaskCoordinator.send(.renewalCancelled)
 
         if usesLocalHTTPBackend {
             isTransmitting = false
@@ -1418,7 +1518,7 @@ extension PTTViewModel {
     }
 
     private func performAbortTransmit(_ target: TransmitTarget) async {
-        transmitServices.cancelRenewTask()
+        transmitTaskCoordinator.send(.renewalCancelled)
         try? await mediaServices.session()?.stopSendingAudio()
 
         if let backend = backendServices {
@@ -1464,7 +1564,7 @@ extension PTTViewModel {
         for target: TransmitTarget
     ) -> (systemTransmitDurationMs: String, webSocketConnected: Bool)? {
         guard transmitCoordinator.state.isPressingTalk,
-              transmitServices.activeTarget()?.channelID == target.channelID else { return nil }
+              transmitProjection.activeTarget?.channelID == target.channelID else { return nil }
         return (
             systemTransmitDurationMs: transmitRuntime.currentSystemTransmitDurationMilliseconds().map(String.init) ?? "unknown",
             webSocketConnected: backendServices?.isWebSocketConnected == true
@@ -1481,121 +1581,119 @@ extension PTTViewModel {
     }
 
     private func startRenewingTransmit(_ target: TransmitTarget) {
-        let transmit = transmitServices
-        let renewIntervalNanoseconds = transmitLeaseRenewIntervalNanoseconds
-        if transmitRuntime.renewTask != nil,
-           transmitRuntime.renewTaskChannelID == target.channelID {
-            return
+        transmitTaskCoordinator.send(.renewalRequested(target))
+    }
+
+    private func performTransmitLeaseRenewal(for target: TransmitTarget, workID: Int) async {
+        defer {
+            transmitTaskCoordinator.send(.renewalFinished(id: workID))
         }
-        transmit.replaceRenewTask(nil, nil)
-        transmit.replaceRenewTask(Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: renewIntervalNanoseconds)
-                guard !Task.isCancelled else { return }
-                guard let context = await self.currentTransmitLeaseRenewalContext(for: target) else { return }
-                let renewStartedAt = Date()
-                do {
+
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: transmitLeaseRenewIntervalNanoseconds)
+            guard !Task.isCancelled else { return }
+            guard let context = currentTransmitLeaseRenewalContext(for: target) else { return }
+            let renewStartedAt = Date()
+            do {
+                await MainActor.run {
+                    self.diagnostics.record(
+                        .media,
+                        message: "Renewing transmit lease",
+                        metadata: [
+                            "contactId": target.contactID.uuidString,
+                            "channelId": target.channelID,
+                            "systemTransmitDurationMs": context.systemTransmitDurationMs,
+                            "webSocketConnected": String(context.webSocketConnected),
+                        ]
+                    )
+                }
+                let response = try await renewTransmitLeaseOnBackend(channelId: target.channelID)
+                let renewDurationMs = Int(Date().timeIntervalSince(renewStartedAt) * 1000)
+                await MainActor.run {
+                    self.diagnostics.record(
+                        .media,
+                        message: "Transmit lease renewed",
+                        metadata: [
+                            "contactId": target.contactID.uuidString,
+                            "channelId": target.channelID,
+                            "systemTransmitDurationMs": context.systemTransmitDurationMs,
+                            "renewDurationMs": String(renewDurationMs),
+                            "expiresAt": response.expiresAt,
+                        ]
+                    )
+                }
+            } catch {
+                let renewDurationMs = Int(Date().timeIntervalSince(renewStartedAt) * 1000)
+                let currentSystemTransmitDurationMs = await MainActor.run {
+                    self.transmitRuntime.currentSystemTransmitDurationMilliseconds().map(String.init) ?? "unknown"
+                }
+                let shouldTreatAsCancellation = await MainActor.run {
+                    self.isExpectedBackendSyncCancellation(error)
+                        || !self.transmitCoordinator.state.isPressingTalk
+                        || !self.pttCoordinator.state.isTransmitting
+                }
+                if shouldTreatAsCancellation {
                     await MainActor.run {
                         self.diagnostics.record(
                             .media,
-                            message: "Renewing transmit lease",
-                            metadata: [
-                                "contactId": target.contactID.uuidString,
-                                "channelId": target.channelID,
-                                "systemTransmitDurationMs": context.systemTransmitDurationMs,
-                                "webSocketConnected": String(context.webSocketConnected),
-                            ]
-                        )
-                    }
-                    let response = try await self.renewTransmitLeaseOnBackend(channelId: target.channelID)
-                    let renewDurationMs = Int(Date().timeIntervalSince(renewStartedAt) * 1000)
-                    await MainActor.run {
-                        self.diagnostics.record(
-                            .media,
-                            message: "Transmit lease renewed",
-                            metadata: [
-                                "contactId": target.contactID.uuidString,
-                                "channelId": target.channelID,
-                                "systemTransmitDurationMs": context.systemTransmitDurationMs,
-                                "renewDurationMs": String(renewDurationMs),
-                                "expiresAt": response.expiresAt,
-                            ]
-                        )
-                    }
-                } catch {
-                    let renewDurationMs = Int(Date().timeIntervalSince(renewStartedAt) * 1000)
-                    let currentSystemTransmitDurationMs = await MainActor.run {
-                        self.transmitRuntime.currentSystemTransmitDurationMilliseconds().map(String.init) ?? "unknown"
-                    }
-                    let shouldTreatAsCancellation = await MainActor.run {
-                        self.isExpectedBackendSyncCancellation(error)
-                            || !self.transmitCoordinator.state.isPressingTalk
-                            || !self.pttCoordinator.state.isTransmitting
-                    }
-                    if shouldTreatAsCancellation {
-                        await MainActor.run {
-                            self.diagnostics.record(
-                                .media,
-                                message: "Transmit lease renewal cancelled",
-                                metadata: [
-                                    "contactId": target.contactID.uuidString,
-                                    "channelId": target.channelID,
-                                    "renewDurationMs": String(renewDurationMs),
-                                    "systemTransmitDurationMs": currentSystemTransmitDurationMs,
-                                    "error": error.localizedDescription,
-                                ]
-                            )
-                        }
-                        return
-                    }
-                    let shouldTreatAsLeaseLoss = await MainActor.run {
-                        self.shouldTreatTransmitLeaseLossAsStop(error)
-                    }
-                    if shouldTreatAsLeaseLoss {
-                        await MainActor.run {
-                            self.diagnostics.record(
-                                .media,
-                                level: .error,
-                                message: "Transmit lease lost during renewal",
-                                metadata: [
-                                    "contactId": target.contactID.uuidString,
-                                    "channelId": target.channelID,
-                                    "renewDurationMs": String(renewDurationMs),
-                                    "systemTransmitDurationMs": currentSystemTransmitDurationMs,
-                                    "error": error.localizedDescription,
-                                ]
-                            )
-                        }
-                        await self.handleTransmitLeaseLossDuringRenewal(target: target)
-                        return
-                    }
-                    let message = error.localizedDescription
-                    await MainActor.run {
-                        self.statusMessage = "Transmit lease expired: \(message)"
-                        self.isTransmitting = false
-                        self.diagnostics.record(
-                            .media,
-                            level: .error,
-                            message: "Transmit lease renewal failed",
+                            message: "Transmit lease renewal cancelled",
                             metadata: [
                                 "contactId": target.contactID.uuidString,
                                 "channelId": target.channelID,
                                 "renewDurationMs": String(renewDurationMs),
                                 "systemTransmitDurationMs": currentSystemTransmitDurationMs,
-                                "error": message,
+                                "error": error.localizedDescription,
                             ]
                         )
                     }
-                    await self.transmitCoordinator.handle(.renewalFailed(message))
-                    await self.refreshChannelState(for: target.contactID)
-                    await MainActor.run {
-                        self.syncTransmitState()
-                    }
                     return
                 }
+                let shouldTreatAsLeaseLoss = await MainActor.run {
+                    self.shouldTreatTransmitLeaseLossAsStop(error)
+                }
+                if shouldTreatAsLeaseLoss {
+                    await MainActor.run {
+                        self.diagnostics.record(
+                            .media,
+                            level: .error,
+                            message: "Transmit lease lost during renewal",
+                            metadata: [
+                                "contactId": target.contactID.uuidString,
+                                "channelId": target.channelID,
+                                "renewDurationMs": String(renewDurationMs),
+                                "systemTransmitDurationMs": currentSystemTransmitDurationMs,
+                                "error": error.localizedDescription,
+                            ]
+                        )
+                    }
+                    await handleTransmitLeaseLossDuringRenewal(target: target)
+                    return
+                }
+                let message = error.localizedDescription
+                await MainActor.run {
+                    self.statusMessage = "Transmit lease expired: \(message)"
+                    self.isTransmitting = false
+                    self.diagnostics.record(
+                        .media,
+                        level: .error,
+                        message: "Transmit lease renewal failed",
+                        metadata: [
+                            "contactId": target.contactID.uuidString,
+                            "channelId": target.channelID,
+                            "renewDurationMs": String(renewDurationMs),
+                            "systemTransmitDurationMs": currentSystemTransmitDurationMs,
+                            "error": message,
+                        ]
+                    )
+                }
+                await transmitCoordinator.handle(.renewalFailed(message))
+                await refreshChannelState(for: target.contactID)
+                await MainActor.run {
+                    self.syncTransmitState()
+                }
+                return
             }
-        }, target.channelID)
+        }
     }
 
     private func handleTransmitLeaseLossDuringRenewal(target: TransmitTarget) async {

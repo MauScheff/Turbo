@@ -265,6 +265,13 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         ensureWebSocketConnected()
     }
 
+    func forceReconnectWebSocket() {
+        guard supportsWebSocket else { return }
+        isWebSocketSuspended = false
+        disconnectWebSocket()
+        connectWebSocket()
+    }
+
     func ensureWebSocketConnected() {
         guard supportsWebSocket else { return }
         guard !isWebSocketSuspended else { return }
@@ -299,6 +306,10 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         let data = try JSONEncoder().encode(envelope)
         let text = String(decoding: data, as: UTF8.self)
         try await webSocketTask.send(.string(text))
+    }
+
+    func setWebSocketConnectionStateForTesting(_ state: WebSocketConnectionState) {
+        webSocketConnectionState = state
     }
 
     private func listenForMessages() async {

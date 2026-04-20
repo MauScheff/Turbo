@@ -66,7 +66,7 @@ struct AudioOutputRouteOverridePlan: Equatable {
 @MainActor
 @Observable
 final class PTTViewModel: NSObject, MediaSessionDelegate {
-    static let shared = PTTViewModel()
+    static let shared = PTTViewModel(pttSystemPolicyDefaults: .standard)
 
     var isReady: Bool = false
     var isJoined: Bool = false
@@ -80,23 +80,27 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     let diagnostics = DiagnosticsStore()
 
     let pttSystemClient: any PTTSystemClientProtocol
+    @ObservationIgnored
+    private let pttSystemPolicyDefaults: UserDefaults?
     let channelName: String = "BeepBeep Prototype"
     var sessionCoordinator = SessionCoordinatorState()
     let backendSyncCoordinator = BackendSyncCoordinator()
+    let controlPlaneCoordinator = ControlPlaneCoordinator()
+    let receiveExecutionCoordinator = ReceiveExecutionCoordinator()
     let backendCommandCoordinator = BackendCommandCoordinator()
     let pttCoordinator = PTTCoordinator()
     let transmitCoordinator = TransmitCoordinator()
+    let transmitTaskCoordinator = TransmitTaskCoordinator()
     let selectedPeerCoordinator = SelectedPeerCoordinator()
     let selfCheckCoordinator = DevSelfCheckCoordinator()
     let pttSystemPolicyCoordinator = PTTSystemPolicyCoordinator()
     var backendRuntime = BackendRuntimeState()
     var talkRequestSurfaceState = TalkRequestSurfaceState()
     var transmitRuntime = TransmitRuntimeState()
+    var transmitTaskRuntime = TransmitTaskRuntimeState()
     var pttWakeRuntime = PTTWakeRuntimeState()
+    var receiveExecutionRuntime = ReceiveExecutionRuntimeState()
     var mediaRuntime = MediaRuntimeState()
-    var localReceiverAudioReadinessPublications: [UUID: ReceiverAudioReadinessPublication] = [:]
-    var remoteTransmittingContactIDs: Set<UUID> = []
-    var remoteAudioSilenceTasks: [UUID: Task<Void, Never>] = [:]
     var isPTTAudioSessionActive: Bool = false
     var lastReportedPTTServiceStatus: PTServiceStatus?
     var lastReportedPTTServiceStatusChannelUUID: UUID?
@@ -112,6 +116,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var pendingTalkRequestNotificationHandle: String?
     var applicationStateOverride: UIApplication.State?
     @ObservationIgnored
+    var backgroundOfflinePresenceHandler: (@MainActor () async -> Void)?
+    @ObservationIgnored
+    var backgroundWebSocketSuspendHandler: (@MainActor () -> Void)?
+    @ObservationIgnored
     var setApplicationBadgeCount: @MainActor (Int) -> Void = { count in
         UNUserNotificationCenter.current().setBadgeCount(count)
     }
@@ -120,8 +128,27 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
     }
 
-    override init() {
-        pttSystemClient = makeDefaultPTTSystemClient()
+    var localReceiverAudioReadinessPublications: [UUID: ReceiverAudioReadinessPublication] {
+        get { controlPlaneCoordinator.state.localReceiverAudioReadinessPublications }
+        set { controlPlaneCoordinator.replaceLocalReceiverAudioReadinessPublications(newValue) }
+    }
+
+    var remoteTransmittingContactIDs: Set<UUID> {
+        get { receiveExecutionCoordinator.state.remoteTransmittingContactIDs }
+        set { receiveExecutionCoordinator.replaceRemoteTransmittingContactIDs(newValue) }
+    }
+
+    var remoteAudioSilenceTasks: [UUID: Task<Void, Never>] {
+        get { receiveExecutionRuntime.remoteAudioSilenceTasks }
+        set { receiveExecutionRuntime.replaceRemoteAudioSilenceTasks(newValue) }
+    }
+
+    init(
+        pttSystemClient: (any PTTSystemClientProtocol)? = nil,
+        pttSystemPolicyDefaults: UserDefaults? = nil
+    ) {
+        self.pttSystemClient = pttSystemClient ?? makeDefaultPTTSystemClient()
+        self.pttSystemPolicyDefaults = pttSystemPolicyDefaults
         audioOutputPreference = .speaker
         UserDefaults.standard.set(AudioOutputPreference.speaker.rawValue, forKey: AudioOutputPreference.storageKey)
         super.init()
@@ -130,6 +157,12 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         }
         backendSyncCoordinator.effectHandler = { [weak self] effect in
             await self?.runBackendSyncEffect(effect)
+        }
+        controlPlaneCoordinator.effectHandler = { [weak self] effect in
+            await self?.runControlPlaneEffect(effect)
+        }
+        receiveExecutionCoordinator.effectHandler = { [weak self] effect in
+            self?.runReceiveExecutionEffect(effect)
         }
         backendCommandCoordinator.effectHandler = { [weak self] effect in
             await self?.runBackendCommandEffect(effect)
@@ -146,8 +179,22 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         transmitCoordinator.effectHandler = { [weak self] effect in
             await self?.runTransmitEffect(effect)
         }
+        transmitTaskCoordinator.effectHandler = { [weak self] effect in
+            self?.runTransmitTaskEffect(effect)
+        }
+        pttSystemPolicyCoordinator.stateChangeHandler = { [weak self] state in
+            guard let defaults = self?.pttSystemPolicyDefaults else { return }
+            PTTSystemPolicyPersistence.store(state, to: defaults)
+        }
         registerAudioSessionObservers()
         registerApplicationLifecycleObservers()
+        if let defaults = pttSystemPolicyDefaults {
+            let restoredPolicyState = PTTSystemPolicyPersistence.load(from: defaults)
+            if restoredPolicyState != .initial {
+                pttSystemPolicyCoordinator.replaceState(restoredPolicyState)
+                syncPTTSystemPolicyState()
+            }
+        }
     }
 
     deinit {
@@ -182,45 +229,18 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         sessionCoordinator.pendingJoinContactID
     }
 
-    var transmitDomainSnapshot: TransmitDomainSnapshot {
-        let coordinatorState = transmitCoordinator.state
-        let runtime = transmitRuntime
-        let activeTarget = coordinatorState.activeTarget ?? runtime.activeTarget
-        let fallbackContactID =
-            activeTarget?.contactID
-            ?? (pttCoordinator.state.isTransmitting ? pttCoordinator.state.activeContactID : nil)
-
-        let phase: TransmitDomainPhase
-        if runtime.explicitStopRequested, let contactID = fallbackContactID {
-            phase = .stopping(contactID: contactID)
-        } else if pttCoordinator.state.isTransmitting, let contactID = pttCoordinator.state.activeContactID ?? fallbackContactID {
-            phase = .active(contactID: contactID)
-        } else {
-            switch coordinatorState.phase {
-            case .idle:
-                if let contactID = fallbackContactID, runtime.isPressingTalk {
-                    phase = .requesting(contactID: contactID)
-                } else {
-                    phase = .idle
-                }
-            case .requesting(let contactID):
-                phase = .requesting(contactID: contactID)
-            case .active(let contactID):
-                phase = runtime.explicitStopRequested ? .stopping(contactID: contactID) : .active(contactID: contactID)
-            case .stopping(let contactID):
-                phase = .stopping(contactID: contactID)
-            }
-        }
-
-        return TransmitDomainSnapshot(
-            phase: phase,
-            isPressActive: !runtime.explicitStopRequested && (runtime.isPressingTalk || coordinatorState.isPressingTalk),
-            explicitStopRequested: runtime.explicitStopRequested,
-            isSystemTransmitting: pttCoordinator.state.isTransmitting,
-            activeTarget: activeTarget,
-            interruptedContactID: runtime.interruptedContactID,
-            requiresReleaseBeforeNextPress: runtime.requiresReleaseBeforeNextPress
+    var transmitProjection: TransmitProjection {
+        TransmitProjection(
+            controlPlane: transmitCoordinator.state,
+            execution: transmitRuntime.executionState,
+            systemChannelUUID: pttCoordinator.state.systemChannelUUID,
+            systemActiveContactID: pttCoordinator.state.activeContactID,
+            systemIsTransmitting: pttCoordinator.state.isTransmitting
         )
+    }
+
+    var transmitDomainSnapshot: TransmitDomainSnapshot {
+        transmitProjection.domainSnapshot
     }
 
     var isTransmitPressActive: Bool {
@@ -231,7 +251,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         if !isTransmitting,
            !transmitCoordinator.state.isPressingTalk,
            transmitCoordinator.state.phase == .idle,
-           !transmitRuntime.hasPendingBeginOrActiveTarget {
+           !hasPendingBeginOrActiveTransmit {
             transmitRuntime.reconcileIdleState()
         }
         transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
@@ -258,7 +278,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func resetBackendRuntimeForReconnect() {
         backendRuntime.disconnectForReconnect()
-        localReceiverAudioReadinessPublications = [:]
+        controlPlaneCoordinator.send(.reset)
     }
 
     func replaceBackendConfig(with config: TurboBackendConfig?) {
@@ -332,14 +352,16 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     func cancelPendingTransmitWork() {
-        transmitRuntime.clearPendingWork()
+        transmitTaskCoordinator.send(.reset)
     }
 
     func resetTransmitRuntimeOnly() {
+        transmitTaskCoordinator.send(.reset)
         transmitRuntime.reset()
     }
 
     func tearDownTransmitRuntime(resetCoordinator: Bool) {
+        transmitTaskCoordinator.send(.reset)
         transmitRuntime.reset()
         if resetCoordinator {
             transmitCoordinator.reset()
@@ -388,38 +410,6 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     var trackedContactIDs: Set<UUID> {
         backendRuntime.trackedContactIDs
-    }
-
-    var transmitServices: TransmitServices {
-        TransmitServices(
-            hasPendingBeginOrActiveTarget: { [weak self] in
-                self?.transmitRuntime.hasPendingBeginOrActiveTarget ?? false
-            },
-            activeTarget: { [weak self] in
-                self?.transmitRuntime.activeTarget
-            },
-            replaceBeginTask: { [weak self] task in
-                self?.transmitRuntime.replaceBeginTask(with: task)
-            },
-            finishBeginTask: { [weak self] in
-                self?.transmitRuntime.finishBeginTask()
-            },
-            cancelBeginTask: { [weak self] in
-                self?.transmitRuntime.cancelBeginTask()
-            },
-            replaceRenewTask: { [weak self] task, channelID in
-                self?.transmitRuntime.replaceRenewTask(with: task, channelID: channelID)
-            },
-            cancelRenewTask: { [weak self] in
-                self?.transmitRuntime.cancelRenewTask()
-            },
-            clearPendingWork: { [weak self] in
-                self?.transmitRuntime.clearPendingWork()
-            },
-            reset: { [weak self] in
-                self?.transmitRuntime.reset()
-            }
-        )
     }
 
     var mediaServices: MediaServices {
@@ -474,8 +464,14 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         mediaRuntime.contactID
     }
 
+    var hasPendingBeginOrActiveTransmit: Bool {
+        transmitTaskCoordinator.state.hasPendingBeginOrActiveTarget(
+            activeTarget: transmitProjection.activeTarget
+        )
+    }
+
     var hasActiveTransmitOrMediaSession: Bool {
-        transmitServices.activeTarget() != nil || mediaServices.session() != nil
+        transmitProjection.activeTarget != nil || mediaServices.session() != nil
     }
 
     var isRunningSelfCheck: Bool {
@@ -542,6 +538,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             isTransmitting: isTransmitting,
             activeChannelID: activeChannelId?.uuidString,
             pendingAction: String(describing: sessionCoordinator.pendingAction),
+            hadConnectedSessionContinuity: selectedContactId == nil
+                ? false
+                : selectedPeerCoordinator.state.hadConnectedSessionContinuity,
             systemSession: String(describing: systemSessionState),
             mediaState: String(describing: mediaRuntime.connectionState),
             backendChannelStatus: selectedChannelProjection?.status?.rawValue,
@@ -615,6 +614,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "selectedPeerStatus": selectedSession.statusMessage,
             "selectedPeerCanTransmit": String(selectedSession.canTransmitNow),
             "pendingAction": selectedSession.pendingAction,
+            "hadConnectedSessionContinuity": String(selectedSession.hadConnectedSessionContinuity),
             "activeChannelId": activeChannelId?.uuidString ?? "none",
             "isJoined": String(isJoined),
             "isTransmitting": String(isTransmitting),
@@ -869,9 +869,22 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     func handleApplicationDidEnterBackground() async {
-        if let backend = backendServices {
+        if let backgroundWebSocketSuspendHandler {
+            backgroundWebSocketSuspendHandler()
+        } else {
+            backendServices?.suspendWebSocket()
+        }
+
+        if let backgroundOfflinePresenceHandler {
+            Task { @MainActor in
+                await backgroundOfflinePresenceHandler()
+            }
+            return
+        }
+
+        guard let backend = backendServices else { return }
+        Task {
             _ = try? await backend.offlinePresence()
-            backend.suspendWebSocket()
         }
     }
 

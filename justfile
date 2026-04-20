@@ -130,6 +130,11 @@ simulator-scenario-merge base="https://beepbeep.to" handle_a="@avery" handle_b="
     --device "{{handle_a}}=sim-scenario-avery" \
     --device "{{handle_b}}=sim-scenario-blake"
 
+simulator-scenario-merge-strict base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" insecure="--insecure":
+  python3 scripts/merged_diagnostics.py --base-url "{{base}}" {{insecure}} --fail-on-violations \
+    --device "{{handle_a}}=sim-scenario-avery" \
+    --device "{{handle_b}}=sim-scenario-blake"
+
 simulator-scenario-local scenario="" base="http://localhost:8090/s/turbo" handle_a="@avery" handle_b="@blake":
   python3 scripts/run_simulator_scenarios.py \
     --scenario "{{scenario}}" \
@@ -139,6 +144,11 @@ simulator-scenario-local scenario="" base="http://localhost:8090/s/turbo" handle
 
 simulator-scenario-merge-local base="http://localhost:8090/s/turbo" handle_a="@avery" handle_b="@blake":
   python3 scripts/merged_diagnostics.py --base-url "{{base}}" \
+    --device "{{handle_a}}=sim-scenario-avery" \
+    --device "{{handle_b}}=sim-scenario-blake"
+
+simulator-scenario-merge-local-strict base="http://localhost:8090/s/turbo" handle_a="@avery" handle_b="@blake":
+  python3 scripts/merged_diagnostics.py --base-url "{{base}}" --fail-on-violations \
     --device "{{handle_a}}=sim-scenario-avery" \
     --device "{{handle_b}}=sim-scenario-blake"
 

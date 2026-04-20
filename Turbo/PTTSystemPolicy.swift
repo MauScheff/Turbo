@@ -5,6 +5,49 @@ struct PTTTokenUploadRequest: Equatable {
     let tokenHex: String
 }
 
+struct PTTSystemPolicyPersistence {
+    private static let latestTokenHexKey = "turbo.pttSystemPolicy.latestTokenHex"
+    private static let uploadedTokenHexKey = "turbo.pttSystemPolicy.uploadedTokenHex"
+    private static let uploadedBackendChannelIDKey = "turbo.pttSystemPolicy.uploadedBackendChannelID"
+    private static let lastTokenUploadErrorKey = "turbo.pttSystemPolicy.lastTokenUploadError"
+
+    static func load(from defaults: UserDefaults) -> PTTSystemPolicyState {
+        PTTSystemPolicyState(
+            latestTokenHex: defaults.string(forKey: latestTokenHexKey) ?? "",
+            lastTokenUploadError: defaults.string(forKey: lastTokenUploadErrorKey),
+            uploadedTokenHex: defaults.string(forKey: uploadedTokenHexKey),
+            uploadedBackendChannelID: defaults.string(forKey: uploadedBackendChannelIDKey)
+        )
+    }
+
+    static func store(_ state: PTTSystemPolicyState, to defaults: UserDefaults) {
+        if let latestTokenHex = state.tokenRegistration.latestTokenHex,
+           !latestTokenHex.isEmpty {
+            defaults.set(latestTokenHex, forKey: latestTokenHexKey)
+        } else {
+            defaults.removeObject(forKey: latestTokenHexKey)
+        }
+
+        if let uploadedTokenHex = state.uploadedTokenHex {
+            defaults.set(uploadedTokenHex, forKey: uploadedTokenHexKey)
+        } else {
+            defaults.removeObject(forKey: uploadedTokenHexKey)
+        }
+
+        if let uploadedBackendChannelID = state.uploadedBackendChannelID {
+            defaults.set(uploadedBackendChannelID, forKey: uploadedBackendChannelIDKey)
+        } else {
+            defaults.removeObject(forKey: uploadedBackendChannelIDKey)
+        }
+
+        if let lastTokenUploadError = state.lastTokenUploadError {
+            defaults.set(lastTokenUploadError, forKey: lastTokenUploadErrorKey)
+        } else {
+            defaults.removeObject(forKey: lastTokenUploadErrorKey)
+        }
+    }
+}
+
 enum PTTTokenRegistrationState: Equatable {
     case idle
     case tokenKnown(tokenHex: String, backendChannelID: String?)
@@ -220,7 +263,7 @@ enum PTTSystemPolicyReducer {
             if let request = uploadRequestIfNeeded(
                 latestTokenHex: tokenHex,
                 backendChannelID: backendChannelID,
-                registeredRequest: state.tokenRegistration.uploadedRequest
+                tokenRegistration: state.tokenRegistration
             ) {
                 nextState.tokenRegistration = .uploadPending(request)
                 effects.append(.uploadEphemeralToken(request))
@@ -235,7 +278,7 @@ enum PTTSystemPolicyReducer {
                 if let request = uploadRequestIfNeeded(
                     latestTokenHex: latestTokenHex,
                     backendChannelID: backendChannelID,
-                    registeredRequest: state.tokenRegistration.uploadedRequest
+                    tokenRegistration: state.tokenRegistration
                 ) {
                     nextState.tokenRegistration = .uploadPending(request)
                     effects.append(.uploadEphemeralToken(request))
@@ -263,14 +306,21 @@ enum PTTSystemPolicyReducer {
     private static func uploadRequestIfNeeded(
         latestTokenHex: String,
         backendChannelID: String?,
-        registeredRequest: PTTTokenUploadRequest?
+        tokenRegistration: PTTTokenRegistrationState
     ) -> PTTTokenUploadRequest? {
         guard let backendChannelID else { return nil }
         let request = PTTTokenUploadRequest(
             backendChannelID: backendChannelID,
             tokenHex: latestTokenHex
         )
-        guard registeredRequest != request else { return nil }
+        switch tokenRegistration {
+        case .uploadPending(let pendingRequest) where pendingRequest == request:
+            return nil
+        case .registered(let registeredRequest) where registeredRequest == request:
+            return nil
+        default:
+            break
+        }
         return request
     }
 }
@@ -279,14 +329,22 @@ enum PTTSystemPolicyReducer {
 final class PTTSystemPolicyCoordinator {
     private(set) var state = PTTSystemPolicyState.initial
     var effectHandler: (@MainActor (PTTSystemPolicyEffect) async -> Void)?
+    var stateChangeHandler: ((PTTSystemPolicyState) -> Void)?
+
+    func replaceState(_ newState: PTTSystemPolicyState) {
+        state = newState
+        stateChangeHandler?(state)
+    }
 
     func send(_ event: PTTSystemPolicyEvent) {
         state = PTTSystemPolicyReducer.reduce(state: state, event: event).state
+        stateChangeHandler?(state)
     }
 
     func handle(_ event: PTTSystemPolicyEvent) async {
         let transition = PTTSystemPolicyReducer.reduce(state: state, event: event)
         state = transition.state
+        stateChangeHandler?(state)
         for effect in transition.effects {
             await effectHandler?(effect)
         }

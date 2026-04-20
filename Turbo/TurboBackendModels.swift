@@ -1380,6 +1380,29 @@ struct TurboChannelStateResponse: Decodable, Equatable {
     var conversationStatus: ConversationState? {
         statusView.conversationState
     }
+
+    func settingMembership(_ membership: TurboChannelMembership) -> TurboChannelStateResponse {
+        TurboChannelStateResponse(
+            channelId: channelId,
+            selfUserId: selfUserId,
+            peerUserId: peerUserId,
+            peerHandle: peerHandle,
+            selfOnline: selfOnline,
+            peerOnline: peerOnline,
+            selfJoined: membership.hasLocalMembership,
+            peerJoined: membership.hasPeerMembership,
+            peerDeviceConnected: membership.peerDeviceConnected,
+            hasIncomingRequest: hasIncomingRequest,
+            hasOutgoingRequest: hasOutgoingRequest,
+            requestCount: requestCount,
+            activeTransmitterUserId: activeTransmitterUserId,
+            transmitLeaseExpiresAt: transmitLeaseExpiresAt,
+            status: statusKind,
+            canTransmit: canTransmit,
+            requestRelationshipPayload: requestRelationshipPayload,
+            conversationStatusPayload: conversationStatusPayload
+        )
+    }
 }
 
 struct TurboChannelReadinessResponse: Decodable, Equatable {
