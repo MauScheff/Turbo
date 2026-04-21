@@ -9,16 +9,29 @@ import Foundation
 import UIKit
 
 extension PTTViewModel {
-    private var remoteAudioSilenceTimeoutNanoseconds: UInt64 { 1_500_000_000 }
+    private func remoteAudioTimeoutNanoseconds(for phase: RemoteReceiveTimeoutPhase) -> UInt64 {
+        switch phase {
+        case .awaitingFirstAudioChunk:
+            return remoteAudioInitialChunkTimeoutNanoseconds
+        case .drainingAudio:
+            return remoteAudioSilenceTimeoutNanoseconds
+        }
+    }
 
     func runReceiveExecutionEffect(_ effect: ReceiveExecutionEffect) {
         switch effect {
-        case .scheduleRemoteSilenceTimeout(let contactID):
+        case .scheduleRemoteSilenceTimeout(let contactID, let phase):
             let task = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: self?.remoteAudioSilenceTimeoutNanoseconds ?? 0)
+                try? await Task.sleep(
+                    nanoseconds: self?.remoteAudioTimeoutNanoseconds(for: phase) ?? 0
+                )
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    self?.handleRemoteAudioSilenceTimeout(for: contactID)
+                    guard let self else { return }
+                    guard self.receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.timeoutPhase == phase else {
+                        return
+                    }
+                    self.handleRemoteAudioSilenceTimeout(for: contactID, phase: phase)
                 }
             }
             receiveExecutionRuntime.replaceRemoteAudioSilenceTask(for: contactID, with: task)
@@ -31,13 +44,24 @@ extension PTTViewModel {
         }
     }
 
-    func handleRemoteAudioSilenceTimeout(for contactID: UUID) {
+    func handleRemoteAudioSilenceTimeout(
+        for contactID: UUID,
+        phase: RemoteReceiveTimeoutPhase? = nil
+    ) {
+        let resolvedPhase = phase
+            ?? receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.timeoutPhase
+            ?? .drainingAudio
         receiveExecutionRuntime.replaceRemoteAudioSilenceTask(for: contactID, with: nil)
         receiveExecutionCoordinator.send(.silenceTimeoutElapsed(contactID: contactID))
         diagnostics.record(
             .media,
-            message: "Remote audio activity timed out",
-            metadata: ["contactId": contactID.uuidString]
+            message: resolvedPhase == .awaitingFirstAudioChunk
+                ? "Initial remote audio chunk timed out"
+                : "Remote audio activity timed out",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "phase": resolvedPhase.rawValue,
+            ]
         )
 
         switch pttWakeRuntime.incomingWakeActivationState(for: contactID) {
@@ -55,6 +79,13 @@ extension PTTViewModel {
              .none:
             break
         }
+
+        finalizeReceiveMediaSessionIfNeeded(
+            for: contactID,
+            closeMessage: "Closed receive media session after remote audio silence timeout",
+            deferPrewarmMessage: "Deferred interactive audio prewarm after remote audio silence timeout"
+        )
+        clearSystemRemoteParticipantIfNeededAfterRemoteAudioEnded(for: contactID)
 
         if selectedContactId == contactID {
             updateStatusForSelectedContact()
@@ -167,7 +198,7 @@ extension PTTViewModel {
             switch existing.statusView {
             case .ready, .selfTransmitting, .peerTransmitting:
                 return true
-            case .waitingForSelf, .waitingForPeer, .unknown:
+            case .inactive, .waitingForSelf, .waitingForPeer, .unknown:
                 return false
             }
         }()
@@ -177,7 +208,7 @@ extension PTTViewModel {
             switch fetched.statusView {
             case .waitingForSelf, .waitingForPeer:
                 return true
-            case .ready, .selfTransmitting, .peerTransmitting, .unknown:
+            case .inactive, .ready, .selfTransmitting, .peerTransmitting, .unknown:
                 return false
             }
         }()
@@ -250,6 +281,9 @@ extension PTTViewModel {
         guard currentApplicationState() != .active else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         guard !pttWakeRuntime.shouldSuppressProvisionalWakeCandidate(for: contactID) else { return false }
+        // Once the system-owned PTT audio session is active, later signal-path
+        // chunks belong to the current receive flow and must not rearm wake.
+        guard !isPTTAudioSessionActive else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
     }
 
@@ -362,18 +396,74 @@ extension PTTViewModel {
         }
     }
 
+    func shouldDeferReceiveTeardownUntilRemoteAudioDrain(for contactID: UUID) -> Bool {
+        guard mediaSessionContactID == contactID else { return false }
+        guard !isTransmitting else { return false }
+        return receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.lastSource == .audioChunk
+    }
+
+    func finalizeReceiveMediaSessionIfNeeded(
+        for contactID: UUID,
+        closeMessage: String,
+        deferPrewarmMessage: String
+    ) {
+        let shouldRestoreInteractivePrewarm =
+            isJoined
+            && activeChannelId == contactID
+            && systemSessionMatches(contactID)
+            && !isTransmitting
+
+        guard mediaSessionContactID == contactID, !isTransmitting else { return }
+
+        closeMediaSession()
+        if backendStatusMessage.hasPrefix("Media ") {
+            backendStatusMessage = "Connected"
+        }
+        diagnostics.record(
+            .media,
+            message: closeMessage,
+            metadata: ["contactId": contactID.uuidString]
+        )
+        if shouldRestoreInteractivePrewarm {
+            deferInteractivePrewarmUntilPTTAudioDeactivation(for: contactID)
+            diagnostics.record(
+                .media,
+                message: deferPrewarmMessage,
+                metadata: ["contactId": contactID.uuidString]
+            )
+        }
+    }
+
+    func clearSystemRemoteParticipantIfNeededAfterRemoteAudioEnded(for contactID: UUID) {
+        guard shouldClearSystemRemoteParticipantFromSignalPath(for: contactID) else { return }
+        Task {
+            await updateSystemRemoteParticipant(for: contactID, isActive: false)
+        }
+    }
+
     func shouldRecoverRemoteTransmitStopFromChannelRefresh(
         contactID: UUID,
         existingChannelState: TurboChannelStateResponse?,
         effectiveChannelState: TurboChannelStateResponse
     ) -> Bool {
         guard remoteTransmittingContactIDs.contains(contactID) else { return false }
+        // Wake receive is still establishing until the pending wake lifecycle
+        // clears. Channel refresh must not synthesize a stop during that window,
+        // or late-arriving audio will be stranded behind a rearmed wake.
+        guard !pttWakeRuntime.hasPendingWake(for: contactID) else { return false }
 
         let existingLookedLikeReceive =
             existingChannelState?.conversationStatus == .receiving
             || mediaSessionContactID == contactID
             || isPTTAudioSessionActive
         guard existingLookedLikeReceive else { return false }
+        // Once signal-path audio is arriving, the backend channel state can
+        // move back to ready before the final queued chunks drain to the
+        // receiver. In that phase, only an explicit transmit-stop signal or
+        // the remote-audio silence timeout should end receive locally.
+        guard receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.lastSource != .audioChunk else {
+            return false
+        }
 
         return effectiveChannelState.conversationStatus != .receiving
     }
@@ -555,6 +645,8 @@ extension PTTViewModel {
 
     func runBackendSyncEffect(_ effect: BackendSyncEffect) async {
         switch effect {
+        case .bootstrapIfNeeded:
+            await recoverBackendBootstrapIfNeeded(trigger: "backend-poll")
         case .ensureWebSocketConnected:
             backendServices?.ensureWebSocketConnected()
         case .heartbeatPresence:
@@ -665,6 +757,8 @@ extension PTTViewModel {
 
         switch envelope.type {
         case .transmitStart, .transmitStop:
+            let shouldDeferReceiveTeardown = envelope.type == .transmitStop
+                && shouldDeferReceiveTeardownUntilRemoteAudioDrain(for: contactID)
             if envelope.type == .transmitStart {
                 pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
                 markRemoteAudioActivity(for: contactID, source: .transmitStartSignal)
@@ -694,32 +788,23 @@ extension PTTViewModel {
                         ]
                     )
                 } else {
-                    pttWakeRuntime.clear(for: contactID)
-                }
-                clearRemoteAudioActivity(for: contactID)
-                let shouldRestoreInteractivePrewarm =
-                    isJoined
-                    && activeChannelId == contactID
-                    && systemSessionMatches(contactID)
-                    && !isTransmitting
-                if mediaSessionContactID == contactID && !isTransmitting {
-                    closeMediaSession()
-                    if backendStatusMessage.hasPrefix("Media ") {
-                        backendStatusMessage = "Connected"
-                    }
-                    diagnostics.record(
-                        .media,
-                        message: "Closed receive media session after transmit stop",
-                        metadata: ["contactId": contactID.uuidString]
-                    )
-                    if shouldRestoreInteractivePrewarm {
-                        deferInteractivePrewarmUntilPTTAudioDeactivation(for: contactID)
+                    if shouldDeferReceiveTeardown {
                         diagnostics.record(
                             .media,
-                            message: "Deferred interactive audio prewarm until PTT audio deactivation",
+                            message: "Deferring receive teardown until remote audio drain after transmit stop",
                             metadata: ["contactId": contactID.uuidString]
                         )
+                    } else {
+                        pttWakeRuntime.clear(for: contactID)
                     }
+                }
+                if !shouldDeferReceiveTeardown {
+                    clearRemoteAudioActivity(for: contactID)
+                    finalizeReceiveMediaSessionIfNeeded(
+                        for: contactID,
+                        closeMessage: "Closed receive media session after transmit stop",
+                        deferPrewarmMessage: "Deferred interactive audio prewarm until PTT audio deactivation"
+                    )
                 }
             }
             diagnostics.record(
@@ -740,6 +825,7 @@ extension PTTViewModel {
                     )
                 let shouldClearRemoteParticipant =
                     envelope.type == .transmitStop
+                    && !shouldDeferReceiveTeardown
                     && shouldClearSystemRemoteParticipantFromSignalPath(for: contactID)
                 if shouldSetRemoteParticipant || shouldClearRemoteParticipant {
                     await updateSystemRemoteParticipant(
@@ -972,6 +1058,12 @@ extension PTTViewModel {
             await reconcileSelectedSessionIfNeeded()
         } catch {
             guard !isExpectedBackendSyncCancellation(error) else { return }
+            if await recoverBackendControlPlaneAfterSyncFailureIfNeeded(
+                scope: "contact-summaries",
+                error: error
+            ) {
+                return
+            }
             backendSyncCoordinator.send(.contactSummariesFailed("Contact sync failed: \(error.localizedDescription)"))
             diagnostics.record(.backend, level: .error, message: "Contact sync failed", metadata: ["error": error.localizedDescription])
             captureDiagnosticsState("backend-sync:contact-summaries-failed")
@@ -1079,6 +1171,12 @@ extension PTTViewModel {
             await reconcileSelectedSessionIfNeeded()
         } catch {
             guard !isExpectedBackendSyncCancellation(error) else { return }
+            if await recoverBackendControlPlaneAfterSyncFailureIfNeeded(
+                scope: "channel-state",
+                error: error
+            ) {
+                return
+            }
             backendSyncCoordinator.send(
                 .channelStateFailed(
                     contactID: contactID,
@@ -1146,6 +1244,12 @@ extension PTTViewModel {
             await reconcileSelectedSessionIfNeeded()
         } catch {
             guard !isExpectedBackendSyncCancellation(error) else { return }
+            if await recoverBackendControlPlaneAfterSyncFailureIfNeeded(
+                scope: "invite-sync",
+                error: error
+            ) {
+                return
+            }
             backendSyncCoordinator.send(.invitesFailed("Invite sync failed: \(error.localizedDescription)"))
             diagnostics.record(.backend, level: .error, message: "Invite sync failed", metadata: ["error": error.localizedDescription])
             captureDiagnosticsState("backend-sync:invites-failed")

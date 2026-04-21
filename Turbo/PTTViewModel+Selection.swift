@@ -244,6 +244,9 @@ extension PTTViewModel {
             ?? false
 
         if let channelSnapshot = selectedChannelSnapshot(for: contactID) {
+            if case .absent = channelSnapshot.membership {
+                return rawPresenceOnline ? .connected : .offline
+            }
             return channelSnapshot.membership.peerDeviceConnected ? .connected : (rawPresenceOnline ? .available : .offline)
         }
 

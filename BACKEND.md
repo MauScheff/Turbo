@@ -65,6 +65,29 @@ Typical backend-owned invariants here include:
 
 Do not make the client prove a rule that only the backend can know.
 
+## Mixed app/backend bug workflow
+
+For distributed-state or app/backend contract bugs, do not assume the first visible client symptom is the source.
+
+Work the problem in this order:
+
+1. restate the report as a broken shared fact
+2. identify who is authoritative for that fact
+3. inspect the backend projection or route that produces the fact
+4. inspect the client projection that renders or derives from it
+5. add or strengthen an invariant at the authoritative seam
+6. fix the subsystem that violated the invariant
+7. keep any client-side guardrail only as a secondary defense, not the primary fix
+
+For Turbo, the backend is usually authoritative for:
+
+- channel membership and readiness
+- wake-target availability
+- direct-channel request/session truth
+- pair/session convergence after reconnect, retry, or disconnect
+
+If the backend can project stale, contradictory, or one-sided session truth, fix that in the backend even if the client also needs to fail closed more clearly.
+
 ## Verification loops
 
 Deploy / probe:

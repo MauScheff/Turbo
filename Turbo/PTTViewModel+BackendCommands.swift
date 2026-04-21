@@ -141,6 +141,11 @@ extension PTTViewModel {
         return message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "missing otheruserid or otherhandle"
     }
 
+    func shouldTreatBackendJoinDisconnectedSessionAsRecoverable(_ error: Error) -> Bool {
+        guard case let TurboBackendError.server(message) = error else { return false }
+        return message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "device session not connected"
+    }
+
     func declineIncomingRequestForSelectedContact() async {
         guard let contact = selectedContact else {
             statusMessage = "Pick a contact"
@@ -834,22 +839,37 @@ extension PTTViewModel {
             do {
                 try await executeBackendJoin(request)
             } catch {
-                guard let backend = backendServices,
-                      shouldTreatBackendJoinMetadataFailureAsRecoverable(error) else {
-                    throw error
+                if shouldTreatBackendJoinDisconnectedSessionAsRecoverable(error),
+                   let backend = backendServices,
+                   backend.supportsWebSocket {
+                    diagnostics.record(
+                        .backend,
+                        message: "Recovering backend join after disconnected session drift",
+                        metadata: [
+                            "contactId": request.contactID.uuidString,
+                            "handle": request.handle,
+                        ]
+                    )
+                    await reconnectBackendControlPlane()
+                    try await executeBackendJoin(request)
+                } else {
+                    guard let backend = backendServices,
+                          shouldTreatBackendJoinMetadataFailureAsRecoverable(error) else {
+                        throw error
+                    }
+
+                    diagnostics.record(
+                        .backend,
+                        message: "Recovering backend join after metadata drift",
+                        metadata: [
+                            "contactId": request.contactID.uuidString,
+                            "handle": request.handle,
+                        ]
+                    )
+
+                    let refreshedRequest = try await refreshJoinContactMetadata(for: request, backend: backend)
+                    try await executeBackendJoin(refreshedRequest)
                 }
-
-                diagnostics.record(
-                    .backend,
-                    message: "Recovering backend join after metadata drift",
-                    metadata: [
-                        "contactId": request.contactID.uuidString,
-                        "handle": request.handle,
-                    ]
-                )
-
-                let refreshedRequest = try await refreshJoinContactMetadata(for: request, backend: backend)
-                try await executeBackendJoin(refreshedRequest)
             }
         } catch {
             let message = error.localizedDescription

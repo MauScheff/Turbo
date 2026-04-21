@@ -1,0 +1,205 @@
+turbo.domain.channelStateStatusFromView :
+  UserId -> ChannelMembershipView -> RequestRelationship -> Boolean -> Optional UserId -> ChannelStateStatus
+turbo.domain.channelStateStatusFromView currentUserId membership requestRelationship peerOnline activeTransmitterUserId =
+  use UserId toText
+  readyMembership =
+    channelMembershipHasLocalMembership membership
+      && channelMembershipHasPeerMembership membership
+      && channelMembershipPeerDeviceConnected membership
+  match activeTransmitterUserId with
+    Some activeUserId ->
+      if textEqual (toText activeUserId) (toText currentUserId)
+      then SelfTransmitting activeUserId
+      else PeerTransmitting activeUserId
+    None ->
+      if readyMembership
+      then ChannelStateStatus.Ready
+      else if channelMembershipHasLocalMembership membership
+      then ChannelStateStatus.WaitingForPeer
+      else if requestRelationshipHasIncoming requestRelationship
+      then IncomingRequest
+      else if requestRelationshipHasOutgoing requestRelationship
+      then ChannelStateStatus.Requested
+      else if channelMembershipHasPeerMembership membership
+      then ChannelStateStatus.Connecting
+      else Idle
+
+turbo.domain.channelStateStatusConnectsWithoutMembershipOrRequest :
+  ChannelMembershipView -> RequestRelationship -> ChannelStateStatus -> Boolean
+turbo.domain.channelStateStatusConnectsWithoutMembershipOrRequest membership requestRelationship =
+  cases
+    ChannelStateStatus.Connecting ->
+      match membership with
+        NoMembership ->
+          match requestRelationship with
+            NoPendingRequest -> true
+            _                -> false
+        _ -> false
+    _ -> false
+
+test> turbo.domain.channelStateStatusFromView.tests.examples = verify do
+  currentUserId = turbo.domain.UserId.fromText "self-user"
+  activeUserId = turbo.domain.UserId.fromText "peer-user"
+
+  ensureEqual
+    turbo.domain.ChannelStateStatus.Idle
+    (turbo.domain.channelStateStatusFromView
+      currentUserId
+      turbo.domain.ChannelMembershipView.NoMembership
+      turbo.domain.RequestRelationship.NoPendingRequest
+      true
+      None)
+
+  ensureEqual
+    turbo.domain.ChannelStateStatus.Connecting
+    (turbo.domain.channelStateStatusFromView
+      currentUserId
+      (turbo.domain.ChannelMembershipView.PeerOnlyMembership false)
+      turbo.domain.RequestRelationship.NoPendingRequest
+      true
+      None)
+
+  ensureEqual
+    (turbo.domain.ChannelStateStatus.PeerTransmitting activeUserId)
+    (turbo.domain.channelStateStatusFromView
+      currentUserId
+      turbo.domain.ChannelMembershipView.NoMembership
+      turbo.domain.RequestRelationship.NoPendingRequest
+      true
+      (Some activeUserId))
+
+test> turbo.domain.channelStateStatusConnectsWithoutMembershipOrRequest.tests.examples = verify do
+  ensure
+    (turbo.domain.channelStateStatusConnectsWithoutMembershipOrRequest
+      turbo.domain.ChannelMembershipView.NoMembership
+      turbo.domain.RequestRelationship.NoPendingRequest
+      turbo.domain.ChannelStateStatus.Connecting)
+
+  ensureEqual
+    false
+    (turbo.domain.channelStateStatusConnectsWithoutMembershipOrRequest
+      turbo.domain.ChannelMembershipView.NoMembership
+      (turbo.domain.RequestRelationship.OutgoingPendingRequest 1)
+      turbo.domain.ChannelStateStatus.Connecting)
+
+  ensureEqual
+    false
+    (turbo.domain.channelStateStatusConnectsWithoutMembershipOrRequest
+      (turbo.domain.ChannelMembershipView.PeerOnlyMembership false)
+      turbo.domain.RequestRelationship.NoPendingRequest
+      turbo.domain.ChannelStateStatus.Connecting)
+
+turbo.service.channels.internal.appendConnectingWithoutMembershipOrRequestInvariant :
+  Database -> UserId -> ChannelId -> '{Exception, Storage, Remote} ()
+turbo.service.channels.internal.appendConnectingWithoutMembershipOrRequestInvariant
+  db
+  currentUserId
+  channelId =
+  do
+    metadata = "channelId=" ++ ChannelId.toText channelId
+    turbo.service.internal.appendInvariantEvent
+      db
+      currentUserId
+      "channel.connecting_without_membership_or_request"
+      "backend"
+      "backend"
+      "channel state projected connecting without membership or request"
+      (Some metadata)
+      ()
+
+turbo.service.channels.state : Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.state db =
+  do
+    use Optional map
+    use Parser / text
+    use UserId toText
+    use object add empty
+    (channelIdText, deviceIdText) = route GET (s "v1" / s "channels" / text / s "state" / text => Tuple.pair)
+    match requireUser db () with
+      Left err          -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        channelId = ChannelId.fromText channelIdText
+        deviceId = DeviceId.fromText deviceIdText
+        match OrderedTable.tryRead (channels.tables.byId db) channelId with
+          None                                          -> notFound.json (empty |> addText "error" "channel not found")
+          Some (DirectChannel _ lowUserId highUserId _) ->
+            peerUserId = if userIdEqual lowUserId currentUserId then highUserId else lowUserId
+            peerHandle = match users.getById db peerUserId () with
+              Some (User _ handleText _ _ _) -> handleText
+              None                           -> toText peerUserId
+            selfPresence = presence.get db deviceId ()
+            selfOnline = match selfPresence with
+              Some presence -> presenceMatches currentUserId presence
+              None          -> false
+            rawSelfJoined = match selfPresence with
+              Some presence -> matchesDeviceChannelPresence currentUserId deviceId channelId presence
+              None          -> false
+            normalizedSelfJoined = selfJoinedChannel db currentUserId channelId selfPresence ()
+            _ =
+              if Boolean.and rawSelfJoined (Boolean.not normalizedSelfJoined)
+              then appendStaleSelfPresenceProjectedLiveInvariant db currentUserId channelId deviceId "state" ()
+              else ()
+            peerPresence = getForUser db peerUserId ()
+            peerOnline = isSome peerPresence
+            peerJoinedPresence = getForUserInChannel db peerUserId channelId ()
+            rawPeerJoined = isSome peerJoinedPresence
+            peerConnectedPresence = getConnectedForUserInChannel db peerUserId channelId ()
+            rawPeerDeviceConnected = isSome peerConnectedPresence
+            incomingInvite = incomingInviteForChannel db currentUserId peerUserId channelId ()
+            outgoingInvite = outgoingInviteForChannel db currentUserId peerUserId channelId ()
+            hasIncomingRequest = isSome incomingInvite
+            hasOutgoingRequest = isSome outgoingInvite
+            hasPendingRequest = Boolean.or hasIncomingRequest hasOutgoingRequest
+            selfJoined = if hasPendingRequest then false else normalizedSelfJoined
+            peerJoined = if hasPendingRequest then false else rawPeerJoined
+            peerDeviceConnected = if hasPendingRequest then false else rawPeerDeviceConnected
+            requestCount = pendingCount incomingInvite outgoingInvite
+            requestRelationship = requestRelationshipFromFlags hasIncomingRequest hasOutgoingRequest requestCount
+            membership = channelMembershipFromFlags selfJoined peerJoined peerDeviceConnected
+            activeTransmit = currentTransmit db channelId ()
+            activeTransmitterUserId = map transmitUserId activeTransmit
+            activeTransmitExpiresAt = map transmitExpiresAtText activeTransmit
+            conversationStatus =
+              channelStateStatusFromView
+                currentUserId
+                membership
+                requestRelationship
+                peerOnline
+                activeTransmitterUserId
+            _ =
+              if turbo.domain.channelStateStatusConnectsWithoutMembershipOrRequest
+                   membership
+                   requestRelationship
+                   conversationStatus
+              then
+                turbo.service.channels.internal.appendConnectingWithoutMembershipOrRequestInvariant
+                  db
+                  currentUserId
+                  channelId
+                  ()
+              else ()
+            ok.json
+              ( empty
+                  |> addText "channelId" channelIdText
+                  |> addText "selfUserId" (toText currentUserId)
+                  |> addText "peerUserId" (toText peerUserId)
+                  |> addText "peerHandle" peerHandle
+                  |> addBoolean "selfOnline" selfOnline
+                  |> addBoolean "peerOnline" peerOnline
+                  |> addBoolean "selfJoined" selfJoined
+                  |> addBoolean "peerJoined" peerJoined
+                  |> addBoolean "peerDeviceConnected" peerDeviceConnected
+                  |> addBoolean "hasIncomingRequest" hasIncomingRequest
+                  |> addBoolean "hasOutgoingRequest" hasOutgoingRequest
+                  |> addNat "requestCount" requestCount
+                  |> add "membership" (channelMembershipJson membership)
+                  |> add "requestRelationship" (requestRelationshipJson requestRelationship)
+                  |> add "conversationStatus" (channelStateStatusJson conversationStatus)
+                  |> addOptionalText "activeTransmitterUserId" (map toText activeTransmitterUserId)
+                  |> addOptionalText "transmitLeaseExpiresAt" activeTransmitExpiresAt
+                  |> addText "status" (channelStateStatusKindText conversationStatus)
+                  |> addBoolean "canTransmit" (canTransmit currentUserId selfOnline peerOnline membership activeTransmitterUserId)
+              )

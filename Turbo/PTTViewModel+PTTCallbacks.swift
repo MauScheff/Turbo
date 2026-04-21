@@ -28,6 +28,26 @@ extension PTTViewModel {
         currentApplicationState() != .active
     }
 
+    func resumeWebSocketForIncomingPTTPushIfNeeded(
+        backendServices: BackendServices,
+        contactID: UUID,
+        channelUUID: UUID,
+        payload: TurboPTTPushPayload
+    ) {
+        guard backendServices.supportsWebSocket else { return }
+        diagnostics.record(
+            .websocket,
+            message: "Resuming WebSocket for incoming PTT push",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelUUID": channelUUID.uuidString,
+                "event": payload.event.rawValue,
+                "webSocketConnected": String(backendServices.isWebSocketConnected),
+            ]
+        )
+        backendServices.resumeWebSocket()
+    }
+
     var pttSystemCallbacks: PTTSystemClientCallbacks {
         PTTSystemClientCallbacks(
             receivedEphemeralPushToken: { [weak self] token in
@@ -140,35 +160,6 @@ extension PTTViewModel {
         await prewarmLocalMediaIfNeeded(for: contactID)
         captureDiagnosticsState("ptt-callback:restored-resolved")
         return contactID
-    }
-
-    func refreshWebSocketForIncomingPTTPushIfNeeded(
-        backendServices: BackendServices,
-        contactID: UUID,
-        channelUUID: UUID,
-        payload: TurboPTTPushPayload
-    ) {
-        guard backendServices.supportsWebSocket else { return }
-        let shouldForceReconnect =
-            shouldArmWakeFlowForIncomingPush
-            && backendServices.isWebSocketConnected
-        diagnostics.record(
-            .websocket,
-            message: shouldForceReconnect
-                ? "Refreshing WebSocket for incoming PTT push"
-                : "Resuming WebSocket for incoming PTT push",
-            metadata: [
-                "contactId": contactID.uuidString,
-                "channelUUID": channelUUID.uuidString,
-                "event": payload.event.rawValue,
-                "forceReconnect": String(shouldForceReconnect),
-            ]
-        )
-        if shouldForceReconnect {
-            backendServices.forceReconnectWebSocket()
-        } else {
-            backendServices.resumeWebSocket()
-        }
     }
 
     func handleWillReturnIncomingPushResult(
@@ -292,6 +283,9 @@ extension PTTViewModel {
                     ]
                 )
                 pttWakeRuntime.clear(for: contactID)
+                Task { [weak self] in
+                    await self?.prepareForegroundReceivePathForIncomingPush(contactID: contactID)
+                }
             }
             if selectedContactId == nil {
                 selectedContactId = contactID
@@ -308,7 +302,7 @@ extension PTTViewModel {
         if shouldArmWakeFlowForIncomingPush {
             if let backendServices,
                backendServices.supportsWebSocket {
-                refreshWebSocketForIncomingPTTPushIfNeeded(
+                resumeWebSocketForIncomingPTTPushIfNeeded(
                     backendServices: backendServices,
                     contactID: contactID,
                     channelUUID: channelUUID,
@@ -325,6 +319,25 @@ extension PTTViewModel {
                 ]
             )
         }
+    }
+
+    private func prepareForegroundReceivePathForIncomingPush(contactID: UUID) async {
+        guard currentApplicationState() == .active else { return }
+        guard isJoined, activeChannelId == contactID else { return }
+        guard systemSessionMatches(contactID) else { return }
+        guard !isTransmitting else { return }
+
+        diagnostics.record(
+            .pushToTalk,
+            message: "Preparing foreground receive path from incoming PTT push",
+            metadata: ["contactId": contactID.uuidString]
+        )
+        await reassertBackendJoinAfterWakeIfNeeded(for: contactID)
+        await prewarmLocalMediaIfNeeded(for: contactID, applicationState: .active)
+        await syncLocalReceiverAudioReadinessSignal(
+            for: contactID,
+            reason: "incoming-push-foreground"
+        )
     }
 
     private func reinforceIncomingPushRemoteParticipant(
@@ -430,6 +443,24 @@ extension PTTViewModel {
     func handleFailedToJoinChannel(_ channelUUID: UUID, error: any Error) {
         let contactID = contactId(for: channelUUID)
         let joinFailure = classifyPTTJoinFailure(error)
+        if joinFailure == .channelLimitReached,
+           let contactID {
+            diagnostics.record(
+                .pushToTalk,
+                message: "System join hit stale channel limit; rejoining",
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "contactID": contactID.uuidString,
+                    "error": joinFailure.message,
+                ]
+            )
+            recoverStaleSystemChannel(
+                for: channelUUID,
+                contactID: contactID,
+                reason: "join-failed-channel-limit"
+            )
+            return
+        }
         Task {
             await pttCoordinator.handle(
                 .failedToJoinChannel(

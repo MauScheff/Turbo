@@ -9,6 +9,7 @@ import Foundation
 
 final class BackendRuntimeState {
     var pollTask: Task<Void, Never>?
+    var bootstrapRetryTask: Task<Void, Never>?
     var config = TurboBackendConfig.load()
     var client: TurboBackendClient?
     var currentUserID: String?
@@ -42,6 +43,8 @@ final class BackendRuntimeState {
         currentUserID = nil
         isReady = false
         mode = "unknown"
+        bootstrapRetryTask?.cancel()
+        bootstrapRetryTask = nil
         pollTask?.cancel()
         pollTask = nil
     }
@@ -53,6 +56,11 @@ final class BackendRuntimeState {
     func replacePollTask(with task: Task<Void, Never>?) {
         pollTask?.cancel()
         pollTask = task
+    }
+
+    func replaceBootstrapRetryTask(with task: Task<Void, Never>?) {
+        bootstrapRetryTask?.cancel()
+        bootstrapRetryTask = task
     }
 
     func storeAuthenticatedUserID(_ userID: String) {
@@ -244,6 +252,10 @@ struct TransmitRuntimeState {
         executionState.lastSystemTransmitBeganAt
     }
 
+    var shouldAwaitInitialOutboundAudioSendGate: Bool {
+        executionState.initialOutboundAudioSendGateState.shouldAwaitInitialRemoteReady
+    }
+
     mutating func syncActiveTarget(_ activeTarget: TransmitTarget?) {
         reduce(.syncActiveTarget(activeTarget))
     }
@@ -280,6 +292,26 @@ struct TransmitRuntimeState {
         pendingSystemBeginChannelUUID == channelUUID
     }
 
+    mutating func beginSystemTransmitActivationIfNeeded(channelUUID: UUID) -> Bool {
+        switch executionState.systemTransmitActivationState {
+        case .idle:
+            reduce(.beginSystemTransmitActivation(channelUUID: channelUUID))
+            return true
+        case .activating(let existingChannelUUID), .activated(let existingChannelUUID):
+            guard existingChannelUUID != channelUUID else { return false }
+            reduce(.beginSystemTransmitActivation(channelUUID: channelUUID))
+            return true
+        }
+    }
+
+    mutating func noteSystemTransmitActivationCompleted(channelUUID: UUID) {
+        reduce(.markSystemTransmitActivationCompleted(channelUUID: channelUUID))
+    }
+
+    mutating func clearSystemTransmitActivation(channelUUID: UUID? = nil) {
+        reduce(.clearSystemTransmitActivation(channelUUID: channelUUID))
+    }
+
     func currentSystemTransmitDurationMilliseconds(at date: Date = Date()) -> Int? {
         guard let lastSystemTransmitBeganAt else { return nil }
         return Int(date.timeIntervalSince(lastSystemTransmitBeganAt) * 1000)
@@ -295,6 +327,13 @@ struct TransmitRuntimeState {
 
     mutating func markExplicitStopRequested() {
         reduce(.markExplicitStopRequested)
+    }
+
+    mutating func takeShouldAwaitInitialOutboundAudioSendGate() -> Bool {
+        let shouldAwait = shouldAwaitInitialOutboundAudioSendGate
+        guard shouldAwait else { return false }
+        reduce(.consumeInitialOutboundAudioSendGate)
+        return true
     }
 
     mutating func reset() {

@@ -21,6 +21,10 @@ Detailed guidance lives in:
 - The structure is the answer.
 - When a bug report is really a broken invariant, translate the plain-language report into a typed invariant using [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md), add detection at the authoritative seam, and make it show up in merged diagnostics plus a regression.
 - When searching broadly, use [`BACKEND_STRUCTURE.md`](/Users/mau/Development/Turbo/BACKEND_STRUCTURE.md) as a quick backend index, then use the Unison MCP to explore the backend authoritatively when you need the current structure or deeper detail.
+- Investigate first and fix problems at their source—never patch backend issues in the frontend.
+- For distributed, shared-state, or app/backend contract bugs, identify which subsystem owns the broken fact before editing code. Do not stop at the client seam if backend truth may be wrong.
+- Client changes may add guardrails, diagnostics, or better projection, but they do not replace a backend fix when the backend owns the incorrect state.
+
 
 # How To Work
 
@@ -35,6 +39,9 @@ Detailed guidance lives in:
 - Prefer the automated simulator scenario/test infrastructure when a task can be proven without a human on a physical device.
 - Treat observability, verification, and repeatable debug loops as part of the implementation.
 - If the task crosses boundaries, load the docs for those boundaries before changing code.
+- For mixed app/backend bugs, inspect both the client projection and the backend projection path before deciding where to fix the issue.
+- When ownership is unclear, add or improve diagnostics/invariants at the authoritative seam first, then fix the subsystem that violates them.
+- Do not accept a frontend-only patch as complete for a distributed-state bug unless you have verified that backend truth is already correct and the defect is purely client-side derivation.
 
 Prefer agent-driven development where it fits: turn behavior reports or requested changes into checked-in scenarios, run the automated proof loop, make the code change, and prove the result automatically. The canonical workflow lives in [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md).
 
@@ -42,7 +49,7 @@ Prefer agent-driven development where it fits: turn behavior reports or requeste
 
 1. Prove behavior with automated tests and checked-in scenarios.
 2. Use local reproducible tooling and diagnostics.
-3. Use hosted or prod-like probes when needed.
+3. For mixed app/backend bugs, use diagnostics, backend route/projection inspection, and hosted or prod-like probes to prove where the contradiction originates before patching.
 4. Ask for manual or physical-device verification only when the relevant surface cannot be exercised from the repo and tooling.
 
 # Engineering Principles

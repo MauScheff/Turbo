@@ -61,6 +61,17 @@ In practice that means you can usually tell the agent:
 
 If the bug is in shared app/backend logic, that is usually enough to build a deterministic scenario, reproduce it, fix it, and keep it as a regression.
 
+For mixed app/backend bugs, do not stop after reproducing the client symptom in Swift.
+
+Before deciding the fix location:
+
+1. inspect the app-side reducer or projection that surfaced the bad state
+2. inspect the backend route or projection that supplied the shared truth
+3. decide whether the client is rendering bad backend truth or deriving the backend truth incorrectly
+4. add an invariant at the seam that can actually prove the contradiction
+
+If the backend-owned fact is wrong, the frontend may add guardrails or better diagnostics, but that is not the primary fix.
+
 Useful commands:
 
 - `just simulator-scenario`

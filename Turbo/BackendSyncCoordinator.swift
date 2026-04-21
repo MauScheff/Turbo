@@ -34,6 +34,7 @@ enum BackendSyncEvent: Equatable {
 }
 
 enum BackendSyncEffect: Equatable {
+    case bootstrapIfNeeded
     case ensureWebSocketConnected
     case heartbeatPresence
     case refreshContactSummaries
@@ -70,19 +71,30 @@ enum BackendSyncReducer {
             nextState.syncState.reset(statusMessage: statusMessage)
 
         case .pollRequested(let selectedContactID):
-            effects = [.ensureWebSocketConnected, .heartbeatPresence, .refreshContactSummaries, .refreshInvites]
-            if let selectedContactID {
-                effects.append(.refreshChannelState(selectedContactID))
+            if nextState.syncState.hasEstablishedConnection {
+                effects = [.ensureWebSocketConnected, .heartbeatPresence, .refreshContactSummaries, .refreshInvites]
+                if let selectedContactID {
+                    effects.append(.refreshChannelState(selectedContactID))
+                }
+            } else {
+                effects = [.bootstrapIfNeeded]
             }
 
         case .webSocketStateChanged(let state, let selectedContactID):
-            if state == .connected, let selectedContactID {
-                effects.append(contentsOf: [
-                    .heartbeatPresence,
-                    .refreshContactSummaries,
-                    .refreshInvites,
-                    .refreshChannelState(selectedContactID),
-                ])
+            switch state {
+            case .idle:
+                nextState.syncState.invalidateRemoteReceiverReadinessAfterWebSocketIdle()
+            case .connecting:
+                break
+            case .connected:
+                if let selectedContactID {
+                    effects.append(contentsOf: [
+                        .heartbeatPresence,
+                        .refreshContactSummaries,
+                        .refreshInvites,
+                        .refreshChannelState(selectedContactID),
+                    ])
+                }
             }
 
         case .contactSummariesUpdated(let updates):

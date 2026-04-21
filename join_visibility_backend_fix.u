@@ -1,0 +1,154 @@
+type turbo.service.channels.internal.JoinPresencePlan
+  = JoinPresencePlanActivate
+  | JoinPresencePlanRejectMissingConnectedSession (Optional ChannelId)
+
+turbo.service.channels.internal.joinPresencePlanFromConnection :
+  Boolean -> Optional ChannelId -> JoinPresencePlan
+turbo.service.channels.internal.joinPresencePlanFromConnection
+  sessionConnected
+  currentChannelId =
+  if sessionConnected
+  then JoinPresencePlanActivate
+  else (JoinPresencePlanRejectMissingConnectedSession currentChannelId)
+
+test> turbo.service.channels.internal.joinPresencePlanFromConnection.tests.examples = verify do
+  channelId = turbo.domain.ChannelId.fromText "channel-123"
+
+  ensureEqual
+    JoinPresencePlanActivate
+    (turbo.service.channels.internal.joinPresencePlanFromConnection
+      true
+      (Some channelId))
+
+  ensureEqual
+    (JoinPresencePlanRejectMissingConnectedSession
+      (Some channelId))
+    (turbo.service.channels.internal.joinPresencePlanFromConnection
+      false
+      (Some channelId))
+
+  ensureEqual
+    (JoinPresencePlanRejectMissingConnectedSession None)
+    (turbo.service.channels.internal.joinPresencePlanFromConnection false None)
+
+turbo.service.channels.internal.appendJoinWithoutConnectedSessionInvariant :
+  Database
+  -> UserId
+  -> ChannelId
+  -> DeviceId
+  -> Optional ChannelId
+  -> '{Exception, Storage, Remote} ()
+turbo.service.channels.internal.appendJoinWithoutConnectedSessionInvariant
+  db
+  currentUserId
+  channelId
+  deviceId
+  existingActiveChannelId =
+  do
+    existingActiveChannelIdText = match existingActiveChannelId with
+      Some staleChannelId -> ChannelId.toText staleChannelId
+      None                -> "none"
+    metadata =
+      "channelId="
+        ++ ChannelId.toText channelId
+        ++ " deviceId="
+        ++ DeviceId.toText deviceId
+        ++ " existingActiveChannelId="
+        ++ existingActiveChannelIdText
+    turbo.service.internal.appendInvariantEvent
+      db
+      currentUserId
+      "channel.join_without_connected_session"
+      "backend"
+      "backend"
+      "join route attempted to mark active channel without a connected session"
+      (Some metadata)
+      ()
+
+turbo.service.channels.join : Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.join db = do
+  use Parser /
+  use Text ==
+  use memberships add
+  use object empty
+  channelIdText = route POST (s "v1" / s "channels" / Parser.text / s "join")
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      fields = decodeJson (Decoder.object Decoder.text)
+      channelId = ChannelId.fromText channelIdText
+      joinedJson membership presence =
+        membershipUserId =
+          (ChannelMembership _ userId _) = membership
+          userId
+        presenceDeviceId =
+          (DevicePresence deviceId _ _ _ _) = presence
+          deviceId
+        empty
+          |> addText "channelId" channelIdText
+          |> addText "userId" (UserId.toText membershipUserId)
+          |> addText "deviceId" (DeviceId.toText presenceDeviceId)
+          |> addText "status" "joined"
+      channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+      match channelOpt with
+        None         -> notFound.json (empty |> addText "error" "channel not found")
+        Some channel ->
+          use UserId toText
+          otherUserId =
+            (DirectChannel _ lowUserId highUserId _) = channel
+            if toText lowUserId == toText currentUserId then highUserId else lowUserId
+          match Map.get "deviceId" fields with
+            None              -> badRequest.json (empty |> addText "error" "missing deviceId")
+            Some deviceIdText ->
+              deviceId = DeviceId.fromText deviceIdText
+              existingActiveChannelId = match presence.get db deviceId () with
+                Some (DevicePresence _ _ _ currentChannelId _) -> currentChannelId
+                None                                          -> None
+              joinPresencePlan =
+                turbo.service.channels.internal.joinPresencePlanFromConnection
+                  (sessions.isConnected db deviceId ())
+                  existingActiveChannelId
+              match joinPresencePlan with
+                JoinPresencePlanRejectMissingConnectedSession staleChannelIdOpt ->
+                    _ =
+                      turbo.service.channels.internal.appendJoinWithoutConnectedSessionInvariant
+                        db
+                        currentUserId
+                        channelId
+                        deviceId
+                        staleChannelIdOpt
+                        ()
+                    _ = match staleChannelIdOpt with
+                      Some _ ->
+                        _ = presence.clearActiveChannel db deviceId currentUserId ()
+                        ()
+                      None   -> ()
+                    badRequest.json (empty |> addText "error" "device session not connected")
+                JoinPresencePlanActivate ->
+                  _ = add db channelId currentUserId ()
+                  _ = add db channelId otherUserId ()
+                  presence =
+                    presence.upsert
+                      db
+                      deviceId
+                      currentUserId
+                      DevicePresenceStatus.Online
+                      (Some channelId)
+                      ()
+                  _ = match getForUserInChannel db otherUserId channelId () with
+                    Some _ -> markConnectedForChannel db currentUserId otherUserId channelId ()
+                    None   -> None
+                  membership = add db channelId currentUserId ()
+                  ok.json (joinedJson membership presence)
+
+turbo.service.channels.join.doc : Doc
+turbo.service.channels.join.doc =
+  {{
+    {{ docExample 1 do db -> channels.join db }} marks the caller's device as joined to a direct
+    channel, but only when the backend still has a live connected session for that device. If the
+    device's control-plane session is stale, the route rejects the join and clears any carried
+    active-channel presence instead of projecting a poisoned live session.
+  }}

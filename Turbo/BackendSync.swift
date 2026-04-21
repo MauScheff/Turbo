@@ -47,6 +47,22 @@ struct BackendSyncState: Equatable {
         channelReadiness[contactID] = readiness
     }
 
+    mutating func invalidateRemoteReceiverReadinessAfterWebSocketIdle() {
+        channelReadiness = channelReadiness.mapValues { readiness in
+            guard readiness.remoteAudioReadiness == .ready else { return readiness }
+
+            let downgradedReadiness: RemoteAudioReadinessState
+            switch readiness.remoteWakeCapability {
+            case .wakeCapable:
+                downgradedReadiness = .wakeCapable
+            case .unavailable:
+                downgradedReadiness = .unknown
+            }
+
+            return readiness.settingRemoteAudioReadiness(downgradedReadiness)
+        }
+    }
+
     mutating func clearChannelState(for contactID: UUID) {
         channelStates[contactID] = nil
         channelReadiness[contactID] = nil

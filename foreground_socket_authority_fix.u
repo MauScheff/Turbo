@@ -1,0 +1,101 @@
+turbo.store.presence.internal.hasConnectedSessionEvidenceFromFlags :
+  Boolean -> Boolean -> Boolean
+turbo.store.presence.internal.hasConnectedSessionEvidenceFromFlags
+  sessionConnected
+  socketOpen =
+    Boolean.or sessionConnected socketOpen
+
+test> turbo.store.presence.internal.hasConnectedSessionEvidenceFromFlags.tests.examples =
+  verify do
+    ensureEqual true
+      (turbo.store.presence.internal.hasConnectedSessionEvidenceFromFlags true false)
+    ensureEqual true
+      (turbo.store.presence.internal.hasConnectedSessionEvidenceFromFlags false true)
+    ensureEqual true
+      (turbo.store.presence.internal.hasConnectedSessionEvidenceFromFlags true true)
+    ensureEqual false
+      (turbo.store.presence.internal.hasConnectedSessionEvidenceFromFlags false false)
+
+turbo.store.presence.internal.hasConnectedSessionEvidence :
+  Database -> DeviceId -> '{Exception, Remote, Random} Boolean
+turbo.store.presence.internal.hasConnectedSessionEvidence db deviceId = do
+  sessionConnected = turbo.store.sessions.isConnected db deviceId ()
+  socketOpen = isSome (turbo.store.sockets.lookup db deviceId ())
+  turbo.store.presence.internal.hasConnectedSessionEvidenceFromFlags
+    sessionConnected
+    socketOpen
+
+turbo.service.contacts.internal.selfJoinedChannel :
+  Database -> UserId -> ChannelId -> Optional DevicePresence -> '{Exception, Remote, Random} Boolean
+turbo.service.contacts.internal.selfJoinedChannel db currentUserId channelId selfPresence =
+  do
+    now = now!
+    match selfPresence with
+      Some presence@(DevicePresence deviceId _ _ _ _) ->
+        if matchesDeviceChannelPresence currentUserId deviceId channelId presence
+        then
+          if presence.internal.isFresh now presence
+          then turbo.store.presence.internal.hasConnectedSessionEvidence db deviceId ()
+          else false
+        else false
+      None -> false
+
+turbo.store.presence.internal.bestConnectedPresence :
+  Database
+  -> UserId
+  -> ChannelId
+  -> [(DeviceId, DevicePresence)]
+  -> Optional (DeviceSession, DevicePresence)
+  -> '{Exception, Remote, Random} Optional DevicePresence
+turbo.store.presence.internal.bestConnectedPresence
+  db
+  userId
+  channelId
+  entries
+  currentBest =
+    do
+      use Instant >=
+      use turbo.store.presence.internal bestConnectedPresence
+      now = now!
+      match entries with
+        [] -> Optional.map (cases (_, presence) -> presence) currentBest
+        (_, presence@(DevicePresence deviceId _ _ _ _)) +: rest ->
+          if Boolean.and
+               (matchesOnlinePresence userId channelId presence)
+               (presence.internal.isFresh now presence)
+          then
+            if turbo.store.presence.internal.hasConnectedSessionEvidence db deviceId ()
+            then
+              match sessions.get db deviceId () with
+                None -> bestConnectedPresence db userId channelId rest currentBest ()
+                Some candidateSession ->
+                  nextBest = match currentBest with
+                    None -> Some (candidateSession, presence)
+                    Some (bestSession, bestPresence) ->
+                      if lastSeenAt candidateSession >= lastSeenAt bestSession
+                      then Some (candidateSession, presence)
+                      else Some (bestSession, bestPresence)
+                  bestConnectedPresence db userId channelId rest nextBest ()
+            else bestConnectedPresence db userId channelId rest currentBest ()
+          else bestConnectedPresence db userId channelId rest currentBest ()
+
+turbo.store.presence.internal.firstConnectedPresence :
+  Database
+  -> UserId
+  -> ChannelId
+  -> [(DeviceId, DevicePresence)]
+  -> '{Exception, Remote, Random} Optional DevicePresence
+turbo.store.presence.internal.firstConnectedPresence db userId channelId entries = do
+  use turbo.store.presence.internal firstConnectedPresence
+  now = now!
+  match entries with
+    [] -> None
+    (_, presence@(DevicePresence deviceId _ _ _ _)) +: rest ->
+      if Boolean.and
+           (matchesOnlinePresence userId channelId presence)
+           (presence.internal.isFresh now presence)
+      then
+        if turbo.store.presence.internal.hasConnectedSessionEvidence db deviceId ()
+        then Some presence
+        else firstConnectedPresence db userId channelId rest ()
+      else firstConnectedPresence db userId channelId rest ()

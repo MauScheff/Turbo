@@ -208,6 +208,7 @@ enum TurboConversationStatus: Equatable {
 }
 
 enum TurboChannelReadinessStatus: Equatable {
+    case inactive
     case waitingForSelf
     case waitingForPeer
     case ready
@@ -217,6 +218,8 @@ enum TurboChannelReadinessStatus: Equatable {
 
     init(rawValue: String, activeTransmitterUserId: String?) {
         switch rawValue {
+        case "inactive":
+            self = .inactive
         case "waiting-for-self":
             self = .waitingForSelf
         case "waiting-for-peer", ConversationState.waitingForPeer.rawValue:
@@ -251,6 +254,8 @@ enum TurboChannelReadinessStatus: Equatable {
 
     var kind: String {
         switch self {
+        case .inactive:
+            return "inactive"
         case .waitingForSelf:
             return "waiting-for-self"
         case .waitingForPeer:
@@ -270,7 +275,7 @@ enum TurboChannelReadinessStatus: Equatable {
         switch self {
         case .selfTransmitting(let activeTransmitterUserId), .peerTransmitting(let activeTransmitterUserId):
             return activeTransmitterUserId
-        case .waitingForSelf, .waitingForPeer, .ready, .unknown:
+        case .inactive, .waitingForSelf, .waitingForPeer, .ready, .unknown:
             return nil
         }
     }
@@ -279,6 +284,8 @@ enum TurboChannelReadinessStatus: Equatable {
         switch self {
         case .waitingForSelf, .waitingForPeer:
             return .waitingForPeer
+        case .inactive:
+            return nil
         case .ready:
             return .ready
         case .selfTransmitting:
@@ -294,7 +301,7 @@ enum TurboChannelReadinessStatus: Equatable {
         switch self {
         case .ready:
             return true
-        case .waitingForSelf, .waitingForPeer, .selfTransmitting, .peerTransmitting, .unknown:
+        case .inactive, .waitingForSelf, .waitingForPeer, .selfTransmitting, .peerTransmitting, .unknown:
             return false
         }
     }
@@ -563,6 +570,7 @@ struct TurboChannelReadinessPayload: Decodable, Equatable {
     }
 
     private static let validKinds: Set<String> = [
+        "inactive",
         "waiting-for-self",
         "waiting-for-peer",
         "ready",

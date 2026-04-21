@@ -9,6 +9,102 @@ import Foundation
 import UIKit
 
 extension PTTViewModel {
+    func isTransientBackendBootstrapFailure(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else { return false }
+        let code = URLError.Code(rawValue: nsError.code)
+
+        switch code {
+        case .timedOut,
+             .networkConnectionLost,
+             .notConnectedToInternet,
+             .cannotConnectToHost,
+             .cannotFindHost,
+             .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    func shouldAutoRetryBackendBootstrapFailure(
+        _ error: Error,
+        applicationState: UIApplication.State? = nil
+    ) -> Bool {
+        guard hasBackendConfig else { return false }
+        guard !backendRuntime.isReady else { return false }
+        guard (applicationState ?? currentApplicationState()) == .active else { return false }
+        return isTransientBackendBootstrapFailure(error)
+    }
+
+    func shouldRecoverBackendControlPlaneAfterSyncFailure(
+        _ error: Error,
+        applicationState: UIApplication.State? = nil
+    ) -> Bool {
+        guard backendRuntime.isReady else { return false }
+        guard (applicationState ?? currentApplicationState()) == .active else { return false }
+        guard backendRuntime.isWebSocketConnected else { return false }
+        return isTransientBackendBootstrapFailure(error)
+            || shouldTreatBackendJoinDisconnectedSessionAsRecoverable(error)
+    }
+
+    func recoverBackendBootstrapIfNeeded(trigger: String) async {
+        guard hasBackendConfig else { return }
+        guard !backendRuntime.isReady else { return }
+
+        diagnostics.record(.backend, message: "Retrying backend bootstrap", metadata: ["trigger": trigger])
+        captureDiagnosticsState("backend-bootstrap:retry")
+        await configureBackendIfNeeded()
+    }
+
+    func recoverBackendControlPlaneAfterSyncFailureIfNeeded(
+        scope: String,
+        error: Error
+    ) async -> Bool {
+        guard shouldRecoverBackendControlPlaneAfterSyncFailure(error) else { return false }
+
+        diagnostics.record(
+            .backend,
+            message: "Recovering backend control plane after sync failure",
+            metadata: [
+                "scope": scope,
+                "error": error.localizedDescription,
+            ]
+        )
+        captureDiagnosticsState("backend-sync:control-plane-recovery")
+        await reconnectBackendControlPlane()
+        return true
+    }
+
+    func scheduleBackendBootstrapRetryIfNeeded(trigger: String, error: Error) {
+        guard shouldAutoRetryBackendBootstrapFailure(error) else { return }
+        guard backendRuntime.bootstrapRetryTask == nil else { return }
+
+        let delaySeconds = Double(backendBootstrapRetryDelayNanoseconds) / 1_000_000_000
+        statusMessage = "Reconnecting..."
+        backendStatusMessage = "Reconnecting backend..."
+        diagnostics.record(
+            .backend,
+            message: "Scheduling backend bootstrap retry",
+            metadata: [
+                "trigger": trigger,
+                "delaySeconds": String(format: "%.1f", delaySeconds),
+                "error": error.localizedDescription,
+            ]
+        )
+        captureDiagnosticsState("backend-bootstrap:retry-scheduled")
+
+        replaceBackendBootstrapRetryTask(
+            with: Task { @MainActor [weak self] in
+                guard let self else { return }
+                try? await Task.sleep(nanoseconds: self.backendBootstrapRetryDelayNanoseconds)
+                guard !Task.isCancelled else { return }
+                self.replaceBackendBootstrapRetryTask(with: nil)
+                await self.recoverBackendBootstrapIfNeeded(trigger: "\(trigger)-scheduled")
+            }
+        )
+    }
+
     func disconnectBackendWebSocket() {
         guard let backend = backendServices, backend.supportsWebSocket else { return }
         diagnostics.record(.websocket, message: "Disconnecting WebSocket for control-plane test")
@@ -159,12 +255,16 @@ extension PTTViewModel {
                 message: "Backend connected",
                 metadata: ["mode": runtimeConfig.mode, "handle": session.handle, "deviceId": client.deviceID]
             )
+            replaceBackendBootstrapRetryTask(with: nil)
             syncPTTServiceStatus(reason: "backend-connected")
             captureDiagnosticsState("backend-config:connected")
         } catch {
             resetBackendRuntimeForReconnect()
             backendSyncCoordinator.send(.bootstrapFailed(error.localizedDescription))
-            statusMessage = "Backend unavailable"
+            scheduleBackendBootstrapRetryIfNeeded(trigger: "configure", error: error)
+            if statusMessage != "Reconnecting..." {
+                statusMessage = "Backend unavailable"
+            }
             diagnostics.record(
                 .backend,
                 level: .error,
@@ -331,6 +431,7 @@ extension PTTViewModel {
         switch state {
         case .idle:
             backendStatusMessage = backendRuntime.isReady ? "Reconnecting WebSocket..." : "WebSocket disconnected"
+            backendSyncCoordinator.send(.webSocketStateChanged(.idle, selectedContactID: selectedContactId))
             controlPlaneCoordinator.send(.webSocketStateChanged(.idle))
             syncPTTServiceStatus(reason: "websocket-idle")
             let shouldResetTransmitSession = shouldResetTransmitSessionOnWebSocketIdle(

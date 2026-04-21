@@ -1,0 +1,221 @@
+type turbo.service.ws.internal.SignalTargetResolutionPlan
+  = SignalTargetResolutionUseActiveTransmitTarget DeviceId
+  | SignalTargetResolutionUseConnectedPresence
+
+turbo.service.ws.internal.signalUsesActiveTransmitTarget :
+  SignalKind -> Boolean
+turbo.service.ws.internal.signalUsesActiveTransmitTarget = cases
+  AudioChunk    -> true
+  TransmitStart -> true
+  TransmitStop  -> true
+  _             -> false
+
+test> turbo.service.ws.internal.signalUsesActiveTransmitTarget.tests.examples = verify do
+  ensureEqual true
+    (turbo.service.ws.internal.signalUsesActiveTransmitTarget AudioChunk)
+  ensureEqual true
+    (turbo.service.ws.internal.signalUsesActiveTransmitTarget TransmitStart)
+  ensureEqual true
+    (turbo.service.ws.internal.signalUsesActiveTransmitTarget TransmitStop)
+  ensureEqual false
+    (turbo.service.ws.internal.signalUsesActiveTransmitTarget ReceiverReady)
+
+turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit :
+  SignalKind
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> Optional TransmitState
+  -> SignalTargetResolutionPlan
+turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit
+  kind
+  fromUserId
+  fromDeviceId
+  toUserId
+  activeTransmit =
+  if turbo.service.ws.internal.signalUsesActiveTransmitTarget kind then
+    match activeTransmit with
+      Some (TransmitState _ activeFromUserId activeFromDeviceId activeToUserId activeToDeviceId _ _) ->
+        sameSenderUser =
+          textEqual
+            (UserId.toText activeFromUserId)
+            (UserId.toText fromUserId)
+        sameSenderDevice =
+          textEqual
+            (DeviceId.toText activeFromDeviceId)
+            (DeviceId.toText fromDeviceId)
+        sameTargetUser =
+          textEqual
+            (UserId.toText activeToUserId)
+            (UserId.toText toUserId)
+        if sameSenderUser && sameSenderDevice && sameTargetUser
+        then SignalTargetResolutionUseActiveTransmitTarget activeToDeviceId
+        else SignalTargetResolutionUseConnectedPresence
+      None -> SignalTargetResolutionUseConnectedPresence
+  else SignalTargetResolutionUseConnectedPresence
+
+test> turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit.tests.examples = verify do
+  channelId = turbo.domain.ChannelId.fromText "channel-123"
+  senderUserId = turbo.domain.UserId.fromText "sender-user"
+  senderDeviceId = turbo.domain.DeviceId.fromText "sender-device"
+  targetUserId = turbo.domain.UserId.fromText "target-user"
+  targetDeviceId = turbo.domain.DeviceId.fromText "target-device"
+  otherUserId = turbo.domain.UserId.fromText "other-user"
+  startedAt = Instant.epoch
+  expiresAt = Instant.epoch
+  activeTransmit =
+    Some
+      (TransmitState
+        channelId
+        senderUserId
+        senderDeviceId
+        targetUserId
+        targetDeviceId
+        startedAt
+        expiresAt)
+
+  ensureEqual
+    (SignalTargetResolutionUseActiveTransmitTarget targetDeviceId)
+    (turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit
+      AudioChunk
+      senderUserId
+      senderDeviceId
+      targetUserId
+      activeTransmit)
+
+  ensureEqual
+    SignalTargetResolutionUseConnectedPresence
+    (turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit
+      ReceiverReady
+      senderUserId
+      senderDeviceId
+      targetUserId
+      activeTransmit)
+
+  ensureEqual
+    SignalTargetResolutionUseConnectedPresence
+    (turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit
+      AudioChunk
+      otherUserId
+      senderDeviceId
+      targetUserId
+      activeTransmit)
+
+  ensureEqual
+    SignalTargetResolutionUseConnectedPresence
+    (turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit
+      AudioChunk
+      senderUserId
+      senderDeviceId
+      otherUserId
+      activeTransmit)
+
+turbo.service.ws.internal.resolveEnvelopeTarget :
+  Database
+  -> UserId
+  -> DeviceId
+  -> SignalEnvelope
+  -> '{Exception, Storage, Remote, Random} Either Text SignalEnvelope
+turbo.service.ws.internal.resolveEnvelopeTarget
+  db currentUserId currentDeviceId = cases
+  SignalEnvelope kind channelId fromUserId fromDeviceId toUserId _ payload ->
+    do
+      use Boolean not
+      sameUser =
+        textEqual (UserId.toText currentUserId) (UserId.toText fromUserId)
+      sameDevice =
+        textEqual
+          (DeviceId.toText currentDeviceId) (DeviceId.toText fromDeviceId)
+      senderIsJoined =
+        isDeviceJoinedInChannel db fromUserId fromDeviceId channelId ()
+      if not sameUser
+        || not sameDevice then
+        Left "signaling sender does not match authenticated socket"
+      else
+        if not senderIsJoined then
+          Left "signaling sender device is not joined to this channel"
+        else
+          activeTransmit = currentTransmit db channelId ()
+          targetPlan =
+            turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit
+              kind
+              fromUserId
+              fromDeviceId
+              toUserId
+              activeTransmit
+          match targetPlan with
+            SignalTargetResolutionUseActiveTransmitTarget targetDeviceId ->
+              Right
+                (SignalEnvelope
+                  kind
+                  channelId
+                  fromUserId
+                  fromDeviceId
+                  toUserId
+                  targetDeviceId
+                  payload)
+            SignalTargetResolutionUseConnectedPresence ->
+              match getConnectedForUserInChannel db toUserId channelId () with
+                None ->
+                  Left
+                    "target user has no connected receiving device in this channel"
+                Some (DevicePresence targetDeviceId _ _ _ _) ->
+                  Right
+                    (SignalEnvelope
+                      kind
+                      channelId
+                      fromUserId
+                      fromDeviceId
+                      toUserId
+                      targetDeviceId
+                      payload)
+
+turbo.service.ws.internal.resolveEnvelopeTarget.doc : Doc
+turbo.service.ws.internal.resolveEnvelopeTarget.doc =
+  {{
+  {{
+  docExample 4 do
+    db currentUserId currentDeviceId envelope ->
+      resolveEnvelopeTarget db currentUserId currentDeviceId envelope }}
+  resolves a routable signaling envelope only when the authenticated sender
+  device is the joined in-channel presence.
+
+  For active transmit signal kinds, routing preserves the backend-chosen
+  transmit target device so wake-capable delivery does not depend on a second
+  presence lookup catching up first. Other signal kinds still route through the
+  latest connected in-channel presence.
+
+  **Also see:** {currentTransmit}, {{
+  docLink (docEmbedTermLink do isDeviceJoinedInChannel) }}, {{
+  docLink (docEmbedTermLink do getConnectedForUserInChannel) }}
+  }}
+
+turbo.service.ws.internal.resolveEnvelopeTargetWithRetry :
+  Database
+  -> UserId
+  -> DeviceId
+  -> SignalEnvelope
+  -> Nat
+  -> '{Exception, Storage, Remote, Random} Either Text SignalEnvelope
+turbo.service.ws.internal.resolveEnvelopeTargetWithRetry
+  db currentUserId currentDeviceId envelope attemptsRemaining =
+  do
+    use Nat - <= >
+    resolved =
+      resolveEnvelopeTarget db currentUserId currentDeviceId envelope ()
+    match resolved with
+      Right resolvedEnvelope -> Right resolvedEnvelope
+      Left err ->
+        remainingAfterThisAttempt =
+          if attemptsRemaining <= 1 then 0 else attemptsRemaining - 1
+        if isTransientTargetError err
+          && remainingAfterThisAttempt > 0 then
+          _ = Remote.sleepMicroseconds 100000
+          resolveEnvelopeTargetWithRetry
+            db
+            currentUserId
+            currentDeviceId
+            envelope
+            remainingAfterThisAttempt
+            ()
+        else Left err

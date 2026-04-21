@@ -46,10 +46,35 @@ enum SystemTransmitExecutionState: Equatable {
     }
 }
 
+enum SystemTransmitActivationExecutionState: Equatable {
+    case idle
+    case activating(channelUUID: UUID)
+    case activated(channelUUID: UUID)
+
+    var channelUUID: UUID? {
+        switch self {
+        case .idle:
+            return nil
+        case .activating(let channelUUID), .activated(let channelUUID):
+            return channelUUID
+        }
+    }
+}
+
 enum SystemTransmitEndDisposition: Equatable {
     case none
     case implicitRelease
     case requireFreshPress(contactID: UUID?)
+}
+
+enum InitialOutboundAudioSendGateState: Equatable {
+    case idle
+    case awaitingFirstSend
+    case consumed
+
+    var shouldAwaitInitialRemoteReady: Bool {
+        self == .awaitingFirstSend
+    }
 }
 
 struct TransmitExecutionSessionState: Equatable {
@@ -57,6 +82,8 @@ struct TransmitExecutionSessionState: Equatable {
     var pressState: TransmitPressState = .idle
     var stopIntent: TransmitStopIntentState = .none
     var systemTransmitState: SystemTransmitExecutionState = .idle
+    var systemTransmitActivationState: SystemTransmitActivationExecutionState = .idle
+    var initialOutboundAudioSendGateState: InitialOutboundAudioSendGateState = .idle
 
     static let initial = TransmitExecutionSessionState()
 
@@ -74,11 +101,15 @@ enum TransmitExecutionEvent: Equatable {
     case markPressBegan
     case markPressEnded
     case markExplicitStopRequested
+    case consumeInitialOutboundAudioSendGate
     case markUnexpectedSystemEndRequiresRelease(contactID: UUID?)
     case noteSystemTransmitBegan(Date)
     case noteSystemTransmitEnded
     case noteSystemTransmitBeginRequested(channelUUID: UUID)
     case clearPendingSystemTransmitBegin(channelUUID: UUID?)
+    case beginSystemTransmitActivation(channelUUID: UUID)
+    case markSystemTransmitActivationCompleted(channelUUID: UUID)
+    case clearSystemTransmitActivation(channelUUID: UUID?)
     case noteTouchReleased
     case reconcileIdleState
     case reset
@@ -110,6 +141,7 @@ enum TransmitExecutionReducer {
             guard !nextState.requiresReleaseBeforeNextPress else { break }
             nextState.pressState = .pressing
             nextState.stopIntent = .none
+            nextState.initialOutboundAudioSendGateState = .awaitingFirstSend
 
         case .markPressEnded:
             guard case .pressing = nextState.pressState else { break }
@@ -118,22 +150,40 @@ enum TransmitExecutionReducer {
         case .markExplicitStopRequested:
             nextState.stopIntent = .explicitStopRequested
 
+        case .consumeInitialOutboundAudioSendGate:
+            guard nextState.initialOutboundAudioSendGateState.shouldAwaitInitialRemoteReady else { break }
+            nextState.initialOutboundAudioSendGateState = .consumed
+
         case .markUnexpectedSystemEndRequiresRelease(let contactID):
             nextState.pressState = .releaseRequired(interruptedContactID: contactID)
 
         case .noteSystemTransmitBegan(let beganAt):
             nextState.systemTransmitState = .transmitting(startedAt: beganAt)
+            nextState.systemTransmitActivationState = .idle
 
         case .noteSystemTransmitEnded:
             nextState.systemTransmitState = .idle
+            nextState.systemTransmitActivationState = .idle
 
         case .noteSystemTransmitBeginRequested(let channelUUID):
             nextState.systemTransmitState = .beginPending(channelUUID: channelUUID)
+            nextState.systemTransmitActivationState = .idle
 
         case .clearPendingSystemTransmitBegin(let channelUUID):
             guard case .beginPending(let pendingChannelUUID) = nextState.systemTransmitState else { break }
             guard channelUUID == nil || pendingChannelUUID == channelUUID else { break }
             nextState.systemTransmitState = .idle
+
+        case .beginSystemTransmitActivation(let channelUUID):
+            nextState.systemTransmitActivationState = .activating(channelUUID: channelUUID)
+
+        case .markSystemTransmitActivationCompleted(let channelUUID):
+            guard nextState.systemTransmitActivationState.channelUUID == channelUUID else { break }
+            nextState.systemTransmitActivationState = .activated(channelUUID: channelUUID)
+
+        case .clearSystemTransmitActivation(let channelUUID):
+            guard channelUUID == nil || nextState.systemTransmitActivationState.channelUUID == channelUUID else { break }
+            nextState.systemTransmitActivationState = .idle
 
         case .noteTouchReleased:
             guard nextState.requiresReleaseBeforeNextPress else { break }
@@ -142,6 +192,8 @@ enum TransmitExecutionReducer {
         case .reconcileIdleState:
             nextState.stopIntent = .none
             nextState.systemTransmitState = .idle
+            nextState.systemTransmitActivationState = .idle
+            nextState.initialOutboundAudioSendGateState = .idle
             if case .pressing = nextState.pressState {
                 nextState.pressState = .idle
             }
@@ -171,6 +223,7 @@ enum TransmitExecutionReducer {
                 disposition = .none
             }
             nextState.systemTransmitState = .idle
+            nextState.systemTransmitActivationState = .idle
             effects.append(.handledSystemTransmitEnded(disposition))
         }
 

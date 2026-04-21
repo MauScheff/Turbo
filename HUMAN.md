@@ -35,3 +35,22 @@ yes, and how might we design and iterate on our system so that once it works, it
   reliable, by design.
   
   -> GOOD
+
+# Start
+
+› Hello we will be collaborating today. I want you to be efficient but also take your time and solve things
+  well. We will be improving our end-to-end communications and the goal of today is that we can get our physical
+  device devices where we are testing that all push-to-talk flows work so we have foreground to foreground,
+  foreground to background, background to background and there's all these edge cases when it's asleep, when
+  some time passes by and the connection is cut. So basically we want to always hear on the other end when we
+  speak. That's what we're working on today. I have two physical devices here that we use for this kind of end-
+  to-end tests because the push-to-talk framework from Apple cannot be tested in the simulator but if we do find
+  bugs that don't need physical devices you also have all the tools and infrastructure to do simulations lane
+  and testing end-to-end so you should try to go as far as you can without me to reduce the human work. When you
+  are ready we can start with a simple smoke test. You may want to read the handoff while I prepare the first
+  smoke test and what I'll do I have Avery on an iPhone and Blake on an iPad and I will do Avery to Blake
+  foreground foreground and then continue with the test and then turn it lock the screen and then Apple's push-
+  to-talk framework comes in the background so they have a UI from Apple and that should work too and I'll be
+  doing this test progressively like the same test gets farther and farther away until we can have everything
+  perfect but we will stop every time we have a little bug and fix it there so we should be able to have this
+  long path testing path work flawlessly by the end of the day. Is there any question?

@@ -1,0 +1,158 @@
+turbo.service.channels.internal.stateMembershipFromDurableMembership :
+  Boolean -> Boolean -> Boolean -> Boolean -> turbo.domain.ChannelMembershipView
+turbo.service.channels.internal.stateMembershipFromDurableMembership
+  hasPendingRequest
+  durableSelfJoined
+  durablePeerJoined
+  peerDeviceConnected =
+  if hasPendingRequest then NoMembership
+  else
+    turbo.domain.channelMembershipFromFlags
+      durableSelfJoined
+      durablePeerJoined
+      peerDeviceConnected
+
+test> turbo.service.channels.internal.stateMembershipFromDurableMembership.tests.examples =
+  test.verify do
+    ensureEqual
+      (SharedMembership false)
+      (turbo.service.channels.internal.stateMembershipFromDurableMembership
+        false
+        true
+        true
+        false)
+    ensureEqual
+      (PeerOnlyMembership true)
+      (turbo.service.channels.internal.stateMembershipFromDurableMembership
+        false
+        false
+        true
+        true)
+    ensureEqual
+      LocalOnlyMembership
+      (turbo.service.channels.internal.stateMembershipFromDurableMembership
+        false
+        true
+        false
+        false)
+    ensureEqual
+      NoMembership
+      (turbo.service.channels.internal.stateMembershipFromDurableMembership
+        true
+        true
+        true
+        true)
+
+turbo.service.channels.internal.appendNoMembershipProjectionWhileDurableMembershipExistsInvariant :
+  Database
+  -> UserId
+  -> ChannelId
+  -> DeviceId
+  -> Boolean
+  -> Boolean
+  -> '{Exception, Storage, Remote} ()
+turbo.service.channels.internal.appendNoMembershipProjectionWhileDurableMembershipExistsInvariant
+  db
+  currentUserId
+  channelId
+  currentDeviceId
+  durableSelfJoined
+  durablePeerJoined =
+  do
+    use Text ++
+    metadata =
+      "channelId="
+        ++ ChannelId.toText channelId
+        ++ " deviceId="
+        ++ DeviceId.toText currentDeviceId
+        ++ " durableSelfJoined="
+        ++ (if durableSelfJoined then "true" else "false")
+        ++ " durablePeerJoined="
+        ++ (if durablePeerJoined then "true" else "false")
+    appendInvariantEvent
+      db
+      currentUserId
+      "channel.no_membership_projection_while_durable_membership_exists"
+      "backend"
+      "backend"
+      "state route projected no membership even though durable channel membership still existed"
+      (Some metadata)
+      ()
+
+turbo.service.channels.state : Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.state db = do
+  use Optional map
+  use Parser / text
+  use UserId toText
+  use object add empty
+  (channelIdText, deviceIdText) = route GET (s "v1" / s "channels" / text / s "state" / text => Tuple.pair)
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      channelId = ChannelId.fromText channelIdText
+      deviceId = DeviceId.fromText deviceIdText
+      match OrderedTable.tryRead (channels.tables.byId db) channelId with
+        None                                          -> notFound.json (empty |> addText "error" "channel not found")
+        Some (DirectChannel _ lowUserId highUserId _) ->
+          peerUserId = if userIdEqual lowUserId currentUserId then highUserId else lowUserId
+          peerHandle = match users.getById db peerUserId () with
+            Some (User _ handleText _ _ _) -> handleText
+            None                           -> toText peerUserId
+          selfPresence = presence.get db deviceId ()
+          selfOnline = match selfPresence with
+            Some presence -> presenceMatches currentUserId presence
+            None          -> false
+          rawSelfJoined = match selfPresence with
+            Some presence -> matchesDeviceChannelPresence currentUserId deviceId channelId presence
+            None          -> false
+          normalizedSelfJoined = selfJoinedChannel db currentUserId channelId selfPresence ()
+          _ = if Boolean.and rawSelfJoined (Boolean.not normalizedSelfJoined) then appendStaleSelfPresenceProjectedLiveInvariant db currentUserId channelId deviceId "state" () else ()
+          peerPresence = getForUser db peerUserId ()
+          peerOnline = isSome peerPresence
+          rawPeerPresence = getRawForUserInChannel db peerUserId channelId ()
+          peerJoinedPresence = getForUserInChannel db peerUserId channelId ()
+          _ = match (rawPeerPresence, peerJoinedPresence) with
+            (Some (DevicePresence peerDeviceId _ _ _ _), None) -> appendStalePeerPresenceProjectedLiveInvariant db currentUserId channelId deviceId peerDeviceId "state" ()
+            _                                                  -> ()
+          peerConnectedPresence = getConnectedForUserInChannel db peerUserId channelId ()
+          rawPeerDeviceConnected = isSome peerConnectedPresence
+          incomingInvite = incomingInviteForChannel db currentUserId peerUserId channelId ()
+          outgoingInvite = outgoingInviteForChannel db currentUserId peerUserId channelId ()
+          hasIncomingRequest = isSome incomingInvite
+          hasOutgoingRequest = isSome outgoingInvite
+          hasPendingRequest = Boolean.or hasIncomingRequest hasOutgoingRequest
+          durableSelfJoined = memberships.exists db channelId currentUserId ()
+          durablePeerJoined = memberships.exists db channelId peerUserId ()
+          membership =
+            turbo.service.channels.internal.stateMembershipFromDurableMembership
+              hasPendingRequest
+              durableSelfJoined
+              durablePeerJoined
+              rawPeerDeviceConnected
+          _ = match membership with
+            NoMembership ->
+              if Boolean.and (Boolean.not hasPendingRequest) (Boolean.or durableSelfJoined durablePeerJoined) then
+                turbo.service.channels.internal.appendNoMembershipProjectionWhileDurableMembershipExistsInvariant
+                  db
+                  currentUserId
+                  channelId
+                  deviceId
+                  durableSelfJoined
+                  durablePeerJoined
+                  ()
+              else ()
+            _ -> ()
+          selfJoined = turbo.domain.channelMembershipHasLocalMembership membership
+          peerJoined = turbo.domain.channelMembershipHasPeerMembership membership
+          peerDeviceConnected = turbo.domain.channelMembershipPeerDeviceConnected membership
+          requestCount = pendingCount incomingInvite outgoingInvite
+          requestRelationship = requestRelationshipFromFlags hasIncomingRequest hasOutgoingRequest requestCount
+          activeTransmit = currentTransmit db channelId ()
+          activeTransmitterUserId = map transmitUserId activeTransmit
+          activeTransmitExpiresAt = map transmitExpiresAtText activeTransmit
+          conversationStatus = channelStateStatusFromView currentUserId membership requestRelationship peerOnline activeTransmitterUserId
+          _ = if channelStateStatusConnectsWithoutMembershipOrRequest membership requestRelationship conversationStatus then appendConnectingWithoutMembershipOrRequestInvariant db currentUserId channelId () else ()
+          ok.json (empty |> addText "channelId" channelIdText |> addText "selfUserId" (toText currentUserId) |> addText "peerUserId" (toText peerUserId) |> addText "peerHandle" peerHandle |> addBoolean "selfOnline" selfOnline |> addBoolean "peerOnline" peerOnline |> addBoolean "selfJoined" selfJoined |> addBoolean "peerJoined" peerJoined |> addBoolean "peerDeviceConnected" peerDeviceConnected |> addBoolean "hasIncomingRequest" hasIncomingRequest |> addBoolean "hasOutgoingRequest" hasOutgoingRequest |> addNat "requestCount" requestCount |> add "membership" (channelMembershipJson membership) |> add "requestRelationship" (requestRelationshipJson requestRelationship) |> add "conversationStatus" (channelStateStatusJson conversationStatus) |> addOptionalText "activeTransmitterUserId" (map toText activeTransmitterUserId) |> addOptionalText "transmitLeaseExpiresAt" activeTransmitExpiresAt |> addText "status" (channelStateStatusKindText conversationStatus) |> addBoolean "canTransmit" (canTransmit currentUserId selfOnline peerOnline membership activeTransmitterUserId))

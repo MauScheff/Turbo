@@ -88,6 +88,13 @@ Choose the smallest seam that can prove the rule.
 - put the rule in the backend when the backend is the authority for the fact, such as transmitter exclusivity or canonical readiness
 
 Do not put pair or convergence rules only in client-side logs. One device cannot prove those alone.
+Do not treat a distributed-state bug as fully encoded if every invariant lives only in the UI or merged analyzer while the backend owns the broken fact.
+
+For distributed app/backend bugs:
+
+- at least one invariant should exist at the backend/domain seam when the backend is authoritative for the violated truth
+- client-side invariants should describe projection contradictions, not replace backend ownership
+- merged invariants should help rediscover cross-device fallout, not be the only place the broken truth is observable
 
 ## Naming rules
 

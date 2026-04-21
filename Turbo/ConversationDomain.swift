@@ -806,6 +806,12 @@ struct ConversationDerivationContext: Equatable {
         return false
     }
 
+    var backendExplicitlyInactiveWithoutMembership: Bool {
+        guard let channel else { return false }
+        guard channel.membership == .absent else { return false }
+        return channel.readinessStatus == .inactive
+    }
+
     var remoteAudioRecoveryAvailable: Bool {
         switch remoteAudioReadinessState {
         case .wakeCapable, .ready:
@@ -813,6 +819,22 @@ struct ConversationDerivationContext: Equatable {
         case .unknown, .waiting:
             return false
         }
+    }
+
+    var wakeRecoveryInFlight: Bool {
+        switch incomingWakeActivationState {
+        case .signalBuffered, .awaitingSystemActivation, .appManagedFallback, .systemActivated:
+            return systemSessionMatchesContact
+        case .systemActivationTimedOutWaitingForForeground, .systemActivationInterruptedByTransmitEnd, .none:
+            return false
+        }
+    }
+
+    var shouldTreatSystemMismatchAsRecoverable: Bool {
+        guard case .mismatched = systemSessionState else { return false }
+        guard !explicitLeaveRequested else { return false }
+        guard hadConnectedSessionContinuity else { return false }
+        return true
     }
 
     var pendingJoinIsStaleWithoutLocalSessionEvidence: Bool {
@@ -1329,25 +1351,21 @@ enum ConversationStateMachine {
             return .teardownSelectedSession(contactID: context.contactID)
         }
 
-        let wakeRecoveryInFlight: Bool = {
-            switch context.incomingWakeActivationState {
-            case .signalBuffered, .awaitingSystemActivation, .appManagedFallback, .systemActivated:
-                return context.systemSessionMatchesContact
-            case .systemActivationTimedOutWaitingForForeground, .systemActivationInterruptedByTransmitEnd, .none:
-                return false
-            }
-        }()
-
-        if wakeRecoveryInFlight && localSessionActive {
+        if context.wakeRecoveryInFlight && localSessionActive {
             return .none
         }
 
         switch context.backendChannelReadiness {
         case .absent:
+            let preserveWakeRecoveryForAbsentBackend =
+                context.hadConnectedSessionContinuity
+                && context.backendShowsWakeCapablePeerRecovery
+                && !context.backendExplicitlyInactiveWithoutMembership
             if localSessionActive,
                context.channel != nil,
                !context.backendShowsConnectablePeerRecovery,
                !context.remoteAudioRecoveryAvailable,
+               !preserveWakeRecoveryForAbsentBackend,
                !context.peerSignalIsTransmitting,
                !explicitLeaveRequested {
                 return .teardownSelectedSession(contactID: context.contactID)
@@ -1456,6 +1474,9 @@ private extension ConversationDerivationContext {
         case .active(let activeContactID, _) where activeContactID != contactID:
             return .blockedByOtherSession
         case .mismatched:
+            if shouldTreatSystemMismatchAsRecoverable {
+                return .transitioning
+            }
             return .systemMismatch
         case .none, .active:
             break
@@ -1472,6 +1493,11 @@ private extension ConversationDerivationContext {
         }
 
         if pendingAction.isLeaveInFlight(for: contactID) {
+            return .disconnecting
+        }
+
+        if backendExplicitlyInactiveWithoutMembership,
+           localSessionReadiness != .none {
             return .disconnecting
         }
 
@@ -1546,7 +1572,7 @@ private extension ConversationDerivationContext {
                 case .ready, .waiting:
                     return false
                 }
-            case .ready, .selfTransmitting, .peerTransmitting, .unknown:
+            case .inactive, .ready, .selfTransmitting, .peerTransmitting, .unknown:
                 return false
             }
         }()
@@ -1648,7 +1674,7 @@ private extension ConversationDerivationContext {
             return .ready
         case .waitingForSelf, .waitingForPeer, .ready:
             return .waiting(reason: .backendSessionTransition, statusMessage: "Establishing connection...")
-        case .unknown:
+        case .inactive, .unknown:
             return .unavailable
         }
     }
@@ -1742,7 +1768,7 @@ private extension TurboChannelReadinessStatus {
         switch self {
         case .selfTransmitting, .peerTransmitting:
             return true
-        case .waitingForSelf, .waitingForPeer, .ready, .unknown:
+        case .inactive, .waitingForSelf, .waitingForPeer, .ready, .unknown:
             return false
         }
     }

@@ -102,6 +102,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var receiveExecutionRuntime = ReceiveExecutionRuntimeState()
     var mediaRuntime = MediaRuntimeState()
     var isPTTAudioSessionActive: Bool = false
+    var backendBootstrapRetryDelayNanoseconds: UInt64 = 2_000_000_000
+    var remoteAudioInitialChunkTimeoutNanoseconds: UInt64 = 5_000_000_000
+    var remoteAudioSilenceTimeoutNanoseconds: UInt64 = 1_500_000_000
     var lastReportedPTTServiceStatus: PTServiceStatus?
     var lastReportedPTTServiceStatusChannelUUID: UUID?
     var lastReportedPTTServiceStatusReason: String?
@@ -287,6 +290,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func replaceBackendPollTask(with task: Task<Void, Never>?) {
         backendRuntime.replacePollTask(with: task)
+    }
+
+    func replaceBackendBootstrapRetryTask(with task: Task<Void, Never>?) {
+        backendRuntime.replaceBootstrapRetryTask(with: task)
     }
 
     func clearTrackedContacts() {

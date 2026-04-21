@@ -297,7 +297,15 @@ enum PTTSystemPolicyReducer {
             )
 
         case .reset:
-            nextState = .initial
+            if let latestTokenHex = state.tokenRegistration.latestTokenHex,
+               !latestTokenHex.isEmpty {
+                // The Apple ephemeral token is device-scoped and may not be
+                // re-delivered after every local reset, so preserve it while
+                // clearing any stale backend-channel binding.
+                nextState = PTTSystemPolicyState(latestTokenHex: latestTokenHex)
+            } else {
+                nextState = .initial
+            }
         }
 
         return PTTSystemPolicyTransition(state: nextState, effects: effects)

@@ -6,8 +6,18 @@ enum RemoteReceiveActivitySource: String, Equatable {
     case audioChunk
 }
 
+enum RemoteReceiveTimeoutPhase: String, Equatable {
+    case awaitingFirstAudioChunk
+    case drainingAudio
+}
+
 struct RemoteReceiveActivityState: Equatable {
     var lastSource: RemoteReceiveActivitySource
+    var hasReceivedAudioChunk: Bool
+
+    var timeoutPhase: RemoteReceiveTimeoutPhase {
+        hasReceivedAudioChunk ? .drainingAudio : .awaitingFirstAudioChunk
+    }
 }
 
 struct ReceiveExecutionSessionState: Equatable {
@@ -19,7 +29,10 @@ struct ReceiveExecutionSessionState: Equatable {
 
     mutating func replaceRemoteTransmittingContactIDs(_ contactIDs: Set<UUID>) {
         remoteActivityByContactID = contactIDs.reduce(into: [:]) { result, contactID in
-            result[contactID] = RemoteReceiveActivityState(lastSource: .transmitStartSignal)
+            result[contactID] = RemoteReceiveActivityState(
+                lastSource: .transmitStartSignal,
+                hasReceivedAudioChunk: false
+            )
         }
     }
 }
@@ -32,7 +45,7 @@ enum ReceiveExecutionEvent: Equatable {
 }
 
 enum ReceiveExecutionEffect: Equatable {
-    case scheduleRemoteSilenceTimeout(contactID: UUID)
+    case scheduleRemoteSilenceTimeout(contactID: UUID, phase: RemoteReceiveTimeoutPhase)
     case cancelRemoteSilenceTimeout(contactID: UUID)
     case cancelAllRemoteSilenceTimeouts
 }
@@ -58,8 +71,20 @@ enum ReceiveExecutionReducer {
             nextState = ReceiveExecutionSessionState()
 
         case .remoteActivityDetected(let contactID, let source):
-            nextState.remoteActivityByContactID[contactID] = RemoteReceiveActivityState(lastSource: source)
-            effects.append(.scheduleRemoteSilenceTimeout(contactID: contactID))
+            let hasReceivedAudioChunk =
+                (nextState.remoteActivityByContactID[contactID]?.hasReceivedAudioChunk ?? false)
+                || source == .audioChunk
+            let activityState = RemoteReceiveActivityState(
+                lastSource: source,
+                hasReceivedAudioChunk: hasReceivedAudioChunk
+            )
+            nextState.remoteActivityByContactID[contactID] = activityState
+            effects.append(
+                .scheduleRemoteSilenceTimeout(
+                    contactID: contactID,
+                    phase: activityState.timeoutPhase
+                )
+            )
 
         case .remoteTransmitStopped(let contactID):
             guard nextState.remoteActivityByContactID.removeValue(forKey: contactID) != nil else {

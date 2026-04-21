@@ -10,6 +10,7 @@ enum PlaybackBufferReceivePlan: Equatable {
 actor AudioChunkSender {
     private var sendChunk: (@Sendable (String) async throws -> Void)?
     private let reportFailure: @Sendable (String) async -> Void
+    private let reportEvent: (@Sendable (String, [String: String]) async -> Void)?
     // Wake transmit can legitimately buffer a few seconds of speech while the
     // background receiver re-establishes its playback path after PTT activation.
     private let maximumPendingPayloads = 128
@@ -19,13 +20,17 @@ actor AudioChunkSender {
     private let transportAvailabilityMaxAttempts = 20
     private var pendingPayloads: [String] = []
     private var isDraining = false
+    private var outboundTransportDispatchReportBudget = 3
+    private var outboundTransportSuccessReportBudget = 3
 
     init(
         sendChunk: (@Sendable (String) async throws -> Void)?,
-        reportFailure: @escaping @Sendable (String) async -> Void
+        reportFailure: @escaping @Sendable (String) async -> Void,
+        reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil
     ) {
         self.sendChunk = sendChunk
         self.reportFailure = reportFailure
+        self.reportEvent = reportEvent
     }
 
     func updateSendChunk(_ handler: (@Sendable (String) async throws -> Void)?) {
@@ -45,6 +50,14 @@ actor AudioChunkSender {
     func reset() {
         pendingPayloads.removeAll(keepingCapacity: false)
         isDraining = false
+        outboundTransportDispatchReportBudget = 3
+        outboundTransportSuccessReportBudget = 3
+    }
+
+    func finishDraining(pollNanoseconds: UInt64 = 10_000_000) async {
+        while isDraining || !pendingPayloads.isEmpty {
+            try? await Task.sleep(nanoseconds: pollNanoseconds)
+        }
     }
 
     private func drain() async {
@@ -56,7 +69,15 @@ actor AudioChunkSender {
                 break
             }
             do {
+                await reportTransportDispatchIfNeeded(
+                    payload: payload,
+                    pendingPayloadCount: pendingPayloads.count
+                )
                 try await sendChunk(payload)
+                await reportTransportSendSucceededIfNeeded(
+                    payload: payload,
+                    pendingPayloadCount: pendingPayloads.count
+                )
             } catch {
                 await reportFailure("audio send failed: \(error.localizedDescription)")
                 pendingPayloads.removeAll(keepingCapacity: false)
@@ -100,6 +121,36 @@ actor AudioChunkSender {
         }
 
         return nil
+    }
+
+    private func reportTransportDispatchIfNeeded(
+        payload: String,
+        pendingPayloadCount: Int
+    ) async {
+        guard outboundTransportDispatchReportBudget > 0 else { return }
+        outboundTransportDispatchReportBudget -= 1
+        await reportEvent?(
+            "Dispatching outbound audio transport payload",
+            [
+                "payloadLength": String(payload.count),
+                "pendingPayloadCount": String(pendingPayloadCount),
+            ]
+        )
+    }
+
+    private func reportTransportSendSucceededIfNeeded(
+        payload: String,
+        pendingPayloadCount: Int
+    ) async {
+        guard outboundTransportSuccessReportBudget > 0 else { return }
+        outboundTransportSuccessReportBudget -= 1
+        await reportEvent?(
+            "Delivered outbound audio transport payload",
+            [
+                "payloadLength": String(payload.count),
+                "pendingPayloadCount": String(pendingPayloadCount),
+            ]
+        )
     }
 }
 
@@ -189,6 +240,10 @@ final class PCMWebSocketMediaSession: MediaSession {
                 await MainActor.run {
                     self.state = .failed(message)
                 }
+            },
+            reportEvent: { [weak self] (message: String, metadata: [String: String]) in
+                guard let self else { return }
+                await self.report(message, metadata: metadata)
             }
         )
     private let captureEngine = AVAudioEngine()
@@ -348,7 +403,7 @@ final class PCMWebSocketMediaSession: MediaSession {
 
     func stopSendingAudio() async throws {
         setSendingAudio(false)
-        await audioChunkSender.reset()
+        await audioChunkSender.finishDraining()
     }
 
     func receiveRemoteAudioChunk(_ payload: String) async {

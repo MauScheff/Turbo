@@ -519,6 +519,7 @@ final class DiagnosticsStore {
         let backendReadiness = fields["backendReadiness"] ?? "none"
         let remoteWakeCapabilityKind = fields["remoteWakeCapabilityKind"] ?? "unavailable"
         let systemSession = fields["systemSession"] ?? "none"
+        let phaseDetail = fields["selectedPeerPhaseDetail"] ?? "none"
 
         var violations: [DiagnosticsInvariantViolationCandidate] = []
 
@@ -648,6 +649,33 @@ final class DiagnosticsStore {
                         "backendChannelStatus": backendChannelStatus,
                         "backendReadiness": backendReadiness,
                         "remoteWakeCapabilityKind": remoteWakeCapabilityKind,
+                    ]
+                )
+            )
+        }
+
+        if phase == "waitingForPeer",
+           phaseDetail.contains("localSessionTransition"),
+           isJoined == true,
+           hadConnectedSessionContinuity == true,
+           systemSession.hasPrefix("active("),
+           backendReadiness == "inactive",
+           backendSelfJoined == false,
+           backendPeerJoined == false {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_inactive_ui_still_joined",
+                    scope: .backend,
+                    message: "backend says the session is inactive, but selectedPeerPhase is still waitingForPeer on a joined local session",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "isJoined": fields["isJoined"] ?? "none",
+                        "systemSession": systemSession,
+                        "backendChannelStatus": backendChannelStatus,
+                        "backendReadiness": backendReadiness,
+                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
+                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
                     ]
                 )
             )

@@ -13,3 +13,5 @@
 * Bad backend state could say Available instead of online
 * Showing hold to talk before ready.
 * Detect app kill and kill connections.
+* One ends the other should end too.
+* Unison Concurrency

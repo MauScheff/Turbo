@@ -10,18 +10,10 @@ import PushToTalk
 import AVFAudio
 import UIKit
 
-private actor OutgoingAudioInitialSendGate {
-    private var shouldAwaitInitialRemoteReady = true
-
-    func takeShouldAwaitInitialRemoteReady() -> Bool {
-        guard shouldAwaitInitialRemoteReady else { return false }
-        shouldAwaitInitialRemoteReady = false
-        return true
-    }
-}
-
 extension PTTViewModel {
     private var wakePlaybackFallbackDelayNanoseconds: UInt64 { 3_500_000_000 }
+    private var wakeCapableInitialAudioSendGraceNanoseconds: UInt64 { 1_500_000_000 }
+    private var wakeCapablePostReleaseAudioSendGraceNanoseconds: UInt64 { 750_000_000 }
     private var mediaSessionRetryCooldown: TimeInterval { 0.75 }
     private var deferredInteractivePrewarmRecoveryDelayNanoseconds: UInt64 { 500_000_000 }
     private var transmitLeaseRenewIntervalNanoseconds: UInt64 { 1_000_000_000 }
@@ -593,6 +585,63 @@ extension PTTViewModel {
         )
     }
 
+    func refreshWebSocketForSystemTransmitActivationIfNeeded(
+        _ backend: BackendServices,
+        contactID: UUID,
+        channelID: String
+    ) {
+        guard backend.supportsWebSocket else { return }
+        let applicationState = currentApplicationState()
+        guard applicationState != .active else {
+            resumeWebSocketBeforePTTTransportWaitIfNeeded(
+                backend,
+                contactID: contactID,
+                channelID: channelID,
+                reason: "system-transmit-activation"
+            )
+            return
+        }
+
+        diagnostics.record(
+            .websocket,
+            message: "Refreshing WebSocket for system-originated transmit activation",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": channelID,
+                "applicationState": String(describing: applicationState),
+            ]
+        )
+        backend.forceReconnectWebSocket()
+    }
+
+    func refreshWebSocketForWakeReceiveActivationIfNeeded(
+        _ backend: BackendServices,
+        contactID: UUID,
+        channelID: String
+    ) {
+        guard backend.supportsWebSocket else { return }
+        let applicationState = currentApplicationState()
+        resumeWebSocketBeforePTTTransportWaitIfNeeded(
+            backend,
+            contactID: contactID,
+            channelID: channelID,
+            reason: "wake-receive-activation"
+        )
+        guard applicationState != .active else { return }
+        guard !backend.isWebSocketConnected else {
+            diagnostics.record(
+                .websocket,
+                message: "Preserving active WebSocket during wake receive activation",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "applicationState": String(describing: applicationState),
+                ]
+            )
+            return
+        }
+    }
+
     private func performBeginTransmit(_ request: TransmitRequestContext, workID: Int) async {
         defer {
             transmitTaskCoordinator.send(.beginFinished(id: workID))
@@ -609,6 +658,9 @@ extension PTTViewModel {
                     channelID: request.backendChannelID,
                     reason: "begin-transmit"
                 )
+            }
+            if await reassertBackendJoinAfterWakeIfNeeded(for: request.contactID) {
+                await refreshChannelState(for: request.contactID)
             }
             // `beginTransmit` is an HTTP control-plane call that acquires the
             // transmit lease and triggers APNs wake. Do not block that on
@@ -879,6 +931,24 @@ extension PTTViewModel {
     func completeSystemTransmitActivation(channelUUID: UUID) async {
         guard let target = activeTransmitTarget(for: channelUUID) else { return }
         guard transmitCoordinator.state.isPressingTalk else { return }
+        guard transmitRuntime.beginSystemTransmitActivationIfNeeded(channelUUID: channelUUID) else {
+            diagnostics.record(
+                .media,
+                message: "Skipped duplicate system transmit activation",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                ]
+            )
+            return
+        }
+
+        var activationCompleted = false
+        defer {
+            if !activationCompleted {
+                transmitRuntime.clearSystemTransmitActivation(channelUUID: channelUUID)
+            }
+        }
 
         startRenewingTransmit(target)
 
@@ -888,11 +958,10 @@ extension PTTViewModel {
         }
 
         do {
-            resumeWebSocketBeforePTTTransportWaitIfNeeded(
+            refreshWebSocketForSystemTransmitActivationIfNeeded(
                 backend,
                 contactID: target.contactID,
-                channelID: target.channelID,
-                reason: "system-transmit-activation"
+                channelID: target.channelID
             )
             try await backend.waitForWebSocketConnection()
             configureOutgoingAudioRoute(target: target)
@@ -914,6 +983,8 @@ extension PTTViewModel {
                     payload: "ptt-begin"
                 )
             )
+            transmitRuntime.noteSystemTransmitActivationCompleted(channelUUID: channelUUID)
+            activationCompleted = true
             await refreshChannelState(for: target.contactID)
         } catch {
             let message = error.localizedDescription
@@ -959,10 +1030,24 @@ extension PTTViewModel {
                     "event": wake.payload.event.rawValue,
                 ]
             )
-            // Background wake resumes a deliberately suspended control-plane socket.
-            // `ensureWebSocketConnected()` is a no-op while suspension is still set.
-            backendServices?.resumeWebSocket()
             let contactID = wake.contactID
+            if let backend = backendServices,
+               let channelID =
+                wake.payload.channelId
+                ?? contacts.first(where: { $0.id == contactID })?.backendChannelId {
+                // The pre-activation reconnect may still be a stale `connecting`
+                // socket started before the system granted background audio
+                // execution. Once the system PTT session is active, force a
+                // fresh reconnect so deferred receiver-ready publications can
+                // actually drain during the wake window.
+                refreshWebSocketForWakeReceiveActivationIfNeeded(
+                    backend,
+                    contactID: contactID,
+                    channelID: channelID
+                )
+            } else {
+                backendServices?.resumeWebSocket()
+            }
             diagnostics.record(
                 .media,
                 message: "Recreating media session after PTT audio activation",
@@ -1262,11 +1347,10 @@ extension PTTViewModel {
         let fromDeviceID = backend.deviceID
         let toUserID = target.userID
         let toDeviceID = target.deviceID
-        let initialSendGate = OutgoingAudioInitialSendGate()
 
         let sendAudioChunk: @Sendable (String) async throws -> Void = { [weak self] payload in
             if let self,
-               await initialSendGate.takeShouldAwaitInitialRemoteReady() {
+               await self.takeShouldAwaitInitialOutboundAudioSendGate() {
                 _ = await self.waitForRemoteReceiverAudioReadinessBeforeSendingIfNeeded(
                     target: target
                 )
@@ -1295,13 +1379,23 @@ extension PTTViewModel {
         )
     }
 
+    func takeShouldAwaitInitialOutboundAudioSendGate() -> Bool {
+        transmitRuntime.takeShouldAwaitInitialOutboundAudioSendGate()
+    }
+
     func waitForRemoteReceiverAudioReadinessBeforeSendingIfNeeded(
         target: TransmitTarget,
         timeoutNanoseconds: UInt64? = nil,
-        pollNanoseconds: UInt64? = nil
+        pollNanoseconds: UInt64? = nil,
+        wakeRecoveryGraceNanoseconds: UInt64? = nil,
+        postReleaseWakeRecoveryGraceNanoseconds: UInt64? = nil
     ) async -> Bool {
         let timeoutNanoseconds = timeoutNanoseconds ?? remoteReceiverAudioReadyGateTimeoutNanoseconds
         let pollNanoseconds = pollNanoseconds ?? remoteReceiverAudioReadyGatePollNanoseconds
+        let wakeRecoveryGraceNanoseconds =
+            wakeRecoveryGraceNanoseconds ?? wakeCapableInitialAudioSendGraceNanoseconds
+        let postReleaseWakeRecoveryGraceNanoseconds =
+            postReleaseWakeRecoveryGraceNanoseconds ?? wakeCapablePostReleaseAudioSendGraceNanoseconds
 
         guard let channelSnapshot = selectedChannelSnapshot(for: target.contactID) else {
             return true
@@ -1309,21 +1403,39 @@ extension PTTViewModel {
         guard !channelSnapshot.remoteAudioReadyForLiveTransmit else {
             return true
         }
-
-        diagnostics.record(
-            .media,
-            message: "Waiting for remote receiver audio readiness before sending outbound audio",
-            metadata: [
-                "contactId": target.contactID.uuidString,
-                "channelId": target.channelID,
-                "remoteAudioReadiness": String(describing: channelSnapshot.remoteAudioReadiness),
-                "readinessStatus": String(describing: channelSnapshot.readinessStatus),
-                "peerDeviceConnected": String(channelSnapshot.membership.peerDeviceConnected),
-            ]
-        )
+        let wakeCapablePeer: Bool
+        if case .wakeCapable = channelSnapshot.remoteWakeCapability {
+            wakeCapablePeer = true
+            diagnostics.record(
+                .media,
+                message: "Waiting for wake-capable receiver recovery before sending initial outbound audio",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "remoteAudioReadiness": String(describing: channelSnapshot.remoteAudioReadiness),
+                    "readinessStatus": String(describing: channelSnapshot.readinessStatus),
+                    "wakeRecoveryGraceMilliseconds": String(wakeRecoveryGraceNanoseconds / 1_000_000),
+                ]
+            )
+        } else {
+            wakeCapablePeer = false
+            diagnostics.record(
+                .media,
+                message: "Waiting for remote receiver audio readiness before sending outbound audio",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "remoteAudioReadiness": String(describing: channelSnapshot.remoteAudioReadiness),
+                    "readinessStatus": String(describing: channelSnapshot.readinessStatus),
+                    "peerDeviceConnected": String(channelSnapshot.membership.peerDeviceConnected),
+                ]
+            )
+        }
 
         let startedAt = Date()
-        while transmitRuntime.isPressingTalk {
+        var releaseLogged = false
+        var postReleaseGraceLogged = false
+        while true {
             if selectedChannelSnapshot(for: target.contactID)?.remoteAudioReadyForLiveTransmit == true {
                 diagnostics.record(
                     .media,
@@ -1337,7 +1449,44 @@ extension PTTViewModel {
                 return true
             }
 
-            if Date().timeIntervalSince(startedAt) >= Double(timeoutNanoseconds) / 1_000_000_000 {
+            let waitedNanoseconds = UInt64(Date().timeIntervalSince(startedAt) * 1_000_000_000)
+            if wakeCapablePeer && waitedNanoseconds >= wakeRecoveryGraceNanoseconds {
+                if !transmitRuntime.isPressingTalk,
+                   waitedNanoseconds
+                    < wakeRecoveryGraceNanoseconds + postReleaseWakeRecoveryGraceNanoseconds {
+                    if !postReleaseGraceLogged {
+                        postReleaseGraceLogged = true
+                        diagnostics.record(
+                            .media,
+                            message: "Extending wake-capable receiver recovery hold after talk release to preserve buffered audio",
+                            metadata: [
+                                "contactId": target.contactID.uuidString,
+                                "channelId": target.channelID,
+                                "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                                "postReleaseGraceMilliseconds": String(
+                                    postReleaseWakeRecoveryGraceNanoseconds / 1_000_000
+                                ),
+                            ]
+                        )
+                    }
+                } else {
+                    diagnostics.record(
+                        .media,
+                        message: "Wake-capable receiver recovery grace elapsed; releasing outbound audio send gate",
+                        metadata: [
+                            "contactId": target.contactID.uuidString,
+                            "channelId": target.channelID,
+                            "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                            "remoteAudioReadiness": String(
+                                describing: selectedChannelSnapshot(for: target.contactID)?.remoteAudioReadiness ?? .unknown
+                            ),
+                        ]
+                    )
+                    return true
+                }
+            }
+
+            if waitedNanoseconds >= timeoutNanoseconds {
                 let currentSnapshot = selectedChannelSnapshot(for: target.contactID)
                 diagnostics.recordInvariantViolation(
                     invariantID: "transmit.outbound_audio_without_remote_receiver_ready",
@@ -1368,10 +1517,26 @@ extension PTTViewModel {
                 return false
             }
 
+            if !transmitRuntime.isPressingTalk {
+                if !wakeCapablePeer {
+                    return false
+                }
+                if !releaseLogged {
+                    releaseLogged = true
+                    diagnostics.record(
+                        .media,
+                        message: "Continuing to hold initial outbound audio after talk release until wake-capable receiver recovery",
+                        metadata: [
+                            "contactId": target.contactID.uuidString,
+                            "channelId": target.channelID,
+                            "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                        ]
+                    )
+                }
+            }
+
             try? await Task.sleep(nanoseconds: pollNanoseconds)
         }
-
-        return false
     }
 
     func reconcileExplicitTransmitStopIfNeeded(

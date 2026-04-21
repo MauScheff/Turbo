@@ -581,6 +581,7 @@ def analyze_reports(reports: list[Report]) -> list[InvariantViolation]:
         left_phase = left.snapshot.get("selectedPeerPhase", "none")
         right_phase = right.snapshot.get("selectedPeerPhase", "none")
         live_session_phases = {"waitingForPeer", "wakeReady", "ready", "startingTransmit", "transmitting", "receiving"}
+        connectable_or_joining_phases = {"peerReady", "waitingForPeer"}
         left_backend_ready = (
             snapshot_bool(left.snapshot, "backendSelfJoined")
             and snapshot_bool(left.snapshot, "backendPeerJoined")
@@ -613,6 +614,49 @@ def analyze_reports(reports: list[Report]) -> list[InvariantViolation]:
                 and snapshot.get("systemSession", "none") == "none"
                 and snapshot.get("backendChannelStatus", "none") == "none"
                 and snapshot_bool(snapshot, "isJoined") is False
+            )
+
+        def snapshot_has_connectable_or_joining_session(snapshot: dict[str, str], phase: str) -> bool:
+            if phase not in connectable_or_joining_phases:
+                return False
+
+            backend_channel_status = snapshot.get("backendChannelStatus", "none")
+            backend_readiness = snapshot.get("backendReadiness", "none")
+            system_session = snapshot.get("systemSession", "none")
+
+            return (
+                backend_channel_status in {"waiting-for-peer", "ready", "transmitting", "receiving"}
+                or backend_readiness in {"waiting-for-self", "waiting-for-peer", "ready"}
+                or system_session.startswith("active(")
+                or snapshot_bool(snapshot, "isJoined") is True
+                or snapshot_bool(snapshot, "backendSelfJoined") is True
+                or snapshot_bool(snapshot, "backendPeerJoined") is True
+            )
+
+        if snapshot_has_connectable_or_joining_session(left.snapshot, left_phase) and snapshot_lacks_session_context(right.snapshot):
+            violations.append(
+                build_violation(
+                    subject="pair",
+                    invariant_id="pair.one_sided_connectable_session",
+                    scope="pair",
+                    message=(
+                        "one device advanced into a connectable or joining session while the peer has no local/backend session context "
+                        f"left={left.handle}:{left_phase} right={right.handle}:{right_phase}"
+                    ),
+                )
+            )
+
+        if snapshot_has_connectable_or_joining_session(right.snapshot, right_phase) and snapshot_lacks_session_context(left.snapshot):
+            violations.append(
+                build_violation(
+                    subject="pair",
+                    invariant_id="pair.one_sided_connectable_session",
+                    scope="pair",
+                    message=(
+                        "one device advanced into a connectable or joining session while the peer has no local/backend session context "
+                        f"left={left.handle}:{left_phase} right={right.handle}:{right_phase}"
+                    ),
+                )
             )
 
         if left_backend_ready and left_phase in live_session_phases and snapshot_lacks_session_context(right.snapshot):
