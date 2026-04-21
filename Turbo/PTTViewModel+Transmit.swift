@@ -12,7 +12,10 @@ import UIKit
 
 extension PTTViewModel {
     private var wakePlaybackFallbackDelayNanoseconds: UInt64 { 3_500_000_000 }
-    private var wakeCapableInitialAudioSendGraceNanoseconds: UInt64 { 1_500_000_000 }
+    // Wake-capable receive now buffers early audio and the backend preserves the
+    // active transmit target, so a long blind hold here just shifts speech behind
+    // the user's finger and makes short phrases feel cut off on release.
+    private var wakeCapableInitialAudioSendGraceNanoseconds: UInt64 { 300_000_000 }
     private var wakeCapablePostReleaseAudioSendGraceNanoseconds: UInt64 { 750_000_000 }
     private var mediaSessionRetryCooldown: TimeInterval { 0.75 }
     private var deferredInteractivePrewarmRecoveryDelayNanoseconds: UInt64 { 500_000_000 }

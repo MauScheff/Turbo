@@ -7289,6 +7289,94 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func explicitTransmitStopDefersReceiveTeardownWhileAwaitingFirstAudioChunk() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.pttWakeRuntime.store(
+            PendingIncomingPTTPush(
+                contactID: contactID,
+                channelUUID: channelUUID,
+                payload: TurboPTTPushPayload(
+                    event: .transmitStart,
+                    channelId: "channel-123",
+                    activeSpeaker: "Blake",
+                    senderUserId: "peer-user",
+                    senderDeviceId: "peer-device"
+                ),
+                hasConfirmedIncomingPush: true,
+                activationState: .systemActivated
+            )
+        )
+        viewModel.isPTTAudioSessionActive = true
+
+        await viewModel.ensureMediaSession(
+            for: contactID,
+            activationMode: .systemActivated,
+            startupMode: .playbackOnly
+        )
+        viewModel.markRemoteAudioActivity(for: contactID, source: .transmitStartSignal)
+
+        viewModel.handleIncomingSignal(
+            TurboSignalEnvelope(
+                type: .transmitStop,
+                channelId: "channel-123",
+                fromUserId: "peer-user",
+                fromDeviceId: "peer-device",
+                toUserId: "self-user",
+                toDeviceId: "self-device",
+                payload: ""
+            )
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(viewModel.remoteTransmittingContactIDs.contains(contactID))
+        #expect(viewModel.mediaSessionContactID == contactID)
+        #expect(viewModel.mediaConnectionState == .connected)
+        #expect(viewModel.pttWakeRuntime.incomingWakeActivationState(for: contactID) == .systemActivated)
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Deferring receive teardown until remote audio drain after transmit stop"
+            )
+        )
+        #expect(
+            !viewModel.diagnosticsTranscript.contains(
+                "Closed receive media session after transmit stop"
+            )
+        )
+
+        viewModel.handleRemoteAudioSilenceTimeout(for: contactID, phase: .awaitingFirstAudioChunk)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(!viewModel.remoteTransmittingContactIDs.contains(contactID))
+        #expect(viewModel.mediaSessionContactID == nil)
+        #expect(viewModel.mediaConnectionState == .idle)
+        #expect(viewModel.pttWakeRuntime.pendingIncomingPush == nil)
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Initial remote audio chunk timed out"
+            )
+        )
+    }
+
+    @MainActor
     @Test func lateAudioChunkAfterTransmitStopDoesNotRearmProvisionalWakeCandidate() async throws {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -7595,6 +7683,84 @@ struct TurboTests {
 
         #expect(viewModel.pttWakeRuntime.pendingIncomingPush == nil)
         #expect(viewModel.pttWakeRuntime.incomingWakeActivationState(for: contactID) == nil)
+    }
+
+    @MainActor
+    @Test func backgroundAudioChunkAfterPTTDeactivationDoesNotRearmWakeForActiveReceiveFlow() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.applicationStateOverride = .background
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.pttWakeRuntime.store(
+            PendingIncomingPTTPush(
+                contactID: contactID,
+                channelUUID: channelUUID,
+                payload: TurboPTTPushPayload(
+                    event: .transmitStart,
+                    channelId: "channel-123",
+                    activeSpeaker: "Blake",
+                    senderUserId: "peer-user",
+                    senderDeviceId: "peer-device"
+                ),
+                hasConfirmedIncomingPush: true,
+                activationState: .systemActivated
+            )
+        )
+        viewModel.isPTTAudioSessionActive = true
+        viewModel.markRemoteAudioActivity(for: contactID, source: .audioChunk)
+
+        await viewModel.handleDeactivatedAudioSession(
+            AVAudioSession.sharedInstance(),
+            applicationState: .background
+        )
+
+        #expect(viewModel.pttWakeRuntime.pendingIncomingPush == nil)
+        #expect(
+            viewModel.receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.hasReceivedAudioChunk == true
+        )
+
+        viewModel.handleIncomingSignal(
+            TurboSignalEnvelope(
+                type: .audioChunk,
+                channelId: "channel-123",
+                fromUserId: "peer-user",
+                fromDeviceId: "peer-device",
+                toUserId: "self-user",
+                toDeviceId: "self-device",
+                payload: "AQI="
+            )
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(viewModel.pttWakeRuntime.pendingIncomingPush == nil)
+        #expect(viewModel.pttWakeRuntime.incomingWakeActivationState(for: contactID) == nil)
+        #expect(
+            !viewModel.diagnosticsTranscript.contains(
+                "Created provisional wake candidate from signal path"
+            )
+        )
+        #expect(
+            !viewModel.diagnosticsTranscript.contains(
+                "Buffered wake audio chunk until PTT activation"
+            )
+        )
     }
 
     @MainActor
@@ -11097,6 +11263,83 @@ struct TurboTests {
             pollNanoseconds: 10_000_000,
             wakeRecoveryGraceNanoseconds: 90_000_000,
             postReleaseWakeRecoveryGraceNanoseconds: 20_000_000
+        )
+
+        #expect(didBecomeReady)
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Extending wake-capable receiver recovery hold after talk release to preserve buffered audio"
+            )
+        )
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Wake-capable receiver recovery grace elapsed; releasing outbound audio send gate"
+            )
+        )
+        #expect(
+            !viewModel.diagnosticsTranscript.contains(
+                "Timed out waiting for remote receiver audio readiness; sending anyway"
+            )
+        )
+    }
+
+    @MainActor
+    @Test func outgoingAudioSendGateDefaultWakeGraceDoesNotHoldShortReleaseForMultipleSeconds() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: channelUUID,
+            backendChannelId: "channel",
+            remoteUserId: "peer-user"
+        )
+
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.transmitRuntime.markPressBegan()
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(
+                    status: .idle,
+                    canTransmit: false,
+                    peerDeviceConnected: false
+                )
+            )
+        )
+        viewModel.backendSyncCoordinator.send(
+            .channelReadinessUpdated(
+                contactID: contactID,
+                readiness: makeChannelReadiness(
+                    status: .waitingForPeer,
+                    selfHasActiveDevice: true,
+                    peerHasActiveDevice: false,
+                    remoteAudioReadiness: .wakeCapable,
+                    remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+                )
+            )
+        )
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            viewModel.transmitRuntime.markPressEnded()
+        }
+
+        let didBecomeReady = await viewModel.waitForRemoteReceiverAudioReadinessBeforeSendingIfNeeded(
+            target: TransmitTarget(
+                contactID: contactID,
+                userID: "peer-user",
+                deviceID: "peer-device",
+                channelID: "channel"
+            ),
+            timeoutNanoseconds: 1_800_000_000,
+            pollNanoseconds: 10_000_000
         )
 
         #expect(didBecomeReady)

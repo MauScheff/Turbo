@@ -281,6 +281,9 @@ extension PTTViewModel {
         guard currentApplicationState() != .active else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         guard !pttWakeRuntime.shouldSuppressProvisionalWakeCandidate(for: contactID) else { return false }
+        guard receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.hasReceivedAudioChunk != true else {
+            return false
+        }
         // Once the system-owned PTT audio session is active, later signal-path
         // chunks belong to the current receive flow and must not rearm wake.
         guard !isPTTAudioSessionActive else { return false }
@@ -399,7 +402,22 @@ extension PTTViewModel {
     func shouldDeferReceiveTeardownUntilRemoteAudioDrain(for contactID: UUID) -> Bool {
         guard mediaSessionContactID == contactID else { return false }
         guard !isTransmitting else { return false }
-        return receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.lastSource == .audioChunk
+        guard let activityState = receiveExecutionCoordinator.state.remoteActivityByContactID[contactID] else {
+            return false
+        }
+        if activityState.hasReceivedAudioChunk {
+            return true
+        }
+        switch pttWakeRuntime.incomingWakeActivationState(for: contactID) {
+        case .systemActivated, .appManagedFallback:
+            return true
+        case .signalBuffered,
+             .awaitingSystemActivation,
+             .systemActivationTimedOutWaitingForForeground,
+             .systemActivationInterruptedByTransmitEnd,
+             .none:
+            return false
+        }
     }
 
     func finalizeReceiveMediaSessionIfNeeded(
