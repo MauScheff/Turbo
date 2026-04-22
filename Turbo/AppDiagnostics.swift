@@ -13,6 +13,7 @@ struct SelectedSessionDiagnosticsSummary: Equatable {
     let isTransmitting: Bool
     let activeChannelID: String?
     let pendingAction: String
+    let reconciliationAction: String
     let hadConnectedSessionContinuity: Bool
     let systemSession: String
     let mediaState: String
@@ -520,6 +521,7 @@ final class DiagnosticsStore {
         let remoteWakeCapabilityKind = fields["remoteWakeCapabilityKind"] ?? "unavailable"
         let systemSession = fields["systemSession"] ?? "none"
         let phaseDetail = fields["selectedPeerPhaseDetail"] ?? "none"
+        let mediaState = fields["mediaState"] ?? "none"
 
         var violations: [DiagnosticsInvariantViolationCandidate] = []
 
@@ -676,6 +678,70 @@ final class DiagnosticsStore {
                         "backendReadiness": backendReadiness,
                         "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
                         "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
+                    ]
+                )
+            )
+        }
+
+        let reconciliationAction = fields["selectedPeerReconciliationAction"] ?? "none"
+        let signalingJoinRecoveryActive =
+            snapshotBool(fields, key: "backendSignalingJoinRecoveryActive") == true
+        let disconnectingTeardownInFlight =
+            phaseDetail.contains("disconnecting")
+            || (fields["pendingAction"] ?? "none").contains("reconciledTeardown(")
+
+        if phase == "waitingForPeer",
+           isJoined == true,
+           hadConnectedSessionContinuity == true,
+           systemSession.hasPrefix("active("),
+           !reconciliationAction.hasPrefix("teardownSelectedSession("),
+           !disconnectingTeardownInFlight,
+           backendSelfJoined == false,
+           backendPeerJoined == false {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_membership_absent_ui_still_joined",
+                    scope: .backend,
+                    message: "backend says channel membership is absent, but selectedPeerPhase is still waitingForPeer on a joined local session",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "isJoined": fields["isJoined"] ?? "none",
+                        "systemSession": systemSession,
+                        "backendChannelStatus": backendChannelStatus,
+                        "backendReadiness": backendReadiness,
+                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
+                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
+                    ]
+                )
+            )
+        }
+
+        if phase == "waitingForPeer",
+           phaseDetail.contains("remoteAudioPrewarm"),
+           isJoined == true,
+           mediaState == "connected",
+           systemSession.hasPrefix("active("),
+           !signalingJoinRecoveryActive,
+           backendReadiness == "ready",
+           backendSelfJoined == true,
+           backendPeerJoined == true,
+           backendPeerDeviceConnected == true {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_ready_missing_remote_audio_signal",
+                    scope: .backend,
+                    message: "backend says the peer is ready and connected, but selectedPeerPhase is still waitingForPeer on remote audio prewarm",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "mediaState": mediaState,
+                        "systemSession": systemSession,
+                        "backendChannelStatus": backendChannelStatus,
+                        "backendReadiness": backendReadiness,
+                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
+                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
+                        "backendPeerDeviceConnected": fields["backendPeerDeviceConnected"] ?? "none",
                     ]
                 )
             )

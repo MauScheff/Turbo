@@ -239,23 +239,11 @@ extension PTTViewModel {
         createdInvite: TurboInviteResponse?,
         currentChannel: ChannelReadinessSnapshot?
     ) -> BackendJoinExecutionPlan {
-        let peerReadyForJoin = currentChannel?.membership.hasPeerMembership == true
-
         if request.relationship.isIncomingRequest {
             return .joinSession
         }
         if request.intent == .joinReadyPeer {
             return .joinSession
-        }
-        if peerReadyForJoin {
-            return .joinSession
-        }
-        if request.relationship.isOutgoingRequest,
-           !peerReadyForJoin {
-            return .requestOnly
-        }
-        if request.outgoingInvite != nil {
-            return .requestOnly
         }
         if createdInvite?.direction == "incoming" {
             return .joinSession
@@ -586,7 +574,6 @@ extension PTTViewModel {
             applyInviteMetadata(invite, to: &contact)
         } else if !request.relationship.isIncomingRequest,
                   request.intent != .joinReadyPeer,
-                  currentChannel?.membership.hasPeerMembership != true,
                   request.requestCooldownRemaining == nil {
             let invite = try await backend.createInvite(otherHandle: request.handle)
             createdInvite = invite
@@ -686,6 +673,24 @@ extension PTTViewModel {
         )
     }
 
+    func prepareBackendJoinControlPlaneIfNeeded(
+        _ backend: BackendServices,
+        request: BackendJoinRequest
+    ) async throws {
+        guard backend.supportsWebSocket else { return }
+        guard !backend.isWebSocketConnected else { return }
+
+        diagnostics.record(
+            .backend,
+            message: "Waiting for backend WebSocket before join",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "handle": request.handle,
+            ]
+        )
+        try await backend.waitForWebSocketConnection()
+    }
+
     private func performRecoverableBackendJoin(
         contact: Contact,
         request: BackendJoinRequest,
@@ -696,6 +701,7 @@ extension PTTViewModel {
         }
 
         do {
+            try await prepareBackendJoinControlPlaneIfNeeded(backend, request: request)
             _ = try await backend.joinChannel(channelId: backendChannelId)
             if try await waitForBackendJoinVisibility(for: contact, request: request, backend: backend) {
                 return contact
@@ -719,6 +725,7 @@ extension PTTViewModel {
             guard let refreshedChannelId = refreshedContact.backendChannelId else {
                 throw TurboBackendError.invalidResponse
             }
+            try await prepareBackendJoinControlPlaneIfNeeded(backend, request: request)
             _ = try await backend.joinChannel(channelId: refreshedChannelId)
             guard try await waitForBackendJoinVisibility(for: refreshedContact, request: request, backend: backend) else {
                 throw TurboBackendError.server("backend join visibility timed out")
@@ -740,6 +747,7 @@ extension PTTViewModel {
         guard let refreshedChannelId = refreshedContact.backendChannelId else {
             throw TurboBackendError.invalidResponse
         }
+        try await prepareBackendJoinControlPlaneIfNeeded(backend, request: request)
         _ = try await backend.joinChannel(channelId: refreshedChannelId)
         guard try await waitForBackendJoinVisibility(for: refreshedContact, request: request, backend: backend) else {
             throw TurboBackendError.server("backend join visibility timed out")

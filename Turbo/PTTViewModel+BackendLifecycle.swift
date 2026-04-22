@@ -51,6 +51,7 @@ extension PTTViewModel {
     func recoverBackendBootstrapIfNeeded(trigger: String) async {
         guard hasBackendConfig else { return }
         guard !backendRuntime.isReady else { return }
+        guard shouldMaintainBackgroundControlPlane() else { return }
 
         diagnostics.record(.backend, message: "Retrying backend bootstrap", metadata: ["trigger": trigger])
         captureDiagnosticsState("backend-bootstrap:retry")
@@ -143,6 +144,72 @@ extension PTTViewModel {
         captureDiagnosticsState("backend:reconnect-finished")
     }
 
+    func handleBackendServerNotice(_ message: String) {
+        backendStatusMessage = message
+        diagnostics.record(.websocket, message: "Backend server notice", metadata: ["message": message])
+
+        guard shouldRecoverBackendSignalingJoinDrift(from: message),
+              let contact = signalingJoinRecoveryContact(),
+              backendRuntime.signalingJoinRecoveryTask == nil else {
+            return
+        }
+
+        diagnostics.record(
+            .backend,
+            message: "Recovering backend join after signaling drift notice",
+            metadata: [
+                "contactId": contact.id.uuidString,
+                "handle": contact.handle,
+                "notice": message,
+            ]
+        )
+        captureDiagnosticsState("backend-signaling:recovery-scheduled")
+
+        let contactID = contact.id
+        replaceBackendSignalingJoinRecoveryTask(
+            with: Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.backendRuntime.signalingJoinRecoveryTask = nil }
+                self.controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
+                await self.reassertBackendJoin(for: contact)
+                await self.refreshChannelState(for: contactID)
+                await self.refreshContactSummaries()
+                await self.syncLocalReceiverAudioReadinessSignal(
+                    for: contactID,
+                    reason: "backend-signaling-recovery"
+                )
+                self.captureDiagnosticsState("backend-signaling:recovered")
+            }
+        )
+    }
+
+    func shouldRecoverBackendSignalingJoinDrift(from message: String) -> Bool {
+        guard backendRuntime.isReady else { return false }
+        let normalized = message
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let stripped = normalized.hasPrefix("signaling ")
+            ? String(normalized.dropFirst("signaling ".count))
+            : normalized
+        return stripped == "sender device is not joined to this channel"
+    }
+
+    func signalingJoinRecoveryContact() -> Contact? {
+        let candidateContactID = activeChannelId ?? selectedContactId
+        guard let contactID = candidateContactID,
+              let contact = contacts.first(where: { $0.id == contactID }),
+              contact.backendChannelId != nil,
+              contact.remoteUserId != nil else {
+            return nil
+        }
+
+        guard systemSessionMatches(contactID) || (isJoined && activeChannelId == contactID) else {
+            return nil
+        }
+
+        return contact
+    }
+
     func shouldResetTransmitSessionOnWebSocketIdle(
         hasPendingBeginOrActiveTransmit: Bool,
         systemIsTransmitting: Bool
@@ -224,7 +291,7 @@ extension PTTViewModel {
             self?.scheduleIncomingSignalDelivery(envelope)
         }
         client.onServerNotice = { [weak self] message in
-            self?.backendStatusMessage = message
+            self?.handleBackendServerNotice(message)
         }
         client.onWebSocketStateChange = { [weak self] state in
             self?.handleWebSocketStateChange(state)
@@ -417,8 +484,12 @@ extension PTTViewModel {
         guard !hasPendingBackendPollTask else { return }
         replaceBackendPollTask(with: Task { [weak self] in
             while let self, !Task.isCancelled {
-                let selectedContactId = await MainActor.run(body: { self.selectedContactId })
-                await self.backendSyncCoordinator.handle(.pollRequested(selectedContactID: selectedContactId))
+                let (selectedContactId, shouldPoll) = await MainActor.run { @MainActor in
+                    (self.selectedContactId, self.shouldMaintainBackgroundControlPlane())
+                }
+                if shouldPoll {
+                    await self.backendSyncCoordinator.handle(.pollRequested(selectedContactID: selectedContactId))
+                }
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
         })
@@ -428,9 +499,29 @@ extension PTTViewModel {
         guard let backend = backendServices, backend.supportsWebSocket else { return }
         diagnostics.record(.websocket, message: "WebSocket state changed", metadata: ["state": String(describing: state)])
 
+        let shouldForceBackgroundSuspension =
+            currentApplicationState() != .active
+            && !shouldMaintainBackgroundControlPlane()
+        if shouldForceBackgroundSuspension {
+            diagnostics.record(
+                .websocket,
+                message: "Suspending unexpected background WebSocket activity",
+                metadata: ["state": String(describing: state)]
+            )
+            backend.suspendWebSocket()
+            if state != .idle {
+                captureDiagnosticsState("websocket:background-suspended")
+                return
+            }
+        }
+
         switch state {
         case .idle:
-            backendStatusMessage = backendRuntime.isReady ? "Reconnecting WebSocket..." : "WebSocket disconnected"
+            if shouldForceBackgroundSuspension {
+                backendStatusMessage = "WebSocket suspended"
+            } else {
+                backendStatusMessage = backendRuntime.isReady ? "Reconnecting WebSocket..." : "WebSocket disconnected"
+            }
             backendSyncCoordinator.send(.webSocketStateChanged(.idle, selectedContactID: selectedContactId))
             controlPlaneCoordinator.send(.webSocketStateChanged(.idle))
             syncPTTServiceStatus(reason: "websocket-idle")

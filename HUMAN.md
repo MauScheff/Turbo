@@ -54,3 +54,6 @@ yes, and how might we design and iterate on our system so that once it works, it
   doing this test progressively like the same test gets farther and farther away until we can have everything
   perfect but we will stop every time we have a little bug and fix it there so we should be able to have this
   long path testing path work flawlessly by the end of the day. Is there any question?
+
+#Midwise
+I'm very dissapointed because we have been working on this all afternoon.

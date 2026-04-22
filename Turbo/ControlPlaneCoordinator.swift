@@ -10,12 +10,24 @@ struct ReceiverAudioReadinessIntent: Equatable {
     let isReady: Bool
     let reason: String
 
+    var publicationBasis: ReceiverAudioReadinessPublicationBasis {
+        reason == "channel-refresh" ? .channelRefresh : .lifecycle
+    }
+
     var publishedState: ReceiverAudioReadinessPublication {
-        ReceiverAudioReadinessPublication(isReady: isReady, peerWasRoutable: true)
+        ReceiverAudioReadinessPublication(
+            isReady: isReady,
+            peerWasRoutable: true,
+            basis: publicationBasis
+        )
     }
 
     var suppressedState: ReceiverAudioReadinessPublication {
-        ReceiverAudioReadinessPublication(isReady: isReady, peerWasRoutable: false)
+        ReceiverAudioReadinessPublication(
+            isReady: isReady,
+            peerWasRoutable: false,
+            basis: publicationBasis
+        )
     }
 }
 

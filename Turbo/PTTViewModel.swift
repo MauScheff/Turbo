@@ -212,6 +212,19 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         (applicationState ?? currentApplicationState()) == .active
     }
 
+    func shouldMaintainBackgroundControlPlane(
+        applicationState: UIApplication.State? = nil
+    ) -> Bool {
+        let state = applicationState ?? currentApplicationState()
+        guard state != .active else { return true }
+
+        return hasPendingBeginOrActiveTransmit
+            || hasActiveTransmitOrMediaSession
+            || isJoined
+            || pttCoordinator.state.systemChannelUUID != nil
+            || pttWakeRuntime.pendingIncomingPush != nil
+    }
+
     func syncPTTState() {
         let previousActiveChannelID = activeChannelId
         activeChannelId = pttCoordinator.state.activeContactID
@@ -294,6 +307,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func replaceBackendBootstrapRetryTask(with task: Task<Void, Never>?) {
         backendRuntime.replaceBootstrapRetryTask(with: task)
+    }
+
+    func replaceBackendSignalingJoinRecoveryTask(with task: Task<Void, Never>?) {
+        backendRuntime.replaceSignalingJoinRecoveryTask(with: task)
     }
 
     func clearTrackedContacts() {
@@ -514,8 +531,33 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             .filter { $0 != currentDevUserHandle }
     }
 
+    var topChromeDiagnosticsErrorText: String? {
+        guard let latestError = diagnostics.latestError else { return nil }
+        guard shouldSurfaceTopChromeDiagnosticsError(latestError) else { return nil }
+        return "\(latestError.subsystem.rawValue): \(latestError.message)"
+    }
+
     var usesLocalHTTPBackend: Bool {
         backendRuntime.mode == "local-http"
+    }
+
+    private func shouldSurfaceTopChromeDiagnosticsError(_ entry: DiagnosticsEntry) -> Bool {
+        switch (entry.subsystem, entry.message) {
+        case (.pushToTalk, "PTT init failed"):
+            return !pttSystemClient.isReady
+        case (.invariant, "backend says the peer is ready and connected, but selectedPeerPhase is still waitingForPeer on remote audio prewarm"):
+            let selectedSession = selectedSessionDiagnosticsSummary
+            return selectedSession.selectedPhase == "waitingForPeer"
+                && selectedSession.selectedPhaseDetail.contains("remoteAudioPrewarm")
+                && selectedSession.mediaState == "connected"
+                && selectedSession.backendReadiness == "ready"
+                && selectedSession.backendSelfJoined == true
+                && selectedSession.backendPeerJoined == true
+                && selectedSession.backendPeerDeviceConnected == true
+                && backendRuntime.signalingJoinRecoveryTask == nil
+        default:
+            return true
+        }
     }
 
     var selectedSessionDiagnosticsSummary: SelectedSessionDiagnosticsSummary {
@@ -545,6 +587,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             isTransmitting: isTransmitting,
             activeChannelID: activeChannelId?.uuidString,
             pendingAction: String(describing: sessionCoordinator.pendingAction),
+            reconciliationAction: String(describing: selectedPeerCoordinator.state.reconciliationAction),
             hadConnectedSessionContinuity: selectedContactId == nil
                 ? false
                 : selectedPeerCoordinator.state.hadConnectedSessionContinuity,
@@ -621,7 +664,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "selectedPeerStatus": selectedSession.statusMessage,
             "selectedPeerCanTransmit": String(selectedSession.canTransmitNow),
             "pendingAction": selectedSession.pendingAction,
+            "selectedPeerReconciliationAction": selectedSession.reconciliationAction,
             "hadConnectedSessionContinuity": String(selectedSession.hadConnectedSessionContinuity),
+            "backendSignalingJoinRecoveryActive": String(backendRuntime.signalingJoinRecoveryTask != nil),
             "activeChannelId": activeChannelId?.uuidString ?? "none",
             "isJoined": String(isJoined),
             "isTransmitting": String(isTransmitting),

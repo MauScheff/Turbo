@@ -10,6 +10,7 @@ import Foundation
 final class BackendRuntimeState {
     var pollTask: Task<Void, Never>?
     var bootstrapRetryTask: Task<Void, Never>?
+    var signalingJoinRecoveryTask: Task<Void, Never>?
     var config = TurboBackendConfig.load()
     var client: TurboBackendClient?
     var currentUserID: String?
@@ -45,6 +46,8 @@ final class BackendRuntimeState {
         mode = "unknown"
         bootstrapRetryTask?.cancel()
         bootstrapRetryTask = nil
+        signalingJoinRecoveryTask?.cancel()
+        signalingJoinRecoveryTask = nil
         pollTask?.cancel()
         pollTask = nil
     }
@@ -61,6 +64,11 @@ final class BackendRuntimeState {
     func replaceBootstrapRetryTask(with task: Task<Void, Never>?) {
         bootstrapRetryTask?.cancel()
         bootstrapRetryTask = task
+    }
+
+    func replaceSignalingJoinRecoveryTask(with task: Task<Void, Never>?) {
+        signalingJoinRecoveryTask?.cancel()
+        signalingJoinRecoveryTask = task
     }
 
     func storeAuthenticatedUserID(_ userID: String) {
@@ -634,9 +642,15 @@ enum MediaSessionStartupState: Equatable {
     case failed(MediaSessionStartupFailure)
 }
 
+enum ReceiverAudioReadinessPublicationBasis: Equatable {
+    case lifecycle
+    case channelRefresh
+}
+
 struct ReceiverAudioReadinessPublication: Equatable {
     let isReady: Bool
     let peerWasRoutable: Bool
+    let basis: ReceiverAudioReadinessPublicationBasis
 }
 
 struct BackendServices {

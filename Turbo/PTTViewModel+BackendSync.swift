@@ -622,10 +622,20 @@ extension PTTViewModel {
     func effectiveChannelStatePreservingLiveMembership(
         contactID: UUID,
         existing: TurboChannelStateResponse?,
-        incoming: TurboChannelStateResponse
+        incoming: TurboChannelStateResponse,
+        authoritativeMembershipLoss: Bool = false
     ) -> TurboChannelStateResponse {
         guard let existing else { return incoming }
         guard existing.channelId == incoming.channelId else { return incoming }
+
+        let incomingLostAllMembership =
+            !incoming.membership.hasLocalMembership
+            && !incoming.membership.hasPeerMembership
+            && !incoming.membership.peerDeviceConnected
+
+        if authoritativeMembershipLoss, incomingLostAllMembership {
+            return incoming
+        }
 
         if shouldPreserveLiveChannelState(
             contactID: contactID,
@@ -661,11 +671,17 @@ extension PTTViewModel {
         return incoming.settingMembership(existing.membership)
     }
 
+    func shouldTreatChannelReadinessMembershipLossAsAuthoritative(_ error: Error) -> Bool {
+        guard case let TurboBackendError.server(message) = error else { return false }
+        return message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "not a channel member"
+    }
+
     func runBackendSyncEffect(_ effect: BackendSyncEffect) async {
         switch effect {
         case .bootstrapIfNeeded:
             await recoverBackendBootstrapIfNeeded(trigger: "backend-poll")
         case .ensureWebSocketConnected:
+            guard shouldMaintainBackgroundControlPlane() else { return }
             backendServices?.ensureWebSocketConnected()
         case .heartbeatPresence:
             guard shouldPublishForegroundPresence() else { return }
@@ -914,6 +930,10 @@ extension PTTViewModel {
                         contactID: contactID,
                         applicationState: applicationState
                     )
+                    await syncLocalReceiverAudioReadinessSignal(
+                        for: contactID,
+                        reason: "channel-refresh"
+                    )
                 }
                 await refreshChannelState(for: contactID)
             }
@@ -1108,13 +1128,35 @@ extension PTTViewModel {
             }
 
             let channelState = try await channelStateTask
-            let fetchedChannelReadiness = try? await channelReadinessTask
+            let fetchedChannelReadiness: TurboChannelReadinessResponse?
+            let channelReadinessFailure: Error?
+            do {
+                fetchedChannelReadiness = try await channelReadinessTask
+                channelReadinessFailure = nil
+            } catch {
+                fetchedChannelReadiness = nil
+                channelReadinessFailure = error
+            }
+
+            let authoritativeMembershipLoss =
+                channelReadinessFailure.map(shouldTreatChannelReadinessMembershipLossAsAuthoritative) ?? false
             let existingChannelState = backendSyncCoordinator.state.syncState.channelStates[contactID]
             let effectiveChannelState = effectiveChannelStatePreservingLiveMembership(
                 contactID: contactID,
                 existing: existingChannelState,
-                incoming: channelState
+                incoming: channelState,
+                authoritativeMembershipLoss: authoritativeMembershipLoss
             )
+            if authoritativeMembershipLoss {
+                diagnostics.record(
+                    .channel,
+                    message: "Honoring backend membership loss after readiness refresh",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": backendChannelId,
+                    ]
+                )
+            }
             await recoverRemoteTransmitStopFromChannelRefreshIfNeeded(
                 contactID: contactID,
                 existingChannelState: existingChannelState,
@@ -1123,13 +1165,16 @@ extension PTTViewModel {
             let existingSessionWasRoutable =
                 systemSessionMatches(contactID)
                 || (isJoined && activeChannelId == contactID)
-            let effectiveChannelReadiness = mergedChannelReadinessPreservingWakeCapableFallback(
-                existing: channelReadinessByContactID[contactID],
-                fetched: fetchedChannelReadiness,
-                peerDeviceConnected: effectiveChannelState.membership.peerDeviceConnected,
-                peerMembershipPresent: effectiveChannelState.membership.hasPeerMembership,
-                existingSessionWasRoutable: existingSessionWasRoutable
-            )
+            let effectiveChannelReadiness: TurboChannelReadinessResponse? = {
+                guard effectiveChannelState.membership != .absent else { return nil }
+                return mergedChannelReadinessPreservingWakeCapableFallback(
+                    existing: channelReadinessByContactID[contactID],
+                    fetched: fetchedChannelReadiness,
+                    peerDeviceConnected: effectiveChannelState.membership.peerDeviceConnected,
+                    peerMembershipPresent: effectiveChannelState.membership.hasPeerMembership,
+                    existingSessionWasRoutable: existingSessionWasRoutable
+                )
+            }()
             let localSessionEstablished =
                 systemSessionMatches(contactID)
                 || (isJoined && activeChannelId == contactID)

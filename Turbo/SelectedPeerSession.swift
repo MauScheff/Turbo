@@ -4,6 +4,19 @@ struct SelectedPeerSelection: Equatable {
     let contactID: UUID
     let contactName: String
     let contactIsOnline: Bool
+    let contactPresence: ContactPresencePresentation
+
+    init(
+        contactID: UUID,
+        contactName: String,
+        contactIsOnline: Bool,
+        contactPresence: ContactPresencePresentation? = nil
+    ) {
+        self.contactID = contactID
+        self.contactName = contactName
+        self.contactIsOnline = contactIsOnline
+        self.contactPresence = contactPresence ?? (contactIsOnline ? .connected : .offline)
+    }
 }
 
 struct SelectedPeerSessionState: Equatable {
@@ -157,6 +170,7 @@ enum SelectedPeerReducer {
             baseState: state.baseState,
             contactName: selection.contactName,
             contactIsOnline: selection.contactIsOnline,
+            contactPresence: selection.contactPresence,
             isJoined: state.isJoined,
             localTransmit: state.localTransmit,
             peerSignalIsTransmitting: state.peerSignalIsTransmitting,

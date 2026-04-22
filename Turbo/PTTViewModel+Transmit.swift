@@ -643,6 +643,17 @@ extension PTTViewModel {
             )
             return
         }
+
+        diagnostics.record(
+            .websocket,
+            message: "Refreshing WebSocket for wake receive activation",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": channelID,
+                "applicationState": String(describing: applicationState),
+            ]
+        )
+        backend.forceReconnectWebSocket()
     }
 
     private func performBeginTransmit(_ request: TransmitRequestContext, workID: Int) async {
@@ -1453,42 +1464,6 @@ extension PTTViewModel {
             }
 
             let waitedNanoseconds = UInt64(Date().timeIntervalSince(startedAt) * 1_000_000_000)
-            if wakeCapablePeer && waitedNanoseconds >= wakeRecoveryGraceNanoseconds {
-                if !transmitRuntime.isPressingTalk,
-                   waitedNanoseconds
-                    < wakeRecoveryGraceNanoseconds + postReleaseWakeRecoveryGraceNanoseconds {
-                    if !postReleaseGraceLogged {
-                        postReleaseGraceLogged = true
-                        diagnostics.record(
-                            .media,
-                            message: "Extending wake-capable receiver recovery hold after talk release to preserve buffered audio",
-                            metadata: [
-                                "contactId": target.contactID.uuidString,
-                                "channelId": target.channelID,
-                                "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
-                                "postReleaseGraceMilliseconds": String(
-                                    postReleaseWakeRecoveryGraceNanoseconds / 1_000_000
-                                ),
-                            ]
-                        )
-                    }
-                } else {
-                    diagnostics.record(
-                        .media,
-                        message: "Wake-capable receiver recovery grace elapsed; releasing outbound audio send gate",
-                        metadata: [
-                            "contactId": target.contactID.uuidString,
-                            "channelId": target.channelID,
-                            "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
-                            "remoteAudioReadiness": String(
-                                describing: selectedChannelSnapshot(for: target.contactID)?.remoteAudioReadiness ?? .unknown
-                            ),
-                        ]
-                    )
-                    return true
-                }
-            }
-
             if waitedNanoseconds >= timeoutNanoseconds {
                 let currentSnapshot = selectedChannelSnapshot(for: target.contactID)
                 diagnostics.recordInvariantViolation(
@@ -1518,6 +1493,42 @@ extension PTTViewModel {
                     ]
                 )
                 return false
+            }
+
+            if wakeCapablePeer && waitedNanoseconds >= wakeRecoveryGraceNanoseconds {
+                if !transmitRuntime.isPressingTalk,
+                   waitedNanoseconds
+                    < wakeRecoveryGraceNanoseconds + postReleaseWakeRecoveryGraceNanoseconds {
+                    if !postReleaseGraceLogged {
+                        postReleaseGraceLogged = true
+                        diagnostics.record(
+                            .media,
+                            message: "Extending wake-capable receiver recovery hold after talk release to preserve buffered audio",
+                            metadata: [
+                                "contactId": target.contactID.uuidString,
+                                "channelId": target.channelID,
+                                "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                                "postReleaseGraceMilliseconds": String(
+                                    postReleaseWakeRecoveryGraceNanoseconds / 1_000_000
+                                ),
+                            ]
+                        )
+                    }
+                } else if !transmitRuntime.isPressingTalk {
+                    diagnostics.record(
+                        .media,
+                        message: "Wake-capable receiver recovery grace elapsed; releasing outbound audio send gate",
+                        metadata: [
+                            "contactId": target.contactID.uuidString,
+                            "channelId": target.channelID,
+                            "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                            "remoteAudioReadiness": String(
+                                describing: selectedChannelSnapshot(for: target.contactID)?.remoteAudioReadiness ?? .unknown
+                            ),
+                        ]
+                    )
+                    return true
+                }
             }
 
             if !transmitRuntime.isPressingTalk {

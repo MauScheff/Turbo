@@ -53,6 +53,7 @@ extension PTTViewModel {
                 )
                 return
             }
+            guard shouldMaintainBackgroundControlPlane() else { return }
             backend.ensureWebSocketConnected()
             diagnostics.record(
                 .websocket,

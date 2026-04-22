@@ -33,6 +33,9 @@ struct BackendSyncState: Equatable {
 
     mutating func applyChannelState(_ channelState: TurboChannelStateResponse, for contactID: UUID) {
         channelStates[contactID] = channelState
+        if channelState.membership == .absent {
+            channelReadiness[contactID] = nil
+        }
         if !channelState.requestRelationship.hasIncomingRequest {
             incomingInvites[contactID] = nil
         }
@@ -44,6 +47,10 @@ struct BackendSyncState: Equatable {
     }
 
     mutating func applyChannelReadiness(_ readiness: TurboChannelReadinessResponse, for contactID: UUID) {
+        if channelStates[contactID]?.membership == .absent {
+            channelReadiness[contactID] = nil
+            return
+        }
         channelReadiness[contactID] = readiness
     }
 

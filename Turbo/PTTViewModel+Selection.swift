@@ -9,7 +9,7 @@ import Foundation
 
 enum ContactPresencePresentation: Equatable {
     case connected
-    case available
+    case reachable
     case offline
 }
 
@@ -69,6 +69,7 @@ extension PTTViewModel {
                 : listConversationState(for: contact.id),
             contactName: contact.name,
             contactIsOnline: selectedConversationPresenceIsOnline(for: contact.id),
+            contactPresence: contactPresencePresentation(for: contact.id),
             isJoined: isJoined,
             localTransmit: localTransmitProjection(for: contact.id),
             peerSignalIsTransmitting: remoteTransmittingContactIDs.contains(contact.id),
@@ -131,7 +132,8 @@ extension PTTViewModel {
                 SelectedPeerSelection(
                     contactID: contact.id,
                     contactName: contact.name,
-                    contactIsOnline: selectedConversationPresenceIsOnline(for: contact.id)
+                    contactIsOnline: selectedConversationPresenceIsOnline(for: contact.id),
+                    contactPresence: contactPresencePresentation(for: contact.id)
                 )
             )
         )
@@ -247,7 +249,7 @@ extension PTTViewModel {
             if case .absent = channelSnapshot.membership {
                 return rawPresenceOnline ? .connected : .offline
             }
-            return channelSnapshot.membership.peerDeviceConnected ? .connected : (rawPresenceOnline ? .available : .offline)
+            return channelSnapshot.membership.peerDeviceConnected ? .connected : (rawPresenceOnline ? .reachable : .offline)
         }
 
         if let summary = contactSummaryByContactID[contactID] {
@@ -259,11 +261,11 @@ extension PTTViewModel {
             case .idle, .unknown:
                 break
             default:
-                return rawPresenceOnline ? .available : .offline
+                return rawPresenceOnline ? .reachable : .offline
             }
 
             if summary.channelId != nil {
-                return summary.membership.peerDeviceConnected ? .connected : (rawPresenceOnline ? .available : .offline)
+                return summary.membership.peerDeviceConnected ? .connected : (rawPresenceOnline ? .reachable : .offline)
             }
         }
 
@@ -271,7 +273,7 @@ extension PTTViewModel {
     }
 
     func selectedConversationPresenceIsOnline(for contactID: UUID) -> Bool {
-        contactPresencePresentation(for: contactID) != .offline
+        contactPresencePresentation(for: contactID) == .connected
     }
 
     var visibleContacts: [Contact] {
@@ -298,7 +300,7 @@ extension PTTViewModel {
         switch presence {
         case .connected:
             return 0
-        case .available:
+        case .reachable:
             return 1
         case .offline:
             return 2

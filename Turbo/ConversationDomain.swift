@@ -282,6 +282,41 @@ enum PairRelationshipState: Equatable {
     }
 }
 
+enum ConversationRequestDirection: Equatable {
+    case outgoing
+    case incoming
+}
+
+enum ConversationDisplayStatus: Equatable {
+    case offline
+    case online
+    case requested(direction: ConversationRequestDirection, requestCount: Int)
+    case ready
+    case live
+
+    var pillText: String {
+        switch self {
+        case .offline:
+            return "Offline"
+        case .online:
+            return "Online"
+        case .requested(let direction, let requestCount):
+            let base = switch direction {
+            case .outgoing:
+                "Requested"
+            case .incoming:
+                "Incoming"
+            }
+            guard requestCount > 1 else { return base }
+            return "\(base) \(requestCount)"
+        case .ready:
+            return "Ready"
+        case .live:
+            return "Live"
+        }
+    }
+}
+
 enum SelectedPeerPhase: Equatable {
     case idle
     case requested
@@ -533,6 +568,25 @@ struct SelectedPeerState: Equatable {
         }
     }
 
+    var displayStatus: ConversationDisplayStatus {
+        switch detail {
+        case .idle(let isOnline):
+            return isOnline ? .online : .offline
+        case .requested(let requestCount):
+            return .requested(direction: .outgoing, requestCount: requestCount)
+        case .incomingRequest(let requestCount):
+            return .requested(direction: .incoming, requestCount: requestCount)
+        case .peerReady:
+            return .ready
+        case .wakeReady, .ready, .startingTransmit, .transmitting, .receiving:
+            return .live
+        case .waitingForPeer(reason: .peerReadyToConnect):
+            return .ready
+        case .waitingForPeer, .localJoinFailed, .blockedByOtherSession, .systemMismatch:
+            return .offline
+        }
+    }
+
     private static func defaultDetail(
         for phase: SelectedPeerPhase,
         relationship: PairRelationshipState,
@@ -691,6 +745,7 @@ struct ConversationDerivationContext: Equatable {
     let baseState: ConversationState
     let contactName: String
     let contactIsOnline: Bool
+    let contactPresence: ContactPresencePresentation
     let isJoined: Bool
     let localTransmit: LocalTransmitProjection
     let peerSignalIsTransmitting: Bool
@@ -711,6 +766,7 @@ struct ConversationDerivationContext: Equatable {
         baseState: ConversationState,
         contactName: String,
         contactIsOnline: Bool,
+        contactPresence: ContactPresencePresentation? = nil,
         isJoined: Bool,
         localTransmit: LocalTransmitProjection? = nil,
         localIsTransmitting: Bool = false,
@@ -736,6 +792,7 @@ struct ConversationDerivationContext: Equatable {
         self.baseState = baseState
         self.contactName = contactName
         self.contactIsOnline = contactIsOnline
+        self.contactPresence = contactPresence ?? (contactIsOnline ? .connected : .offline)
         self.isJoined = isJoined
         self.localTransmit = localTransmit ?? LocalTransmitProjection.legacy(
             isTransmitting: localIsTransmitting,
@@ -757,6 +814,17 @@ struct ConversationDerivationContext: Equatable {
         self.incomingWakeActivationState = incomingWakeActivationState
         self.hadConnectedSessionContinuity = hadConnectedSessionContinuity
         self.channel = channel
+    }
+
+    var idleAvailabilityStatusMessage: String {
+        switch contactPresence {
+        case .connected:
+            return "\(contactName) is online"
+        case .reachable:
+            return "Ready to connect"
+        case .offline:
+            return "Ready to connect"
+        }
     }
 
     var remoteAudioReadinessState: RemoteAudioReadinessState {
@@ -980,11 +1048,6 @@ enum ConversationStateMachine {
                     return makeState(.peerReady, "\(context.contactName) is ready to connect", false)
                 }
             case .selfOnly:
-                if localSessionActive,
-                   context.remoteAudioReadinessState == .wakeCapable,
-                   case .wakeCapable = context.remoteWakeCapabilityState {
-                    return makeState(.wakeReady, "Hold to talk to wake \(context.contactName)", false)
-                }
                 if localSessionActive
                     || (
                         context.backendChannelReadiness.hasLocalMembership
@@ -1014,6 +1077,13 @@ enum ConversationStateMachine {
             // falling all the way back to idle/requested.
             if !localSessionActive,
                context.channel?.readinessStatus == .waitingForSelf {
+                return makeState(.peerReady, "\(context.contactName) is ready to connect", false)
+            }
+
+            if !localSessionActive,
+               context.backendChannelReadiness.hasLocalMembership,
+               context.backendChannelReadiness.hasPeerMembership,
+               context.channel?.readinessStatus == .inactive {
                 return makeState(.peerReady, "\(context.contactName) is ready to connect", false)
             }
 
@@ -1051,7 +1121,7 @@ enum ConversationStateMachine {
             case .none:
                 return makeState(
                     .idle(isOnline: context.contactIsOnline),
-                    context.contactIsOnline ? "\(context.contactName) is online" : "Ready to connect",
+                    context.idleAvailabilityStatusMessage,
                     false
                 )
             }
@@ -1113,6 +1183,25 @@ enum ConversationStateMachine {
         return summary.badge.conversationState
     }
 
+    static func displayStatus(
+        for conversationState: ConversationState,
+        requestCount: Int?,
+        presence: ContactPresencePresentation
+    ) -> ConversationDisplayStatus {
+        switch conversationState {
+        case .requested:
+            return .requested(direction: .outgoing, requestCount: max(requestCount ?? 1, 1))
+        case .incomingRequest:
+            return .requested(direction: .incoming, requestCount: max(requestCount ?? 1, 1))
+        case .waitingForPeer:
+            return .ready
+        case .ready, .transmitting, .receiving:
+            return .live
+        case .idle:
+            return presence == .connected ? .online : .offline
+        }
+    }
+
     static func statusMessage(for context: ConversationDerivationContext) -> String {
         let effectiveState = effectiveState(for: context)
 
@@ -1142,7 +1231,7 @@ enum ConversationStateMachine {
 
         switch effectiveState {
         case .idle:
-            return context.contactIsOnline ? "\(context.contactName) is online" : "Ready to connect"
+            return context.idleAvailabilityStatusMessage
         case .requested:
             return "Requested \(context.contactName)"
         case .incomingRequest:
@@ -1357,15 +1446,8 @@ enum ConversationStateMachine {
 
         switch context.backendChannelReadiness {
         case .absent:
-            let preserveWakeRecoveryForAbsentBackend =
-                context.hadConnectedSessionContinuity
-                && context.backendShowsWakeCapablePeerRecovery
-                && !context.backendExplicitlyInactiveWithoutMembership
             if localSessionActive,
                context.channel != nil,
-               !context.backendShowsConnectablePeerRecovery,
-               !context.remoteAudioRecoveryAvailable,
-               !preserveWakeRecoveryForAbsentBackend,
                !context.peerSignalIsTransmitting,
                !explicitLeaveRequested {
                 return .teardownSelectedSession(contactID: context.contactID)
@@ -1560,6 +1642,8 @@ private extension ConversationDerivationContext {
 
         let shouldPreferWakeReadyDespiteStalePeerConnectivity: Bool = {
             guard case .wakeCapable = remoteWakeCapabilityState,
+                  hadConnectedSessionContinuity,
+                  !peerDeviceConnected,
                   !canTransmit else {
                 return false
             }
@@ -1585,10 +1669,6 @@ private extension ConversationDerivationContext {
             || readinessStatus == .ready
 
         let sessionTransmitReady = effectivePeerDeviceConnected
-        let backendAuthoritativeRemoteAudioReady =
-            peerDeviceConnected
-            && readinessStatus == .ready
-
         if sessionTransmitReady && peerSignalIsTransmitting {
             return .receiving
         }
@@ -1597,17 +1677,12 @@ private extension ConversationDerivationContext {
             return .wakeReady
         }
 
-        if sessionTransmitReady && canTransmit {
-            switch remoteAudioReadinessState {
-            case .wakeCapable:
-                if !peerDeviceConnected,
-                   case .wakeCapable = remoteWakeCapabilityState {
-                    return .wakeReady
-                }
-            case .ready, .waiting, .unknown:
-                break
-            }
+        let authoritativeBackendReady =
+            readinessStatus == .ready
+            && peerDeviceConnected
+            && canTransmit
 
+        if sessionTransmitReady && canTransmit {
             switch localMediaWarmupState {
             case .cold, .prewarming:
                 return .waiting(reason: .localAudioPrewarm, statusMessage: "Preparing audio...")
@@ -1617,29 +1692,19 @@ private extension ConversationDerivationContext {
                 break
             }
 
+            if authoritativeBackendReady {
+                return .ready
+            }
+
             switch remoteAudioReadinessState {
             case .ready:
                 break
             case .wakeCapable:
-                if backendAuthoritativeRemoteAudioReady {
-                    break
-                }
-                if !peerDeviceConnected,
-                   case .wakeCapable = remoteWakeCapabilityState {
-                    return .wakeReady
-                }
                 return .waiting(
                     reason: .remoteAudioPrewarm,
                     statusMessage: "Waiting for \(contactName)'s audio..."
                 )
             case .waiting, .unknown:
-                if backendAuthoritativeRemoteAudioReady {
-                    break
-                }
-                if !peerDeviceConnected,
-                   case .wakeCapable = remoteWakeCapabilityState {
-                    return .wakeReady
-                }
                 return .waiting(
                     reason: .remoteAudioPrewarm,
                     statusMessage: "Waiting for \(contactName)'s audio..."
@@ -1650,7 +1715,13 @@ private extension ConversationDerivationContext {
         if !effectivePeerDeviceConnected {
             switch remoteWakeCapabilityState {
             case .wakeCapable:
-                return .wakeReady
+                if hadConnectedSessionContinuity {
+                    return .wakeReady
+                }
+                return .waiting(
+                    reason: .backendSessionTransition,
+                    statusMessage: "Connecting..."
+                )
             case .unavailable:
                 return .waiting(
                     reason: .remoteWakeUnavailable,
@@ -1747,15 +1818,7 @@ private extension ConversationDerivationContext {
     }
 
     var remoteAudioReadyForTransmit: Bool {
-        if remoteAudioReadinessState == .ready {
-            return true
-        }
-
-        guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness else {
-            return false
-        }
-
-        return peerDeviceConnected && readinessStatus == .ready
+        remoteAudioReadinessState == .ready
     }
 
     var startingTransmitStage: StartingTransmitStage? {

@@ -212,8 +212,7 @@ struct ContentView: View {
     }
 
     private var latestDiagnosticsErrorText: String? {
-        guard let latestError = viewModel.diagnostics.latestError else { return nil }
-        return "\(latestError.subsystem.rawValue): \(latestError.message)"
+        viewModel.topChromeDiagnosticsErrorText
     }
 
     private func openPeer(_ handle: String) {
@@ -360,49 +359,43 @@ struct ContentView: View {
     private func contactStatusPillModel(_ contact: Contact) -> ContactStatusPillModel {
         let isSelected = viewModel.selectedContactId == contact.id
         let selectedPeerState = isSelected ? viewModel.selectedPeerState(for: contact.id) : nil
-        if selectedPeerState?.phase == .peerReady {
-            return ContactStatusPillModel(text: "Ready", tint: .green)
-        }
-        let conversationState =
-            isSelected
-            ? (selectedPeerState?.conversationState ?? .idle)
-            : viewModel.listConversationState(for: contact.id)
         let summary = viewModel.contactSummary(for: contact.id)
-
-        let text: String
-
-        switch conversationState {
-        case .transmitting:
+        if case .some(.transmitting) = selectedPeerState?.detail {
             return ContactStatusPillModel(text: "Talking", tint: .red)
-        case .receiving:
+        }
+        if case .some(.receiving) = selectedPeerState?.detail {
             return ContactStatusPillModel(text: "Receiving", tint: .orange)
-        case .ready:
-            return ContactStatusPillModel(text: "Ready", tint: .green)
-        case .waitingForPeer:
+        }
+        if case .some(.waitingForPeer(let reason)) = selectedPeerState?.detail,
+           reason != .peerReadyToConnect {
             return ContactStatusPillModel(text: "Waiting", tint: .yellow)
-        case .requested:
-            if let summary, summary.requestCount > 1 {
-                text = "Requested \(summary.requestCount)"
+        }
+
+        let displayStatus: ConversationDisplayStatus =
+            if let selectedPeerState {
+                selectedPeerState.displayStatus
             } else {
-                text = "Requested"
+                ConversationStateMachine.displayStatus(
+                    for: viewModel.listConversationState(for: contact.id),
+                    requestCount: summary?.requestCount,
+                    presence: viewModel.contactPresencePresentation(for: contact.id)
+                )
             }
-            return ContactStatusPillModel(text: text, tint: .blue)
-        case .incomingRequest:
-            if let summary, summary.requestCount > 1 {
-                text = "Incoming \(summary.requestCount)"
-            } else {
-                text = "Incoming"
-            }
-            return ContactStatusPillModel(text: text, tint: .orange)
-        default:
-            switch viewModel.contactPresencePresentation(for: contact.id) {
-            case .connected:
-                return ContactStatusPillModel(text: "Online", tint: .green)
-            case .available:
-                return ContactStatusPillModel(text: "Available", tint: .mint)
-            case .offline:
-                return ContactStatusPillModel(text: "Offline", tint: .gray)
-            }
+
+        switch displayStatus {
+        case .offline:
+            return ContactStatusPillModel(text: displayStatus.pillText, tint: .gray)
+        case .online:
+            return ContactStatusPillModel(text: displayStatus.pillText, tint: .green)
+        case .requested(let direction, _):
+            return ContactStatusPillModel(
+                text: displayStatus.pillText,
+                tint: direction == .incoming ? .orange : .blue
+            )
+        case .ready:
+            return ContactStatusPillModel(text: displayStatus.pillText, tint: .green)
+        case .live:
+            return ContactStatusPillModel(text: displayStatus.pillText, tint: .mint)
         }
     }
 }
