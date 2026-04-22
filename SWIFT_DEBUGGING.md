@@ -34,6 +34,50 @@ Optimize for:
 - For targeted Swift Testing runs, use `just swift-test-target <name>` instead of raw `-only-testing`. The wrapper fails if the requested test name never actually executes, which prevents false-green zero-test runs.
 - If `xcodebuild` says the simulator scenario command succeeded unusually quickly, confirm that tests actually ran. Swift Testing does not use the same selector behavior as classic XCTest, so a bad `-only-testing` filter can silently run zero tests.
 
+## Client-only UX shortcuts
+
+Some flows intentionally have a client-side shortcut layered on top of the underlying handshake state machine.
+
+Current shortcut:
+
+- requester auto-join on peer acceptance
+  - if Avery sent the request
+  - and Blake accepts it
+  - Avery may auto-join instead of requiring a second manual `Connect` tap
+
+This is intentionally:
+
+- client-only
+- optional
+- reversible for debugging
+
+It does **not** change the backend handshake truth. The underlying request / peer-ready / join states still exist and should still be reasoned about as the source of truth. The shortcut only compresses the requester-side UX.
+
+### When debugging handshake bugs
+
+If you suspect the shortcut is hiding a real sequencing bug, disable it first and reproduce the raw handshake:
+
+```lldb
+expr PTTViewModel.shared.setRequesterAutoJoinOnPeerAcceptanceEnabled(false)
+```
+
+Re-enable it with:
+
+```lldb
+expr PTTViewModel.shared.setRequesterAutoJoinOnPeerAcceptanceEnabled(true)
+```
+
+The flag is persisted in `UserDefaults` under:
+
+- `turbo.shortcuts.requesterAutoJoinOnPeerAcceptance`
+
+Diagnostics also expose:
+
+- `selectedPeerAutoJoinEnabled`
+- `selectedPeerAutoJoinArmed`
+
+Those fields are useful when a merged timeline looks like the requester skipped a step. First check whether the shortcut was armed before assuming the backend or reducer illegally jumped phases.
+
 ## Scenario-driven simulator loop
 
 Prefer this order for distributed control-plane bugs:

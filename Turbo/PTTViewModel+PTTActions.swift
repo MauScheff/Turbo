@@ -284,11 +284,14 @@ extension PTTViewModel {
     }
 
     func performConnect(to contact: Contact, intent: BackendJoinIntent) {
+        let connectOrigin: PendingConnectOrigin =
+            relationshipState(for: contact.id).isIncomingRequest ? .acceptingIncomingRequest : .neutral
+
         if usesLocalHTTPBackend {
             if isJoined, activeChannelId == contact.id {
                 return
             }
-            sessionCoordinator.queueConnect(contactID: contact.id)
+            sessionCoordinator.queueConnect(contactID: contact.id, origin: connectOrigin)
             captureDiagnosticsState("session-connect:queued-local")
             requestBackendJoin(for: contact, intent: intent)
             return
@@ -298,7 +301,7 @@ extension PTTViewModel {
             return
         }
 
-        sessionCoordinator.queueConnect(contactID: contact.id)
+        sessionCoordinator.queueConnect(contactID: contact.id, origin: connectOrigin)
         captureDiagnosticsState("session-connect:queued")
 
         if isJoined, let activeChannelId, let channelUUID = channelUUID(for: activeChannelId) {
@@ -435,7 +438,6 @@ extension PTTViewModel {
         }
 
         if stalePendingJoinWithoutLocalSessionEvidence {
-            sessionCoordinator.clearPendingJoin(for: contact.id)
             diagnostics.record(
                 .pushToTalk,
                 message: "Retrying stale pending local join",
@@ -444,6 +446,8 @@ extension PTTViewModel {
                     "channelUUID": contact.channelId.uuidString,
                 ]
             )
+            // Preserve the pending local-join projection while we retry so the
+            // selected UI cannot briefly fall back to peerReady/connectable.
             captureDiagnosticsState("ptt-join:retry-stale-pending")
         }
 

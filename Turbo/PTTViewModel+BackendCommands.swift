@@ -492,6 +492,13 @@ extension PTTViewModel {
         return outgoingInvites.first { inviteMatchesJoinRequest($0, request: request, direction: "outgoing") }
     }
 
+    func shouldReplaceExistingOutgoingInvite(for request: BackendJoinRequest) -> Bool {
+        guard request.intent == .requestConnection else { return false }
+        guard !request.relationship.isIncomingRequest else { return false }
+        guard request.relationship.isOutgoingRequest else { return false }
+        return request.requestCooldownRemaining == nil
+    }
+
     private func resolveBackendJoinContact(_ request: BackendJoinRequest) async throws -> ResolvedBackendJoinContact {
         guard let backend = backendServices else {
             throw TurboBackendError.invalidConfiguration
@@ -502,6 +509,7 @@ extension PTTViewModel {
 
         var contact = contacts[index]
         var createdInvite: TurboInviteResponse?
+        let shouldReplaceOutgoingInvite = shouldReplaceExistingOutgoingInvite(for: request)
 
         if contact.remoteUserId == nil {
             let remoteUser = try await backend.lookupUser(handle: request.handle)
@@ -531,6 +539,37 @@ extension PTTViewModel {
                 diagnostics.record(
                     .backend,
                     message: "Ignoring stale superseded outgoing request cancel failure",
+                    metadata: ["contactId": request.contactID.uuidString, "handle": request.handle]
+                )
+            }
+        }
+
+        if shouldReplaceOutgoingInvite,
+           let outgoingInvite = try await resolveOutgoingInvite(for: request, backend: backend) {
+            do {
+                _ = try await backend.cancelInvite(inviteId: outgoingInvite.inviteId)
+                diagnostics.record(
+                    .backend,
+                    message: "Cancelled stale outgoing request before sending request again",
+                    metadata: ["contactId": request.contactID.uuidString, "handle": request.handle]
+                )
+            } catch {
+                guard shouldIgnoreInviteNotFoundFailure(error) else {
+                    diagnostics.record(
+                        .backend,
+                        level: .error,
+                        message: "Cancel request-again outgoing invite failed",
+                        metadata: [
+                            "contactId": request.contactID.uuidString,
+                            "handle": request.handle,
+                            "error": error.localizedDescription,
+                        ]
+                    )
+                    throw error
+                }
+                diagnostics.record(
+                    .backend,
+                    message: "Ignoring stale request-again outgoing invite cancel failure",
                     metadata: ["contactId": request.contactID.uuidString, "handle": request.handle]
                 )
             }
@@ -570,7 +609,8 @@ extension PTTViewModel {
 
         let currentChannel = await liveJoinChannelSnapshot(for: contact, backend: backend)
 
-        if let invite = try await resolveOutgoingInvite(for: request, backend: backend) {
+        if !shouldReplaceOutgoingInvite,
+           let invite = try await resolveOutgoingInvite(for: request, backend: backend) {
             applyInviteMetadata(invite, to: &contact)
         } else if !request.relationship.isIncomingRequest,
                   request.intent != .joinReadyPeer,
@@ -882,7 +922,10 @@ extension PTTViewModel {
         } catch {
             let message = error.localizedDescription
             backendCommandCoordinator.send(.operationFailed(message))
+            sessionCoordinator.clearPendingConnect(for: request.contactID)
             statusMessage = "Join failed: \(message)"
+            updateStatusForSelectedContact()
+            captureDiagnosticsState("backend-join:failed")
             diagnostics.record(
                 .backend,
                 level: .error,

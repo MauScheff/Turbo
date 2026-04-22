@@ -39,6 +39,7 @@ Use these docs as the primary authority for their respective concerns:
   - app-visible session phases, state derivation, and PTT journey examples
 - `SWIFT_DEBUGGING.md`
   - simulator/device/PTT/audio debugging loops and escalation rules
+  - client-only handshake UX shortcuts and how to disable them during debugging
 - `BACKEND.md`
   - backend/control-plane scope, storage/query rules, and backend operational guidance
 - `STATE_MACHINE_TESTING.md`

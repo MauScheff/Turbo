@@ -113,6 +113,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var lastReportedPTTDescriptorReason: String?
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
     var automaticDiagnosticsPublishEnabled: Bool = true
+    var conversationShortcutPolicy: ConversationShortcutPolicy = .load()
     var microphonePermission: AVAudioApplication.recordPermission = AVAudioApplication.shared.recordPermission
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     var audioOutputPreference: AudioOutputPreference = .loadStored()
@@ -210,6 +211,15 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func shouldPublishForegroundPresence(applicationState: UIApplication.State? = nil) -> Bool {
         (applicationState ?? currentApplicationState()) == .active
+    }
+
+    /// Debug knob for the requester-side auto-join UX shortcut.
+    /// This keeps the shortcut explicit and reversible without changing
+    /// the underlying handshake or backend truth.
+    func setRequesterAutoJoinOnPeerAcceptanceEnabled(_ enabled: Bool) {
+        conversationShortcutPolicy.requesterAutoJoinOnPeerAcceptance = enabled
+        ConversationShortcutPolicy.store(conversationShortcutPolicy)
+        syncSelectedPeerSession()
     }
 
     func shouldMaintainBackgroundControlPlane(
@@ -665,6 +675,12 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "selectedPeerCanTransmit": String(selectedSession.canTransmitNow),
             "pendingAction": selectedSession.pendingAction,
             "selectedPeerReconciliationAction": selectedSession.reconciliationAction,
+            "selectedPeerAutoJoinEnabled": String(
+                conversationShortcutPolicy.requesterAutoJoinOnPeerAcceptance
+            ),
+            "selectedPeerAutoJoinArmed": String(
+                selectedPeerCoordinator.state.requesterAutoJoinOnPeerAcceptanceArmed
+            ),
             "hadConnectedSessionContinuity": String(selectedSession.hadConnectedSessionContinuity),
             "backendSignalingJoinRecoveryActive": String(backendRuntime.signalingJoinRecoveryTask != nil),
             "activeChannelId": activeChannelId?.uuidString ?? "none",

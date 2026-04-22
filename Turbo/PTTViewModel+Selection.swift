@@ -77,6 +77,8 @@ extension PTTViewModel {
             systemSessionMatchesContact: systemSessionMatches(contact.id),
             systemSessionState: systemSessionState,
             pendingAction: sessionCoordinator.pendingAction,
+            pendingConnectAcceptedIncomingRequest:
+                sessionCoordinator.pendingConnectAcceptedIncomingRequestContactID == contact.id,
             localJoinFailure: pttCoordinator.state.lastJoinFailure,
             mediaState: mediaConnectionState,
             localMediaWarmupState: localMediaWarmupState(for: contact.id),
@@ -128,40 +130,34 @@ extension PTTViewModel {
 
         let relationship = relationshipState(for: contact.id)
         selectedPeerCoordinator.send(
-            .selectedContactChanged(
-                SelectedPeerSelection(
-                    contactID: contact.id,
-                    contactName: contact.name,
-                    contactIsOnline: selectedConversationPresenceIsOnline(for: contact.id),
-                    contactPresence: contactPresencePresentation(for: contact.id)
+            .syncUpdated(
+                SelectedPeerSyncSnapshot(
+                    selection:
+                        SelectedPeerSelection(
+                            contactID: contact.id,
+                            contactName: contact.name,
+                            contactIsOnline: selectedConversationPresenceIsOnline(for: contact.id),
+                            contactPresence: contactPresencePresentation(for: contact.id)
+                        ),
+                    relationship: relationship,
+                    baseState: selectedPeerBaseState(for: contact.id, relationship: relationship),
+                    channel: selectedChannelSnapshot(for: contact.id),
+                    isJoined: isJoined,
+                    activeChannelID: activeChannelId,
+                    pendingAction: sessionCoordinator.pendingAction,
+                    pendingConnectAcceptedIncomingRequest:
+                        sessionCoordinator.pendingConnectAcceptedIncomingRequestContactID == contact.id,
+                    requesterAutoJoinOnPeerAcceptanceEnabled:
+                        conversationShortcutPolicy.requesterAutoJoinOnPeerAcceptance,
+                    localTransmit: localTransmit,
+                    peerSignalIsTransmitting: remoteTransmittingContactIDs.contains(contact.id),
+                    systemSessionState: systemSessionState,
+                    systemSessionMatchesContact: systemSessionMatches(contact.id),
+                    mediaState: mediaConnectionState,
+                    incomingWakeActivationState:
+                        pttWakeRuntime.incomingWakeActivationState(for: contact.id),
+                    localJoinFailure: pttCoordinator.state.lastJoinFailure
                 )
-            )
-        )
-        selectedPeerCoordinator.send(.relationshipUpdated(relationship))
-        selectedPeerCoordinator.send(.baseStateUpdated(selectedPeerBaseState(for: contact.id, relationship: relationship)))
-        selectedPeerCoordinator.send(.channelUpdated(selectedChannelSnapshot(for: contact.id)))
-        selectedPeerCoordinator.send(
-            .localSessionUpdated(
-                isJoined: isJoined,
-                activeChannelID: activeChannelId,
-                pendingAction: sessionCoordinator.pendingAction,
-                localJoinFailure: pttCoordinator.state.lastJoinFailure
-            )
-        )
-        selectedPeerCoordinator.send(.localTransmitUpdated(localTransmit))
-        selectedPeerCoordinator.send(
-            .peerSignalTransmittingUpdated(remoteTransmittingContactIDs.contains(contact.id))
-        )
-        selectedPeerCoordinator.send(
-            .systemSessionUpdated(
-                systemSessionState,
-                matchesSelectedContact: systemSessionMatches(contact.id)
-            )
-        )
-        selectedPeerCoordinator.send(.mediaStateUpdated(mediaConnectionState))
-        selectedPeerCoordinator.send(
-            .incomingWakeActivationStateUpdated(
-                pttWakeRuntime.incomingWakeActivationState(for: contact.id)
             )
         )
     }

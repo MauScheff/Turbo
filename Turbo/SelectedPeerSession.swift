@@ -30,6 +30,10 @@ struct SelectedPeerSessionState: Equatable {
     var systemSessionMatchesContact: Bool = false
     var systemSessionState: SystemPTTSessionState = .none
     var pendingAction: PendingSessionAction = .none
+    var pendingConnectAcceptedIncomingRequest = false
+    var requesterAutoJoinOnPeerAcceptanceEnabled = true
+    var requesterAutoJoinOnPeerAcceptanceArmed = false
+    var requesterAutoJoinOnPeerAcceptanceDispatchInFlight = false
     var localJoinFailure: PTTJoinFailure?
     var channel: ChannelReadinessSnapshot?
     var mediaState: MediaConnectionState = .idle
@@ -44,7 +48,27 @@ struct SelectedPeerSessionState: Equatable {
     static let initial = SelectedPeerSessionState()
 }
 
+struct SelectedPeerSyncSnapshot: Equatable {
+    let selection: SelectedPeerSelection
+    let relationship: PairRelationshipState
+    let baseState: ConversationState
+    let channel: ChannelReadinessSnapshot?
+    let isJoined: Bool
+    let activeChannelID: UUID?
+    let pendingAction: PendingSessionAction
+    let pendingConnectAcceptedIncomingRequest: Bool
+    let requesterAutoJoinOnPeerAcceptanceEnabled: Bool
+    let localTransmit: LocalTransmitProjection
+    let peerSignalIsTransmitting: Bool
+    let systemSessionState: SystemPTTSessionState
+    let systemSessionMatchesContact: Bool
+    let mediaState: MediaConnectionState
+    let incomingWakeActivationState: IncomingWakeActivationState?
+    let localJoinFailure: PTTJoinFailure?
+}
+
 enum SelectedPeerEvent: Equatable {
+    case syncUpdated(SelectedPeerSyncSnapshot)
     case selectedContactChanged(SelectedPeerSelection?)
     case relationshipUpdated(PairRelationshipState)
     case baseStateUpdated(ConversationState)
@@ -53,8 +77,10 @@ enum SelectedPeerEvent: Equatable {
         isJoined: Bool,
         activeChannelID: UUID?,
         pendingAction: PendingSessionAction,
+        pendingConnectAcceptedIncomingRequest: Bool,
         localJoinFailure: PTTJoinFailure?
     )
+    case shortcutPolicyUpdated(requesterAutoJoinOnPeerAcceptanceEnabled: Bool)
     case localTransmitUpdated(LocalTransmitProjection)
     case peerSignalTransmittingUpdated(Bool)
     case systemSessionUpdated(SystemPTTSessionState, matchesSelectedContact: Bool)
@@ -87,6 +113,39 @@ enum SelectedPeerReducer {
         var effects: [SelectedPeerEffect] = []
 
         switch event {
+        case .syncUpdated(let snapshot):
+            if nextState.selection?.contactID == snapshot.selection.contactID {
+                nextState.selection = snapshot.selection
+            } else {
+                var resetState = SelectedPeerSessionState.initial
+                resetState.selection = snapshot.selection
+                resetState.requesterAutoJoinOnPeerAcceptanceArmed =
+                    nextState.requesterAutoJoinOnPeerAcceptanceArmed
+                resetState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight =
+                    nextState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight
+                nextState = resetState
+            }
+            nextState.relationship = snapshot.relationship
+            nextState.baseState = snapshot.baseState
+            nextState.channel = snapshot.channel
+            applyLocalSessionUpdate(
+                to: &nextState,
+                isJoined: snapshot.isJoined,
+                activeChannelID: snapshot.activeChannelID,
+                pendingAction: snapshot.pendingAction,
+                pendingConnectAcceptedIncomingRequest: snapshot.pendingConnectAcceptedIncomingRequest,
+                localJoinFailure: snapshot.localJoinFailure
+            )
+            applyShortcutPolicyUpdate(
+                to: &nextState,
+                requesterAutoJoinOnPeerAcceptanceEnabled: snapshot.requesterAutoJoinOnPeerAcceptanceEnabled
+            )
+            nextState.localTransmit = snapshot.localTransmit
+            nextState.peerSignalIsTransmitting = snapshot.peerSignalIsTransmitting
+            nextState.systemSessionState = snapshot.systemSessionState
+            nextState.systemSessionMatchesContact = snapshot.systemSessionMatchesContact
+            nextState.mediaState = snapshot.mediaState
+            nextState.incomingWakeActivationState = snapshot.incomingWakeActivationState
         case .selectedContactChanged(let selection):
             switch selection {
             case .none:
@@ -110,12 +169,22 @@ enum SelectedPeerReducer {
             let isJoined,
             let activeChannelID,
             let pendingAction,
+            let pendingConnectAcceptedIncomingRequest,
             let localJoinFailure
         ):
-            nextState.isJoined = isJoined
-            nextState.activeChannelID = activeChannelID
-            nextState.pendingAction = pendingAction
-            nextState.localJoinFailure = localJoinFailure
+            applyLocalSessionUpdate(
+                to: &nextState,
+                isJoined: isJoined,
+                activeChannelID: activeChannelID,
+                pendingAction: pendingAction,
+                pendingConnectAcceptedIncomingRequest: pendingConnectAcceptedIncomingRequest,
+                localJoinFailure: localJoinFailure
+            )
+        case .shortcutPolicyUpdated(let requesterAutoJoinOnPeerAcceptanceEnabled):
+            applyShortcutPolicyUpdate(
+                to: &nextState,
+                requesterAutoJoinOnPeerAcceptanceEnabled: requesterAutoJoinOnPeerAcceptanceEnabled
+            )
         case .localTransmitUpdated(let localTransmit):
             nextState.localTransmit = localTransmit
         case .peerSignalTransmittingUpdated(let peerSignalIsTransmitting):
@@ -130,6 +199,11 @@ enum SelectedPeerReducer {
         case .joinRequested:
             recomputeDerivedState(&nextState)
             if let effect = joinEffect(for: nextState) {
+                if shouldArmRequesterAutoJoinShortcut(state: nextState, effect: effect) {
+                    nextState.requesterAutoJoinOnPeerAcceptanceArmed = true
+                } else if case .joinReadyPeer = effect {
+                    nextState.requesterAutoJoinOnPeerAcceptanceArmed = false
+                }
                 effects.append(effect)
             }
             return SelectedPeerTransition(state: nextState, effects: effects)
@@ -148,6 +222,31 @@ enum SelectedPeerReducer {
         }
 
         recomputeDerivedState(&nextState)
+        if let effect = autoJoinReadyPeerEffect(for: nextState) {
+            nextState.requesterAutoJoinOnPeerAcceptanceArmed = false
+            nextState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = true
+            if let selection = nextState.selection {
+                nextState.selectedPeerState = SelectedPeerState(
+                    contactID: selection.contactID,
+                    contactName: selection.contactName,
+                    relationship: nextState.relationship,
+                    detail: .waitingForPeer(reason: .pendingJoin),
+                    statusMessage: "Connecting...",
+                    canTransmitNow: false
+                )
+            }
+            effects.append(effect)
+        } else if shouldProjectRequesterAutoJoinConnecting(state: nextState),
+                  let selection = nextState.selection {
+            nextState.selectedPeerState = SelectedPeerState(
+                contactID: selection.contactID,
+                contactName: selection.contactName,
+                relationship: nextState.relationship,
+                detail: .waitingForPeer(reason: .pendingJoin),
+                statusMessage: "Connecting...",
+                canTransmitNow: false
+            )
+        }
         return SelectedPeerTransition(state: nextState, effects: effects)
     }
 
@@ -178,6 +277,7 @@ enum SelectedPeerReducer {
             systemSessionMatchesContact: state.systemSessionMatchesContact,
             systemSessionState: state.systemSessionState,
             pendingAction: state.pendingAction,
+            pendingConnectAcceptedIncomingRequest: state.pendingConnectAcceptedIncomingRequest,
             localJoinFailure: state.localJoinFailure,
             mediaState: state.mediaState,
             localMediaWarmupState: {
@@ -225,6 +325,38 @@ enum SelectedPeerReducer {
                 statusMessage: "Hold to talk to wake \(selection.contactName)",
                 canTransmitNow: false
             )
+        }
+    }
+
+    private static func applyLocalSessionUpdate(
+        to state: inout SelectedPeerSessionState,
+        isJoined: Bool,
+        activeChannelID: UUID?,
+        pendingAction: PendingSessionAction,
+        pendingConnectAcceptedIncomingRequest: Bool,
+        localJoinFailure: PTTJoinFailure?
+    ) {
+        state.isJoined = isJoined
+        state.activeChannelID = activeChannelID
+        state.pendingAction = pendingAction
+        state.pendingConnectAcceptedIncomingRequest = pendingConnectAcceptedIncomingRequest
+        state.localJoinFailure = localJoinFailure
+        if isJoined || activeChannelID != nil {
+            state.requesterAutoJoinOnPeerAcceptanceArmed = false
+            state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = false
+        } else if pendingAction.pendingJoinContactID != nil {
+            state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = false
+        }
+    }
+
+    private static func applyShortcutPolicyUpdate(
+        to state: inout SelectedPeerSessionState,
+        requesterAutoJoinOnPeerAcceptanceEnabled: Bool
+    ) {
+        state.requesterAutoJoinOnPeerAcceptanceEnabled = requesterAutoJoinOnPeerAcceptanceEnabled
+        if !requesterAutoJoinOnPeerAcceptanceEnabled {
+            state.requesterAutoJoinOnPeerAcceptanceArmed = false
+            state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = false
         }
     }
 
@@ -284,6 +416,54 @@ enum SelectedPeerReducer {
         }
     }
 
+    private static func shouldArmRequesterAutoJoinShortcut(
+        state: SelectedPeerSessionState,
+        effect: SelectedPeerEffect
+    ) -> Bool {
+        guard state.requesterAutoJoinOnPeerAcceptanceEnabled else { return false }
+        guard case .requestConnection = effect else { return false }
+        switch state.selectedPeerState.phase {
+        case .idle, .requested:
+            return true
+        case .incomingRequest, .peerReady, .waitingForPeer, .wakeReady, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+            return false
+        }
+    }
+
+    private static func autoJoinReadyPeerEffect(for state: SelectedPeerSessionState) -> SelectedPeerEffect? {
+        guard state.requesterAutoJoinOnPeerAcceptanceEnabled else { return nil }
+        guard state.requesterAutoJoinOnPeerAcceptanceArmed else { return nil }
+        guard state.pendingAction.pendingConnectContactID == nil else { return nil }
+        guard state.pendingAction.pendingJoinContactID == nil else { return nil }
+        guard state.durableSessionProjection == .inactive else { return nil }
+        guard state.selection?.contactID == state.selectedPeerState.contactID else { return nil }
+        guard state.selectedPeerState.phase == .peerReady else { return nil }
+        guard let contactID = state.selection?.contactID else { return nil }
+        return .joinReadyPeer(contactID: contactID)
+    }
+
+    private static func shouldProjectRequesterAutoJoinConnecting(
+        state: SelectedPeerSessionState
+    ) -> Bool {
+        guard state.requesterAutoJoinOnPeerAcceptanceEnabled else { return false }
+        guard state.requesterAutoJoinOnPeerAcceptanceArmed
+                || state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight else { return false }
+        if state.requesterAutoJoinOnPeerAcceptanceArmed {
+            guard state.pendingAction.pendingConnectContactID == nil else { return false }
+            guard state.pendingAction.pendingJoinContactID == nil else { return false }
+        }
+        guard state.durableSessionProjection == .inactive else { return false }
+
+        switch state.selectedPeerState.detail {
+        case .peerReady, .waitingForPeer(reason: .peerReadyToConnect):
+            return true
+        case .idle:
+            return !state.relationship.isOutgoingRequest
+        case .requested, .incomingRequest, .waitingForPeer, .wakeReady, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+            return false
+        }
+    }
+
     private static func disconnectEffect(for state: SelectedPeerSessionState) -> SelectedPeerEffect? {
         guard let contactID = state.selection?.contactID else { return nil }
 
@@ -322,15 +502,32 @@ enum SelectedPeerReducer {
 final class SelectedPeerCoordinator {
     private(set) var state: SelectedPeerSessionState = .initial
     var effectHandler: (@MainActor (SelectedPeerEffect) async -> Void)?
+    private var queuedEffectTask: Task<Void, Never>?
 
     func send(_ event: SelectedPeerEvent) {
-        state = SelectedPeerReducer.reduce(state: state, event: event).state
+        let transition = SelectedPeerReducer.reduce(state: state, event: event)
+        state = transition.state
+        enqueueEffects(transition.effects)
     }
 
     func handle(_ event: SelectedPeerEvent) async {
         let transition = SelectedPeerReducer.reduce(state: state, event: event)
         state = transition.state
-        for effect in transition.effects {
+        await runEffects(transition.effects)
+    }
+
+    private func enqueueEffects(_ effects: [SelectedPeerEffect]) {
+        guard !effects.isEmpty else { return }
+        let previousTask = queuedEffectTask
+        queuedEffectTask = Task { @MainActor [effects] in
+            _ = await previousTask?.value
+            await self.runEffects(effects)
+        }
+    }
+
+    private func runEffects(_ effects: [SelectedPeerEffect]) async {
+        guard !effects.isEmpty else { return }
+        for effect in effects {
             await effectHandler?(effect)
         }
     }

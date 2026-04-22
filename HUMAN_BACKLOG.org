@@ -15,3 +15,5 @@
 * Detect app kill and kill connections.
 * One ends the other should end too.
 * Unison Concurrency
+* Request again disabled.
+* UI for low volume level
