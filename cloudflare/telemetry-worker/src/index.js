@@ -4,6 +4,7 @@ const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
  * @typedef {{
  *   TURBO_TELEMETRY_WORKER_SECRET: string
  *   TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK?: string
+ *   TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK?: string
  *   TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK?: string
  *   TURBO_TELEMETRY_DISCORD_WEBHOOK?: string
  *   TURBO_TELEMETRY: AnalyticsEngineDataset
@@ -34,6 +35,7 @@ export default {
         service: "turbo-telemetry",
         hasWorkerSecret: Boolean(env.TURBO_TELEMETRY_WORKER_SECRET),
         hasDiscordAlertsWebhook: Boolean(discordAlertsWebhook(env)),
+        hasDiscordDevWebhook: Boolean(env.TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK),
         hasDiscordStreamWebhook: Boolean(env.TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK),
         hasAnalyticsBinding: Boolean(env.TURBO_TELEMETRY),
       });
@@ -59,12 +61,13 @@ export default {
       const event = normalizeEvent(body);
       env.TURBO_TELEMETRY.writeDataPoint(buildAnalyticsPoint(event));
 
-      const { alerted, streamed } = await deliverDiscord(event, env);
+      const { alerted, devDelivered, streamed } = await deliverDiscord(event, env);
 
       return jsonResponse(202, {
         ok: true,
         status: "accepted",
         alerted,
+        devDelivered,
         streamed,
         eventName: event.eventName,
         source: event.source,
@@ -101,6 +104,7 @@ function validateEvent(body) {
   if (body.metadata !== undefined && !isRecordOfStrings(body.metadata)) return "invalid-metadata";
   if (body.metadataText !== undefined && typeof body.metadataText !== "string") return "invalid-metadata-text";
   if (body.alert !== undefined && !isAlertValue(body.alert)) return "invalid-alert";
+  if (body.devTraffic !== undefined && !isAlertValue(body.devTraffic)) return "invalid-dev-traffic";
   return null;
 }
 
@@ -128,6 +132,7 @@ function normalizeEvent(body) {
     reason: stringOrEmpty(body.reason),
     message: stringOrEmpty(body.message),
     metadataText,
+    devTraffic: parseAlert(body.devTraffic),
     alert: parseAlert(body.alert),
   };
 }
@@ -156,6 +161,7 @@ function buildAnalyticsPoint(event) {
       event.reason,
       event.message,
       event.metadataText,
+      event.devTraffic ? "true" : "false",
     ],
     doubles: [
       1,
@@ -179,7 +185,22 @@ function shouldAlert(event) {
  */
 async function deliverDiscord(event, env) {
   let alerted = false;
+  let devDelivered = false;
   let streamed = false;
+
+  const devWebhook = env.TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK;
+  if (event.devTraffic && devWebhook) {
+    const deliveryKind = devDeliveryKind(event);
+    if (!deliveryKind) {
+      return { alerted, devDelivered, streamed };
+    }
+    try {
+      devDelivered = await sendDiscordEvent(event, devWebhook, deliveryKind);
+    } catch {
+      devDelivered = false;
+    }
+    return { alerted, devDelivered, streamed };
+  }
 
   const streamWebhook = env.TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK;
   if (streamWebhook && shouldStream(event)) {
@@ -199,7 +220,7 @@ async function deliverDiscord(event, env) {
     }
   }
 
-  return { alerted, streamed };
+  return { alerted, devDelivered, streamed };
 }
 
 /**
@@ -225,8 +246,22 @@ function shouldStream(event) {
 
 /**
  * @param {ReturnType<typeof normalizeEvent>} event
+ * @returns {"dev-alert" | "dev-stream" | null}
+ */
+function devDeliveryKind(event) {
+  if (shouldAlert(event)) {
+    return "dev-alert";
+  }
+  if (shouldStream(event)) {
+    return "dev-stream";
+  }
+  return null;
+}
+
+/**
+ * @param {ReturnType<typeof normalizeEvent>} event
  * @param {string} webhookUrl
- * @param {"alert" | "stream"} deliveryKind
+ * @param {"alert" | "dev-alert" | "dev-stream" | "stream"} deliveryKind
  */
 async function sendDiscordEvent(event, webhookUrl, deliveryKind) {
   const response = await fetch(webhookUrl, {
@@ -237,7 +272,7 @@ async function sendDiscordEvent(event, webhookUrl, deliveryKind) {
       allowed_mentions: { parse: [] },
       embeds: [
         {
-          title: `${deliveryKind.toUpperCase()} ${event.source} ${event.eventName}`,
+          title: `${formatDeliveryKind(deliveryKind)} ${event.source} ${event.eventName}`,
           description: compactDescription(event),
           color: severityColor(event.severity),
           fields: compactFields(event),
@@ -247,6 +282,13 @@ async function sendDiscordEvent(event, webhookUrl, deliveryKind) {
     }),
   });
   return response.ok;
+}
+
+/**
+ * @param {"alert" | "dev-alert" | "dev-stream" | "stream"} deliveryKind
+ */
+function formatDeliveryKind(deliveryKind) {
+  return deliveryKind.replaceAll("-", " ").toUpperCase();
 }
 
 /**
@@ -415,8 +457,10 @@ function timingSafeEqual(provided, expected) {
 export const __test = {
   buildAnalyticsPoint,
   compactDescription,
+  devDeliveryKind,
   deliverDiscord,
   discordAlertsWebhook,
+  formatDeliveryKind,
   normalizeEvent,
   normalizeMetadataText,
   sendDiscordEvent,

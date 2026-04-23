@@ -36,6 +36,7 @@ test("buildAnalyticsPoint keeps a stable field order for the dataset", () => {
     userHandle: "@avery",
     deviceId: "device-1",
     channelId: "channel-1",
+    devTraffic: true,
     alert: true,
   });
 
@@ -44,8 +45,30 @@ test("buildAnalyticsPoint keeps a stable field order for the dataset", () => {
   assert.equal(point.blobs[0], "ios.transmit.begin_requested");
   assert.equal(point.blobs[4], "@avery");
   assert.equal(point.blobs[7], "channel-1");
+  assert.equal(point.blobs[18], "true");
   assert.deepEqual(point.doubles, [1, 1, 2]);
   assert.deepEqual(point.indexes, ["user-1"]);
+});
+
+test("validateEvent accepts string and boolean dev traffic markers", () => {
+  assert.equal(
+    __test.validateEvent({
+      eventName: "ios.transmit.begin_requested",
+      source: "ios",
+      severity: "info",
+      devTraffic: "true",
+    }),
+    null,
+  );
+  assert.equal(
+    __test.validateEvent({
+      eventName: "ios.transmit.begin_requested",
+      source: "ios",
+      severity: "info",
+      devTraffic: 1,
+    }),
+    "invalid-dev-traffic",
+  );
 });
 
 test("shouldAlert triggers on explicit alerts and critical severity", () => {
@@ -85,6 +108,33 @@ test("shouldStream excludes noisy heartbeat events from Discord stream", () => {
 
   assert.equal(__test.shouldStream(heartbeat), false);
   assert.equal(__test.shouldStream(joined), true);
+});
+
+test("devDeliveryKind routes dev alerts and dev stream events without duplication", () => {
+  const devAlert = __test.normalizeEvent({
+    eventName: "ios.invariant.violation",
+    source: "ios",
+    severity: "error",
+    devTraffic: true,
+    alert: true,
+  });
+  const devStream = __test.normalizeEvent({
+    eventName: "ios.transmit.begin_requested",
+    source: "ios",
+    severity: "notice",
+    devTraffic: true,
+  });
+  const devHeartbeat = __test.normalizeEvent({
+    eventName: "backend.presence.heartbeat",
+    source: "backend",
+    severity: "notice",
+    devTraffic: true,
+  });
+
+  assert.equal(__test.devDeliveryKind(devAlert), "dev-alert");
+  assert.equal(__test.devDeliveryKind(devStream), "dev-stream");
+  assert.equal(__test.devDeliveryKind(devHeartbeat), null);
+  assert.equal(__test.formatDeliveryKind("dev-alert"), "DEV ALERT");
 });
 
 test("sendDiscordEvent posts a compact embed payload", async () => {
@@ -146,7 +196,7 @@ test("deliverDiscord skips heartbeat stream noise and only alerts alert-worthy e
       },
     );
 
-    assert.deepEqual(heartbeatResult, { alerted: false, streamed: false });
+    assert.deepEqual(heartbeatResult, { alerted: false, devDelivered: false, streamed: false });
     assert.deepEqual(urls, []);
 
     urls.length = 0;
@@ -163,7 +213,7 @@ test("deliverDiscord skips heartbeat stream noise and only alerts alert-worthy e
       },
     );
 
-    assert.deepEqual(quietResult, { alerted: false, streamed: true });
+    assert.deepEqual(quietResult, { alerted: false, devDelivered: false, streamed: true });
     assert.deepEqual(urls, ["https://discord.example/stream"]);
 
     urls.length = 0;
@@ -181,11 +231,68 @@ test("deliverDiscord skips heartbeat stream noise and only alerts alert-worthy e
       },
     );
 
-    assert.deepEqual(alertResult, { alerted: true, streamed: true });
+    assert.deepEqual(alertResult, { alerted: true, devDelivered: false, streamed: true });
     assert.deepEqual(urls, [
       "https://discord.example/stream",
       "https://discord.example/alerts",
     ]);
+
+    urls.length = 0;
+
+    const devQuietResult = await __test.deliverDiscord(
+      __test.normalizeEvent({
+        eventName: "ios.transmit.begin_requested",
+        source: "ios",
+        severity: "info",
+        devTraffic: true,
+      }),
+      {
+        TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK: "https://discord.example/alerts",
+        TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK: "https://discord.example/dev",
+        TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK: "https://discord.example/stream",
+      },
+    );
+
+    assert.deepEqual(devQuietResult, { alerted: false, devDelivered: true, streamed: false });
+    assert.deepEqual(urls, ["https://discord.example/dev"]);
+
+    urls.length = 0;
+
+    const devAlertResult = await __test.deliverDiscord(
+      __test.normalizeEvent({
+        eventName: "ios.invariant.violation",
+        source: "ios",
+        severity: "error",
+        devTraffic: true,
+        alert: true,
+      }),
+      {
+        TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK: "https://discord.example/alerts",
+        TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK: "https://discord.example/dev",
+        TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK: "https://discord.example/stream",
+      },
+    );
+
+    assert.deepEqual(devAlertResult, { alerted: false, devDelivered: true, streamed: false });
+    assert.deepEqual(urls, ["https://discord.example/dev"]);
+
+    urls.length = 0;
+
+    const fallbackDevResult = await __test.deliverDiscord(
+      __test.normalizeEvent({
+        eventName: "ios.transmit.begin_requested",
+        source: "ios",
+        severity: "info",
+        devTraffic: true,
+      }),
+      {
+        TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK: "https://discord.example/alerts",
+        TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK: "https://discord.example/stream",
+      },
+    );
+
+    assert.deepEqual(fallbackDevResult, { alerted: false, devDelivered: false, streamed: true });
+    assert.deepEqual(urls, ["https://discord.example/stream"]);
   } finally {
     globalThis.fetch = originalFetch;
   }

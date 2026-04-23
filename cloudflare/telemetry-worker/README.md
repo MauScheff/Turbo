@@ -109,6 +109,7 @@ Set these with `wrangler secret put`:
 Optional:
 
 - `TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK`
+- `TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK`
 - `TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK`
 
 Legacy fallback:
@@ -117,8 +118,10 @@ Legacy fallback:
 
 Delivery behavior:
 
-- `TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK` receives every accepted telemetry event
-- `TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK` receives only alert-worthy events
+- `TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK` receives `devTraffic=true` events only, labeled as either `DEV STREAM` or `DEV ALERT`
+- when the dev webhook is configured, `devTraffic=true` events do not go to the main stream or alerts webhooks
+- `TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK` receives non-dev telemetry events that pass the stream filter
+- `TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK` receives only non-dev alert-worthy events
 - if the new alerts webhook is unset, `TURBO_TELEMETRY_DISCORD_WEBHOOK` is used as an alerts fallback
 
 ## Local commands
