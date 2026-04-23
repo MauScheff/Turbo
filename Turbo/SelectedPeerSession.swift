@@ -504,6 +504,12 @@ final class SelectedPeerCoordinator {
     var effectHandler: (@MainActor (SelectedPeerEffect) async -> Void)?
     private var queuedEffectTask: Task<Void, Never>?
 
+    func reset() {
+        queuedEffectTask?.cancel()
+        queuedEffectTask = nil
+        state = .initial
+    }
+
     func send(_ event: SelectedPeerEvent) {
         let transition = SelectedPeerReducer.reduce(state: state, event: event)
         state = transition.state

@@ -136,12 +136,11 @@ struct ContentView: View {
             peerLookupBar
             TurboContactListView(
                 selectedContactID: viewModel.selectedContactId,
-                activeContact: viewModel.selectedContact,
+                activeContact: viewModel.activeConversationContact,
                 systemSessionSubtitle: systemSessionSubtitle,
-                incomingRequests: incomingRequestItems,
-                outgoingRequests: outgoingRequestItems,
-                contacts: viewModel.sortedContacts,
-                statusPill: contactStatusPillModel,
+                contactSections: viewModel.contactListSections,
+                activeStatusPill: contactStatusPillModel,
+                itemStatusPill: contactListItemStatusPillModel,
                 selectContact: viewModel.selectContact,
                 endSystemSession: viewModel.endSystemSession
             )
@@ -334,68 +333,31 @@ struct ContentView: View {
         }
     }
 
-    private var incomingRequestItems: [RequestListItem] {
-        viewModel.incomingRequests.map { contact, invite in
-            RequestListItem(
-                contact: contact,
-                title: "Incoming",
-                tint: .orange,
-                requestCount: invite.requestCount
-            )
-        }
-    }
-
-    private var outgoingRequestItems: [RequestListItem] {
-        viewModel.outgoingRequests.map { contact, invite in
-            RequestListItem(
-                contact: contact,
-                title: "Requested",
-                tint: .blue,
-                requestCount: invite.requestCount
-            )
-        }
-    }
-
     private func contactStatusPillModel(_ contact: Contact) -> ContactStatusPillModel {
-        let isSelected = viewModel.selectedContactId == contact.id
-        let selectedPeerState = isSelected ? viewModel.selectedPeerState(for: contact.id) : nil
-        let summary = viewModel.contactSummary(for: contact.id)
-        if case .some(.transmitting) = selectedPeerState?.detail {
-            return ContactStatusPillModel(text: "Talking", tint: .red)
-        }
-        if case .some(.receiving) = selectedPeerState?.detail {
-            return ContactStatusPillModel(text: "Receiving", tint: .orange)
-        }
-        if case .some(.waitingForPeer(let reason)) = selectedPeerState?.detail,
-           reason != .peerReadyToConnect {
-            return ContactStatusPillModel(text: "Waiting", tint: .yellow)
-        }
+        pillModel(
+            for: viewModel.contactListItem(for: contact).presentation,
+            isActiveConversation: true
+        )
+    }
 
-        let displayStatus: ConversationDisplayStatus =
-            if let selectedPeerState {
-                selectedPeerState.displayStatus
-            } else {
-                ConversationStateMachine.displayStatus(
-                    for: viewModel.listConversationState(for: contact.id),
-                    requestCount: summary?.requestCount,
-                    presence: viewModel.contactPresencePresentation(for: contact.id)
-                )
-            }
+    private func contactListItemStatusPillModel(_ item: ContactListItem) -> ContactStatusPillModel {
+        pillModel(for: item.presentation)
+    }
 
-        switch displayStatus {
-        case .offline:
-            return ContactStatusPillModel(text: displayStatus.pillText, tint: .gray)
+    private func pillModel(
+        for presentation: ContactListPresentation,
+        isActiveConversation: Bool = false
+    ) -> ContactStatusPillModel {
+        switch presentation.availabilityPill {
         case .online:
-            return ContactStatusPillModel(text: displayStatus.pillText, tint: .green)
-        case .requested(let direction, _):
             return ContactStatusPillModel(
-                text: displayStatus.pillText,
-                tint: direction == .incoming ? .orange : .blue
+                text: presentation.statusPillText(isActiveConversation: isActiveConversation),
+                tint: .green
             )
-        case .ready:
-            return ContactStatusPillModel(text: displayStatus.pillText, tint: .green)
-        case .live:
-            return ContactStatusPillModel(text: displayStatus.pillText, tint: .mint)
+        case .offline:
+            return ContactStatusPillModel(text: presentation.statusPillText(), tint: .gray)
+        case .busy:
+            return ContactStatusPillModel(text: presentation.statusPillText(), tint: .orange)
         }
     }
 }

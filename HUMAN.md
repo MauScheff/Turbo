@@ -57,3 +57,5 @@ yes, and how might we design and iterate on our system so that once it works, it
 
 #Midwise
 I'm very dissapointed because we have been working on this all afternoon.
+
+# I have good judgement

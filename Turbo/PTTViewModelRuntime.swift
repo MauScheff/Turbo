@@ -703,6 +703,10 @@ struct BackendServices {
         try await client.offlinePresence()
     }
 
+    func backgroundPresence() async throws -> TurboPresenceHeartbeatResponse {
+        try await client.backgroundPresence()
+    }
+
     func lookupUser(handle: String) async throws -> TurboUserLookupResponse {
         try await client.lookupUser(handle: handle)
     }

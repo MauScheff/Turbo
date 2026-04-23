@@ -690,6 +690,27 @@ async def main() -> int:
             )
             require(heartbeat.get("deviceId") == current["device_id"], f"presence heartbeat mismatched device: {heartbeat}")
 
+            background_presence = run_check(
+                results,
+                f"presence-background:{current['handle']}",
+                lambda current=current: request(
+                    args.base_url,
+                    "/v1/presence/background",
+                    current["handle"],
+                    method="POST",
+                    body={"deviceId": current["device_id"]},
+                    insecure=args.insecure,
+                ),
+            )
+            require(
+                background_presence.get("deviceId") == current["device_id"],
+                f"presence background mismatched device: {background_presence}",
+            )
+            require(
+                background_presence.get("status") == "offline",
+                f"presence background should report offline: {background_presence}",
+            )
+
             user_lookup = run_check(
                 results,
                 f"user-by-handle:{current['handle']}",
@@ -713,6 +734,61 @@ async def main() -> int:
                 ),
             )
             require(isinstance(presence_lookup, dict), f"presence lookup returned unexpected payload: {presence_lookup}")
+            require(
+                presence_lookup.get("isOnline") is False,
+                f"background presence should make the user offline: {presence_lookup}",
+            )
+
+            heartbeat_after_background = run_check(
+                results,
+                f"presence-heartbeat-after-background:{current['handle']}",
+                lambda current=current: request(
+                    args.base_url,
+                    "/v1/presence/heartbeat",
+                    current["handle"],
+                    method="POST",
+                    body={"deviceId": current["device_id"]},
+                    insecure=args.insecure,
+                ),
+            )
+            require(
+                heartbeat_after_background.get("deviceId") == current["device_id"],
+                f"presence heartbeat after background mismatched device: {heartbeat_after_background}",
+            )
+
+            device_after_background = run_check(
+                results,
+                f"device-register-after-background:{current['handle']}",
+                lambda current=current: request(
+                    args.base_url,
+                    "/v1/devices/register",
+                    current["handle"],
+                    method="POST",
+                    body={"deviceId": current["device_id"], "deviceLabel": current["device_id"]},
+                    insecure=args.insecure,
+                ),
+            )
+            require(
+                device_after_background.get("deviceId") == current["device_id"],
+                f"device registration after background mismatched id: {device_after_background}",
+            )
+
+            heartbeat_after_reregister = run_check(
+                results,
+                f"presence-heartbeat-after-reregister:{current['handle']}",
+                lambda current=current: request(
+                    args.base_url,
+                    "/v1/presence/heartbeat",
+                    current["handle"],
+                    method="POST",
+                    body={"deviceId": current["device_id"]},
+                    insecure=args.insecure,
+                ),
+            )
+            require(
+                heartbeat_after_reregister.get("deviceId") == current["device_id"],
+                f"presence heartbeat after re-register mismatched device: {heartbeat_after_reregister}",
+            )
 
         caller_summaries = run_check(
             results,

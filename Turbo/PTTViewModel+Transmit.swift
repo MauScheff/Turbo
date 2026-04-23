@@ -595,26 +595,35 @@ extension PTTViewModel {
     ) {
         guard backend.supportsWebSocket else { return }
         let applicationState = currentApplicationState()
-        guard applicationState != .active else {
-            resumeWebSocketBeforePTTTransportWaitIfNeeded(
-                backend,
-                contactID: contactID,
-                channelID: channelID,
-                reason: "system-transmit-activation"
+        resumeWebSocketBeforePTTTransportWaitIfNeeded(
+            backend,
+            contactID: contactID,
+            channelID: channelID,
+            reason: "system-transmit-activation"
+        )
+        guard applicationState != .active else { return }
+        guard backend.isWebSocketConnected else {
+            diagnostics.record(
+                .websocket,
+                message: "Allowing background WebSocket reconnect to continue for system-originated transmit activation",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "applicationState": String(describing: applicationState),
+                ]
             )
             return
         }
 
         diagnostics.record(
             .websocket,
-            message: "Refreshing WebSocket for system-originated transmit activation",
+            message: "Preserving active WebSocket during system-originated transmit activation",
             metadata: [
                 "contactId": contactID.uuidString,
                 "channelId": channelID,
                 "applicationState": String(describing: applicationState),
             ]
         )
-        backend.forceReconnectWebSocket()
     }
 
     func refreshWebSocketForWakeReceiveActivationIfNeeded(

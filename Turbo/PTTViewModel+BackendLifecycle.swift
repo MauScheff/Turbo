@@ -464,6 +464,7 @@ extension PTTViewModel {
         receiveExecutionCoordinator.send(.reset)
         isPTTAudioSessionActive = false
         selectedContactId = nil
+        selectedPeerCoordinator.reset()
         syncPTTState()
         sessionCoordinator.reset()
         backendSyncCoordinator.send(.reset(statusMessage: backendStatus))

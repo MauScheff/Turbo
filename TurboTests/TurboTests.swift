@@ -1874,6 +1874,45 @@ struct TurboTests {
         )
     }
 
+    @Test func explicitLeaveWithConnectedSessionContinuitySuppressesAutoRestore() {
+        let contactID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .ready,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: false,
+            activeChannelID: nil,
+            systemSessionMatchesContact: false,
+            systemSessionState: .none,
+            pendingAction: .leave(.explicit(contactID: contactID)),
+            localJoinFailure: nil,
+            hadConnectedSessionContinuity: true,
+            channel: ChannelReadinessSnapshot(
+                channelState: makeChannelState(
+                    status: .ready,
+                    canTransmit: true,
+                    selfJoined: true,
+                    peerJoined: true,
+                    peerDeviceConnected: true
+                ),
+                readiness: makeChannelReadiness(
+                    status: .ready,
+                    selfHasActiveDevice: true,
+                    peerHasActiveDevice: true,
+                    remoteAudioReadiness: .ready,
+                    remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+                )
+            )
+        )
+
+        #expect(
+            ConversationStateMachine.reconciliationAction(for: context)
+                != .restoreLocalSession(contactID: contactID)
+        )
+    }
+
     @Test func channelLimitJoinFailureSuppressesAutomaticRestore() {
         let contactID = UUID()
         let channelUUID = UUID()
@@ -2448,6 +2487,43 @@ struct TurboTests {
                 presence: .connected
             ) == .live
         )
+    }
+
+    @Test func contactListPresentationUsesDedicatedSectionsWithSimplifiedAvailabilityPills() {
+        let incoming = ConversationStateMachine.contactListPresentation(
+            for: .incomingRequest,
+            requestCount: 2,
+            presence: .connected
+        )
+        let ready = ConversationStateMachine.contactListPresentation(
+            for: .ready,
+            requestCount: nil,
+            presence: .reachable
+        )
+        let requested = ConversationStateMachine.contactListPresentation(
+            for: .requested,
+            requestCount: 1,
+            presence: .connected
+        )
+        let offline = ConversationStateMachine.contactListPresentation(
+            for: .idle,
+            requestCount: nil,
+            presence: .offline
+        )
+
+        #expect(incoming.section == .wantsToTalk)
+        #expect(incoming.availabilityPill == .online)
+        #expect(incoming.statusPillText() == "Ready")
+        #expect(ready.section == .readyToTalk)
+        #expect(ready.availabilityPill == .online)
+        #expect(ready.statusPillText() == "Online")
+        #expect(ready.statusPillText(isActiveConversation: true) == "Connected")
+        #expect(requested.section == .requested)
+        #expect(requested.availabilityPill == .online)
+        #expect(requested.statusPillText() == "Online")
+        #expect(offline.section == .contacts)
+        #expect(offline.availabilityPill == .offline)
+        #expect(offline.statusPillText() == "Offline")
     }
 
     @Test func selectedPeerStateUsesWaitingDuringPendingJoin() {
@@ -9220,7 +9296,7 @@ struct TurboTests {
         #expect(observedStates.isEmpty)
     }
 
-    @Test func systemTransmitActivationReconnectsStaleConnectedWebSocketInBackground() async throws {
+    @Test func systemTransmitActivationPreservesConnectedWebSocketInBackground() async throws {
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -9263,7 +9339,99 @@ struct TurboTests {
         )
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        #expect(observedStates.starts(with: [.idle, .connecting]))
+        #expect(observedStates.isEmpty)
+    }
+
+    @Test func systemTransmitActivationPreservesConnectingWebSocketInBackground() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        var observedStates: [TurboBackendClient.WebSocketConnectionState] = []
+        client.onWebSocketStateChange = { state in
+            observedStates.append(state)
+        }
+
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "self-user", mode: "cloud")
+        viewModel.applicationStateOverride = .background
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+
+        client.setWebSocketConnectionStateForTesting(.connecting)
+        observedStates.removeAll()
+
+        guard let backend = viewModel.backendServices else {
+            Issue.record("Missing backend services")
+            return
+        }
+
+        viewModel.refreshWebSocketForSystemTransmitActivationIfNeeded(
+            backend,
+            contactID: contactID,
+            channelID: "channel-123"
+        )
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(observedStates.isEmpty)
+    }
+
+    @Test func systemTransmitActivationResumesIdleWebSocketInBackgroundWithoutForcedRestart() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        var observedStates: [TurboBackendClient.WebSocketConnectionState] = []
+        client.onWebSocketStateChange = { state in
+            observedStates.append(state)
+        }
+
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "self-user", mode: "cloud")
+        viewModel.applicationStateOverride = .background
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+
+        client.setWebSocketConnectionStateForTesting(.idle)
+        observedStates.removeAll()
+
+        guard let backend = viewModel.backendServices else {
+            Issue.record("Missing backend services")
+            return
+        }
+
+        viewModel.refreshWebSocketForSystemTransmitActivationIfNeeded(
+            backend,
+            contactID: contactID,
+            channelID: "channel-123"
+        )
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(observedStates == [.connecting])
     }
 
     @MainActor
@@ -10893,27 +11061,95 @@ struct TurboTests {
         let probe = BackgroundTransitionProbe()
 
         viewModel.backgroundWebSocketSuspendHandler = {
-            Task {
-                await probe.recordSuspend()
-            }
+            probe.recordSuspend()
+        }
+        viewModel.beginBackgroundActivity = { name, _ in
+            probe.recordBackgroundTaskBegin(name)
+            return UIBackgroundTaskIdentifier(rawValue: 1)
+        }
+        viewModel.endBackgroundActivity = { _ in
+            probe.recordBackgroundTaskEnd()
         }
         viewModel.backgroundOfflinePresenceHandler = {
-            await probe.recordOfflineStart()
+            probe.recordOfflineStart()
             try? await Task.sleep(nanoseconds: 50_000_000)
-            await probe.recordOfflineFinish()
+            probe.recordOfflineFinish()
         }
 
         await viewModel.handleApplicationDidEnterBackground()
-        try? await Task.sleep(nanoseconds: 10_000_000)
+        let events = probe.events
+        #expect(probe.offlineStarted)
+        #expect(probe.suspendCount == 1)
+        #expect(probe.backgroundTaskStarted)
+        #expect(probe.backgroundTaskEnded)
+        #expect(events.first == "suspend")
+        #expect(events.contains("background-task-begin:offline-presence"))
+        #expect(events.contains("offline-start"))
+        #expect(events.contains("offline-finish"))
+        #expect(events.contains("background-task-end"))
+        #expect(events.firstIndex(of: "background-task-begin:offline-presence")! < events.firstIndex(of: "offline-finish")!)
+        #expect(events.firstIndex(of: "background-task-end")! > events.firstIndex(of: "offline-finish")!)
+    }
 
-        #expect(await probe.offlineStarted)
-        #expect(await probe.suspendCount == 1)
-        #expect(await probe.events.prefix(2).elementsEqual(["suspend", "offline-start"]))
+    @MainActor
+    @Test func backgroundTransitionPreservesJoinedSessionWhilePublishingBackgroundPresence() async {
+        let viewModel = PTTViewModel()
+        let probe = BackgroundTransitionProbe()
+        let contactID = UUID()
+        let channelUUID = UUID()
 
-        try? await Task.sleep(nanoseconds: 70_000_000)
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Kai",
+                handle: "@kai",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-kai",
+                remoteUserId: "user-kai"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.syncPTTState()
 
-        #expect(await probe.suspendCount == 1)
-        #expect(await probe.events == ["suspend", "offline-start", "offline-finish"])
+        viewModel.backgroundWebSocketSuspendHandler = {
+            probe.recordSuspend()
+        }
+        viewModel.beginBackgroundActivity = { name, _ in
+            probe.recordBackgroundTaskBegin(name)
+            return UIBackgroundTaskIdentifier(rawValue: 1)
+        }
+        viewModel.endBackgroundActivity = { _ in
+            probe.recordBackgroundTaskEnd()
+        }
+        viewModel.backgroundSessionPresenceHandler = {
+            probe.recordBackgroundStart()
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            probe.recordBackgroundFinish()
+        }
+        viewModel.backgroundOfflinePresenceHandler = {
+            probe.recordOfflineStart()
+        }
+
+        await viewModel.handleApplicationDidEnterBackground()
+        let events = probe.events
+        #expect(probe.backgroundStarted)
+        #expect(probe.offlineStarted == false)
+        #expect(probe.suspendCount == 1)
+        #expect(probe.backgroundTaskStarted)
+        #expect(probe.backgroundTaskEnded)
+        #expect(events.first == "suspend")
+        #expect(events.contains("background-task-begin:background-presence"))
+        #expect(events.contains("background-start"))
+        #expect(events.contains("background-finish"))
+        #expect(events.contains("background-task-end"))
+        #expect(events.firstIndex(of: "background-task-begin:background-presence")! < events.firstIndex(of: "background-finish")!)
+        #expect(events.firstIndex(of: "background-task-end")! > events.firstIndex(of: "background-finish")!)
     }
 
     @MainActor
@@ -10948,6 +11184,73 @@ struct TurboTests {
         #expect(viewModel.backendStatusMessage == "Reconnecting as @blake...")
         #expect(viewModel.diagnostics.latestError == nil)
         #expect(viewModel.diagnosticsTranscript.contains("Old error") == false)
+    }
+
+    @MainActor
+    @Test func resetLocalDevStateClearsSelectedPeerShortcutStateBeforeFreshSelection() async {
+        let viewModel = PTTViewModel()
+        let staleContactID = UUID()
+        let freshContactID = UUID()
+
+        viewModel.selectedPeerCoordinator.send(
+            .selectedContactChanged(
+                SelectedPeerSelection(
+                    contactID: staleContactID,
+                    contactName: "Blake",
+                    contactIsOnline: true
+                )
+            )
+        )
+        viewModel.selectedPeerCoordinator.send(
+            .shortcutPolicyUpdated(requesterAutoJoinOnPeerAcceptanceEnabled: true)
+        )
+        viewModel.selectedPeerCoordinator.send(.relationshipUpdated(.none))
+        viewModel.selectedPeerCoordinator.send(.baseStateUpdated(.idle))
+        viewModel.selectedPeerCoordinator.send(.channelUpdated(nil))
+        viewModel.selectedPeerCoordinator.send(
+            .localSessionUpdated(
+                isJoined: false,
+                activeChannelID: nil,
+                pendingAction: .none,
+                pendingConnectAcceptedIncomingRequest: false,
+                localJoinFailure: nil
+            )
+        )
+        viewModel.selectedPeerCoordinator.send(.systemSessionUpdated(.none, matchesSelectedContact: false))
+
+        await viewModel.selectedPeerCoordinator.handle(.joinRequested)
+
+        #expect(viewModel.selectedPeerCoordinator.state.requesterAutoJoinOnPeerAcceptanceArmed)
+
+        viewModel.resetLocalDevState(backendStatus: "Reconnecting as @kai...")
+
+        #expect(!viewModel.selectedPeerCoordinator.state.requesterAutoJoinOnPeerAcceptanceArmed)
+        #expect(!viewModel.selectedPeerCoordinator.state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight)
+        #expect(viewModel.selectedPeerCoordinator.state.selection == nil)
+
+        viewModel.contacts = [
+            Contact(
+                id: freshContactID,
+                name: "Kai",
+                handle: "@kai",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: "channel-kai",
+                remoteUserId: "user-kai"
+            )
+        ]
+
+        guard let kai = viewModel.contacts.first else {
+            Issue.record("missing fresh contact after reset")
+            return
+        }
+
+        viewModel.selectContact(kai)
+
+        let selectedPeerState = viewModel.selectedPeerState(for: freshContactID)
+
+        #expect(selectedPeerState.phase == .idle)
+        #expect(selectedPeerState.statusMessage == "Kai is online")
     }
 
     @MainActor
@@ -12016,6 +12319,185 @@ struct TurboTests {
         ]
 
         #expect(viewModel.contactPresencePresentation(for: contactID) == .connected)
+    }
+
+    @MainActor
+    @Test func contactListSectionsBucketContactsByDerivedGroup() {
+        let viewModel = PTTViewModel()
+        let incomingID = UUID()
+        let readyID = UUID()
+        let requestedID = UUID()
+        let offlineID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: incomingID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: ContactDirectory.stableChannelUUID(for: "channel-blake"),
+                backendChannelId: "channel-blake",
+                remoteUserId: "user-blake"
+            ),
+            Contact(
+                id: readyID,
+                name: "Casey",
+                handle: "@casey",
+                isOnline: true,
+                channelId: ContactDirectory.stableChannelUUID(for: "channel-casey"),
+                backendChannelId: "channel-casey",
+                remoteUserId: "user-casey"
+            ),
+            Contact(
+                id: requestedID,
+                name: "Drew",
+                handle: "@drew",
+                isOnline: true,
+                channelId: ContactDirectory.stableChannelUUID(for: "channel-drew"),
+                backendChannelId: "channel-drew",
+                remoteUserId: "user-drew"
+            ),
+            Contact(
+                id: offlineID,
+                name: "Erin",
+                handle: "@erin",
+                isOnline: false,
+                channelId: ContactDirectory.stableChannelUUID(for: "channel-erin"),
+                backendChannelId: "channel-erin",
+                remoteUserId: "user-erin"
+            )
+        ]
+        viewModel.backendSyncCoordinator.send(
+            .contactSummariesUpdated([
+                BackendContactSummaryUpdate(
+                    contactID: incomingID,
+                    summary: makeContactSummary(
+                        channelId: "channel-blake",
+                        handle: "@blake",
+                        displayName: "Blake",
+                        isOnline: true,
+                        hasIncomingRequest: true,
+                        requestCount: 2,
+                        badgeStatus: "incoming",
+                        membershipKind: "peer-only",
+                        peerDeviceConnected: true
+                    )
+                ),
+                BackendContactSummaryUpdate(
+                    contactID: readyID,
+                    summary: makeContactSummary(
+                        channelId: "channel-casey",
+                        handle: "@casey",
+                        displayName: "Casey",
+                        isOnline: true,
+                        badgeStatus: "ready",
+                        membershipKind: "both",
+                        peerDeviceConnected: true
+                    )
+                ),
+                BackendContactSummaryUpdate(
+                    contactID: requestedID,
+                    summary: makeContactSummary(
+                        channelId: "channel-drew",
+                        handle: "@drew",
+                        displayName: "Drew",
+                        isOnline: true,
+                        hasOutgoingRequest: true,
+                        requestCount: 1,
+                        badgeStatus: "requested",
+                        membershipKind: "peer-only",
+                        peerDeviceConnected: false
+                    )
+                ),
+                BackendContactSummaryUpdate(
+                    contactID: offlineID,
+                    summary: makeContactSummary(
+                        channelId: "channel-erin",
+                        handle: "@erin",
+                        displayName: "Erin",
+                        isOnline: false,
+                        badgeStatus: "offline",
+                        membershipKind: "absent",
+                        peerDeviceConnected: nil
+                    )
+                ),
+            ])
+        )
+
+        let sections = viewModel.contactListSections
+
+        #expect(sections.wantsToTalk.map { $0.contact.handle } == ["@blake"])
+        #expect(sections.readyToTalk.map { $0.contact.handle } == ["@casey"])
+        #expect(sections.requested.map { $0.contact.handle } == ["@drew"])
+        #expect(sections.contacts.map { $0.contact.handle } == ["@erin"])
+        #expect(sections.wantsToTalk.first?.presentation.availabilityPill == .online)
+        #expect(sections.readyToTalk.first?.presentation.availabilityPill == .online)
+        #expect(sections.requested.first?.presentation.availabilityPill == .online)
+        #expect(sections.contacts.first?.presentation.availabilityPill == .offline)
+    }
+
+    @MainActor
+    @Test func contactListKeepsSelectedPeerInSectionAndPinsOnlyActualActiveConversation() {
+        let viewModel = PTTViewModel()
+        let activeID = UUID()
+        let selectedReadyID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: activeID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: ContactDirectory.stableChannelUUID(for: "channel-avery"),
+                backendChannelId: "channel-avery",
+                remoteUserId: "user-avery"
+            ),
+            Contact(
+                id: selectedReadyID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: ContactDirectory.stableChannelUUID(for: "channel-blake"),
+                backendChannelId: "channel-blake",
+                remoteUserId: "user-blake"
+            ),
+        ]
+        viewModel.selectedContactId = selectedReadyID
+        viewModel.activeChannelId = activeID
+        viewModel.isJoined = true
+        viewModel.backendSyncCoordinator.send(
+            .contactSummariesUpdated([
+                BackendContactSummaryUpdate(
+                    contactID: activeID,
+                    summary: makeContactSummary(
+                        channelId: "channel-avery",
+                        handle: "@avery",
+                        displayName: "Avery",
+                        isOnline: true,
+                        isActiveConversation: true,
+                        badgeStatus: "ready",
+                        membershipKind: "both",
+                        peerDeviceConnected: true
+                    )
+                ),
+                BackendContactSummaryUpdate(
+                    contactID: selectedReadyID,
+                    summary: makeContactSummary(
+                        channelId: "channel-blake",
+                        handle: "@blake",
+                        displayName: "Blake",
+                        isOnline: true,
+                        badgeStatus: "ready",
+                        membershipKind: "both",
+                        peerDeviceConnected: true
+                    )
+                ),
+            ])
+        )
+
+        let sections = viewModel.contactListSections
+
+        #expect(viewModel.activeConversationContact?.handle == "@avery")
+        #expect(sections.readyToTalk.map { $0.contact.handle } == ["@blake"])
+        #expect(!sections.readyToTalk.map { $0.contact.handle }.contains("@avery"))
     }
 
     @MainActor
@@ -14414,6 +14896,50 @@ struct TurboTests {
 
         await viewModel.runPTTEffect(.syncLeftChannel(contactID: contactID, autoRejoinContactID: nil))
 
+        #expect(
+            capturedEffects == [
+                .leave(
+                    BackendLeaveRequest(contactID: contactID, backendChannelID: "channel-1")
+                )
+            ]
+        )
+    }
+
+    @MainActor
+    @Test func activeSystemLeaveCallbackArmsExplicitLeaveAndRequestsBackendLeave() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-1",
+                remoteUserId: "user-blake"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.syncPTTState()
+
+        var capturedEffects: [BackendCommandEffect] = []
+        viewModel.backendCommandCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        viewModel.handleDidLeaveChannel(channelUUID, reason: "PTChannelLeaveReason(rawValue: 1)")
+
+        await Task.yield()
+        await Task.yield()
+
+        #expect(viewModel.sessionCoordinator.pendingAction == .leave(.explicit(contactID: contactID)))
         #expect(
             capturedEffects == [
                 .leave(
@@ -17287,7 +17813,7 @@ private func scenarioSnapshotSummary(_ participants: [PTTViewModel]) -> String {
             "localJoinFailure=\(participant.pttCoordinator.state.lastJoinFailure.map { String(describing: $0) } ?? "none")",
         ]
         let contactDetails = projection.contacts.map { contact in
-            "contact[\(contact.handle)]={online:\(contact.isOnline),list:\(contact.listState),badge:\(contact.badgeStatus ?? "none")}"
+            "contact[\(contact.handle)]={online:\(contact.isOnline),list:\(contact.listState),section:\(contact.listSection),presence:\(contact.presencePill),badge:\(contact.badgeStatus ?? "none")}"
         }
         return (fields + contactDetails).joined(separator: " ")
     }
@@ -17545,14 +18071,37 @@ private func reduceSelectedPeerState(_ events: [SelectedPeerEvent]) -> SelectedP
     }
 }
 
-private actor BackgroundTransitionProbe {
+@MainActor
+private final class BackgroundTransitionProbe {
     private(set) var events: [String] = []
+    private(set) var backgroundStarted = false
+    private(set) var backgroundTaskStarted = false
+    private(set) var backgroundTaskEnded = false
     private(set) var offlineStarted = false
     private(set) var suspendCount = 0
 
     func recordSuspend() {
         suspendCount += 1
         events.append("suspend")
+    }
+
+    func recordBackgroundTaskBegin(_ name: String) {
+        backgroundTaskStarted = true
+        events.append("background-task-begin:\(name)")
+    }
+
+    func recordBackgroundTaskEnd() {
+        backgroundTaskEnded = true
+        events.append("background-task-end")
+    }
+
+    func recordBackgroundStart() {
+        backgroundStarted = true
+        events.append("background-start")
+    }
+
+    func recordBackgroundFinish() {
+        events.append("background-finish")
     }
 
     func recordOfflineStart() {
@@ -17577,18 +18126,33 @@ private func makeTransmitRequest() -> TransmitRequestContext {
     )
 }
 
-private func makeContactSummary(channelId: String?) -> TurboContactSummaryResponse {
+private func makeContactSummary(
+    channelId: String?,
+    handle: String = "@avery",
+    displayName: String = "Avery",
+    isOnline: Bool = true,
+    hasIncomingRequest: Bool = false,
+    hasOutgoingRequest: Bool = false,
+    requestCount: Int = 0,
+    isActiveConversation: Bool = false,
+    badgeStatus: String = "online",
+    membershipKind: String? = nil,
+    peerDeviceConnected: Bool? = nil
+) -> TurboContactSummaryResponse {
     TurboContactSummaryResponse(
         userId: "user-peer",
-        handle: "@avery",
-        displayName: "Avery",
+        handle: handle,
+        displayName: displayName,
         channelId: channelId,
-        isOnline: true,
-        hasIncomingRequest: false,
-        hasOutgoingRequest: false,
-        requestCount: 0,
-        isActiveConversation: false,
-        badgeStatus: "online"
+        isOnline: isOnline,
+        hasIncomingRequest: hasIncomingRequest,
+        hasOutgoingRequest: hasOutgoingRequest,
+        requestCount: requestCount,
+        isActiveConversation: isActiveConversation,
+        badgeStatus: badgeStatus,
+        membershipPayload: membershipKind.map {
+            TurboChannelMembershipPayload(kind: $0, peerDeviceConnected: peerDeviceConnected)
+        }
     )
 }
 

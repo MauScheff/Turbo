@@ -38,6 +38,8 @@ struct ContactDiagnosticsSummary: Equatable, Identifiable {
     let isOnline: Bool
     let listState: String
     let badgeStatus: String?
+    let listSection: String
+    let presencePill: String
     let requestRelationship: String
     let hasIncomingRequest: Bool
     let hasOutgoingRequest: Bool

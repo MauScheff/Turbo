@@ -1,14 +1,5 @@
 import SwiftUI
 
-struct RequestListItem: Identifiable {
-    let contact: Contact
-    let title: String
-    let tint: Color
-    let requestCount: Int
-
-    var id: UUID { contact.id }
-}
-
 struct ContactStatusPillModel {
     let text: String
     let tint: Color
@@ -70,12 +61,17 @@ struct TurboContactListView: View {
     let selectedContactID: UUID?
     let activeContact: Contact?
     let systemSessionSubtitle: String?
-    let incomingRequests: [RequestListItem]
-    let outgoingRequests: [RequestListItem]
-    let contacts: [Contact]
-    let statusPill: (Contact) -> ContactStatusPillModel
+    let contactSections: ContactListSections
+    let activeStatusPill: (Contact) -> ContactStatusPillModel
+    let itemStatusPill: (ContactListItem) -> ContactStatusPillModel
     let selectContact: (Contact) -> Void
     let endSystemSession: () -> Void
+
+    private struct ContactRowRenderIdentity: Hashable {
+        let contactID: UUID
+        let section: ConversationListSection?
+        let isSelected: Bool
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -89,10 +85,18 @@ struct TurboContactListView: View {
                         if let activeContact {
                             sectionHeader("Active", topPadding: 4)
                             TurboContactRow(
-                                contact: activeContact,
+                                title: activeContact.name,
+                                subtitle: activeContact.handle,
                                 isSelected: true,
-                                pill: statusPill(activeContact),
+                                pill: activeStatusPill(activeContact),
                                 onTap: { selectContact(activeContact) }
+                            )
+                            .id(
+                                ContactRowRenderIdentity(
+                                    contactID: activeContact.id,
+                                    section: nil,
+                                    isSelected: true
+                                )
                             )
                             if let systemSessionSubtitle {
                                 TurboSystemSessionRow(
@@ -108,35 +112,26 @@ struct TurboContactListView: View {
                             )
                         }
 
-                        if !incomingRequests.isEmpty {
-                            sectionHeader("Requests", topPadding: activeContact == nil ? 4 : 8)
-                            ForEach(incomingRequests) { item in
-                                TurboRequestRow(
-                                    item: item,
-                                    onTap: { selectContact(item.contact) }
-                                )
-                            }
-                        }
-
-                        if !outgoingRequests.isEmpty {
-                            sectionHeader("Requested", topPadding: incomingRequests.isEmpty ? 4 : 8)
-                            ForEach(outgoingRequests) { item in
-                                TurboRequestRow(
-                                    item: item,
-                                    onTap: { selectContact(item.contact) }
-                                )
-                            }
-                        }
-
-                        sectionHeader("Contacts", topPadding: 4)
-                        ForEach(contacts) { contact in
-                            TurboContactRow(
-                                contact: contact,
-                                isSelected: selectedContactID == contact.id,
-                                pill: statusPill(contact),
-                                onTap: { selectContact(contact) }
-                            )
-                        }
+                        contactSection(
+                            .wantsToTalk,
+                            items: contactSections.wantsToTalk,
+                            topPadding: activeContact == nil ? 4 : 8
+                        )
+                        contactSection(
+                            .readyToTalk,
+                            items: contactSections.readyToTalk,
+                            topPadding: contactSections.wantsToTalk.isEmpty ? 4 : 8
+                        )
+                        contactSection(
+                            .requested,
+                            items: contactSections.requested,
+                            topPadding: contactSections.readyToTalk.isEmpty ? 4 : 8
+                        )
+                        contactSection(
+                            .contacts,
+                            items: contactSections.contacts,
+                            topPadding: 4
+                        )
                     }
                 }
             }
@@ -155,44 +150,46 @@ struct TurboContactListView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, topPadding)
     }
-}
 
-private struct TurboRequestRow: View {
-    let item: RequestListItem
-    let onTap: () -> Void
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.contact.name)
-                        .font(.body.weight(.semibold))
-                    Text(item.contact.handle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                Text(requestBadgeText(title: item.title, requestCount: item.requestCount))
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(item.tint.opacity(0.15))
-                    .foregroundStyle(item.tint)
-                    .clipShape(Capsule())
+    @ViewBuilder
+    private func contactSection(
+        _ section: ConversationListSection,
+        items: [ContactListItem],
+        topPadding: CGFloat
+    ) -> some View {
+        if !items.isEmpty {
+            sectionHeader(section.title, topPadding: topPadding)
+            ForEach(items) { item in
+                let isSelected = selectedContactID == item.contact.id
+                TurboContactRow(
+                    title: item.contact.name,
+                    subtitle: subtitleText(for: item),
+                    isSelected: isSelected,
+                    pill: itemStatusPill(item),
+                    onTap: { selectContact(item.contact) }
+                )
+                .id(
+                    ContactRowRenderIdentity(
+                        contactID: item.contact.id,
+                        section: section,
+                        isSelected: isSelected
+                    )
+                )
             }
-            .padding(12)
-            .frame(maxWidth: .infinity)
-            .background(Color.gray.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(.plain)
+    }
+
+    private func subtitleText(for item: ContactListItem) -> String {
+        guard let requestCount = item.presentation.requestCount, requestCount > 1 else {
+            return item.contact.handle
+        }
+        return "\(item.contact.handle) • \(requestCount)x"
     }
 }
 
 private struct TurboContactRow: View {
-    let contact: Contact
+    let title: String
+    let subtitle: String
     let isSelected: Bool
     let pill: ContactStatusPillModel
     let onTap: () -> Void
@@ -201,9 +198,9 @@ private struct TurboContactRow: View {
         Button(action: onTap) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(contact.name)
+                    Text(title)
                         .font(.body.weight(.semibold))
-                    Text(contact.handle)
+                    Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -433,9 +430,4 @@ enum HoldToTalkButtonPolicy {
             style: .active
         )
     }
-}
-
-private func requestBadgeText(title: String, requestCount: Int) -> String {
-    guard requestCount > 1 else { return title }
-    return "\(title) · \(requestCount)"
 }

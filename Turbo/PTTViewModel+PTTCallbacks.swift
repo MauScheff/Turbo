@@ -415,7 +415,24 @@ extension PTTViewModel {
     func handleDidLeaveChannel(_ channelUUID: UUID, reason: String) {
         let contactID = contactId(for: channelUUID)
         let autoRejoinContactID = sessionCoordinator.autoRejoinContactID(afterLeaving: contactID)
+        let shouldTreatLocalSystemLeaveAsExplicitTeardown: Bool = {
+            guard autoRejoinContactID == nil,
+                  let contactID,
+                  !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) else {
+                return false
+            }
+
+            switch pttCoordinator.state.systemSessionState {
+            case .active(let activeContactID, let activeChannelUUID):
+                return activeChannelUUID == channelUUID && activeContactID == contactID
+            case .none, .mismatched:
+                return false
+            }
+        }()
         Task {
+            if shouldTreatLocalSystemLeaveAsExplicitTeardown {
+                sessionCoordinator.markExplicitLeave(contactID: contactID)
+            }
             await pttCoordinator.handle(
                 .didLeaveChannel(
                     channelUUID: channelUUID,

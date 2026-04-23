@@ -13,6 +13,20 @@ enum ContactPresencePresentation: Equatable {
     case offline
 }
 
+struct ContactListItem: Identifiable, Equatable {
+    let contact: Contact
+    let presentation: ContactListPresentation
+
+    var id: UUID { contact.id }
+}
+
+struct ContactListSections: Equatable {
+    let wantsToTalk: [ContactListItem]
+    let readyToTalk: [ContactListItem]
+    let requested: [ContactListItem]
+    let contacts: [ContactListItem]
+}
+
 extension PTTViewModel {
     func localTransmitProjection(for contactID: UUID) -> LocalTransmitProjection {
         transmitDomainSnapshot.localTransmitProjection(
@@ -272,23 +286,79 @@ extension PTTViewModel {
         contactPresencePresentation(for: contactID) == .connected
     }
 
-    var visibleContacts: [Contact] {
+    var activeConversationContactID: UUID? {
+        if case .active(let contactID, _) = systemSessionState,
+           contacts.contains(where: { $0.id == contactID }) {
+            return contactID
+        }
+        return activeChannelId
+    }
+
+    var activeConversationContact: Contact? {
+        guard let activeConversationContactID else { return nil }
+        return contacts.first(where: { $0.id == activeConversationContactID })
+    }
+
+    private var listEligibleContacts: [Contact] {
         contacts.filter { contact in
             contact.handle != currentDevUserHandle
-                && !requestContactIDs.contains(contact.id)
-                && !(activeChannelId == contact.id)
-                && !(selectedContactId == contact.id)
+                && !(activeConversationContactID == contact.id)
         }
     }
 
-    var sortedContacts: [Contact] {
-        visibleContacts.sorted { lhs, rhs in
-            let lhsPresence = contactPresencePresentation(for: lhs.id)
-            let rhsPresence = contactPresencePresentation(for: rhs.id)
+    func contactListItem(for contact: Contact) -> ContactListItem {
+        let relationship = relationshipState(for: contact.id)
+        let presence = contactPresencePresentation(for: contact.id)
+        let presentation = ConversationStateMachine.contactListPresentation(
+            for: listConversationState(for: contact.id),
+            requestCount: relationship.requestCount,
+            presence: presence,
+            // Reserve the busy case in the product model until the backend exposes
+            // a dedicated peer-busy fact we can trust.
+            isBusy: false
+        )
+        return ContactListItem(contact: contact, presentation: presentation)
+    }
+
+    var contactListSections: ContactListSections {
+        let items = listEligibleContacts.map(contactListItem(for:))
+
+        return ContactListSections(
+            wantsToTalk: sortContactListItems(items.filter { $0.presentation.section == .wantsToTalk }),
+            readyToTalk: sortContactListItems(items.filter { $0.presentation.section == .readyToTalk }),
+            requested: sortContactListItems(items.filter { $0.presentation.section == .requested }),
+            contacts: sortContactListItems(items.filter { $0.presentation.section == .contacts })
+        )
+    }
+
+    private func sortContactListItems(_ items: [ContactListItem]) -> [ContactListItem] {
+        items.sorted { lhs, rhs in
+            if lhs.presentation.section == rhs.presentation.section {
+                switch lhs.presentation.section {
+                case .wantsToTalk, .requested:
+                    let lhsRequestCount = lhs.presentation.requestCount ?? 1
+                    let rhsRequestCount = rhs.presentation.requestCount ?? 1
+                    if lhsRequestCount != rhsRequestCount {
+                        return lhsRequestCount > rhsRequestCount
+                    }
+                case .readyToTalk:
+                    let lhsRank = readyToTalkSortRank(lhs.presentation.displayStatus)
+                    let rhsRank = readyToTalkSortRank(rhs.presentation.displayStatus)
+                    if lhsRank != rhsRank {
+                        return lhsRank < rhsRank
+                    }
+                case .contacts:
+                    break
+                }
+            }
+
+            let lhsPresence = contactPresencePresentation(for: lhs.contact.id)
+            let rhsPresence = contactPresencePresentation(for: rhs.contact.id)
             if lhsPresence != rhsPresence {
                 return presenceSortRank(lhsPresence) < presenceSortRank(rhsPresence)
             }
-            return lhs.name < rhs.name
+
+            return lhs.contact.name.localizedCaseInsensitiveCompare(rhs.contact.name) == .orderedAscending
         }
     }
 
@@ -303,23 +373,14 @@ extension PTTViewModel {
         }
     }
 
-    var incomingRequests: [(Contact, TurboInviteResponse)] {
-        contacts.compactMap { contact in
-            guard contact.handle != currentDevUserHandle else { return nil }
-            guard contact.id != selectedContactId else { return nil }
-            guard contactSummaryByContactID[contact.id]?.requestRelationship.hasIncomingRequest == true,
-                  let invite = incomingInviteByContactID[contact.id] else { return nil }
-            return (contact, invite)
-        }
-    }
-
-    var outgoingRequests: [(Contact, TurboInviteResponse)] {
-        contacts.compactMap { contact in
-            guard contact.handle != currentDevUserHandle else { return nil }
-            guard contact.id != selectedContactId else { return nil }
-            guard contactSummaryByContactID[contact.id]?.requestRelationship.hasOutgoingRequest == true,
-                  let invite = outgoingInviteByContactID[contact.id] else { return nil }
-            return (contact, invite)
+    private func readyToTalkSortRank(_ displayStatus: ConversationDisplayStatus) -> Int {
+        switch displayStatus {
+        case .live:
+            return 0
+        case .ready:
+            return 1
+        case .offline, .online, .requested:
+            return 2
         }
     }
 

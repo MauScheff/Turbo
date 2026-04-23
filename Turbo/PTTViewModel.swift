@@ -12,6 +12,11 @@ import AVFAudio
 import UIKit
 import UserNotifications
 
+private final class BackgroundActivityLease {
+    var identifier: UIBackgroundTaskIdentifier = .invalid
+    var ended = false
+}
+
 enum AudioOutputPreference: String, Equatable {
     case speaker
     case phone
@@ -122,7 +127,18 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     @ObservationIgnored
     var backgroundOfflinePresenceHandler: (@MainActor () async -> Void)?
     @ObservationIgnored
+    var backgroundSessionPresenceHandler: (@MainActor () async -> Void)?
+    @ObservationIgnored
     var backgroundWebSocketSuspendHandler: (@MainActor () -> Void)?
+    @ObservationIgnored
+    var beginBackgroundActivity: @MainActor (String, @escaping @Sendable () -> Void) -> UIBackgroundTaskIdentifier = { name, expiration in
+        UIApplication.shared.beginBackgroundTask(withName: name, expirationHandler: expiration)
+    }
+    @ObservationIgnored
+    var endBackgroundActivity: @MainActor (UIBackgroundTaskIdentifier) -> Void = { identifier in
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+    }
     @ObservationIgnored
     var setApplicationBadgeCount: @MainActor (Int) -> Void = { count in
         UNUserNotificationCenter.current().setBadgeCount(count)
@@ -211,6 +227,34 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func shouldPublishForegroundPresence(applicationState: UIApplication.State? = nil) -> Bool {
         (applicationState ?? currentApplicationState()) == .active
+    }
+
+    private func performProtectedBackgroundHandoff(
+        named name: String,
+        operation: @escaping @MainActor () async -> Void
+    ) async {
+        let lease = BackgroundActivityLease()
+        let endLease: @MainActor () -> Void = { [weak self] in
+            guard !lease.ended else { return }
+            lease.ended = true
+            guard lease.identifier != .invalid else { return }
+            self?.endBackgroundActivity(lease.identifier)
+        }
+
+        lease.identifier = beginBackgroundActivity(name) { [weak self] in
+            Task { @MainActor in
+                self?.diagnostics.record(
+                    .app,
+                    level: .error,
+                    message: "Background handoff expired before completion",
+                    metadata: ["name": name]
+                )
+                endLease()
+            }
+        }
+
+        await operation()
+        endLease()
     }
 
     /// Debug knob for the requester-side auto-join UX shortcut.
@@ -637,15 +681,29 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             .sorted { $0.handle < $1.handle }
             .map { contact in
                 let summary = contactSummaryByContactID[contact.id]
+                let listItem = contactListItem(for: contact)
+                let relationship = relationshipState(for: contact.id)
+                let relationshipDescription: String = switch relationship {
+                case .none:
+                    "none"
+                case .outgoingRequest(let requestCount):
+                    "outgoing(requestCount: \(requestCount))"
+                case .incomingRequest(let requestCount):
+                    "incoming(requestCount: \(requestCount))"
+                case .mutualRequest(let requestCount):
+                    "mutual(requestCount: \(requestCount))"
+                }
                 return ContactDiagnosticsSummary(
                     handle: contact.handle,
                     isOnline: summary?.isOnline ?? contact.isOnline,
                     listState: listConversationState(for: contact.id).rawValue,
                     badgeStatus: summary?.badgeKind,
-                    requestRelationship: String(describing: summary?.requestRelationship ?? .none),
-                    hasIncomingRequest: summary?.requestRelationship.hasIncomingRequest ?? false,
-                    hasOutgoingRequest: summary?.requestRelationship.hasOutgoingRequest ?? false,
-                    requestCount: summary?.requestRelationship.requestCount ?? 0,
+                    listSection: listItem.presentation.section.rawValue,
+                    presencePill: listItem.presentation.availabilityPill.rawValue,
+                    requestRelationship: relationshipDescription,
+                    hasIncomingRequest: relationship.isIncomingRequest,
+                    hasOutgoingRequest: relationship.isOutgoingRequest,
+                    requestCount: listItem.presentation.requestCount ?? 0,
                     incomingInviteCount: incomingInviteByContactID[contact.id]?.requestCount,
                     outgoingInviteCount: outgoingInviteByContactID[contact.id]?.requestCount
                 )
@@ -728,6 +786,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                 "contact[\(summary.handle)].isOnline=\(summary.isOnline)",
                 "contact[\(summary.handle)].listState=\(summary.listState)",
                 "contact[\(summary.handle)].badgeStatus=\(summary.badgeStatus ?? "none")",
+                "contact[\(summary.handle)].listSection=\(summary.listSection)",
+                "contact[\(summary.handle)].presencePill=\(summary.presencePill)",
                 "contact[\(summary.handle)].requestRelationship=\(summary.requestRelationship)",
                 "contact[\(summary.handle)].hasIncomingRequest=\(summary.hasIncomingRequest)",
                 "contact[\(summary.handle)].hasOutgoingRequest=\(summary.hasOutgoingRequest)",
@@ -937,22 +997,56 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     func handleApplicationDidEnterBackground() async {
+        let shouldPreserveJoinedSession =
+            shouldMaintainBackgroundControlPlane(applicationState: .background)
+
         if let backgroundWebSocketSuspendHandler {
             backgroundWebSocketSuspendHandler()
         } else {
             backendServices?.suspendWebSocket()
         }
 
-        if let backgroundOfflinePresenceHandler {
-            Task { @MainActor in
-                await backgroundOfflinePresenceHandler()
+        if shouldPreserveJoinedSession {
+            guard backgroundSessionPresenceHandler != nil || backendServices != nil else { return }
+            await performProtectedBackgroundHandoff(named: "background-presence") { [weak self] in
+                guard let self else { return }
+                if let backgroundSessionPresenceHandler {
+                    await backgroundSessionPresenceHandler()
+                    return
+                }
+                guard let backend = backendServices else { return }
+                do {
+                    _ = try await backend.backgroundPresence()
+                } catch {
+                    diagnostics.record(
+                        .backend,
+                        level: .error,
+                        message: "Background presence publish failed",
+                        metadata: ["error": error.localizedDescription]
+                    )
+                }
             }
             return
         }
 
-        guard let backend = backendServices else { return }
-        Task {
-            _ = try? await backend.offlinePresence()
+        guard backgroundOfflinePresenceHandler != nil || backendServices != nil else { return }
+        await performProtectedBackgroundHandoff(named: "offline-presence") { [weak self] in
+            guard let self else { return }
+            if let backgroundOfflinePresenceHandler {
+                await backgroundOfflinePresenceHandler()
+                return
+            }
+            guard let backend = backendServices else { return }
+            do {
+                _ = try await backend.offlinePresence()
+            } catch {
+                diagnostics.record(
+                    .backend,
+                    level: .error,
+                    message: "Offline presence publish failed",
+                    metadata: ["error": error.localizedDescription]
+                )
+            }
         }
     }
 

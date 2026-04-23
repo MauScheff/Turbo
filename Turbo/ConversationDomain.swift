@@ -316,6 +316,15 @@ enum ConversationDisplayStatus: Equatable {
     case ready
     case live
 
+    var requestCount: Int? {
+        switch self {
+        case .requested(_, let requestCount):
+            return requestCount
+        case .offline, .online, .ready, .live:
+            return nil
+        }
+    }
+
     var pillText: String {
         switch self {
         case .offline:
@@ -336,6 +345,62 @@ enum ConversationDisplayStatus: Equatable {
         case .live:
             return "Live"
         }
+    }
+}
+
+enum ConversationListSection: String, Equatable {
+    case wantsToTalk = "wants-to-talk"
+    case readyToTalk = "ready-to-talk"
+    case requested
+    case contacts
+
+    var title: String {
+        switch self {
+        case .wantsToTalk:
+            return "Wants to Talk"
+        case .readyToTalk:
+            return "Ready to Talk"
+        case .requested:
+            return "Requested"
+        case .contacts:
+            return "Contacts"
+        }
+    }
+}
+
+enum ConversationAvailabilityPill: String, Equatable {
+    case online
+    case offline
+    case busy
+
+    var pillText: String {
+        switch self {
+        case .online:
+            return "Online"
+        case .offline:
+            return "Offline"
+        case .busy:
+            return "Busy"
+        }
+    }
+}
+
+struct ContactListPresentation: Equatable {
+    let displayStatus: ConversationDisplayStatus
+    let section: ConversationListSection
+    let availabilityPill: ConversationAvailabilityPill
+    let requestCount: Int?
+
+    func statusPillText(isActiveConversation: Bool = false) -> String {
+        if isActiveConversation, availabilityPill == .online {
+            return "Connected"
+        }
+
+        if section == .wantsToTalk, availabilityPill == .online {
+            return "Ready"
+        }
+
+        return availabilityPill.pillText
     }
 }
 
@@ -1242,6 +1307,57 @@ enum ConversationStateMachine {
         case .idle:
             return presence == .connected ? .online : .offline
         }
+    }
+
+    static func contactListSection(for displayStatus: ConversationDisplayStatus) -> ConversationListSection {
+        switch displayStatus {
+        case .requested(let direction, _):
+            switch direction {
+            case .incoming:
+                return .wantsToTalk
+            case .outgoing:
+                return .requested
+            }
+        case .ready, .live:
+            return .readyToTalk
+        case .offline, .online:
+            return .contacts
+        }
+    }
+
+    static func availabilityPill(
+        for presence: ContactPresencePresentation,
+        isBusy: Bool = false
+    ) -> ConversationAvailabilityPill {
+        if isBusy {
+            return .busy
+        }
+
+        switch presence {
+        case .connected, .reachable:
+            return .online
+        case .offline:
+            return .offline
+        }
+    }
+
+    static func contactListPresentation(
+        for conversationState: ConversationState,
+        requestCount: Int?,
+        presence: ContactPresencePresentation,
+        isBusy: Bool = false
+    ) -> ContactListPresentation {
+        let displayStatus = displayStatus(
+            for: conversationState,
+            requestCount: requestCount,
+            presence: presence
+        )
+        return ContactListPresentation(
+            displayStatus: displayStatus,
+            section: contactListSection(for: displayStatus),
+            availabilityPill: availabilityPill(for: presence, isBusy: isBusy),
+            requestCount: displayStatus.requestCount
+        )
     }
 
     static func statusMessage(for context: ConversationDerivationContext) -> String {

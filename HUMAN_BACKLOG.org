@@ -17,3 +17,12 @@
 * Unison Concurrency
 * Request again disabled.
 * UI for low volume level
+* Intermittent state changes
+* Wait for the beep, than talk.
+* Contact adding
+** QR / username
+** Giving a name?
+* Production logs and diagnostics and invariant detection.
+* Discord event monitoring.
+* Event based analytics?
+* Background + Background and end session (should end other too)

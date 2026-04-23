@@ -112,6 +112,14 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         )
     }
 
+    func backgroundPresence() async throws -> TurboPresenceHeartbeatResponse {
+        try await request(
+            path: "/v1/presence/background",
+            method: "POST",
+            body: TurboChannelDeviceRequest(deviceId: config.deviceID)
+        )
+    }
+
     func contactSummaries() async throws -> [TurboContactSummaryResponse] {
         try await request(
             path: "/v1/contacts/summaries/\(config.deviceID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? config.deviceID)"
