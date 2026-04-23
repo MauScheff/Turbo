@@ -60,6 +60,7 @@ extension PTTViewModel {
             reason: reason,
             message: message,
             metadata: baseTelemetryMetadata().merging(metadata, uniquingKeysWith: { _, new in new }),
+            devTraffic: isDevTelemetryTraffic,
             alert: alert
         )
 
@@ -99,5 +100,13 @@ extension PTTViewModel {
         default:
             return entry.level == .error
         }
+    }
+
+    private var isDevTelemetryTraffic: Bool {
+#if DEBUG
+        true
+#else
+        backendRuntime.mode != "cloud"
+#endif
     }
 }

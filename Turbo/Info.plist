@@ -6,6 +6,17 @@
 	<string>BeepBeep</string>
 	<key>CFBundleName</key>
 	<string>BeepBeep</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>to.beepbeep.app</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>beepbeep</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -13,6 +24,8 @@
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>BeepBeep uses the microphone to send push-to-talk audio to the connected contact.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>BeepBeep uses the camera to scan QR codes for adding contacts.</string>
 	<key>TurboBackendBaseURL</key>
 	<string>https://beepbeep.to</string>
 	<key>TurboDevUserHandle</key>

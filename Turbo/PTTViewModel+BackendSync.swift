@@ -1072,12 +1072,15 @@ extension PTTViewModel {
             for summary in summaries {
                 let channelID = summary.channelId ?? ""
                 let contactID = ensureContactExists(
-                    handle: summary.handle,
+                    handle: summary.publicId,
                     remoteUserId: summary.userId,
-                    channelId: channelID
+                    channelId: channelID,
+                    displayName: summary.profileName
                 )
                 nextSummaries[contactID] = summary
                 updateContact(contactID) { contact in
+                    contact.name = summary.profileName
+                    contact.handle = summary.publicId
                     contact.isOnline = summary.isOnline
                     contact.remoteUserId = summary.userId
                     if let channelId = summary.channelId {

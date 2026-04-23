@@ -1,0 +1,309 @@
+turbo.store.users.getByPublicId : Database -> Text -> '{Exception, Remote} Optional User
+turbo.store.users.getByPublicId db publicId = do
+  getByHandle db publicId ()
+
+turbo.service.internal.htmlEscape : Text -> Text
+turbo.service.internal.htmlEscape text =
+  text
+    |> Text.replaceAll "&" "&amp;"
+    |> Text.replaceAll "<" "&lt;"
+    |> Text.replaceAll ">" "&gt;"
+    |> Text.replaceAll "\"" "&quot;"
+    |> Text.replaceAll "'" "&#39;"
+
+turbo.service.internal.urlQueryEscape : Text -> Text
+turbo.service.internal.urlQueryEscape text =
+  text
+    |> Text.replaceAll "%" "%25"
+    |> Text.replaceAll " " "%20"
+    |> Text.replaceAll "#" "%23"
+    |> Text.replaceAll "&" "%26"
+    |> Text.replaceAll "+" "%2B"
+    |> Text.replaceAll "," "%2C"
+    |> Text.replaceAll "/" "%2F"
+    |> Text.replaceAll ":" "%3A"
+    |> Text.replaceAll ";" "%3B"
+    |> Text.replaceAll "=" "%3D"
+    |> Text.replaceAll "?" "%3F"
+    |> Text.replaceAll "@" "%40"
+
+turbo.service.share.appIdentifier : Text
+turbo.service.share.appIdentifier = "7MQU7TLQQ2.com.rounded.Turbo"
+
+turbo.service.share.customSchemeLink : User -> Text
+turbo.service.share.customSchemeLink user =
+  use Text ++
+  "beepbeep://p/" ++ shareCode user
+
+turbo.service.share.qrImageLink : User -> Text
+turbo.service.share.qrImageLink user =
+  use Text ++
+  "https://api.qrserver.com/v1/create-qr-code/?size=640x640&data="
+    ++ service.internal.urlQueryEscape (shareLink user)
+
+turbo.service.share.didDocumentJson : User -> Json
+turbo.service.share.didDocumentJson user =
+  use Text ++
+  use object addList addText empty
+  documentId = did user
+  sharePage = shareLink user
+  empty
+    |> addList "@context" [Json.text "https://www.w3.org/ns/did/v1"]
+    |> addText "id" documentId
+    |> addList "alsoKnownAs" [Json.text sharePage]
+    |> addList "service"
+      [ empty
+          |> addText "id" (documentId ++ "#share")
+          |> addText "type" "BeepBeepSharePage"
+          |> addText "serviceEndpoint" sharePage
+      ]
+
+turbo.service.share.appleAppSiteAssociationJson : Json
+turbo.service.share.appleAppSiteAssociationJson =
+  use object addList addText empty
+  appComponent path =
+    empty
+      |> addText "/" path
+  details =
+    empty
+      |> addList "appIDs" [Json.text appIdentifier]
+      |> addList "components"
+        [ appComponent "/p/*"
+        , appComponent "/id/*/did.json"
+        ]
+  empty
+    |> add "applinks"
+      (empty
+        |> addList "details" [details])
+
+turbo.service.share.notFoundHtml : Text -> Text
+turbo.service.share.notFoundHtml publicId =
+  use Text ++
+  escapedPublicId = service.internal.htmlEscape publicId
+  Text.unlines
+    [ "<!doctype html>"
+    , "<html lang=\"en\">"
+    , "<head>"
+    , "  <meta charset=\"utf-8\">"
+    , "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    , "  <title>BeepBeep</title>"
+    , "  <style>"
+    , "    :root { color-scheme: dark; --bg: #0b1018; --ink: #f5f0e8; --muted: #9ca7b5; --accent: #ff6b2c; }"
+    , "    * { box-sizing: border-box; }"
+    , "    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: radial-gradient(circle at top, #1d2b3f 0%, #0b1018 55%, #05070b 100%); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Display\", sans-serif; padding: 24px; }"
+    , "    main { width: min(540px, 100%); }"
+    , "    h1 { font-size: clamp(2.6rem, 10vw, 4.6rem); line-height: 0.92; margin: 0 0 12px; }"
+    , "    p { margin: 0; color: var(--muted); font-size: 1rem; line-height: 1.6; }"
+    , "    .label { color: var(--accent); font-size: 0.8rem; font-weight: 700; letter-spacing: 0.22em; margin-bottom: 18px; }"
+    , "    .code { margin-top: 22px; font-size: 1.1rem; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }"
+    , "  </style>"
+    , "</head>"
+    , "<body>"
+    , "  <main>"
+    , "    <div class=\"label\">BEEPBEEP</div>"
+    , "    <h1>That link no longer points to someone.</h1>"
+    , "    <p>The shared code <span class=\"code\">" ++ escapedPublicId ++ "</span> does not currently resolve to a BeepBeep identity.</p>"
+    , "  </main>"
+    , "</body>"
+    , "</html>"
+    ]
+
+turbo.service.share.pageHtml : User -> Text
+turbo.service.share.pageHtml user =
+  use Text ++
+  escapedName = service.internal.htmlEscape (profileName user)
+  escapedCode = service.internal.htmlEscape (shareCode user)
+  escapedLink = service.internal.htmlEscape (shareLink user)
+  escapedDid = service.internal.htmlEscape (did user)
+  escapedScheme = service.internal.htmlEscape (customSchemeLink user)
+  escapedQrImage = service.internal.htmlEscape (qrImageLink user)
+  Text.unlines
+    [ "<!doctype html>"
+    , "<html lang=\"en\">"
+    , "<head>"
+    , "  <meta charset=\"utf-8\">"
+    , "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    , "  <title>" ++ escapedName ++ " on BeepBeep</title>"
+    , "  <meta name=\"apple-itunes-app\" content=\"app-id=6762493911, app-argument=" ++ escapedLink ++ "\">"
+    , "  <meta name=\"theme-color\" content=\"#0d141d\">"
+    , "  <style>"
+    , "    :root { color-scheme: dark; --bg: #0d141d; --ink: #f8f3eb; --muted: #9ea8b6; --accent: #ff6b2c; --accent-soft: #ffd06a; --line: rgba(255,255,255,0.12); --paper: #fffdf6; }"
+    , "    * { box-sizing: border-box; }"
+    , "    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top, rgba(255,126,58,0.22), transparent 34%), radial-gradient(circle at 85% 14%, rgba(255,208,106,0.18), transparent 28%), linear-gradient(180deg, #101723 0%, #070a0f 100%); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Display\", sans-serif; }"
+    , "    main { min-height: 100vh; display: grid; align-items: center; padding: clamp(24px, 4vw, 48px); }"
+    , "    .hero { width: min(980px, 100%); display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(248px, 312px); gap: clamp(28px, 5vw, 60px); align-items: end; }"
+    , "    .copy { min-width: 0; }"
+    , "    .eyebrow { margin: 0 0 18px; font-size: 0.78rem; font-weight: 800; letter-spacing: 0.28em; color: var(--accent-soft); }"
+    , "    h1 { margin: 0; font-size: clamp(3.4rem, 14vw, 7.6rem); line-height: 0.9; letter-spacing: -0.05em; max-width: 9ch; }"
+    , "    .lede { margin: 18px 0 0; max-width: 34rem; font-size: clamp(1rem, 2.8vw, 1.22rem); line-height: 1.6; color: var(--muted); }"
+    , "    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }"
+    , "    .button { appearance: none; border: 0; border-radius: 999px; padding: 15px 22px; font: inherit; font-weight: 700; cursor: pointer; text-decoration: none; transition: transform 160ms ease, opacity 160ms ease, background 160ms ease; }"
+    , "    .button:hover { transform: translateY(-1px); }"
+    , "    .button.primary { background: var(--accent); color: #130901; }"
+    , "    .button.secondary { background: rgba(255,255,255,0.06); color: var(--ink); border: 1px solid var(--line); }"
+    , "    .meta { display: grid; gap: 18px; margin-top: 36px; padding-top: 22px; border-top: 1px solid var(--line); max-width: 38rem; }"
+    , "    .kicker { margin: 0; font-size: 0.74rem; font-weight: 700; letter-spacing: 0.18em; color: var(--muted); text-transform: uppercase; }"
+    , "    .code { margin: 6px 0 0; font-size: clamp(1.2rem, 4vw, 1.55rem); font-weight: 700; letter-spacing: 0.06em; }"
+    , "    .mono { margin: 8px 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.94rem; line-height: 1.5; color: var(--ink); word-break: break-all; }"
+    , "    details { margin-top: 8px; }"
+    , "    summary { cursor: pointer; color: var(--muted); }"
+    , "    .install-group { margin-top: 32px; max-width: 32rem; }"
+    , "    .install { margin: 0; color: var(--muted); line-height: 1.6; }"
+    , "    .install strong { color: var(--ink); }"
+    , "    .install[hidden] { display: none; }"
+    , "    .qr-shell { justify-self: end; width: min(100%, 312px); }"
+    , "    .qr-panel { padding: 18px; background: rgba(255,255,255,0.05); border: 1px solid var(--line); border-radius: 28px; backdrop-filter: blur(18px); }"
+    , "    .qr-frame { aspect-ratio: 1; width: 100%; border-radius: 22px; background: var(--paper); display: grid; place-items: center; padding: 18px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06); }"
+    , "    .qr-frame canvas, .qr-frame img { width: 100%; height: auto; display: block; }"
+    , "    .qr-note { margin: 14px 6px 0; color: var(--muted); font-size: 0.92rem; line-height: 1.5; }"
+    , "    .qr-fallback { text-align: center; color: #1d232f; font-size: 0.92rem; line-height: 1.5; }"
+    , "    @media (max-width: 900px) { .hero { grid-template-columns: 1fr; } .qr-shell { justify-self: start; width: min(280px, 100%); } h1 { max-width: 100%; } }"
+    , "    @media (max-width: 720px) { .actions { flex-direction: column; align-items: stretch; } .button { text-align: center; } }"
+    , "  </style>"
+    , "</head>"
+    , "<body>"
+    , "  <main>"
+    , "    <section class=\"hero\">"
+    , "      <div class=\"copy\">"
+    , "        <p class=\"eyebrow\">ADD ME ON BEEPBEEP</p>"
+    , "        <h1>" ++ escapedName ++ "</h1>"
+    , "        <p class=\"lede\">Open this on your iPhone to jump straight into BeepBeep, or scan the QR from another device to add this contact instantly.</p>"
+    , "        <div class=\"actions\">"
+    , "          <a id=\"open-app\" class=\"button primary\" href=\"" ++ escapedScheme ++ "\">Open in BeepBeep</a>"
+    , "          <button class=\"button secondary\" type=\"button\" data-copy=\"" ++ escapedLink ++ "\" onclick=\"copyValue(this)\">Copy Link</button>"
+    , "        </div>"
+    , "        <div class=\"meta\">"
+    , "          <div>"
+    , "            <p class=\"kicker\">Code</p>"
+    , "            <p class=\"code\">" ++ escapedCode ++ "</p>"
+    , "          </div>"
+    , "          <div>"
+    , "            <p class=\"kicker\">Share link</p>"
+    , "            <p class=\"mono\">" ++ escapedLink ++ "</p>"
+    , "          </div>"
+    , "          <details>"
+    , "            <summary>Identity details</summary>"
+    , "            <p class=\"mono\">" ++ escapedDid ++ "</p>"
+    , "          </details>"
+    , "        </div>"
+    , "        <div class=\"install-group\">"
+    , "          <p id=\"install-default\" class=\"install\"><strong>Open on iPhone.</strong> Scan the QR or send yourself this link, then open it from your phone to jump into BeepBeep.</p>"
+    , "          <p id=\"install-ios\" class=\"install\" hidden><strong>On iPhone now?</strong> Tap Open in BeepBeep or use the banner above. If the app is not installed yet, get it from the App Store.</p>"
+    , "          <p id=\"install-android\" class=\"install\" hidden><strong>Android is not supported yet.</strong> Keep this page open and scan the QR or open the same link from an iPhone instead.</p>"
+    , "        </div>"
+    , "      </div>"
+    , "      <aside class=\"qr-shell\">"
+    , "        <div class=\"qr-panel\">"
+    , "          <div id=\"qr\" class=\"qr-frame\">"
+    , "            <img src=\"" ++ escapedQrImage ++ "\" alt=\"QR code for this BeepBeep share link\" referrerpolicy=\"no-referrer\" onerror=\"handleQRLoadError()\">"
+    , "          </div>"
+    , "          <p class=\"qr-note\">Scan this in BeepBeep or with your phone camera to open the same share link.</p>"
+    , "        </div>"
+    , "      </aside>"
+    , "    </section>"
+    , "  </main>"
+    , "  <script>"
+    , "    function copyValue(button) {"
+    , "      const value = button.dataset.copy || '';"
+    , "      if (!value) return;"
+    , "      const reset = () => window.setTimeout(() => { button.textContent = 'Copy Link'; }, 1200);"
+    , "      if (navigator.clipboard && navigator.clipboard.writeText) {"
+    , "        navigator.clipboard.writeText(value).then(() => { button.textContent = 'Copied'; reset(); });"
+    , "        return;"
+    , "      }"
+    , "      const field = document.createElement('textarea');"
+    , "      field.value = value;"
+    , "      document.body.appendChild(field);"
+    , "      field.select();"
+    , "      document.execCommand('copy');"
+    , "      document.body.removeChild(field);"
+    , "      button.textContent = 'Copied';"
+    , "      reset();"
+    , "    }"
+    , "    function handleQRLoadError() {"
+    , "      const shell = document.getElementById('qr');"
+    , "      if (!shell) return;"
+    , "      shell.innerHTML = '<div class=\"qr-fallback\">Open BeepBeep and enter the code above.</div>';"
+    , "    }"
+    , "    (function configurePlatformHints() {"
+    , "      const ua = navigator.userAgent || '';"
+    , "      const ios = /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);"
+    , "      const android = /Android/i.test(ua);"
+    , "      const openApp = document.getElementById('open-app');"
+    , "      const variants = {"
+    , "        default: document.getElementById('install-default'),"
+    , "        ios: document.getElementById('install-ios'),"
+    , "        android: document.getElementById('install-android')"
+    , "      };"
+    , "      const show = (key) => {"
+    , "        Object.keys(variants).forEach((current) => {"
+    , "          const element = variants[current];"
+    , "          if (!element) return;"
+    , "          element.hidden = current !== key;"
+    , "        });"
+    , "      };"
+    , "      if (ios) {"
+    , "        show('ios');"
+    , "        return;"
+    , "      }"
+    , "      if (android) {"
+    , "        show('android');"
+    , "      } else {"
+    , "        show('default');"
+    , "      }"
+    , "      if (openApp) openApp.hidden = true;"
+    , "    })();"
+    , "  </script>"
+    , "</body>"
+    , "</html>"
+    ]
+
+turbo.service.share.page : Database -> '{Route, Exception, Remote} ()
+turbo.service.share.page db = do
+  use Parser /
+  publicIdText = route GET (s "p" / Parser.text)
+  match getByPublicId db publicIdText () with
+    None      -> notFound.html (notFoundHtml publicIdText)
+    Some user -> ok.html (pageHtml user)
+
+turbo.service.share.didDocument : Database -> '{Route, Exception, Remote} ()
+turbo.service.share.didDocument db = do
+  use Parser /
+  publicIdText = route GET (s "id" / Parser.text / s "did.json")
+  match getByPublicId db publicIdText () with
+    None      -> notFound.json (object.empty |> addText "error" "user not found")
+    Some user -> ok.json (didDocumentJson user)
+
+turbo.service.share.appleAppSiteAssociationRoot : '{Route} ()
+turbo.service.share.appleAppSiteAssociationRoot = do
+  noCapture GET (s "apple-app-site-association")
+  ok.json appleAppSiteAssociationJson
+
+turbo.service.share.appleAppSiteAssociationWellKnown : '{Route} ()
+turbo.service.share.appleAppSiteAssociationWellKnown = do
+  use Parser /
+  noCapture GET (s ".well-known" / s "apple-app-site-association")
+  ok.json appleAppSiteAssociationJson
+
+turbo.service.routes.share : Database -> '{Route, Exception, Remote} ()
+turbo.service.routes.share db =
+  use Route or
+  or service.share.appleAppSiteAssociationRoot
+    (or service.share.appleAppSiteAssociationWellKnown
+      (or (service.share.page db) (service.share.didDocument db)))
+
+turbo.service.httpWithConfig : Text -> Boolean -> Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.httpWithConfig mode supportsWebSocket db =
+  use Route or
+  or health
+    (or (service.routes.share db)
+      (or (service.config mode supportsWebSocket)
+        (or (uploadEvent db)
+          (or (internal.routes db)
+            (or (dev db)
+              (or (service.presence.heartbeat db)
+                (or (background db)
+                  (or (offline db)
+                    (or (auth db)
+                      (or (users db)
+                        (or (invites db) (channels db)))))))))))

@@ -55,6 +55,14 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         try await request(path: "/v1/auth/session", method: "POST")
     }
 
+    func updateProfileName(_ profileName: String) async throws -> TurboAuthSessionResponse {
+        try await request(
+            path: "/v1/profile",
+            method: "POST",
+            body: TurboProfileUpdateRequest(profileName: profileName)
+        )
+    }
+
     func seedDevUsers() async throws -> TurboSeedResponse {
         try await request(path: "/v1/dev/seed", method: "POST")
     }
@@ -96,6 +104,14 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         try await request(path: "/v1/users/by-handle/\(handle.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? handle)")
     }
 
+    func resolveIdentity(reference: String) async throws -> TurboUserLookupResponse {
+        try await request(
+            path: "/v1/identities/resolve",
+            method: "POST",
+            body: TurboResolveIdentityRequest(reference: reference)
+        )
+    }
+
     func lookupPresence(handle: String) async throws -> TurboUserPresenceResponse {
         try await request(path: Self.presenceLookupPath(for: handle))
     }
@@ -130,11 +146,11 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         )
     }
 
-    func directChannel(otherHandle: String) async throws -> TurboDirectChannelResponse {
+    func directChannel(otherHandle: String? = nil, otherUserId: String? = nil) async throws -> TurboDirectChannelResponse {
         try await request(
             path: "/v1/channels/direct",
             method: "POST",
-            body: TurboDirectChannelRequest(otherHandle: otherHandle)
+            body: TurboDirectChannelRequest(otherHandle: otherHandle, otherUserId: otherUserId)
         )
     }
 
@@ -166,11 +182,11 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         )
     }
 
-    func createInvite(otherHandle: String) async throws -> TurboInviteResponse {
+    func createInvite(otherHandle: String? = nil, otherUserId: String? = nil) async throws -> TurboInviteResponse {
         try await request(
             path: "/v1/invites",
             method: "POST",
-            body: TurboCreateInviteRequest(otherHandle: otherHandle, deviceId: config.deviceID)
+            body: TurboCreateInviteRequest(otherHandle: otherHandle, otherUserId: otherUserId, deviceId: config.deviceID)
         )
     }
 
@@ -511,12 +527,18 @@ private struct TurboRegisterDeviceRequest: Encodable {
 }
 
 private struct TurboDirectChannelRequest: Encodable {
-    let otherHandle: String
+    let otherHandle: String?
+    let otherUserId: String?
 }
 
 private struct TurboCreateInviteRequest: Encodable {
-    let otherHandle: String
+    let otherHandle: String?
+    let otherUserId: String?
     let deviceId: String
+}
+
+private struct TurboResolveIdentityRequest: Encodable {
+    let reference: String
 }
 
 private struct TurboChannelDeviceRequest: Encodable {

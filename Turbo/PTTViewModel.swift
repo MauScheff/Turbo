@@ -245,7 +245,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         }
 
         lease.identifier = beginBackgroundActivity(name) { [weak self] in
-            Task { @MainActor in
+            Task { @MainActor [weak self, endLease, name] in
                 self?.diagnostics.record(
                     .app,
                     level: .error,
@@ -341,18 +341,30 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         client: TurboBackendClient,
         userID: String,
         mode: String,
-        telemetryEnabled: Bool = false
+        telemetryEnabled: Bool = false,
+        publicID: String? = nil,
+        profileName: String? = nil,
+        shareCode: String? = nil,
+        shareLink: String? = nil
     ) {
         backendRuntime.applyAuthenticatedSession(
             client: client,
             userID: userID,
             mode: mode,
-            telemetryEnabled: telemetryEnabled
+            telemetryEnabled: telemetryEnabled,
+            publicID: publicID,
+            profileName: profileName,
+            shareCode: shareCode,
+            shareLink: shareLink
         )
     }
 
     func storeAuthenticatedUserID(_ userID: String) {
         backendRuntime.storeAuthenticatedUserID(userID)
+    }
+
+    func storeCurrentProfileName(_ profileName: String?) {
+        backendRuntime.storeCurrentProfileName(profileName)
     }
 
     func resetBackendRuntimeForReconnect() {
@@ -572,7 +584,46 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     var currentDevUserHandle: String {
-        backendRuntime.config?.devUserHandle ?? "@turbo-ios"
+        backendRuntime.config?.devUserHandle ?? "bb-local"
+    }
+
+    var currentIdentityCode: String {
+        backendRuntime.currentShareCode
+            ?? backendRuntime.currentPublicID
+            ?? currentDevUserHandle
+    }
+
+    var currentProfileName: String {
+        if let currentProfileName = backendRuntime.currentProfileName?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !currentProfileName.isEmpty {
+            return currentProfileName
+        }
+        return TurboIdentityProfileStore.draftProfileName()
+    }
+
+    var currentIdentityShareLink: String {
+        if let currentShareLink = backendRuntime.currentShareLink,
+           !currentShareLink.isEmpty {
+            return currentShareLink
+        }
+
+        let encodedCode =
+            currentIdentityCode.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+            ?? currentIdentityCode
+        return "https://beepbeep.to/p/\(encodedCode)"
+    }
+
+    var developerIdentityControlsEnabled: Bool {
+#if DEBUG
+        true
+#else
+        false
+#endif
+    }
+
+    var hasCompletedIdentityOnboarding: Bool {
+        TurboIdentityProfileStore.hasCompletedOnboarding()
     }
 
     var appVersionDescription: String {
@@ -586,11 +637,15 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     var availableDevUserHandles: [String] {
-        Array(Set(([currentDevUserHandle] + ContactDirectory.suggestedDevHandles).map(Contact.normalizedHandle))).sorted()
+        guard developerIdentityControlsEnabled else { return [currentDevUserHandle] }
+        return Array(
+            Set(([currentDevUserHandle] + ContactDirectory.suggestedDevHandles).map(Contact.normalizedHandle))
+        ).sorted()
     }
 
     var quickPeerHandles: [String] {
-        ["@avery", "@blake"]
+        guard developerIdentityControlsEnabled else { return [] }
+        return ["@avery", "@blake"]
             .map(Contact.normalizedHandle)
             .filter { $0 != currentDevUserHandle }
     }

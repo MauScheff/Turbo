@@ -15,7 +15,21 @@ struct TurboTests {
         #expect(AudioOutputPreference.phone.buttonLabel == "Phone")
     }
 
-    @Test func telemetryEventRequestEncodesMetadataTextAndAlertAsStrings() throws {
+    @Test func suggestedProfileNameUsesTwoWordsWithoutDigits() {
+        for _ in 0..<32 {
+            let candidate = TurboSuggestedProfileName.generate()
+            let parts = candidate.split(separator: " ")
+            #expect(parts.count == 2)
+            #expect(candidate.contains(where: \.isNumber) == false)
+        }
+    }
+
+    @Test func identityProfileStoreNormalizesWhitespace() {
+        let normalized = TurboIdentityProfileStore.normalizedProfileName("  Sunny Otter  ")
+        #expect(normalized == "Sunny Otter")
+    }
+
+    @Test func telemetryEventRequestEncodesMetadataTextAndFlagsAsStrings() throws {
         let payload = TurboTelemetryEventRequest(
             eventName: "ios.invariant.violation",
             source: "ios",
@@ -24,6 +38,7 @@ struct TurboTests {
                 "beta": "2",
                 "alpha": "1",
             ],
+            devTraffic: true,
             alert: true
         )
 
@@ -34,6 +49,7 @@ struct TurboTests {
         #expect(json?["eventName"] == "ios.invariant.violation")
         #expect(json?["source"] == "ios")
         #expect(json?["severity"] == "error")
+        #expect(json?["devTraffic"] == "true")
         #expect(json?["alert"] == "true")
         #expect(json?["metadataText"] == #"{"alpha":"1","beta":"2"}"#)
     }
@@ -53,6 +69,7 @@ struct TurboTests {
         let json = rawObject as? [String: String]
 
         #expect(json?["metadataText"] == #"{"prebuilt":"payload"}"#)
+        #expect(json?["devTraffic"] == "false")
         #expect(json?["alert"] == "false")
     }
 
@@ -2895,6 +2912,46 @@ struct TurboTests {
         #expect(refreshed.channelId != ContactDirectory.stableChannelUUID(for: staleChannelID))
     }
 
+    @Test func contactStableIDUsesRemoteUserIdAcrossPublicIdChanges() {
+        let original = Contact.stableID(remoteUserId: "user-blake", fallbackHandle: "@blake")
+        let renamed = Contact.stableID(remoteUserId: "user-blake", fallbackHandle: "maurice")
+        let fallbackOnly = Contact.stableID(remoteUserId: nil, fallbackHandle: "@blake")
+
+        #expect(original == renamed)
+        #expect(original != fallbackOnly)
+    }
+
+    @Test func ensureContactMatchesExistingRemoteUserWhenPublicIdChanges() {
+        let existingContactID = Contact.stableID(remoteUserId: "user-blake", fallbackHandle: "@blake")
+        let existing = [
+            Contact(
+                id: existingContactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: nil,
+                remoteUserId: "user-blake"
+            )
+        ]
+
+        let result = ContactDirectory.ensureContact(
+            handle: "maurice",
+            remoteUserId: "user-blake",
+            channelId: "",
+            displayName: "Maurice",
+            existingContacts: existing
+        )
+
+        let refreshed = try! #require(result.contacts.first)
+        #expect(result.contacts.count == 1)
+        #expect(result.contactID == existingContactID)
+        #expect(refreshed.id == existingContactID)
+        #expect(refreshed.handle == "maurice")
+        #expect(refreshed.name == "Maurice")
+        #expect(refreshed.remoteUserId == "user-blake")
+    }
+
     @Test func backendSyncStateClearsStaleChannelStateWhenContactSummaryHasNoChannel() {
         let contactID = UUID()
         var state = BackendSyncState()
@@ -4594,6 +4651,94 @@ struct TurboTests {
         #expect(summary.badge == .incoming)
         #expect(summary.badgeKind == "incoming")
         #expect(summary.badge.conversationState == .incomingRequest)
+    }
+
+    @Test func userLookupDecodesPublicIdentityFields() throws {
+        let data = Data(
+            """
+            {
+              "userId": "peer",
+              "handle": "@legacy",
+              "publicId": "maurice",
+              "displayName": "Maurice",
+              "profileName": "Maurice",
+              "shareCode": "maurice",
+              "shareLink": "https://beepbeep.to/p/maurice",
+              "did": "did:web:beepbeep.to:id:maurice",
+              "subjectKind": "agent"
+            }
+            """.utf8
+        )
+
+        let user = try JSONDecoder().decode(TurboUserLookupResponse.self, from: data)
+
+        #expect(user.handle == "@legacy")
+        #expect(user.publicId == "maurice")
+        #expect(user.profileName == "Maurice")
+        #expect(user.shareCode == "maurice")
+        #expect(user.shareLink == "https://beepbeep.to/p/maurice")
+        #expect(user.did == "did:web:beepbeep.to:id:maurice")
+        #expect(user.subjectKind == "agent")
+    }
+
+    @Test func incomingLinkParsesCanonicalSharePage() {
+        let url = URL(string: "https://beepbeep.to/p/maurice?utm_source=test#card")!
+
+        #expect(TurboIncomingLink.reference(from: url) == "https://beepbeep.to/p/maurice")
+    }
+
+    @Test func incomingLinkParsesCustomSchemeSharePage() {
+        let url = URL(string: "beepbeep://p/maurice")!
+
+        #expect(TurboIncomingLink.reference(from: url) == "https://beepbeep.to/p/maurice")
+    }
+
+    @Test func incomingLinkParsesCustomSchemeDidTarget() {
+        let url = URL(string: "beepbeep://id/maurice")!
+
+        #expect(TurboIncomingLink.reference(from: url) == "did:web:beepbeep.to:id:maurice")
+    }
+
+    @Test func incomingLinkRejectsUnrelatedURLs() {
+        let url = URL(string: "https://example.com/p/maurice")!
+
+        #expect(TurboIncomingLink.reference(from: url) == nil)
+    }
+
+    @Test func contactSummaryFallsBackToLegacyHandleForPublicIdentityFields() throws {
+        let data = Data(
+            """
+            {
+              "userId": "peer",
+              "handle": "@blake",
+              "displayName": "Blake",
+              "channelId": "channel",
+              "isOnline": true,
+              "hasIncomingRequest": false,
+              "hasOutgoingRequest": false,
+              "requestCount": 0,
+              "requestRelationship": {
+                "kind": "none",
+                "requestCount": 0
+              },
+              "summaryStatus": {
+                "kind": "online",
+                "activeTransmitterUserId": null
+              },
+              "membership": {
+                "kind": "both",
+                "peerDeviceConnected": true
+              },
+              "isActiveConversation": false,
+              "badgeStatus": "online"
+            }
+            """.utf8
+        )
+
+        let summary = try JSONDecoder().decode(TurboContactSummaryResponse.self, from: data)
+
+        #expect(summary.publicId == "@blake")
+        #expect(summary.profileName == "Blake")
     }
 
     @Test func contactSummaryDecodeFailsWithoutNestedContract() {
@@ -17163,7 +17308,7 @@ private func executeSimulatorScenario(_ spec: SimulatorScenarioConfig) async thr
                           let peer = spec.participants[peerActor] else {
                         throw ScenarioFailure(message: "openPeer requires a known peer actor")
                     }
-                    await participant.openContact(handle: peer.handle)
+                    await participant.openContact(reference: peer.handle)
                 case "connect":
                     participant.joinChannel()
                 case "disconnect":
@@ -17182,7 +17327,8 @@ private func executeSimulatorScenario(_ spec: SimulatorScenarioConfig) async thr
                           let backend = participant.backendServices else {
                         throw ScenarioFailure(message: "ensureDirectChannel requires a known peer actor and backend")
                     }
-                    _ = try await backend.directChannel(otherHandle: peer.handle)
+                    let remoteUser = try await backend.resolveIdentity(reference: peer.handle)
+                    _ = try await backend.directChannel(otherUserId: remoteUser.userId)
                     await participant.refreshContactSummaries()
                     if let selectedContactID = participant.selectedContact?.id {
                         await participant.refreshChannelState(for: selectedContactID)
@@ -17446,7 +17592,7 @@ private func scenarioParticipantsAreDiscoverable(
         guard let backend = participant.backendServices else { return false }
         for (peerActor, peer) in spec.participants where peerActor != actor {
             do {
-                _ = try await backend.lookupUser(handle: peer.handle)
+                _ = try await backend.resolveIdentity(reference: peer.handle)
             } catch {
                 return false
             }

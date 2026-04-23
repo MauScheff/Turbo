@@ -1,0 +1,52 @@
+turbo.store.users.normalizedDisplayName : Text -> Text -> Text
+turbo.store.users.normalizedDisplayName handleText submittedDisplayName =
+  trimmed = Text.trim submittedDisplayName
+  if Text.size trimmed == 0 then handleText else trimmed
+
+turbo.store.users.updateDisplayName : Database -> UserId -> Text -> '{Exception, Storage, Remote} Optional User
+turbo.store.users.updateDisplayName db targetUserId submittedDisplayName = do
+  use OrderedTable tryRead.tx write.tx
+  table = users.tables.byId db
+  byCreatedAt = users.tables.byCreatedAt db
+  updatedAt = now!
+  transact (OrderedTable.database table) do
+    match tryRead.tx table targetUserId with
+      None -> None
+      Some user ->
+        match user with
+          User userId handleText displayName createdAt _ ->
+            nextDisplayName = normalizedDisplayName handleText submittedDisplayName
+            if nextDisplayName == displayName then
+              Some user
+            else
+              updatedUser = User userId handleText nextDisplayName createdAt updatedAt
+              _ = write.tx table userId updatedUser
+              _ = write.tx byCreatedAt (createdAt, userId) updatedUser
+              Some updatedUser
+
+turbo.service.users.profile : Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.users.profile db = do
+  use Parser /
+  use object empty
+  noCapture POST (s "v1" / s "profile")
+  match requireUser db () with
+    Left err -> unauthorized.json (empty |> addText "error" err)
+    Right user ->
+      fields = decodeJson (Decoder.object Decoder.text)
+      match Map.get "profileName" fields with
+        None ->
+          badRequest.json (empty |> addText "error" "missing profileName")
+        Some submittedDisplayName ->
+          match user with
+            User userId _ _ _ _ ->
+              match updateDisplayName db userId submittedDisplayName () with
+                None ->
+                  notFound.json (empty |> addText "error" "user not found")
+                Some updatedUser ->
+                  ok.json (userIdentityJson updatedUser)
+
+turbo.service.routes.users : Database -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.users db =
+  use Route or
+  or (users.profile db)
+    (or (resolveIdentity db) (or (summary db) (or (presenceByHandle db) (users.byHandle db))))

@@ -40,6 +40,7 @@ The shared event envelope includes these fields when available:
 - `reason`
 - `message`
 - `metadataText`
+- `devTraffic`
 - `alert`
 
 The worker stores these in the `turbo_telemetry_events_v1` Analytics Engine dataset.
@@ -89,6 +90,18 @@ Production telemetry is enabled when the backend has both of these environment v
 - `TURBO_TELEMETRY_WORKER_BASE_URL`
 - `TURBO_TELEMETRY_WORKER_SECRET`
 
+Optional classification env:
+
+- `TURBO_TELEMETRY_DEV_HANDLES`
+  - comma-separated handles treated as dev traffic for backend-owned events
+  - example: `@avery,@blake,@turbo-ios`
+
+`devTraffic` classification rules:
+
+- iOS uploads set `devTraffic=true` for `DEBUG` builds
+- iOS uploads also set `devTraffic=true` when running against a non-cloud backend mode
+- backend-owned events set `devTraffic=true` when the emitting handle is in `TURBO_TELEMETRY_DEV_HANDLES`
+
 When those are present:
 
 - the backend advertises `"telemetryEnabled": true` from `GET /v1/config`
@@ -118,11 +131,13 @@ cd cloudflare/telemetry-worker
 wrangler secret put TURBO_TELEMETRY_WORKER_SECRET
 ```
 
-Optional Discord alert webhook:
+Optional Discord webhooks:
 
 ```bash
 cd cloudflare/telemetry-worker
-wrangler secret put TURBO_TELEMETRY_DISCORD_WEBHOOK
+wrangler secret put TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK
+wrangler secret put TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK
+wrangler secret put TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK
 ```
 
 Then bind the worker to the intended public hostname in Cloudflare:
@@ -182,13 +197,21 @@ Available `just` commands:
 
 - `just telemetry-query query='SHOW TABLES'`
 - `just telemetry-recent hours=24 limit=50`
+- `just telemetry-recent-signal hours=24 limit=50`
+- `just telemetry-recent-dev hours=24 limit=50`
+- `just telemetry-follow hours=1 limit=50 poll=5`
+- `just telemetry-follow-signal hours=1 limit=50 poll=5`
+- `just telemetry-follow-dev hours=1 limit=50 poll=5`
 - `just telemetry-user handle=@avery hours=24 limit=50`
 
 Equivalent direct usage:
 
 ```bash
 python3 scripts/query_telemetry.py --hours 24 --limit 50
+python3 scripts/query_telemetry.py --hours 24 --limit 50 --exclude-event-name backend.presence.heartbeat
+python3 scripts/query_telemetry.py --hours 1 --limit 50 --follow --poll-seconds 5
 python3 scripts/query_telemetry.py --user-handle @avery --hours 24 --limit 50
+python3 scripts/query_telemetry.py --hours 24 --limit 50 --dev-traffic true
 python3 scripts/query_telemetry.py --query "SHOW TABLES"
 ```
 
@@ -202,6 +225,7 @@ Recommended webhook split:
 
 - `TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK` for `#prod-alerts`
 - `TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK` for `#prod-telemetry`
+- `TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK` for `#prod-dev`
 
 Current alert policy:
 
@@ -217,9 +241,11 @@ That means:
 Delivery behavior:
 
 - every accepted event is still written to Analytics Engine
-- the stream webhook receives a curated operator feed
+- `devTraffic=true` events go only to the dev webhook when `TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK` is configured
+- the dev webhook receives both dev telemetry and dev alerts in one channel, labeled separately as `DEV STREAM` or `DEV ALERT`
+- the stream webhook receives a curated operator feed for non-dev traffic
 - `backend.presence.heartbeat` is intentionally excluded from the stream webhook to avoid Discord flood
-- the alerts webhook receives only alert-worthy events
+- the alerts webhook receives only non-dev alert-worthy events
 - the legacy `TURBO_TELEMETRY_DISCORD_WEBHOOK` name is still accepted as an alerts fallback during migration
 
 Discord alerts intentionally include the fields needed to pivot back into Analytics Engine:

@@ -41,6 +41,7 @@ struct TurboTelemetryEventRequest: Encodable {
     let reason: String?
     let message: String?
     let metadataText: String?
+    let devTraffic: String
     let alert: String
 
     init(
@@ -63,6 +64,7 @@ struct TurboTelemetryEventRequest: Encodable {
         message: String? = nil,
         metadata: [String: String] = [:],
         metadataText: String? = nil,
+        devTraffic: Bool = false,
         alert: Bool = false
     ) {
         self.eventName = eventName
@@ -86,6 +88,7 @@ struct TurboTelemetryEventRequest: Encodable {
             metadata: metadata,
             metadataText: metadataText
         )
+        self.devTraffic = devTraffic ? "true" : "false"
         self.alert = alert ? "true" : "false"
     }
 

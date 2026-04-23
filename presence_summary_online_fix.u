@@ -1,0 +1,135 @@
+turbo.service.contacts.internal.summaryPeerPresenceIsOnline :
+  Boolean -> Boolean -> Boolean
+turbo.service.contacts.internal.summaryPeerPresenceIsOnline
+  hasOnlinePeerPresence
+  hasConnectedPeerPresence =
+  Boolean.or hasOnlinePeerPresence hasConnectedPeerPresence
+
+test> turbo.service.contacts.internal.summaryPeerPresenceIsOnline.tests.examples =
+  test.verify do
+    ensureEqual false
+      (turbo.service.contacts.internal.summaryPeerPresenceIsOnline false false)
+    ensure
+      (turbo.service.contacts.internal.summaryPeerPresenceIsOnline true false)
+    ensure
+      (turbo.service.contacts.internal.summaryPeerPresenceIsOnline false true)
+    ensure
+      (turbo.service.contacts.internal.summaryPeerPresenceIsOnline true true)
+
+turbo.service.contacts.internal.summaryJson :
+  Database
+  -> UserId
+  -> Optional DevicePresence
+  -> User
+  -> '{Exception, Storage, Remote, Random} Optional Json
+turbo.service.contacts.internal.summaryJson db currentUserId selfPresence user =
+  do
+    use Boolean or
+    use object add
+    (User otherUserId handleText displayName _ _) = user
+    if userIdEqual currentUserId otherUserId then None
+    else
+      directChannelOpt = directChannel db currentUserId otherUserId ()
+      peerPresence = getForUser db otherUserId ()
+      peerConnectedPresence = getConnectedForUser db otherUserId ()
+      rawPeerOnline =
+        match peerPresence with
+          None -> false
+          Some (DevicePresence _ _ presenceStatus _ _) ->
+            match presenceStatus with
+              DevicePresenceStatus.Online -> true
+              DevicePresenceStatus.Offline -> false
+      peerOnline =
+        turbo.service.contacts.internal.summaryPeerPresenceIsOnline
+          rawPeerOnline
+          (isSome peerConnectedPresence)
+      channelFacts =
+        match directChannelOpt with
+          None -> (None, false, false, false, None, None, None)
+          Some (DirectChannel channelId _ _ _) ->
+            normalizedSelfJoined =
+              selfJoinedChannel db currentUserId channelId selfPresence ()
+            rawPeerDeviceConnected =
+              isSome (getConnectedForUserInChannel db otherUserId channelId ())
+            incomingInvite =
+              incomingInviteForChannel
+                db currentUserId otherUserId channelId ()
+            outgoingInvite =
+              outgoingInviteForChannel
+                db currentUserId otherUserId channelId ()
+            hasPendingRequest =
+              or (isSome incomingInvite) (isSome outgoingInvite)
+            selfJoined =
+              if hasPendingRequest then false else normalizedSelfJoined
+            peerDeviceConnected =
+              if hasPendingRequest then false else rawPeerDeviceConnected
+            peerJoined = peerDeviceConnected
+            activeTransmit = currentTransmit db channelId ()
+            activeTransmitterUserId =
+              Optional.map transmitUserId activeTransmit
+            ( Some (ChannelId.toText channelId)
+            , selfJoined
+            , peerJoined
+            , peerDeviceConnected
+            , incomingInvite
+            , outgoingInvite
+            , activeTransmitterUserId
+            )
+      ( channelIdTextOpt,
+        selfJoined,
+        peerJoined,
+        peerDeviceConnected,
+        incomingInvite,
+        outgoingInvite,
+        activeTransmitterUserId)
+        =
+        channelFacts
+      hasIncomingRequest = isSome incomingInvite
+      hasOutgoingRequest = isSome outgoingInvite
+      requestCount = pendingCount incomingInvite outgoingInvite
+      requestRelationship =
+        requestRelationshipFromFlags
+          hasIncomingRequest hasOutgoingRequest requestCount
+      membership =
+        channelMembershipFromFlags selfJoined peerJoined peerDeviceConnected
+      summaryStatus =
+        contactSummaryStatusFromView
+          currentUserId
+          peerOnline
+          membership
+          requestRelationship
+          activeTransmitterUserId
+      _ =
+        if summaryConnectableWithoutLivePeerOrRequest
+             summaryStatus
+             requestRelationship
+             peerDeviceConnected
+             activeTransmitterUserId
+        then
+          appendSummaryConnectableWithoutLivePeerOrRequestInvariant
+            db
+            currentUserId
+            otherUserId
+            channelIdTextOpt
+            summaryStatus
+            ()
+        else ()
+      isActiveConversation =
+        or
+          (channelMembershipHasLocalMembership membership)
+          (or
+            (channelMembershipHasPeerMembership membership)
+            (isSome activeTransmitterUserId))
+      Some
+        ( userIdentityJson user
+        |> addOptionalText "channelId" channelIdTextOpt
+        |> addBoolean "isOnline" peerOnline
+        |> addBoolean "hasIncomingRequest" hasIncomingRequest
+        |> addBoolean "hasOutgoingRequest" hasOutgoingRequest
+        |> addNat "requestCount" requestCount
+        |> add "membership" (channelMembershipJson membership)
+        |> add "requestRelationship" (requestRelationshipJson requestRelationship)
+        |> add "summaryStatus" (contactSummaryStatusJson summaryStatus)
+        |> addBoolean "isActiveConversation" isActiveConversation
+        |> addText "badgeStatus" (contactSummaryStatusKindText summaryStatus)
+        )

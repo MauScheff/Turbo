@@ -299,7 +299,10 @@ extension PTTViewModel {
 
         do {
             let runtimeConfig = try await client.fetchRuntimeConfig()
-            let session = try await client.authenticate()
+            let session = try await synchronizedProfileSessionIfNeeded(
+                try await client.authenticate(),
+                using: client
+            )
             _ = try await client.registerDevice(
                 label: UIDevice.current.name,
                 alertPushToken: alertPushTokenHex.isEmpty ? nil : alertPushTokenHex
@@ -309,7 +312,11 @@ extension PTTViewModel {
                 client: client,
                 userID: session.userId,
                 mode: runtimeConfig.mode,
-                telemetryEnabled: runtimeConfig.telemetryEnabled ?? false
+                telemetryEnabled: runtimeConfig.telemetryEnabled ?? false,
+                publicID: session.publicId,
+                profileName: session.profileName,
+                shareCode: session.shareCode,
+                shareLink: session.shareLink
             )
             client.connectWebSocket()
             backendSyncCoordinator.send(.bootstrapCompleted(mode: runtimeConfig.mode, handle: session.handle))
@@ -361,6 +368,71 @@ extension PTTViewModel {
         resetLocalDevState(backendStatus: "Reconnecting as \(currentDevUserHandle)...")
         diagnostics.record(.auth, message: "Switching dev identity", metadata: ["handle": currentDevUserHandle])
         captureDiagnosticsState("identity-switch:start")
+        await configureBackendIfNeeded()
+    }
+
+    func updateProfileName(_ profileName: String, markOnboardingComplete: Bool = false) async {
+        let normalizedProfileName = TurboIdentityProfileStore.storeDraftProfileName(profileName)
+        if markOnboardingComplete {
+            TurboIdentityProfileStore.markOnboardingCompleted()
+        }
+        storeCurrentProfileName(normalizedProfileName)
+
+        guard let backend = backendServices else {
+            diagnostics.record(
+                .auth,
+                message: "Stored local profile name while backend was unavailable",
+                metadata: ["profileName": normalizedProfileName]
+            )
+            captureDiagnosticsState("profile-name:stored-local")
+            return
+        }
+
+        do {
+            let session = try await backend.client.updateProfileName(normalizedProfileName)
+            let storedProfileName = TurboIdentityProfileStore.storeDraftProfileName(session.profileName)
+            storeCurrentProfileName(storedProfileName)
+            applyAuthenticatedBackendSession(
+                client: backend.client,
+                userID: session.userId,
+                mode: backend.mode,
+                telemetryEnabled: backend.telemetryEnabled,
+                publicID: session.publicId,
+                profileName: session.profileName,
+                shareCode: session.shareCode,
+                shareLink: session.shareLink
+            )
+            diagnostics.record(
+                .auth,
+                message: "Updated profile name",
+                metadata: ["profileName": storedProfileName]
+            )
+            await refreshContactSummaries()
+            captureDiagnosticsState("profile-name:updated")
+        } catch {
+            diagnostics.record(
+                .auth,
+                level: .error,
+                message: "Profile name update failed",
+                metadata: ["error": error.localizedDescription]
+            )
+            captureDiagnosticsState("profile-name:update-failed")
+        }
+    }
+
+    func signOutToFreshIdentity() async {
+        diagnostics.record(.auth, message: "Signing out to fresh identity", metadata: ["handle": currentDevUserHandle])
+        captureDiagnosticsState("identity-sign-out:start")
+
+        if selectedContactId != nil || isJoined || pttCoordinator.state.systemChannelUUID != nil {
+            await requestDisconnectSelectedPeer()
+        }
+
+        TurboIdentityProfileStore.resetForFreshIdentity()
+        replaceBackendConfig(with: TurboBackendConfig.load())
+        resetLocalDevState(backendStatus: "Creating your new BeepBeep...")
+        backendStatusMessage = "Creating your new BeepBeep..."
+        captureDiagnosticsState("identity-sign-out:local-cleared")
         await configureBackendIfNeeded()
     }
 
@@ -642,6 +714,74 @@ extension PTTViewModel {
             level: outcome.report.isPassing ? .info : .error,
             message: outcome.report.summary,
             metadata: ["target": outcome.report.targetHandle ?? "none"]
+        )
+    }
+
+    private func synchronizedProfileSessionIfNeeded(
+        _ session: TurboAuthSessionResponse,
+        using client: TurboBackendClient
+    ) async throws -> TurboAuthSessionResponse {
+        let remoteProfileName = session.profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let localProfileName = TurboIdentityProfileStore.storeDraftProfileName(
+            TurboIdentityProfileStore.draftProfileName()
+        )
+        let remoteLooksDefault = remoteProfileName.isEmpty
+            || remoteProfileName == session.publicId
+            || remoteProfileName == session.handle
+
+        if !TurboIdentityProfileStore.hasCompletedOnboarding() {
+            if !remoteLooksDefault {
+                let storedRemoteName = TurboIdentityProfileStore.storeDraftProfileName(remoteProfileName)
+                TurboIdentityProfileStore.markOnboardingCompleted()
+                storeCurrentProfileName(storedRemoteName)
+                return sessionWithProfileName(session, profileName: storedRemoteName)
+            }
+
+            storeCurrentProfileName(localProfileName)
+            return sessionWithProfileName(session, profileName: localProfileName)
+        }
+
+        guard localProfileName != remoteProfileName else {
+            storeCurrentProfileName(localProfileName)
+            return sessionWithProfileName(session, profileName: localProfileName)
+        }
+
+        do {
+            let updatedSession = try await client.updateProfileName(localProfileName)
+            let storedRemoteName = TurboIdentityProfileStore.storeDraftProfileName(updatedSession.profileName)
+            storeCurrentProfileName(storedRemoteName)
+            diagnostics.record(
+                .auth,
+                message: "Synchronized profile name on backend connect",
+                metadata: ["profileName": storedRemoteName]
+            )
+            return sessionWithProfileName(updatedSession, profileName: storedRemoteName)
+        } catch {
+            diagnostics.record(
+                .auth,
+                level: .error,
+                message: "Deferred profile sync failed during backend bootstrap",
+                metadata: ["error": error.localizedDescription]
+            )
+            storeCurrentProfileName(localProfileName)
+            return sessionWithProfileName(session, profileName: localProfileName)
+        }
+    }
+
+    private func sessionWithProfileName(
+        _ session: TurboAuthSessionResponse,
+        profileName: String
+    ) -> TurboAuthSessionResponse {
+        TurboAuthSessionResponse(
+            userId: session.userId,
+            handle: session.handle,
+            publicId: session.publicId,
+            displayName: session.displayName,
+            profileName: profileName,
+            shareCode: session.shareCode,
+            shareLink: session.shareLink,
+            did: session.did,
+            subjectKind: session.subjectKind
         )
     }
 }

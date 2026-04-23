@@ -9,19 +9,23 @@ import SwiftUI
 
 private enum ContentRoute {
     case splash
+    case profileSetup
     case live
-    case callPrototype
 }
 
 struct ContentView: View {
     @State private var viewModel: PTTViewModel
     @State private var route: ContentRoute = .splash
+    @State private var isShowingAddContactSheet: Bool = false
+    @State private var isShowingProfileSheet: Bool = false
     @State private var isShowingDevIdentitySheet: Bool = false
     @State private var isShowingDiagnostics: Bool = false
     @State private var draftDevUserHandle: String = ""
     @State private var draftPeerHandle: String = ""
+    @State private var draftProfileName: String = ""
     @State private var isSavingDevIdentity: Bool = false
-    @State private var isRestartingLocalSession: Bool = false
+    @State private var isSavingProfileName: Bool = false
+    @State private var isSigningOut: Bool = false
     @State private var isOpeningPeer: Bool = false
     @State private var isResettingDevState: Bool = false
     @State private var isUploadingDiagnostics: Bool = false
@@ -39,18 +43,20 @@ struct ContentView: View {
             switch route {
             case .splash:
                 splashView
+            case .profileSetup:
+                profileSetupView
             case .live:
                 mainView
-            case .callPrototype:
-                callPrototypeView
             }
         }
         .task {
             await viewModel.initializeIfNeeded()
+            if draftProfileName.isEmpty {
+                draftProfileName = viewModel.currentProfileName
+            }
         }
         .overlay(alignment: .top) {
-            if route != .callPrototype,
-               let activeIncomingTalkRequest = viewModel.activeIncomingTalkRequest {
+            if let activeIncomingTalkRequest = viewModel.activeIncomingTalkRequest {
                 TurboIncomingTalkRequestBanner(
                     request: activeIncomingTalkRequest,
                     onDismiss: viewModel.dismissIncomingTalkRequestSurface,
@@ -63,9 +69,56 @@ struct ContentView: View {
         }
         .animation(.spring(response: 0.28, dampingFraction: 0.9), value: viewModel.activeIncomingTalkRequest?.id)
         .onChange(of: viewModel.selectedContactId) { _, _ in
-            if route != .callPrototype {
-                route = .live
+            route = .live
+            isShowingAddContactSheet = false
+        }
+        .onChange(of: viewModel.currentProfileName) { _, newValue in
+            if !isSavingProfileName && !isShowingProfileSheet {
+                draftProfileName = newValue
             }
+        }
+        .sheet(isPresented: $isShowingAddContactSheet) {
+            TurboAddContactSheet(
+                draftReference: $draftPeerHandle,
+                currentIdentityCode: viewModel.currentIdentityCode,
+                currentShareLink: viewModel.currentIdentityShareLink,
+                quickPeerHandles: viewModel.quickPeerHandles,
+                isOpeningPeer: isOpeningPeer,
+                isResettingDevState: isResettingDevState,
+                statusMessage: addContactStatusMessage,
+                onClose: { isShowingAddContactSheet = false },
+                onOpenReference: openPeer
+            )
+        }
+        .sheet(isPresented: $isShowingProfileSheet) {
+            TurboProfileSheet(
+                draftProfileName: $draftProfileName,
+                currentIdentityCode: viewModel.currentIdentityCode,
+                currentShareLink: viewModel.currentIdentityShareLink,
+                isSavingProfileName: isSavingProfileName,
+                isSigningOut: isSigningOut,
+                showsDeveloperControls: viewModel.developerIdentityControlsEnabled,
+                onClose: { isShowingProfileSheet = false },
+                onSaveProfileName: saveProfileNameFromSheet,
+                onSignOut: signOut,
+                onShowDevIdentity: {
+                    isShowingProfileSheet = false
+                    draftDevUserHandle = viewModel.currentDevUserHandle
+                    isShowingDevIdentitySheet = true
+                },
+                onShowDiagnostics: {
+                    isShowingProfileSheet = false
+                    isShowingDiagnostics = true
+                },
+                onRunSelfCheck: {
+                    isShowingProfileSheet = false
+                    runSelfCheckAndShowDiagnostics()
+                },
+                onResetDevState: {
+                    isShowingProfileSheet = false
+                    resetDevState()
+                }
+            )
         }
         .sheet(isPresented: $isShowingDevIdentitySheet) {
             TurboDevIdentitySheet(
@@ -94,6 +147,13 @@ struct ContentView: View {
                 onRequestMicrophonePermission: requestMicrophonePermission
             )
         }
+        .onOpenURL { url in
+            handleIncomingURL(url)
+        }
+        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { userActivity in
+            guard let url = userActivity.webpageURL else { return }
+            handleIncomingURL(url)
+        }
     }
 
     private var mainView: some View {
@@ -101,49 +161,34 @@ struct ContentView: View {
             TurboHeaderView(
                 wordmarkName: wordmarkName,
                 statusMessage: viewModel.statusMessage,
-                backendStatusMessage: viewModel.backendStatusMessage,
-                selfCheckSummary: viewModel.latestSelfCheckReport?.summary,
-                selfCheckPassing: viewModel.latestSelfCheckReport?.isPassing,
                 latestErrorText: latestDiagnosticsErrorText,
-                currentDevUserHandle: viewModel.currentDevUserHandle,
-                diagnosticsHasError: viewModel.diagnostics.latestError != nil,
-                isRunningSelfCheck: viewModel.isRunningSelfCheck,
-                isResettingDevState: isResettingDevState || isRestartingLocalSession,
                 microphonePermissionStatus: viewModel.microphonePermissionStatusText,
                 needsMicrophonePermission: viewModel.needsMicrophonePermission,
-                onBack: {
-                    route = .splash
-                    draftPeerHandle = ""
-                    isRestartingLocalSession = true
-                    Task {
-                        await viewModel.restartLocalAppSession()
-                        await MainActor.run {
-                            isRestartingLocalSession = false
-                        }
-                    }
+                onAddContact: {
+                    isShowingAddContactSheet = true
                 },
-                onShowIdentity: {
-                    draftDevUserHandle = viewModel.currentDevUserHandle
-                    isShowingDevIdentitySheet = true
+                onShowProfile: {
+                    draftProfileName = viewModel.currentProfileName
+                    isShowingProfileSheet = true
                 },
-                onShowDiagnostics: {
-                    isShowingDiagnostics = true
-                },
-                onRunSelfCheck: runSelfCheckAndShowDiagnostics,
-                onResetDevState: resetDevState,
                 onRequestMicrophonePermission: requestMicrophonePermission
             )
-            peerLookupBar
-            TurboContactListView(
-                selectedContactID: viewModel.selectedContactId,
-                activeContact: viewModel.activeConversationContact,
-                systemSessionSubtitle: systemSessionSubtitle,
-                contactSections: viewModel.contactListSections,
-                activeStatusPill: contactStatusPillModel,
-                itemStatusPill: contactListItemStatusPillModel,
-                selectContact: viewModel.selectContact,
-                endSystemSession: viewModel.endSystemSession
-            )
+            if viewModel.contacts.isEmpty, viewModel.activeConversationContact == nil {
+                TurboEmptyContactsView(onAddContact: {
+                    isShowingAddContactSheet = true
+                })
+            } else {
+                TurboContactListView(
+                    selectedContactID: viewModel.selectedContactId,
+                    activeContact: viewModel.activeConversationContact,
+                    systemSessionSubtitle: systemSessionSubtitle,
+                    contactSections: viewModel.contactListSections,
+                    activeStatusPill: contactStatusPillModel,
+                    itemStatusPill: contactListItemStatusPillModel,
+                    selectContact: viewModel.selectContact,
+                    endSystemSession: viewModel.endSystemSession
+                )
+            }
             TurboTalkControlsView(
                 selectedContactID: viewModel.selectedContactId,
                 isJoined: viewModel.isJoined,
@@ -165,44 +210,29 @@ struct ContentView: View {
     private var splashView: some View {
         TurboSplashView(
             wordmarkName: wordmarkName,
-            backendStatusMessage: viewModel.backendStatusMessage,
-            currentDevUserHandle: viewModel.currentDevUserHandle,
-            lookupBar: {
-                peerLookupBar
-            },
-            onShowIdentity: {
-                draftDevUserHandle = viewModel.currentDevUserHandle
-                isShowingDevIdentitySheet = true
-            },
-            onShowCallPrototype: {
-                route = .callPrototype
-            },
-            onConnect: {
-                route = .live
-                if let contact = viewModel.selectedContact {
-                    viewModel.selectContact(contact)
+            hasCompletedOnboarding: viewModel.hasCompletedIdentityOnboarding,
+            hasContacts: !viewModel.contacts.isEmpty,
+            onContinue: {
+                if viewModel.hasCompletedIdentityOnboarding {
+                    route = .live
+                    if let contact = viewModel.selectedContact {
+                        viewModel.selectContact(contact)
+                    }
+                } else {
+                    draftProfileName = viewModel.currentProfileName
+                    route = .profileSetup
                 }
             }
         )
     }
 
-    private var callPrototypeView: some View {
-        TurboCallPrototypeView(
-            contactName: callPrototypeName,
-            contactHandle: callPrototypeHandle,
-            onClose: {
-                route = .splash
-            }
-        )
-    }
-
-    private var peerLookupBar: some View {
-        TurboPeerLookupBar(
-            draftPeerHandle: $draftPeerHandle,
-            quickPeerHandles: viewModel.quickPeerHandles,
-            isOpeningPeer: isOpeningPeer,
-            isResettingDevState: isResettingDevState || isRestartingLocalSession,
-            openPeer: openPeer
+    private var profileSetupView: some View {
+        TurboProfileSetupView(
+            wordmarkName: wordmarkName,
+            draftProfileName: $draftProfileName,
+            isSaving: isSavingProfileName,
+            onShuffle: shuffleSuggestedProfileName,
+            onContinue: saveProfileNameAndContinue
         )
     }
 
@@ -214,15 +244,44 @@ struct ContentView: View {
         viewModel.topChromeDiagnosticsErrorText
     }
 
+    private var addContactStatusMessage: String? {
+        if isOpeningPeer {
+            return "Opening contact…"
+        }
+        guard viewModel.backendCommandCoordinator.state.lastError != nil else { return nil }
+        return viewModel.backendStatusMessage
+    }
+
     private func openPeer(_ handle: String) {
+        beginOpeningPeer(handle)
+    }
+
+    private func beginOpeningPeer(_ handle: String, ensureInitialized: Bool = false) {
+        let trimmedHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedHandle.isEmpty else { return }
+        draftPeerHandle = trimmedHandle
         isOpeningPeer = true
         Task {
-            await viewModel.openContact(handle: handle)
+            if ensureInitialized {
+                await viewModel.initializeIfNeeded()
+            }
+            await viewModel.openContact(reference: trimmedHandle)
             await MainActor.run {
                 isOpeningPeer = false
-                route = .live
+                if viewModel.backendCommandCoordinator.state.lastError == nil {
+                    draftPeerHandle = ""
+                    isShowingAddContactSheet = false
+                    route = .live
+                }
             }
         }
+    }
+
+    private func handleIncomingURL(_ url: URL) {
+        guard let reference = TurboIncomingLink.reference(from: url) else { return }
+        route = .live
+        isShowingAddContactSheet = false
+        beginOpeningPeer(reference, ensureInitialized: true)
     }
 
     private func runSelfCheckAndShowDiagnostics() {
@@ -244,40 +303,6 @@ struct ContentView: View {
                 route = .live
             }
         }
-    }
-
-    private var callPrototypeName: String {
-        if let selectedContact = viewModel.selectedContact {
-            return selectedContact.name
-        }
-
-        let trimmedDraftHandle = draftPeerHandle.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedDraftHandle.isEmpty {
-            return Contact.displayName(for: trimmedDraftHandle)
-        }
-
-        if let quickPeerHandle = viewModel.quickPeerHandles.first {
-            return Contact.displayName(for: quickPeerHandle)
-        }
-
-        return "Avery"
-    }
-
-    private var callPrototypeHandle: String {
-        if let selectedContact = viewModel.selectedContact {
-            return selectedContact.handle
-        }
-
-        let trimmedDraftHandle = draftPeerHandle.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedDraftHandle.isEmpty {
-            return Contact.normalizedHandle(trimmedDraftHandle)
-        }
-
-        if let quickPeerHandle = viewModel.quickPeerHandles.first {
-            return Contact.normalizedHandle(quickPeerHandle)
-        }
-
-        return "@avery"
     }
 
     private func saveDevIdentity() {
@@ -318,6 +343,49 @@ struct ContentView: View {
             await viewModel.requestMicrophonePermission()
             await MainActor.run {
                 isRequestingMicrophonePermission = false
+            }
+        }
+    }
+
+    private func shuffleSuggestedProfileName() {
+        draftProfileName = TurboSuggestedProfileName.generate()
+    }
+
+    private func saveProfileNameAndContinue() {
+        let profileName = draftProfileName
+        isSavingProfileName = true
+        Task {
+            await viewModel.updateProfileName(profileName, markOnboardingComplete: true)
+            await MainActor.run {
+                draftProfileName = viewModel.currentProfileName
+                isSavingProfileName = false
+                route = .live
+            }
+        }
+    }
+
+    private func saveProfileNameFromSheet() {
+        let profileName = draftProfileName
+        isSavingProfileName = true
+        Task {
+            await viewModel.updateProfileName(profileName, markOnboardingComplete: true)
+            await MainActor.run {
+                draftProfileName = viewModel.currentProfileName
+                isSavingProfileName = false
+            }
+        }
+    }
+
+    private func signOut() {
+        isSigningOut = true
+        Task {
+            await viewModel.signOutToFreshIdentity()
+            await MainActor.run {
+                isSigningOut = false
+                isShowingProfileSheet = false
+                draftPeerHandle = ""
+                draftProfileName = viewModel.currentProfileName
+                route = .splash
             }
         }
     }

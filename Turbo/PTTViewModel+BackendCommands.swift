@@ -298,19 +298,16 @@ extension PTTViewModel {
         }
     }
 
-    func openContact(handle: String) async {
-        let normalizedHandle = Contact.normalizedHandle(handle)
-        guard normalizedHandle != currentDevUserHandle else {
-            statusMessage = "Pick another handle"
-            return
-        }
+    func openContact(reference: String) async {
+        let normalizedReference = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedReference.isEmpty else { return }
         guard backendServices != nil else {
             backendStatusMessage = "Backend unavailable"
             statusMessage = "Backend unavailable"
             return
         }
 
-        await backendCommandCoordinator.handle(.openPeerRequested(handle: normalizedHandle))
+        await backendCommandCoordinator.handle(.openPeerRequested(handle: normalizedReference))
     }
 
     func runBackendCommandEffect(_ effect: BackendCommandEffect) async {
@@ -392,6 +389,16 @@ extension PTTViewModel {
         }
     }
 
+    private func backendPeerIdentityQuery(
+        handle: String,
+        remoteUserId: String?
+    ) -> (otherHandle: String?, otherUserId: String?) {
+        if let remoteUserId, !remoteUserId.isEmpty {
+            return (nil, remoteUserId)
+        }
+        return (handle, nil)
+    }
+
     private func performOpenPeer(handle: String) async {
         guard let backend = backendServices else {
             backendCommandCoordinator.send(.operationFailed("Backend unavailable"))
@@ -401,16 +408,29 @@ extension PTTViewModel {
         }
 
         do {
-            let remoteUser = try await backend.lookupUser(handle: handle)
-            let contactID = ensureContactExists(handle: handle, remoteUserId: remoteUser.userId, channelId: "")
+            let remoteUser = try await backend.resolveIdentity(reference: handle)
+            guard remoteUser.userId != backend.currentUserID else {
+                backendCommandCoordinator.send(.operationFailed("cannot open self"))
+                statusMessage = "Pick another code"
+                backendStatusMessage = "That code belongs to this device account"
+                return
+            }
+            let contactID = ensureContactExists(
+                handle: remoteUser.publicId,
+                remoteUserId: remoteUser.userId,
+                channelId: "",
+                displayName: remoteUser.profileName
+            )
             // Make the new peer authoritative before any further awaits so background sync
             // cannot prune the selection candidate out from under the open-peer flow.
             trackContact(contactID)
             if let contact = contacts.first(where: { $0.id == contactID }) {
                 selectContact(contact)
             }
-            if let presence = try? await backend.lookupPresence(handle: handle) {
+            if let presence = try? await backend.lookupPresence(handle: remoteUser.publicId) {
                 updateContact(contactID) { contact in
+                    contact.name = remoteUser.profileName
+                    contact.handle = remoteUser.publicId
                     contact.isOnline = presence.isOnline
                     contact.remoteUserId = presence.userId
                 }
@@ -418,7 +438,11 @@ extension PTTViewModel {
             await refreshContactSummaries()
             await refreshInvites()
             backendCommandCoordinator.send(.operationFinished)
-            diagnostics.record(.state, message: "Opened peer handle", metadata: ["handle": handle])
+            diagnostics.record(
+                .state,
+                message: "Opened peer identity",
+                metadata: ["reference": handle, "publicId": remoteUser.publicId]
+            )
         } catch {
             let message = error.localizedDescription
             backendCommandCoordinator.send(.operationFailed(message))
@@ -428,7 +452,7 @@ extension PTTViewModel {
                 .backend,
                 level: .error,
                 message: "Peer lookup failed",
-                metadata: ["handle": handle, "error": message]
+                metadata: ["reference": handle, "error": message]
             )
         }
     }
@@ -512,8 +536,10 @@ extension PTTViewModel {
         let shouldReplaceOutgoingInvite = shouldReplaceExistingOutgoingInvite(for: request)
 
         if contact.remoteUserId == nil {
-            let remoteUser = try await backend.lookupUser(handle: request.handle)
+            let remoteUser = try await backend.resolveIdentity(reference: request.handle)
             contact.remoteUserId = remoteUser.userId
+            contact.handle = remoteUser.publicId
+            contact.name = remoteUser.profileName
         }
 
         if request.relationship.isIncomingRequest,
@@ -603,7 +629,14 @@ extension PTTViewModel {
         }
 
         if contact.backendChannelId == nil || request.relationship.isIncomingRequest {
-            let channel = try await backend.directChannel(otherHandle: request.handle)
+            let identityQuery = backendPeerIdentityQuery(
+                handle: request.handle,
+                remoteUserId: contact.remoteUserId ?? request.existingRemoteUserID
+            )
+            let channel = try await backend.directChannel(
+                otherHandle: identityQuery.otherHandle,
+                otherUserId: identityQuery.otherUserId
+            )
             applyDirectChannelMetadata(channel, currentUserID: backend.currentUserID, to: &contact)
         }
 
@@ -615,7 +648,14 @@ extension PTTViewModel {
         } else if !request.relationship.isIncomingRequest,
                   request.intent != .joinReadyPeer,
                   request.requestCooldownRemaining == nil {
-            let invite = try await backend.createInvite(otherHandle: request.handle)
+            let identityQuery = backendPeerIdentityQuery(
+                handle: request.handle,
+                remoteUserId: contact.remoteUserId ?? request.existingRemoteUserID
+            )
+            let invite = try await backend.createInvite(
+                otherHandle: identityQuery.otherHandle,
+                otherUserId: identityQuery.otherUserId
+            )
             createdInvite = invite
             applyInviteMetadata(invite, to: &contact)
             if invite.direction == "outgoing" {
@@ -645,7 +685,14 @@ extension PTTViewModel {
         request: BackendJoinRequest,
         backend: BackendServices
     ) async throws -> Contact {
-        let channel = try await backend.directChannel(otherHandle: request.handle)
+        let identityQuery = backendPeerIdentityQuery(
+            handle: request.handle,
+            remoteUserId: contact.remoteUserId ?? request.existingRemoteUserID
+        )
+        let channel = try await backend.directChannel(
+            otherHandle: identityQuery.otherHandle,
+            otherUserId: identityQuery.otherUserId
+        )
 
         guard let index = contacts.firstIndex(where: { $0.id == contact.id }) else {
             throw TurboBackendError.invalidResponse
@@ -677,10 +724,19 @@ extension PTTViewModel {
         }
 
         var refreshedContact = contacts[index]
-        let remoteUser = try await backend.lookupUser(handle: request.handle)
+        let remoteUser = try await backend.resolveIdentity(reference: request.handle)
         refreshedContact.remoteUserId = remoteUser.userId
+        refreshedContact.handle = remoteUser.publicId
+        refreshedContact.name = remoteUser.profileName
 
-        let channel = try await backend.directChannel(otherHandle: request.handle)
+        let identityQuery = backendPeerIdentityQuery(
+            handle: request.handle,
+            remoteUserId: remoteUser.userId
+        )
+        let channel = try await backend.directChannel(
+            otherHandle: identityQuery.otherHandle,
+            otherUserId: identityQuery.otherUserId
+        )
         applyDirectChannelMetadata(channel, currentUserID: backend.currentUserID, to: &refreshedContact)
 
         contacts[index] = refreshedContact
@@ -921,10 +977,15 @@ extension PTTViewModel {
             }
         } catch {
             let message = error.localizedDescription
+            let failedActiveJoin =
+                sessionCoordinator.pendingAction.pendingConnectContactID == request.contactID
+                || sessionCoordinator.pendingAction.pendingJoinContactID == request.contactID
             backendCommandCoordinator.send(.operationFailed(message))
             sessionCoordinator.clearPendingConnect(for: request.contactID)
+            if failedActiveJoin {
+                backendSyncCoordinator.send(.channelStateCleared(contactID: request.contactID))
+            }
             statusMessage = "Join failed: \(message)"
-            updateStatusForSelectedContact()
             captureDiagnosticsState("backend-join:failed")
             diagnostics.record(
                 .backend,

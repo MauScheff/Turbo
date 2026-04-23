@@ -14,6 +14,10 @@ final class BackendRuntimeState {
     var config = TurboBackendConfig.load()
     var client: TurboBackendClient?
     var currentUserID: String?
+    var currentPublicID: String?
+    var currentShareCode: String?
+    var currentShareLink: String?
+    var currentProfileName: String?
     var isReady: Bool = false
     var mode: String = "unknown"
     var telemetryEnabled: Bool = false
@@ -32,10 +36,18 @@ final class BackendRuntimeState {
         client: TurboBackendClient,
         userID: String,
         mode: String,
-        telemetryEnabled: Bool
+        telemetryEnabled: Bool,
+        publicID: String? = nil,
+        profileName: String? = nil,
+        shareCode: String? = nil,
+        shareLink: String? = nil
     ) {
         self.client = client
         currentUserID = userID
+        currentPublicID = publicID
+        currentProfileName = profileName
+        currentShareCode = shareCode ?? publicID
+        currentShareLink = shareLink
         isReady = true
         self.mode = mode
         self.telemetryEnabled = telemetryEnabled
@@ -45,6 +57,10 @@ final class BackendRuntimeState {
         client?.disconnectWebSocket()
         client = nil
         currentUserID = nil
+        currentPublicID = nil
+        currentShareCode = nil
+        currentShareLink = nil
+        currentProfileName = nil
         isReady = false
         mode = "unknown"
         telemetryEnabled = false
@@ -77,6 +93,10 @@ final class BackendRuntimeState {
 
     func storeAuthenticatedUserID(_ userID: String) {
         currentUserID = userID
+    }
+
+    func storeCurrentProfileName(_ profileName: String?) {
+        currentProfileName = profileName
     }
 
     func track(contactID: UUID) {
@@ -720,6 +740,10 @@ struct BackendServices {
         try await client.lookupUser(handle: handle)
     }
 
+    func resolveIdentity(reference: String) async throws -> TurboUserLookupResponse {
+        try await client.resolveIdentity(reference: reference)
+    }
+
     func lookupPresence(handle: String) async throws -> TurboUserPresenceResponse {
         try await client.lookupPresence(handle: handle)
     }
@@ -728,8 +752,11 @@ struct BackendServices {
         try await client.contactSummaries()
     }
 
-    func directChannel(otherHandle: String) async throws -> TurboDirectChannelResponse {
-        try await client.directChannel(otherHandle: otherHandle)
+    func directChannel(
+        otherHandle: String? = nil,
+        otherUserId: String? = nil
+    ) async throws -> TurboDirectChannelResponse {
+        try await client.directChannel(otherHandle: otherHandle, otherUserId: otherUserId)
     }
 
     func joinChannel(channelId: String) async throws -> TurboJoinResponse {
@@ -748,8 +775,11 @@ struct BackendServices {
         try await client.channelReadiness(channelId: channelId)
     }
 
-    func createInvite(otherHandle: String) async throws -> TurboInviteResponse {
-        try await client.createInvite(otherHandle: otherHandle)
+    func createInvite(
+        otherHandle: String? = nil,
+        otherUserId: String? = nil
+    ) async throws -> TurboInviteResponse {
+        try await client.createInvite(otherHandle: otherHandle, otherUserId: otherUserId)
     }
 
     func incomingInvites() async throws -> [TurboInviteResponse] {

@@ -791,37 +791,54 @@ struct TurboBackendConfig {
 
     static func load() -> TurboBackendConfig? {
         guard let rawBaseURL = Bundle.main.object(forInfoDictionaryKey: "TurboBackendBaseURL") as? String,
-              let baseURL = URL(string: rawBaseURL),
-              let defaultDevUserHandle = Bundle.main.object(forInfoDictionaryKey: "TurboDevUserHandle") as? String,
-              !defaultDevUserHandle.isEmpty else {
+              let baseURL = URL(string: rawBaseURL) else {
             return nil
         }
 
         return TurboBackendConfig(
             baseURL: baseURL,
-            devUserHandle: persistedDevUserHandle(defaultValue: defaultDevUserHandle),
+            devUserHandle: persistedDevUserHandle(defaultValue: generatedLocalPublicID()),
             deviceID: persistedDeviceID()
         )
     }
 
     static func setPersistedDevUserHandle(_ handle: String) {
         let normalized = normalizeDevUserHandle(handle)
-        UserDefaults.standard.set(normalized, forKey: "TurboDevUserHandleOverride")
+        let defaults = UserDefaults.standard
+        defaults.set(normalized, forKey: "TurboAccountPublicID")
+        defaults.set(normalized, forKey: "TurboDevUserHandleOverride")
+    }
+
+    static func resetPersistedIdentity() {
+        setPersistedDevUserHandle(generatedLocalPublicID())
     }
 
     private static func persistedDevUserHandle(defaultValue: String) -> String {
         let defaults = UserDefaults.standard
+        if let current = defaults.string(forKey: "TurboAccountPublicID"),
+           !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return normalizeDevUserHandle(current)
+        }
         if let override = defaults.string(forKey: "TurboDevUserHandleOverride"),
            !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return normalizeDevUserHandle(override)
+            let normalized = normalizeDevUserHandle(override)
+            defaults.set(normalized, forKey: "TurboAccountPublicID")
+            return normalized
         }
-        return normalizeDevUserHandle(defaultValue)
+        let normalized = normalizeDevUserHandle(defaultValue)
+        defaults.set(normalized, forKey: "TurboAccountPublicID")
+        return normalized
+    }
+
+    private static func generatedLocalPublicID() -> String {
+        let raw = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        return "bb-\(raw.prefix(10))"
     }
 
     private static func normalizeDevUserHandle(_ handle: String) -> String {
         let trimmed = handle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "@turbo-ios" }
-        return trimmed.hasPrefix("@") ? trimmed : "@\(trimmed)"
+        guard !trimmed.isEmpty else { return generatedLocalPublicID() }
+        return trimmed.lowercased()
     }
 
     private static func persistedDeviceID() -> String {
@@ -830,9 +847,22 @@ struct TurboBackendConfig {
         if let existing = defaults.string(forKey: key), !existing.isEmpty {
             return existing
         }
-        let newValue = UIDevice.current.identifierForVendor?.uuidString.lowercased() ?? UUID().uuidString.lowercased()
+        let newValue = UUID().uuidString.lowercased()
         defaults.set(newValue, forKey: key)
         return newValue
+    }
+}
+
+private extension KeyedDecodingContainer {
+    func decodeIdentityField(
+        publicIdKey: Key,
+        legacyHandleKey: Key
+    ) throws -> String {
+        if let publicId = try decodeIfPresent(String.self, forKey: publicIdKey),
+           !publicId.isEmpty {
+            return publicId
+        }
+        return try decode(String.self, forKey: legacyHandleKey)
     }
 }
 
@@ -910,7 +940,64 @@ struct TurboSignalEnvelope: Codable {
 struct TurboAuthSessionResponse: Decodable {
     let userId: String
     let handle: String
+    let publicId: String
     let displayName: String
+    let profileName: String
+    let shareCode: String
+    let shareLink: String
+    let did: String
+    let subjectKind: String
+
+    init(
+        userId: String,
+        handle: String,
+        publicId: String? = nil,
+        displayName: String,
+        profileName: String? = nil,
+        shareCode: String? = nil,
+        shareLink: String? = nil,
+        did: String? = nil,
+        subjectKind: String = "human"
+    ) {
+        self.userId = userId
+        self.handle = handle
+        self.publicId = publicId ?? handle
+        self.displayName = displayName
+        self.profileName = profileName ?? displayName
+        self.shareCode = shareCode ?? self.publicId
+        self.shareLink = shareLink ?? "https://beepbeep.to/p/\(self.shareCode)"
+        self.did = did ?? "did:web:beepbeep.to:id:\(self.publicId)"
+        self.subjectKind = subjectKind
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case userId
+        case handle
+        case publicId
+        case displayName
+        case profileName
+        case shareCode
+        case shareLink
+        case did
+        case subjectKind
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        userId = try container.decode(String.self, forKey: .userId)
+        handle = try container.decode(String.self, forKey: .handle)
+        publicId = try container.decodeIdentityField(publicIdKey: .publicId, legacyHandleKey: .handle)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        profileName = try container.decodeIfPresent(String.self, forKey: .profileName) ?? displayName
+        shareCode = try container.decodeIfPresent(String.self, forKey: .shareCode) ?? publicId
+        shareLink = try container.decodeIfPresent(String.self, forKey: .shareLink) ?? "https://beepbeep.to/p/\(shareCode)"
+        did = try container.decodeIfPresent(String.self, forKey: .did) ?? "did:web:beepbeep.to:id:\(publicId)"
+        subjectKind = try container.decodeIfPresent(String.self, forKey: .subjectKind) ?? "human"
+    }
+}
+
+struct TurboProfileUpdateRequest: Encodable {
+    let profileName: String
 }
 
 struct TurboBackendRuntimeConfig: Decodable {
@@ -1003,7 +1090,60 @@ struct TurboResetStateResponse: Decodable {
 struct TurboUserLookupResponse: Decodable {
     let userId: String
     let handle: String
+    let publicId: String
     let displayName: String
+    let profileName: String
+    let shareCode: String
+    let shareLink: String
+    let did: String
+    let subjectKind: String
+
+    init(
+        userId: String,
+        handle: String,
+        publicId: String? = nil,
+        displayName: String,
+        profileName: String? = nil,
+        shareCode: String? = nil,
+        shareLink: String? = nil,
+        did: String? = nil,
+        subjectKind: String = "human"
+    ) {
+        self.userId = userId
+        self.handle = handle
+        self.publicId = publicId ?? handle
+        self.displayName = displayName
+        self.profileName = profileName ?? displayName
+        self.shareCode = shareCode ?? self.publicId
+        self.shareLink = shareLink ?? "https://beepbeep.to/p/\(self.shareCode)"
+        self.did = did ?? "did:web:beepbeep.to:id:\(self.publicId)"
+        self.subjectKind = subjectKind
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case userId
+        case handle
+        case publicId
+        case displayName
+        case profileName
+        case shareCode
+        case shareLink
+        case did
+        case subjectKind
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        userId = try container.decode(String.self, forKey: .userId)
+        handle = try container.decode(String.self, forKey: .handle)
+        publicId = try container.decodeIdentityField(publicIdKey: .publicId, legacyHandleKey: .handle)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        profileName = try container.decodeIfPresent(String.self, forKey: .profileName) ?? displayName
+        shareCode = try container.decodeIfPresent(String.self, forKey: .shareCode) ?? publicId
+        shareLink = try container.decodeIfPresent(String.self, forKey: .shareLink) ?? "https://beepbeep.to/p/\(shareCode)"
+        did = try container.decodeIfPresent(String.self, forKey: .did) ?? "did:web:beepbeep.to:id:\(publicId)"
+        subjectKind = try container.decodeIfPresent(String.self, forKey: .subjectKind) ?? "human"
+    }
 }
 
 struct TurboDeviceRegistrationResponse: Decodable {
@@ -1030,8 +1170,65 @@ struct TurboPresenceHeartbeatResponse: Decodable {
 struct TurboUserPresenceResponse: Decodable {
     let userId: String
     let handle: String
+    let publicId: String
     let displayName: String
+    let profileName: String
+    let shareCode: String
+    let shareLink: String
+    let did: String
+    let subjectKind: String
     let isOnline: Bool
+
+    init(
+        userId: String,
+        handle: String,
+        publicId: String? = nil,
+        displayName: String,
+        profileName: String? = nil,
+        shareCode: String? = nil,
+        shareLink: String? = nil,
+        did: String? = nil,
+        subjectKind: String = "human",
+        isOnline: Bool
+    ) {
+        self.userId = userId
+        self.handle = handle
+        self.publicId = publicId ?? handle
+        self.displayName = displayName
+        self.profileName = profileName ?? displayName
+        self.shareCode = shareCode ?? self.publicId
+        self.shareLink = shareLink ?? "https://beepbeep.to/p/\(self.shareCode)"
+        self.did = did ?? "did:web:beepbeep.to:id:\(self.publicId)"
+        self.subjectKind = subjectKind
+        self.isOnline = isOnline
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case userId
+        case handle
+        case publicId
+        case displayName
+        case profileName
+        case shareCode
+        case shareLink
+        case did
+        case subjectKind
+        case isOnline
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        userId = try container.decode(String.self, forKey: .userId)
+        handle = try container.decode(String.self, forKey: .handle)
+        publicId = try container.decodeIdentityField(publicIdKey: .publicId, legacyHandleKey: .handle)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        profileName = try container.decodeIfPresent(String.self, forKey: .profileName) ?? displayName
+        shareCode = try container.decodeIfPresent(String.self, forKey: .shareCode) ?? publicId
+        shareLink = try container.decodeIfPresent(String.self, forKey: .shareLink) ?? "https://beepbeep.to/p/\(shareCode)"
+        did = try container.decodeIfPresent(String.self, forKey: .did) ?? "did:web:beepbeep.to:id:\(publicId)"
+        subjectKind = try container.decodeIfPresent(String.self, forKey: .subjectKind) ?? "human"
+        isOnline = try container.decode(Bool.self, forKey: .isOnline)
+    }
 }
 
 struct TurboJoinResponse: Decodable {
@@ -1050,7 +1247,9 @@ struct TurboLeaveResponse: Decodable {
 struct TurboContactSummaryResponse: Decodable, Equatable {
     let userId: String
     let handle: String
+    let publicId: String
     let displayName: String
+    let profileName: String
     let channelId: String?
     let isOnline: Bool
     let isActiveConversation: Bool
@@ -1061,7 +1260,9 @@ struct TurboContactSummaryResponse: Decodable, Equatable {
     init(
         userId: String,
         handle: String,
+        publicId: String? = nil,
         displayName: String,
+        profileName: String? = nil,
         channelId: String?,
         isOnline: Bool,
         hasIncomingRequest: Bool,
@@ -1075,7 +1276,9 @@ struct TurboContactSummaryResponse: Decodable, Equatable {
     ) {
         self.userId = userId
         self.handle = handle
+        self.publicId = publicId ?? handle
         self.displayName = displayName
+        self.profileName = profileName ?? displayName
         self.channelId = channelId
         self.isOnline = isOnline
         self.isActiveConversation = isActiveConversation
@@ -1097,7 +1300,9 @@ struct TurboContactSummaryResponse: Decodable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case userId
         case handle
+        case publicId
         case displayName
+        case profileName
         case channelId
         case isOnline
         case hasIncomingRequest
@@ -1114,7 +1319,9 @@ struct TurboContactSummaryResponse: Decodable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         userId = try container.decode(String.self, forKey: .userId)
         handle = try container.decode(String.self, forKey: .handle)
+        publicId = try container.decodeIdentityField(publicIdKey: .publicId, legacyHandleKey: .handle)
         displayName = try container.decode(String.self, forKey: .displayName)
+        profileName = try container.decodeIfPresent(String.self, forKey: .profileName) ?? displayName
         channelId = try container.decodeIfPresent(String.self, forKey: .channelId)
         isOnline = try container.decode(Bool.self, forKey: .isOnline)
         isActiveConversation = try container.decode(Bool.self, forKey: .isActiveConversation)

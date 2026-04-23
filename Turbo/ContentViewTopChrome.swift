@@ -3,72 +3,39 @@ import SwiftUI
 struct TurboHeaderView: View {
     let wordmarkName: String
     let statusMessage: String
-    let backendStatusMessage: String
-    let selfCheckSummary: String?
-    let selfCheckPassing: Bool?
     let latestErrorText: String?
-    let currentDevUserHandle: String
-    let diagnosticsHasError: Bool
-    let isRunningSelfCheck: Bool
-    let isResettingDevState: Bool
     let microphonePermissionStatus: String
     let needsMicrophonePermission: Bool
-    let onBack: () -> Void
-    let onShowIdentity: () -> Void
-    let onShowDiagnostics: () -> Void
-    let onRunSelfCheck: () -> Void
-    let onResetDevState: () -> Void
+    let onAddContact: () -> Void
+    let onShowProfile: () -> Void
     let onRequestMicrophonePermission: () -> Void
 
     var body: some View {
-        VStack(spacing: 6) {
-            HStack {
-                Button(action: onBack) {
-                    Image(systemName: "chevron.left")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .accessibilityLabel("Back")
-                }
-
-                Spacer()
-
+        VStack(spacing: 8) {
+            ZStack {
                 Image(wordmarkName)
                     .resizable()
                     .scaledToFit()
                     .frame(height: 22)
                     .accessibilityLabel("BeepBeep")
 
-                Spacer()
+                HStack(spacing: 12) {
+                    Spacer()
 
-                Button(action: onShowIdentity) {
-                    Image(systemName: "person.crop.circle")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .accessibilityLabel("Choose dev identity")
-                }
+                    Button(action: onAddContact) {
+                        Image(systemName: "plus.circle")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .accessibilityLabel("Add contact")
+                    }
 
-                Button(action: onShowDiagnostics) {
-                    Image(systemName: diagnosticsHasError ? "exclamationmark.bubble" : "waveform.path.ecg")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(diagnosticsHasError ? Color.red : Color.primary)
-                        .accessibilityLabel("Diagnostics")
+                    Button(action: onShowProfile) {
+                        Image(systemName: "person.crop.circle")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .accessibilityLabel("Profile")
+                    }
                 }
-
-                Button(action: onRunSelfCheck) {
-                    Image(systemName: isRunningSelfCheck ? "checklist.checked" : "checklist")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(selfCheckPassing == false ? Color.red : Color.primary)
-                        .accessibilityLabel("Run self-check")
-                }
-                .disabled(isRunningSelfCheck || isResettingDevState)
-
-                Button(action: onResetDevState) {
-                    Image(systemName: isResettingDevState ? "arrow.clockwise.circle.fill" : "arrow.clockwise.circle")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .accessibilityLabel("Reset dev state")
-                }
-                .disabled(isResettingDevState)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 6)
@@ -76,17 +43,6 @@ struct TurboHeaderView: View {
             Text(statusMessage)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-
-            Text(backendStatusMessage)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-
-            if let selfCheckSummary {
-                Text(selfCheckSummary)
-                    .font(.caption2)
-                    .foregroundStyle(selfCheckPassing == false ? Color.red : Color.secondary)
-                    .lineLimit(2)
-            }
 
             if needsMicrophonePermission {
                 Button(action: onRequestMicrophonePermission) {
@@ -108,131 +64,85 @@ struct TurboHeaderView: View {
                     .foregroundStyle(.red)
                     .lineLimit(2)
             }
-
-            Text("Identity: \(currentDevUserHandle)")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
         }
     }
 }
 
-struct TurboPeerLookupBar: View {
-    @Binding var draftPeerHandle: String
-    let quickPeerHandles: [String]
-    let isOpeningPeer: Bool
-    let isResettingDevState: Bool
-    let openPeer: (String) -> Void
+struct TurboEmptyContactsView: View {
+    let onAddContact: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if !quickPeerHandles.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(quickPeerHandles, id: \.self) { handle in
-                            Button(handle) {
-                                draftPeerHandle = handle
-                                openPeer(handle)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(isOpeningPeer || isResettingDevState)
-                        }
-                    }
-                }
-            }
-
-            HStack(spacing: 12) {
-                TextField("Peer handle", text: $draftPeerHandle)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(Color.gray.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                Button {
-                    openPeer(draftPeerHandle)
-                } label: {
-                    Text(isOpeningPeer ? "Opening…" : "Open")
-                        .frame(minWidth: 72)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(draftPeerHandle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isOpeningPeer || isResettingDevState)
-            }
-        }
-    }
-}
-
-struct TurboSplashView<LookupBar: View>: View {
-    let wordmarkName: String
-    let backendStatusMessage: String
-    let currentDevUserHandle: String
-    let lookupBar: LookupBar
-    let onShowIdentity: () -> Void
-    let onShowCallPrototype: () -> Void
-    let onConnect: () -> Void
-
-    init(
-        wordmarkName: String,
-        backendStatusMessage: String,
-        currentDevUserHandle: String,
-        @ViewBuilder lookupBar: () -> LookupBar,
-        onShowIdentity: @escaping () -> Void,
-        onShowCallPrototype: @escaping () -> Void,
-        onConnect: @escaping () -> Void
-    ) {
-        self.wordmarkName = wordmarkName
-        self.backendStatusMessage = backendStatusMessage
-        self.currentDevUserHandle = currentDevUserHandle
-        self.lookupBar = lookupBar()
-        self.onShowIdentity = onShowIdentity
-        self.onShowCallPrototype = onShowCallPrototype
-        self.onConnect = onConnect
-    }
-
-    var body: some View {
-        VStack(spacing: 20) {
-            Spacer()
-
-            Image(wordmarkName)
-                .resizable()
-                .scaledToFit()
-                .frame(height: 36)
-                .accessibilityLabel("BeepBeep")
-
-            Text("Ready to connect")
-                .font(.callout)
+        VStack(spacing: 0) {
+            Image(systemName: "person.crop.circle.badge.plus")
+                .font(.system(size: 36, weight: .medium))
                 .foregroundStyle(.secondary)
 
-            Text(backendStatusMessage)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+            Spacer()
+                .frame(height: 18)
 
-            Button(action: onShowIdentity) {
-                Text("Use \(currentDevUserHandle)")
-                    .font(.caption)
+            VStack(spacing: 6) {
+                Text("No contacts yet")
+                    .font(.title3.weight(.semibold))
+
+                Text("Add someone by QR, link, or code to start talking.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            lookupBar
-                .padding(.horizontal, 24)
+            Spacer()
+                .frame(height: 26)
 
-            Button(action: onConnect) {
-                Text("Connect")
+            Button(action: onAddContact) {
+                Text("Add Contact")
                     .frame(maxWidth: .infinity, minHeight: 52)
             }
             .buttonStyle(.borderedProminent)
-            .padding(.horizontal, 24)
-
-            Button(action: onShowCallPrototype) {
-                Text("See Call View")
-                    .font(.callout.weight(.semibold))
-                    .frame(maxWidth: .infinity, minHeight: 52)
-            }
-            .buttonStyle(.bordered)
-            .tint(.white)
-            .padding(.horizontal, 24)
-
-            Spacer()
+            .frame(maxWidth: TurboLayout.primaryButtonMaxWidth)
         }
-        .padding()
+        .frame(maxWidth: TurboLayout.contentMaxWidth)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+    }
+}
+
+struct TurboSplashView: View {
+    let wordmarkName: String
+    let hasCompletedOnboarding: Bool
+    let hasContacts: Bool
+    let onContinue: () -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            let buttonWidth = TurboLayout.primaryButtonWidth(for: geometry.size.width)
+            let topInset = max(geometry.size.height * 0.18, 96)
+            let bottomInset = max(geometry.safeAreaInsets.bottom + 20, 28)
+
+            VStack(spacing: 0) {
+                Spacer()
+                    .frame(height: topInset)
+
+                Image(wordmarkName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: 42)
+                    .accessibilityLabel("BeepBeep")
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .overlay(alignment: .bottom) {
+                Button(action: onContinue) {
+                    Text(hasCompletedOnboarding || hasContacts ? "Continue" : "Get Started")
+                        .frame(maxWidth: .infinity, minHeight: 54)
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(width: buttonWidth)
+                .padding(.bottom, bottomInset)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, TurboLayout.horizontalPadding)
     }
 }

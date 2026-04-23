@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -24,10 +25,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source")
     parser.add_argument("--severity")
     parser.add_argument("--event-name")
+    parser.add_argument("--exclude-event-name")
+    parser.add_argument("--dev-traffic", choices=["true", "false"])
     parser.add_argument("--user-handle")
     parser.add_argument("--device-id")
     parser.add_argument("--channel-id")
     parser.add_argument("--invariant-id")
+    parser.add_argument("--follow", action="store_true", help="Poll and print new matching events as they arrive.")
+    parser.add_argument("--poll-seconds", type=int, default=5)
     parser.add_argument("--json", action="store_true", help="Print the raw response JSON.")
     return parser.parse_args()
 
@@ -46,10 +51,13 @@ def build_recent_query(args: argparse.Namespace) -> str:
         "blob6": args.device_id,
         "blob8": args.channel_id,
         "blob14": args.invariant_id,
+        "blob19": args.dev_traffic,
     }
     for field, value in optional_filters.items():
         if value:
             filters.append(f"{field} = {sql_string(value)}")
+    if args.exclude_event_name:
+        filters.append(f"blob1 != {sql_string(args.exclude_event_name)}")
 
     where_clause = " AND ".join(filters)
     return f"""
@@ -73,6 +81,7 @@ SELECT
   blob16 AS reason,
   blob17 AS message,
   blob18 AS metadata_text,
+  blob19 AS dev_traffic,
   double2 AS alert_flag,
   double3 AS severity_rank
 FROM {args.dataset}
@@ -127,7 +136,10 @@ def print_pretty(response: dict, query: str) -> None:
         identity = row.get("user_handle") or row.get("user_id") or row.get("device_id") or "unknown"
         message = row.get("message") or row.get("reason") or row.get("invariant_id") or ""
         print(" | ".join(parts))
-        print(f"  actor={identity} channel={row.get('channel_id') or 'none'} alert={row.get('alert_flag')}")
+        print(
+            f"  actor={identity} channel={row.get('channel_id') or 'none'} "
+            f"alert={row.get('alert_flag')} dev={row.get('dev_traffic') or 'false'}"
+        )
         if message:
             print(f"  {message}")
         metadata = row.get("metadata_text")
@@ -136,9 +148,65 @@ def print_pretty(response: dict, query: str) -> None:
         print()
 
 
+def print_pretty_rows(rows: list[dict]) -> None:
+    for row in rows:
+        parts = [
+            row.get("timestamp", "?"),
+            row.get("severity", "unknown"),
+            row.get("source", "unknown"),
+            row.get("event_name", "unknown"),
+        ]
+        identity = row.get("user_handle") or row.get("user_id") or row.get("device_id") or "unknown"
+        message = row.get("message") or row.get("reason") or row.get("invariant_id") or ""
+        print(" | ".join(parts))
+        print(
+            f"  actor={identity} channel={row.get('channel_id') or 'none'} "
+            f"alert={row.get('alert_flag')} dev={row.get('dev_traffic') or 'false'}"
+        )
+        if message:
+            print(f"  {message}")
+        metadata = row.get("metadata_text")
+        if metadata:
+            print(f"  metadata={metadata}")
+        print()
+
+
+def row_key(row: dict) -> str:
+    return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+
+def follow_pretty(account_id: str, api_token: str, query: str, poll_seconds: int) -> None:
+    print(query)
+    print()
+    seen: set[str] = set()
+    try:
+        while True:
+            response = execute_query(account_id, api_token, query)
+            data = response.get("data")
+            rows = [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+            fresh_rows: list[dict] = []
+            for row in reversed(rows):
+                key = row_key(row)
+                if key in seen:
+                    continue
+                seen.add(key)
+                fresh_rows.append(row)
+            if fresh_rows:
+                print_pretty_rows(fresh_rows)
+                sys.stdout.flush()
+            time.sleep(poll_seconds)
+    except KeyboardInterrupt:
+        return
+
+
 def main() -> None:
     args = parse_args()
+    if args.follow and args.json:
+        raise SystemExit("--follow and --json cannot be combined")
     query = args.query or build_recent_query(args)
+    if args.follow:
+        follow_pretty(args.account_id, args.api_token, query, args.poll_seconds)
+        return
     response = execute_query(args.account_id, args.api_token, query)
     if args.json:
         json.dump(response, sys.stdout, indent=2, sort_keys=True)

@@ -13,15 +13,21 @@ enum ConversationState: String {
 
 struct Contact: Identifiable, Hashable {
     let id: UUID
-    let name: String
-    let handle: String
+    var name: String
+    var handle: String
     var isOnline: Bool
     var channelId: UUID
     var backendChannelId: String?
     var remoteUserId: String?
 
-    static func stableID(for handle: String) -> UUID {
-        let digest = SHA256.hash(data: Data("contact:\(normalizedHandle(handle))".utf8))
+    static func stableID(remoteUserId: String?, fallbackHandle: String) -> UUID {
+        let identitySeed: String
+        if let remoteUserId, !remoteUserId.isEmpty {
+            identitySeed = remoteUserId
+        } else {
+            identitySeed = normalizedHandle(fallbackHandle)
+        }
+        let digest = SHA256.hash(data: Data("contact:\(identitySeed)".utf8))
         var bytes = Array(digest.prefix(16))
         bytes[6] = (bytes[6] & 0x0f) | 0x50
         bytes[8] = (bytes[8] & 0x3f) | 0x80
@@ -33,16 +39,21 @@ struct Contact: Identifiable, Hashable {
         ))
     }
 
+    static func stableID(for handle: String) -> UUID {
+        stableID(remoteUserId: nil, fallbackHandle: handle)
+    }
+
     static func displayName(for handle: String) -> String {
-        let raw = normalizedHandle(handle).dropFirst()
-        guard !raw.isEmpty else { return normalizedHandle(handle) }
+        let normalized = normalizedHandle(handle)
+        let raw = normalized.hasPrefix("@") ? String(normalized.dropFirst()) : normalized
+        guard !raw.isEmpty else { return normalized }
         return raw.prefix(1).uppercased() + raw.dropFirst()
     }
 
     static func normalizedHandle(_ handle: String) -> String {
         let trimmed = handle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "@turbo-ios" }
-        return trimmed.hasPrefix("@") ? trimmed.lowercased() : "@\(trimmed.lowercased())"
+        guard !trimmed.isEmpty else { return "turbo-ios" }
+        return trimmed.lowercased()
     }
 }
 
@@ -1838,10 +1849,7 @@ private extension ConversationDerivationContext {
             return .wakeReady
         }
 
-        let authoritativeBackendReady =
-            readinessStatus == .ready
-            && peerDeviceConnected
-            && canTransmit
+        let authoritativeBackendReady = backendReadyAuthoritativelySatisfiesRemoteAudio
 
         if sessionTransmitReady && canTransmit {
             switch localMediaWarmupState {
@@ -1979,7 +1987,32 @@ private extension ConversationDerivationContext {
     }
 
     var remoteAudioReadyForTransmit: Bool {
-        remoteAudioReadinessState == .ready
+        guard effectivePeerDeviceConnectedForTransmit else {
+            return false
+        }
+
+        switch remoteAudioReadinessState {
+        case .ready:
+            return true
+        case .wakeCapable, .waiting, .unknown:
+            return backendReadyAuthoritativelySatisfiesRemoteAudio
+        }
+    }
+
+    var backendReadyAuthoritativelySatisfiesRemoteAudio: Bool {
+        guard case .both(let peerDeviceConnected, let canTransmit, let readinessStatus) = backendChannelReadiness,
+              readinessStatus == .ready,
+              peerDeviceConnected,
+              canTransmit else {
+            return false
+        }
+
+        switch remoteWakeCapabilityState {
+        case .wakeCapable:
+            return true
+        case .unavailable:
+            return remoteAudioReadinessState == .ready
+        }
     }
 
     var startingTransmitStage: StartingTransmitStage? {
@@ -2029,14 +2062,23 @@ enum ContactDirectory {
         handle: String,
         remoteUserId: String,
         channelId: String,
+        displayName: String? = nil,
         existingContacts: [Contact]
     ) -> (contacts: [Contact], contactID: UUID) {
         let normalizedHandle = Contact.normalizedHandle(handle)
-        let stableID = Contact.stableID(for: normalizedHandle)
+        let stableID = Contact.stableID(remoteUserId: remoteUserId, fallbackHandle: normalizedHandle)
         let stableChannelID = channelId.isEmpty ? nil : stableChannelUUID(for: channelId)
 
         var contacts = existingContacts
-        if let index = contacts.firstIndex(where: { Contact.normalizedHandle($0.handle) == normalizedHandle }) {
+        if let index = contacts.firstIndex(where: {
+            ($0.remoteUserId != nil && $0.remoteUserId == remoteUserId)
+                || Contact.normalizedHandle($0.handle) == normalizedHandle
+        }) {
+            let trimmedName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedName.isEmpty {
+                contacts[index].name = trimmedName
+            }
+            contacts[index].handle = normalizedHandle
             contacts[index].remoteUserId = remoteUserId
             if let stableChannelID {
                 contacts[index].backendChannelId = channelId
@@ -2051,7 +2093,10 @@ enum ContactDirectory {
         contacts.append(
             Contact(
                 id: stableID,
-                name: Contact.displayName(for: normalizedHandle),
+                name: {
+                    let trimmedName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return trimmedName.isEmpty ? Contact.displayName(for: normalizedHandle) : trimmedName
+                }(),
                 handle: normalizedHandle,
                 isOnline: false,
                 channelId: stableChannelID ?? UUID(),

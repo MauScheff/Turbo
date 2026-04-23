@@ -36,7 +36,7 @@ class CheckResult:
 def request(
     base_url: str,
     path: str,
-    handle: str,
+    handle: str | None,
     *,
     method: str = "GET",
     body: dict | None = None,
@@ -50,11 +50,14 @@ def request(
         "--fail-with-body",
         "-X",
         method,
-        "-H",
-        f"x-turbo-user-handle: {handle}",
-        "-H",
-        f"Authorization: Bearer {handle}",
     ]
+    if handle:
+        command.extend([
+            "-H",
+            f"x-turbo-user-handle: {handle}",
+            "-H",
+            f"Authorization: Bearer {handle}",
+        ])
     for key, value in (extra_headers or {}).items():
         command.extend(["-H", f"{key}: {value}"])
     if insecure:
@@ -69,6 +72,46 @@ def request(
         raise RouteProbeFailure(f"{method} {path} failed: {payload}") from exc
     raw = completed.stdout.strip()
     return json.loads(raw) if raw else {}
+
+
+def request_text(
+    base_url: str,
+    path: str,
+    handle: str | None,
+    *,
+    method: str = "GET",
+    body: dict | None = None,
+    extra_headers: dict[str, str] | None = None,
+    insecure: bool = False,
+) -> str:
+    url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+    command = [
+        "curl",
+        "-sS",
+        "--fail-with-body",
+        "-X",
+        method,
+    ]
+    if handle:
+        command.extend([
+            "-H",
+            f"x-turbo-user-handle: {handle}",
+            "-H",
+            f"Authorization: Bearer {handle}",
+        ])
+    for key, value in (extra_headers or {}).items():
+        command.extend(["-H", f"{key}: {value}"])
+    if insecure:
+        command.append("-k")
+    if body is not None:
+        command.extend(["-H", "Content-Type: application/json", "--data-binary", json.dumps(body)])
+    command.append(url)
+    try:
+        completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        payload = exc.stderr.strip() or exc.stdout.strip()
+        raise RouteProbeFailure(f"{method} {path} failed: {payload}") from exc
+    return completed.stdout
 
 
 def require(condition: bool, message: str) -> None:
@@ -477,6 +520,33 @@ async def main() -> int:
             lambda: request(args.base_url, "/v1/config", caller["handle"], insecure=args.insecure),
         )
         require(isinstance(config, dict), f"/v1/config returned unexpected payload: {config}")
+        app_site_association = run_check(
+            results,
+            "apple-app-site-association",
+            lambda: request(
+                args.base_url,
+                "/.well-known/apple-app-site-association",
+                None,
+                insecure=args.insecure,
+            ),
+        )
+        require(isinstance(app_site_association, dict), f"unexpected aasa payload: {app_site_association}")
+        applinks = app_site_association.get("applinks")
+        require(isinstance(applinks, dict), f"aasa missing applinks object: {app_site_association}")
+        details = applinks.get("details")
+        require(isinstance(details, list) and details, f"aasa missing details array: {app_site_association}")
+        first_detail = details[0]
+        require(isinstance(first_detail, dict), f"aasa detail had wrong shape: {app_site_association}")
+        app_ids = first_detail.get("appIDs")
+        require(
+            isinstance(app_ids, list) and "7MQU7TLQQ2.com.rounded.Turbo" in app_ids,
+            f"aasa missing BeepBeep app id: {app_site_association}",
+        )
+        components = first_detail.get("components")
+        require(isinstance(components, list) and components, f"aasa missing path components: {app_site_association}")
+        component_paths = {component.get("/") for component in components if isinstance(component, dict)}
+        require("/p/*" in component_paths, f"aasa missing /p/* component: {app_site_association}")
+        require("/id/*/did.json" in component_paths, f"aasa missing did component: {app_site_association}")
 
         run_check(
             results,
@@ -533,6 +603,65 @@ async def main() -> int:
             )
             require(session.get("handle") == current["handle"], f"auth session mismatched handle: {session}")
             current["user_id"] = session["userId"]
+            current["public_id"] = session.get("publicId", current["handle"])
+            current["share_code"] = session.get("shareCode", current["public_id"])
+            current["share_link"] = session.get("shareLink", f"{args.base_url.rstrip('/')}/p/{current['share_code']}")
+            current["did"] = session.get("did", f"did:web:beepbeep.to:id:{current['public_id']}")
+            current["profile_name"] = f"Route Probe {current['handle'].lstrip('@').title()}"
+
+            updated_profile = run_check(
+                results,
+                f"profile-update:{current['handle']}",
+                lambda current=current: request(
+                    args.base_url,
+                    "/v1/profile",
+                    current["handle"],
+                    method="POST",
+                    body={"profileName": current["profile_name"]},
+                    insecure=args.insecure,
+                ),
+            )
+            require(
+                updated_profile.get("profileName") == current["profile_name"],
+                f"profile update did not persist profileName: {updated_profile}",
+            )
+
+            share_page_html = run_check(
+                results,
+                f"share-page:{current['handle']}",
+                lambda current=current: request_text(
+                    args.base_url,
+                    f"/p/{urllib.parse.quote(current['share_code'])}",
+                    None,
+                    insecure=args.insecure,
+                ),
+            )
+            require("Open in BeepBeep" in share_page_html, f"share page missing app CTA: {share_page_html[:400]}")
+            require(current["share_link"] in share_page_html, f"share page missing share link: {share_page_html[:400]}")
+            require(current["share_code"] in share_page_html, f"share page missing share code: {share_page_html[:400]}")
+            require(current["profile_name"] in share_page_html, f"share page missing updated profile name: {share_page_html[:400]}")
+            require("apple-itunes-app" in share_page_html, f"share page missing smart app banner metadata: {share_page_html[:400]}")
+            require("app-id=6762493911" in share_page_html, f"share page missing app store id: {share_page_html[:400]}")
+            require("id=\"qr\"" in share_page_html, f"share page missing qr container: {share_page_html[:400]}")
+            require("api.qrserver.com/v1/create-qr-code/" in share_page_html, f"share page missing qr image source: {share_page_html[:400]}")
+            require("Android is not supported yet." in share_page_html, f"share page missing android fallback copy: {share_page_html[:400]}")
+
+            did_document = run_check(
+                results,
+                f"did-document:{current['handle']}",
+                lambda current=current: request(
+                    args.base_url,
+                    f"/id/{urllib.parse.quote(current['public_id'])}/did.json",
+                    None,
+                    insecure=args.insecure,
+                ),
+            )
+            require(did_document.get("id") == current["did"], f"did document mismatched id: {did_document}")
+            also_known_as = did_document.get("alsoKnownAs")
+            require(
+                isinstance(also_known_as, list) and current["share_link"] in also_known_as,
+                f"did document missing share page alias: {did_document}",
+            )
 
             device = run_check(
                 results,

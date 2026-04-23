@@ -384,11 +384,17 @@ extension PTTViewModel {
         }
     }
 
-    func ensureContactExists(handle: String, remoteUserId: String, channelId: String) -> UUID {
+    func ensureContactExists(
+        handle: String,
+        remoteUserId: String,
+        channelId: String,
+        displayName: String? = nil
+    ) -> UUID {
         let result = ContactDirectory.ensureContact(
             handle: handle,
             remoteUserId: remoteUserId,
             channelId: channelId,
+            displayName: displayName,
             existingContacts: contacts
         )
         contacts = result.contacts

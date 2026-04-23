@@ -103,13 +103,13 @@ extension PTTViewModel {
             )
             return
         }
-        await openContact(handle: handle)
+        await openContact(reference: handle)
     }
 
     func openPendingTalkRequestNotificationIfNeeded() async {
         guard let handle = pendingTalkRequestNotificationHandle else { return }
         pendingTalkRequestNotificationHandle = nil
-        await openContact(handle: handle)
+        await openContact(reference: handle)
     }
 
     func refreshDeviceRegistrationWithAlertPushTokenIfPossible() async {
