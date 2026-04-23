@@ -16,6 +16,7 @@ final class BackendRuntimeState {
     var currentUserID: String?
     var isReady: Bool = false
     var mode: String = "unknown"
+    var telemetryEnabled: Bool = false
     var trackedContactIDs: Set<UUID> = []
     var transportFaults = TransportFaultRuntimeState()
 
@@ -30,12 +31,14 @@ final class BackendRuntimeState {
     func applyAuthenticatedSession(
         client: TurboBackendClient,
         userID: String,
-        mode: String
+        mode: String,
+        telemetryEnabled: Bool
     ) {
         self.client = client
         currentUserID = userID
         isReady = true
         self.mode = mode
+        self.telemetryEnabled = telemetryEnabled
     }
 
     func disconnectForReconnect() {
@@ -44,6 +47,7 @@ final class BackendRuntimeState {
         currentUserID = nil
         isReady = false
         mode = "unknown"
+        telemetryEnabled = false
         bootstrapRetryTask?.cancel()
         bootstrapRetryTask = nil
         signalingJoinRecoveryTask?.cancel()
@@ -657,6 +661,7 @@ struct BackendServices {
     let client: TurboBackendClient
     let currentUserID: String?
     let mode: String
+    let telemetryEnabled: Bool
 
     var supportsWebSocket: Bool { client.supportsWebSocket }
     var isWebSocketConnected: Bool { client.isWebSocketConnected }
@@ -693,6 +698,10 @@ struct BackendServices {
 
     func latestDiagnostics(deviceId: String) async throws -> TurboLatestDiagnosticsResponse {
         try await client.latestDiagnostics(deviceId: deviceId)
+    }
+
+    func uploadTelemetry(_ payload: TurboTelemetryEventRequest) async throws -> TurboTelemetryUploadResponse {
+        try await client.uploadTelemetry(payload)
     }
 
     func heartbeatPresence() async throws -> TurboPresenceHeartbeatResponse {

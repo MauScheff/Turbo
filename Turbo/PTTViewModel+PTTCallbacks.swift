@@ -201,6 +201,20 @@ extension PTTViewModel {
                 "senderDeviceId": payload.senderDeviceId ?? "none",
             ]
         )
+        sendTelemetryEvent(
+            eventName: "ios.ptt.incoming_push_received",
+            severity: .notice,
+            reason: payload.event.rawValue,
+            message: "Incoming PTT push received",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "event": payload.event.rawValue,
+                "activeSpeaker": payload.activeSpeaker ?? "none",
+                "senderDeviceId": payload.senderDeviceId ?? "none",
+            ],
+            peerHandle: payload.activeSpeaker,
+            channelId: payload.channelId
+        )
 
         guard let contactID else {
             captureDiagnosticsState("ptt-callback:incoming-push-unmatched")
@@ -550,6 +564,20 @@ extension PTTViewModel {
                     "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
                 ]
             )
+            sendTelemetryEvent(
+                eventName: "ios.transmit.system_began",
+                severity: .notice,
+                reason: source,
+                message: "System transmit began",
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "source": source,
+                    "activeContactId": (callbackTarget?.contactID ?? contactId(for: channelUUID))?.uuidString ?? "none",
+                    "activeChannelId": callbackTarget?.channelID ?? "none",
+                    "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
+                ],
+                channelId: callbackTarget?.channelID
+            )
             if callbackTarget == nil {
                 handleSystemOriginatedBeginTransmitIfNeeded(
                     channelUUID: channelUUID,
@@ -594,6 +622,20 @@ extension PTTViewModel {
                     "pttDescriptorReason": lastReportedPTTDescriptorReason ?? "none",
                     "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
                 ]
+            )
+            sendTelemetryEvent(
+                eventName: "ios.transmit.system_ended",
+                severity: .notice,
+                reason: source,
+                message: "System transmit ended",
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "source": source,
+                    "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
+                    "activeContactId": matchingActiveTarget?.contactID.uuidString ?? "none",
+                    "activeChannelId": matchingActiveTarget?.channelID ?? "none",
+                ],
+                channelId: matchingActiveTarget?.channelID
             )
             switch transmitRuntime.handleSystemTransmitEnded(
                 applicationStateIsActive: applicationState == .active,

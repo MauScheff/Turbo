@@ -26,7 +26,7 @@ turbo.deploy.internal.resolveApnsPrivateKeyText = do
 turbo.deploy : '{IO, Exception} URI
 turbo.deploy =
   Cloud.main do
-    env = Environment.named "turbo-production-v2"
+    env = Environment.named "turbo-production-v3"
     database = Database.named "turbo-control-plane-v2"
     _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_WORKER_SECRET"
     _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_TEAM_ID"
@@ -48,19 +48,19 @@ turbo.deploy =
 turbo.setApnsTeamId : Text -> '{IO, Exception} ()
 turbo.setApnsTeamId teamId =
   Cloud.main do
-    env = Environment.named "turbo-production-v2"
+    env = Environment.named "turbo-production-v3"
     Environment.setValue env "TURBO_APNS_TEAM_ID" teamId
 
 turbo.setApnsKeyId : Text -> '{IO, Exception} ()
 turbo.setApnsKeyId keyId =
   Cloud.main do
-    env = Environment.named "turbo-production-v2"
+    env = Environment.named "turbo-production-v3"
     Environment.setValue env "TURBO_APNS_KEY_ID" keyId
 
 turbo.setApnsPrivateKey : Text -> '{IO, Exception} ()
 turbo.setApnsPrivateKey pemText =
   Cloud.main do
-    env = Environment.named "turbo-production-v2"
+    env = Environment.named "turbo-production-v3"
     Environment.setValue env "TURBO_APNS_PRIVATE_KEY" pemText
 
 turbo.setApnsPrivateKeyFromPath : Text -> '{IO, Exception} ()
@@ -71,13 +71,13 @@ turbo.setApnsPrivateKeyFromPath pathText = do
 turbo.setApnsBundleId : Text -> '{IO, Exception} ()
 turbo.setApnsBundleId bundleId =
   Cloud.main do
-    env = Environment.named "turbo-production-v2"
+    env = Environment.named "turbo-production-v3"
     Environment.setValue env "TURBO_APNS_BUNDLE_ID" bundleId
 
 turbo.setApnsUseSandbox : Text -> '{IO, Exception} ()
 turbo.setApnsUseSandbox useSandbox =
   Cloud.main do
-    env = Environment.named "turbo-production-v2"
+    env = Environment.named "turbo-production-v3"
     Environment.setValue env "TURBO_APNS_USE_SANDBOX" useSandbox
 
 

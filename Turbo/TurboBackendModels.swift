@@ -916,6 +916,30 @@ struct TurboAuthSessionResponse: Decodable {
 struct TurboBackendRuntimeConfig: Decodable {
     let mode: String
     let supportsWebSocket: Bool
+    let telemetryEnabled: Bool?
+
+    init(
+        mode: String,
+        supportsWebSocket: Bool,
+        telemetryEnabled: Bool? = nil
+    ) {
+        self.mode = mode
+        self.supportsWebSocket = supportsWebSocket
+        self.telemetryEnabled = telemetryEnabled
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case mode
+        case supportsWebSocket
+        case telemetryEnabled
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try container.decode(String.self, forKey: .mode)
+        supportsWebSocket = try container.decode(Bool.self, forKey: .supportsWebSocket)
+        telemetryEnabled = try container.decodeIfPresent(Bool.self, forKey: .telemetryEnabled)
+    }
 }
 
 struct TurboSeedResponse: Decodable {
@@ -956,6 +980,11 @@ struct TurboDiagnosticsUploadResponse: Decodable {
 struct TurboLatestDiagnosticsResponse: Decodable {
     let status: String
     let report: TurboPublishedDiagnosticsReport
+}
+
+struct TurboTelemetryUploadResponse: Decodable {
+    let status: String
+    let delivered: Bool?
 }
 
 struct TurboResetStateResponse: Decodable {

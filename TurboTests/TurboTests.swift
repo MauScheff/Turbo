@@ -15,6 +15,47 @@ struct TurboTests {
         #expect(AudioOutputPreference.phone.buttonLabel == "Phone")
     }
 
+    @Test func telemetryEventRequestEncodesMetadataTextAndAlertAsStrings() throws {
+        let payload = TurboTelemetryEventRequest(
+            eventName: "ios.invariant.violation",
+            source: "ios",
+            severity: "error",
+            metadata: [
+                "beta": "2",
+                "alpha": "1",
+            ],
+            alert: true
+        )
+
+        let data = try JSONEncoder().encode(payload)
+        let rawObject = try JSONSerialization.jsonObject(with: data)
+        let json = rawObject as? [String: String]
+
+        #expect(json?["eventName"] == "ios.invariant.violation")
+        #expect(json?["source"] == "ios")
+        #expect(json?["severity"] == "error")
+        #expect(json?["alert"] == "true")
+        #expect(json?["metadataText"] == #"{"alpha":"1","beta":"2"}"#)
+    }
+
+    @Test func telemetryEventRequestPrefersExplicitMetadataText() throws {
+        let payload = TurboTelemetryEventRequest(
+            eventName: "ios.error.backend",
+            source: "ios",
+            severity: "error",
+            metadata: ["ignored": "value"],
+            metadataText: "{\"prebuilt\":\"payload\"}",
+            alert: false
+        )
+
+        let data = try JSONEncoder().encode(payload)
+        let rawObject = try JSONSerialization.jsonObject(with: data)
+        let json = rawObject as? [String: String]
+
+        #expect(json?["metadataText"] == #"{"prebuilt":"payload"}"#)
+        #expect(json?["alert"] == "false")
+    }
+
     @Test func speakerOverridePlanSkipsOverrideWhenSpeakerAlreadyActive() {
         let plan = AudioOutputRouteOverridePlan.forCurrentRoute(
             preference: .speaker,

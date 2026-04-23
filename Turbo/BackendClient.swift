@@ -76,6 +76,10 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         return try await request(path: "/v1/dev/diagnostics/latest/\(escapedDeviceID)/")
     }
 
+    func uploadTelemetry(_ payload: TurboTelemetryEventRequest) async throws -> TurboTelemetryUploadResponse {
+        try await request(path: "/v1/telemetry/events", method: "POST", body: payload)
+    }
+
     func registerDevice(label: String?, alertPushToken: String?) async throws -> TurboDeviceRegistrationResponse {
         try await request(
             path: "/v1/devices/register",

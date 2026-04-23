@@ -23,6 +23,77 @@ You can show excerpts of the scratch file as needed when asking for help or revi
 
 You are not finished with a task until the scratch file you are working on compiles.
 
+## Backend env vars in Unison Cloud
+
+When adding backend environment variables that the deployed service must read via
+`Config.lookup`, use this exact loop.
+
+1. Add the local values in `.envrc`.
+2. Add the new key to `turbo.config.seedKeys`.
+3. If the value needs transformation before cloud storage, handle that in
+   `turbo.deploy.internal.seedCurrentOsEnv`.
+   Example: `TURBO_APNS_PRIVATE_KEY_PATH` resolves locally and stores
+   `TURBO_APNS_PRIVATE_KEY` in cloud config.
+4. Add or extend a runtime proof surface such as `/v1/dev/deploy-stamp`.
+5. Run the generic sync helper from a `direnv`-loaded shell.
+6. Deploy.
+7. Verify the running service, not just the local shell.
+
+Preferred shape:
+
+```unison
+turbo.config.seedKeys : [Text]
+turbo.config.seedKeys =
+  [ "FEATURE_SECRET"
+  , "FEATURE_BASE_URL"
+  ]
+
+turbo.config.readOsEnv : '{IO} [(Text, Text)]
+turbo.config.readOsEnv = do
+  turbo.config.seedKeys |> List.filterMap
+    (k ->
+      match getEnv.impl k with
+        Right v -> Some (k, v)
+        Left _  -> None)
+
+turbo.deploy.internal.seedEnvValues :
+  Environment -> [(Text, Text)] ->{Exception, Cloud} ()
+turbo.deploy.internal.seedEnvValues env = cases
+  []             -> ()
+  (k, v) +: more ->
+    Environment.setValue env k v
+    turbo.deploy.internal.seedEnvValues env more
+
+turbo.syncDeployConfig : '{IO, Exception} ()
+turbo.syncDeployConfig =
+  Cloud.main do
+    env = Environment.named "turbo-production-vN"
+    kvs = turbo.config.readOsEnv()
+    turbo.deploy.internal.seedEnvValues env kvs
+```
+
+Operator loop:
+
+```bash
+direnv exec . ucm run turbo/main:.turbo.syncDeployConfig
+just deploy
+curl -sS -H 'x-turbo-user-handle: @avery' -H 'Authorization: Bearer @avery' \
+  https://beepbeep.to/v1/dev/deploy-stamp
+```
+
+Important:
+
+- Do not trust local shell state by itself.
+- Adding a new backend env var should not require switching from
+  `turbo-production-vN` to a new environment name. Treat environment hopping as
+  an exceptional recovery step, not the standard workflow.
+- Do not test probe values in the production environment unless you are prepared
+  to delete and reseed them immediately.
+- If config keys are present but wrong, delete and reseed those exact keys, then
+  deploy again.
+- `deploy-force` only counts if it updates `turbo.service.deployStamp` in
+  `turbo/main`, not `scratch/main`.
+
 ## Design maxims (Functional Programming)
 
 * Model the domain with types first

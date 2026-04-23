@@ -18,6 +18,7 @@ The app side currently proves out Apple's PushToTalk framework integration. The 
 - `TOOLING.md`: tooling, operational entrypoints, and infrastructure overview.
 - `STATE_MACHINE_TESTING.md`: canonical scenario-driven state-machine testing workflow.
 - `INVARIANTS.md`: invariant rule catalog and diagnostics-backed regression guidance.
+- `PRODUCTION_TELEMETRY.md`: production telemetry architecture, deployment, alerting, and query workflow.
 - `.agents/`: supporting Unison language and workflow notes.
 
 ## Docs ownership
@@ -46,6 +47,8 @@ Use these docs as the primary authority for their respective concerns:
   - the default distributed bug reproduction, proof, and regression-testing model
 - `INVARIANTS.md`
   - how invariant IDs, typed violation logging, merged diagnostics checks, and regression expectations are encoded
+- `PRODUCTION_TELEMETRY.md`
+  - production telemetry architecture, worker/backend setup, and operator query workflow
 - `handoffs/README.md`
   - handoff conventions and how to use the timestamped handoff log
 - `handoffs/*.md`

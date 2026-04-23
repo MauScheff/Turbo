@@ -308,7 +308,8 @@ extension PTTViewModel {
             applyAuthenticatedBackendSession(
                 client: client,
                 userID: session.userId,
-                mode: runtimeConfig.mode
+                mode: runtimeConfig.mode,
+                telemetryEnabled: runtimeConfig.telemetryEnabled ?? false
             )
             client.connectWebSocket()
             backendSyncCoordinator.send(.bootstrapCompleted(mode: runtimeConfig.mode, handle: session.handle))
@@ -321,6 +322,17 @@ extension PTTViewModel {
                 .backend,
                 message: "Backend connected",
                 metadata: ["mode": runtimeConfig.mode, "handle": session.handle, "deviceId": client.deviceID]
+            )
+            sendTelemetryEvent(
+                eventName: "ios.backend.connected",
+                severity: .info,
+                reason: runtimeConfig.mode,
+                message: "Backend connected",
+                metadata: [
+                    "deviceId": client.deviceID,
+                    "handle": session.handle,
+                    "telemetryEnabled": String(runtimeConfig.telemetryEnabled ?? false),
+                ]
             )
             replaceBackendBootstrapRetryTask(with: nil)
             syncPTTServiceStatus(reason: "backend-connected")

@@ -21,7 +21,7 @@ deploy:
 
 bump-deploy-stamp:
   sh -c 'cd {{justfile_directory()}} && ./scripts/write_deploy_stamp_scratch.sh'
-  sh -c 'cd {{justfile_directory()}} && direnv exec . ucm -c ~/.unison/v2 transcript.in-place bump-deploy-stamp.transcript.md'
+  sh -c 'cd {{justfile_directory()}} && printf "load scratch_deploy_stamp.u\nupdate\nquit\n" | direnv exec . ucm -p turbo/main'
 
 deploy-force:
   just bump-deploy-stamp
@@ -117,6 +117,21 @@ cf-apns-worker-dev:
 
 cf-apns-worker-deploy:
   sh -c 'cd {{justfile_directory()}}/cloudflare/apns-worker && wrangler deploy'
+
+cf-telemetry-worker-dev:
+  sh -c 'cd {{justfile_directory()}}/cloudflare/telemetry-worker && wrangler dev'
+
+cf-telemetry-worker-deploy:
+  sh -c 'cd {{justfile_directory()}}/cloudflare/telemetry-worker && wrangler deploy'
+
+telemetry-query query="SHOW TABLES":
+  python3 scripts/query_telemetry.py --query "{{query}}"
+
+telemetry-recent hours="24" limit="50":
+  python3 scripts/query_telemetry.py --hours "{{hours}}" --limit "{{limit}}"
+
+telemetry-user handle hours="24" limit="50":
+  python3 scripts/query_telemetry.py --hours "{{hours}}" --limit "{{limit}}" --user-handle "{{handle}}"
 
 simulator-scenario scenario="" base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" insecure="--insecure":
   python3 scripts/run_simulator_scenarios.py \

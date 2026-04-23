@@ -202,6 +202,7 @@ final class DiagnosticsStore {
     private(set) var stateCaptures: [DiagnosticsStateCapture] = []
     private(set) var invariantViolations: [DiagnosticsInvariantViolation] = []
     private(set) var latestErrorEntry: DiagnosticsEntry?
+    var onHighSignalEvent: ((DiagnosticsHighSignalEvent) -> Void)?
 
     init() {
         let baseDirectory =
@@ -325,6 +326,9 @@ final class DiagnosticsStore {
         refreshLatestErrorEntry(afterRecording: entry)
         logger.log(level: entry.level.osLogType, "\(entry.subsystem.rawValue, privacy: .public): \(entry.message, privacy: .public) \(entry.metadata.formattedForLog, privacy: .public)")
         appendToDisk(entry)
+        if entry.level == .error, entry.subsystem != .invariant {
+            onHighSignalEvent?(.errorEntry(entry))
+        }
     }
 
     private func clearOnMain() {
@@ -401,6 +405,7 @@ final class DiagnosticsStore {
         if invariantViolations.count > invariantViolationLimit {
             invariantViolations.removeLast(invariantViolations.count - invariantViolationLimit)
         }
+        onHighSignalEvent?(.invariantViolation(violation))
 
         var diagnosticMetadata = metadata
         diagnosticMetadata["invariantID"] = invariantID

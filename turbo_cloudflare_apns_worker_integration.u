@@ -26,7 +26,7 @@ turbo.deploy.internal.resolveApnsPrivateKeyText = do
 turbo.deploy : '{IO, Exception} URI
 turbo.deploy =
   Cloud.main do
-    env = Environment.named "turbo-production-v2"
+    env = Environment.named "turbo-production-v3"
     database = Database.named "turbo-control-plane-v2"
     _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_WORKER_SECRET"
     _ = turbo.deploy.internal.syncOptionalEnvToCloud env "TURBO_APNS_WORKER_BASE_URL"
@@ -49,13 +49,13 @@ turbo.deploy =
 turbo.setApnsWorkerSecret : Text -> '{IO, Exception} ()
 turbo.setApnsWorkerSecret secret =
   Cloud.main do
-    env = Environment.named "turbo-production-v2"
+    env = Environment.named "turbo-production-v3"
     Environment.setValue env "TURBO_APNS_WORKER_SECRET" secret
 
 turbo.setApnsWorkerBaseUrl : Text -> '{IO, Exception} ()
 turbo.setApnsWorkerBaseUrl baseUrl =
   Cloud.main do
-    env = Environment.named "turbo-production-v2"
+    env = Environment.named "turbo-production-v3"
     Environment.setValue env "TURBO_APNS_WORKER_BASE_URL" baseUrl
 
 turbo.syncApnsWorkerConfig : '{IO} ()
@@ -64,7 +64,7 @@ turbo.syncApnsWorkerConfig = do
     secret = getEnv "TURBO_APNS_WORKER_SECRET"
     baseUrl = getEnv "TURBO_APNS_WORKER_BASE_URL"
     Cloud.main do
-      env = Environment.named "turbo-production-v2"
+      env = Environment.named "turbo-production-v3"
       Environment.setValue env "TURBO_APNS_WORKER_SECRET" secret
       Environment.setValue env "TURBO_APNS_WORKER_BASE_URL" baseUrl
   with

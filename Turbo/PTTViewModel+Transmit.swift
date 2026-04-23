@@ -408,6 +408,19 @@ extension PTTViewModel {
         }
 
         diagnostics.record(.media, message: "Begin transmit requested", metadata: ["contact": contact.handle])
+        sendTelemetryEvent(
+            eventName: "ios.transmit.begin_requested",
+            severity: .notice,
+            reason: "hold-to-talk",
+            message: "Begin transmit requested",
+            metadata: [
+                "contact": contact.handle,
+                "backendChannelId": contact.backendChannelId ?? "none",
+                "usesLocalHTTPBackend": String(usesLocalHTTPBackend),
+            ],
+            peerHandle: contact.handle,
+            channelId: contact.backendChannelId
+        )
         let request = TransmitRequestContext(
             contactID: contact.id,
             contactHandle: contact.handle,
@@ -518,6 +531,12 @@ extension PTTViewModel {
             || isTransmitting
         guard hasPendingOrActiveTransmit else { return }
         diagnostics.record(.media, message: "End transmit requested")
+        sendTelemetryEvent(
+            eventName: "ios.transmit.end_requested",
+            severity: .notice,
+            reason: "release",
+            message: "End transmit requested"
+        )
         // Clear the local press latch immediately so a system-end callback racing
         // with release does not look like an unexpected end that should be retried.
         transmitRuntime.markExplicitStopRequested()
@@ -708,6 +727,21 @@ extension PTTViewModel {
                     "expiresAt": response.expiresAt,
                     "targetDeviceId": response.targetDeviceId,
                 ]
+            )
+            sendTelemetryEvent(
+                eventName: "ios.transmit.backend_granted",
+                severity: .notice,
+                reason: "begin-transmit",
+                message: "Backend transmit lease granted",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "startedAt": response.startedAt,
+                    "expiresAt": response.expiresAt,
+                    "targetDeviceId": response.targetDeviceId,
+                ],
+                peerHandle: request.contactHandle,
+                channelId: target.channelID
             )
             // The backend lease starts as soon as beginTransmit succeeds.
             // Keep it alive from that point, not from later PTT activation

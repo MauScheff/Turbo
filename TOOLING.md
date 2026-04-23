@@ -139,8 +139,9 @@ Wake-send attempts should still be uploaded to the backend dev diagnostics surfa
 When introducing a new backend environment variable, treat it as a three-part change:
 
 1. Add the variable to the local deploy environment.
-2. Update `turbo.deploy` so the variable is copied into the named cloud environment.
-3. Add or extend a small runtime config surface so the deployed service can report whether it sees the new value.
+2. Add the key to `turbo.config.seedKeys` so `turbo.deploy` copies it into the named cloud environment.
+3. If the value must be transformed before storage, extend `turbo.deploy.internal.seedCurrentOsEnv`.
+4. Add or extend a small runtime config surface so the deployed service can report whether it sees the new value.
 
 Do not stop at step 1. A variable existing in the local shell does not make it live in the deployed backend. New backend env vars are not fully wired until deploy-time sync and runtime visibility are both in place.
 

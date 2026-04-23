@@ -172,6 +172,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         audioOutputPreference = .speaker
         UserDefaults.standard.set(AudioOutputPreference.speaker.rawValue, forKey: AudioOutputPreference.storageKey)
         super.init()
+        diagnostics.onHighSignalEvent = { [weak self] event in
+            self?.handleHighSignalDiagnosticsEvent(event)
+        }
         selectedPeerCoordinator.effectHandler = { [weak self] effect in
             await self?.runSelectedPeerEffect(effect)
         }
@@ -337,9 +340,15 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     func applyAuthenticatedBackendSession(
         client: TurboBackendClient,
         userID: String,
-        mode: String
+        mode: String,
+        telemetryEnabled: Bool = false
     ) {
-        backendRuntime.applyAuthenticatedSession(client: client, userID: userID, mode: mode)
+        backendRuntime.applyAuthenticatedSession(
+            client: client,
+            userID: userID,
+            mode: mode,
+            telemetryEnabled: telemetryEnabled
+        )
     }
 
     func storeAuthenticatedUserID(_ userID: String) {
@@ -474,7 +483,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         return BackendServices(
             client: client,
             currentUserID: runtime.currentUserID,
-            mode: runtime.mode
+            mode: runtime.mode,
+            telemetryEnabled: runtime.telemetryEnabled
         )
     }
 
