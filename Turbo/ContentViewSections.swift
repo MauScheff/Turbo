@@ -64,7 +64,10 @@ struct TurboContactListView: View {
     let contactSections: ContactListSections
     let activeStatusPill: (Contact) -> ContactStatusPillModel
     let itemStatusPill: (ContactListItem) -> ContactStatusPillModel
+    let activeSubtitle: (Contact) -> String
+    let itemSubtitle: (ContactListItem) -> String
     let selectContact: (Contact) -> Void
+    let showContactDetails: (Contact) -> Void
     let endSystemSession: () -> Void
 
     private struct ContactRowRenderIdentity: Hashable {
@@ -86,10 +89,14 @@ struct TurboContactListView: View {
                             sectionHeader("Active", topPadding: 4)
                             TurboContactRow(
                                 title: activeContact.name,
-                                subtitle: activeContact.handle,
+                                subtitle: activeSubtitle(activeContact),
                                 isSelected: true,
                                 pill: activeStatusPill(activeContact),
-                                onTap: { selectContact(activeContact) }
+                                onTap: { selectContact(activeContact) },
+                                onLongPress: {
+                                    selectContact(activeContact)
+                                    showContactDetails(activeContact)
+                                }
                             )
                             .id(
                                 ContactRowRenderIdentity(
@@ -163,10 +170,14 @@ struct TurboContactListView: View {
                 let isSelected = selectedContactID == item.contact.id
                 TurboContactRow(
                     title: item.contact.name,
-                    subtitle: subtitleText(for: item),
+                    subtitle: itemSubtitle(item),
                     isSelected: isSelected,
                     pill: itemStatusPill(item),
-                    onTap: { selectContact(item.contact) }
+                    onTap: { selectContact(item.contact) },
+                    onLongPress: {
+                        selectContact(item.contact)
+                        showContactDetails(item.contact)
+                    }
                 )
                 .id(
                     ContactRowRenderIdentity(
@@ -179,20 +190,14 @@ struct TurboContactListView: View {
         }
     }
 
-    private func subtitleText(for item: ContactListItem) -> String {
-        guard let requestCount = item.presentation.requestCount, requestCount > 1 else {
-            return item.contact.handle
-        }
-        return "\(item.contact.handle) • \(requestCount)x"
-    }
 }
-
 private struct TurboContactRow: View {
     let title: String
     let subtitle: String
     let isSelected: Bool
     let pill: ContactStatusPillModel
     let onTap: () -> Void
+    let onLongPress: (() -> Void)?
 
     var body: some View {
         Button(action: onTap) {
@@ -221,6 +226,12 @@ private struct TurboContactRow: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.45)
+                .onEnded { _ in
+                    onLongPress?()
+                }
+        )
     }
 }
 

@@ -38,6 +38,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     var deviceID: String { config.deviceID }
     var devUserHandle: String { config.devUserHandle }
     var supportsWebSocket: Bool { runtimeConfig?.supportsWebSocket ?? false }
+    var supportsDirectQuicUpgrade: Bool { runtimeConfig?.supportsDirectQuicUpgrade ?? false }
+    var directQuicPolicy: TurboDirectQuicPolicy? { runtimeConfig?.directQuicPolicy }
     var modeDescription: String { runtimeConfig?.mode ?? "unknown" }
     var isWebSocketConnected: Bool { webSocketConnectionState == .connected }
 
@@ -109,6 +111,28 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             path: "/v1/identities/resolve",
             method: "POST",
             body: TurboResolveIdentityRequest(reference: reference)
+        )
+    }
+
+    func rememberContact(
+        otherHandle: String? = nil,
+        otherUserId: String? = nil
+    ) async throws -> TurboRememberContactResponse {
+        try await request(
+            path: "/v1/contacts/remember",
+            method: "POST",
+            body: TurboRememberContactRequest(otherHandle: otherHandle, otherUserId: otherUserId)
+        )
+    }
+
+    func forgetContact(
+        otherHandle: String? = nil,
+        otherUserId: String? = nil
+    ) async throws -> TurboForgetContactResponse {
+        try await request(
+            path: "/v1/contacts/forget",
+            method: "POST",
+            body: TurboForgetContactRequest(otherHandle: otherHandle, otherUserId: otherUserId)
         )
     }
 
@@ -539,6 +563,16 @@ private struct TurboCreateInviteRequest: Encodable {
 
 private struct TurboResolveIdentityRequest: Encodable {
     let reference: String
+}
+
+private struct TurboRememberContactRequest: Encodable {
+    let otherHandle: String?
+    let otherUserId: String?
+}
+
+private struct TurboForgetContactRequest: Encodable {
+    let otherHandle: String?
+    let otherUserId: String?
 }
 
 private struct TurboChannelDeviceRequest: Encodable {

@@ -201,7 +201,14 @@ enum DevSelfCheckRunner {
         let runtimeConfig: TurboBackendRuntimeConfig
         do {
             runtimeConfig = try await services.fetchRuntimeConfig()
-            steps.append(DevSelfCheckStep(.runtimeConfig, status: .passed, detail: "Mode \(runtimeConfig.mode), websocket \(runtimeConfig.supportsWebSocket ? "on" : "off")"))
+            let relayOnlyOverride = TurboDirectPathDebugOverride.isRelayOnlyForced()
+            steps.append(
+                DevSelfCheckStep(
+                    .runtimeConfig,
+                    status: .passed,
+                    detail: "Mode \(runtimeConfig.mode), websocket \(runtimeConfig.supportsWebSocket ? "on" : "off"), direct-quic \(runtimeConfig.supportsDirectQuicUpgrade ? "on" : "off"), relay-only override \(relayOnlyOverride ? "on" : "off")"
+                )
+            )
         } catch {
             steps.append(DevSelfCheckStep(.runtimeConfig, status: .failed, detail: error.localizedDescription))
             return DevSelfCheckOutcome(

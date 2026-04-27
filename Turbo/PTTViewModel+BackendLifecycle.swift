@@ -299,6 +299,7 @@ extension PTTViewModel {
 
         do {
             let runtimeConfig = try await client.fetchRuntimeConfig()
+            let localRelayOnlyOverride = TurboDirectPathDebugOverride.isRelayOnlyForced()
             let session = try await synchronizedProfileSessionIfNeeded(
                 try await client.authenticate(),
                 using: client
@@ -328,7 +329,13 @@ extension PTTViewModel {
             diagnostics.record(
                 .backend,
                 message: "Backend connected",
-                metadata: ["mode": runtimeConfig.mode, "handle": session.handle, "deviceId": client.deviceID]
+                metadata: [
+                    "mode": runtimeConfig.mode,
+                    "handle": session.handle,
+                    "deviceId": client.deviceID,
+                    "supportsDirectQuicUpgrade": String(runtimeConfig.supportsDirectQuicUpgrade),
+                    "localRelayOnlyOverride": String(localRelayOnlyOverride),
+                ]
             )
             sendTelemetryEvent(
                 eventName: "ios.backend.connected",
@@ -339,8 +346,17 @@ extension PTTViewModel {
                     "deviceId": client.deviceID,
                     "handle": session.handle,
                     "telemetryEnabled": String(runtimeConfig.telemetryEnabled ?? false),
+                    "supportsDirectQuicUpgrade": String(runtimeConfig.supportsDirectQuicUpgrade),
+                    "localRelayOnlyOverride": String(localRelayOnlyOverride),
                 ]
             )
+            if runtimeConfig.supportsDirectQuicUpgrade, localRelayOnlyOverride {
+                diagnostics.record(
+                    .media,
+                    message: "Direct QUIC upgrade disabled by local debug override",
+                    metadata: ["deviceId": client.deviceID]
+                )
+            }
             replaceBackendBootstrapRetryTask(with: nil)
             syncPTTServiceStatus(reason: "backend-connected")
             captureDiagnosticsState("backend-config:connected")
@@ -369,6 +385,57 @@ extension PTTViewModel {
         diagnostics.record(.auth, message: "Switching dev identity", metadata: ["handle": currentDevUserHandle])
         captureDiagnosticsState("identity-switch:start")
         await configureBackendIfNeeded()
+    }
+
+    func restoreExistingIdentity(from reference: String) async -> Bool {
+        guard let publicID = TurboIncomingLink.publicID(from: reference) else {
+            diagnostics.record(
+                .auth,
+                level: .error,
+                message: "Restore identity failed to parse reference",
+                metadata: ["reference": reference]
+            )
+            return false
+        }
+
+        TurboBackendConfig.setPersistedDevUserHandle(publicID)
+        replaceBackendConfig(with: TurboBackendConfig.load())
+        resetLocalDevState(backendStatus: "Restoring your BeepBeep...")
+        backendStatusMessage = "Restoring your BeepBeep..."
+        diagnostics.record(.auth, message: "Restoring existing identity", metadata: ["publicId": publicID])
+        captureDiagnosticsState("identity-restore:start")
+        await configureBackendIfNeeded()
+
+        guard backendRuntime.isReady else {
+            captureDiagnosticsState("identity-restore:failed")
+            return false
+        }
+
+        let restoredProfileName = TurboIdentityProfileStore.storeDraftProfileName(currentProfileName)
+        TurboIdentityProfileStore.markOnboardingCompleted()
+        storeCurrentProfileName(restoredProfileName)
+        captureDiagnosticsState("identity-restore:finished")
+        return true
+    }
+
+    func createFreshIdentity(handle: String, profileName: String) async -> Bool {
+        let normalizedHandle = TurboHandle.normalizedStoredHandle(handle)
+        TurboBackendConfig.setPersistedDevUserHandle(normalizedHandle)
+        replaceBackendConfig(with: TurboBackendConfig.load())
+        resetLocalDevState(backendStatus: "Creating your BeepBeep...")
+        backendStatusMessage = "Creating your BeepBeep..."
+        diagnostics.record(.auth, message: "Creating fresh identity", metadata: ["handle": normalizedHandle])
+        captureDiagnosticsState("identity-create:start")
+        await configureBackendIfNeeded()
+
+        guard backendRuntime.isReady else {
+            captureDiagnosticsState("identity-create:failed")
+            return false
+        }
+
+        await updateProfileName(profileName, markOnboardingComplete: true)
+        captureDiagnosticsState("identity-create:finished")
+        return backendRuntime.isReady
     }
 
     func updateProfileName(_ profileName: String, markOnboardingComplete: Bool = false) async {

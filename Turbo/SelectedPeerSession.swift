@@ -222,6 +222,10 @@ enum SelectedPeerReducer {
         }
 
         recomputeDerivedState(&nextState)
+        if shouldClearRequesterAutoJoinShortcut(state: nextState) {
+            nextState.requesterAutoJoinOnPeerAcceptanceArmed = false
+            nextState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = false
+        }
         if let effect = autoJoinReadyPeerEffect(for: nextState) {
             nextState.requesterAutoJoinOnPeerAcceptanceArmed = false
             nextState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = true
@@ -385,6 +389,19 @@ enum SelectedPeerReducer {
         }
 
         return previous
+    }
+
+    private static func shouldClearRequesterAutoJoinShortcut(
+        state: SelectedPeerSessionState
+    ) -> Bool {
+        guard state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight else { return false }
+        guard state.pendingAction.pendingConnectContactID == nil else { return false }
+        guard state.pendingAction.pendingJoinContactID == nil else { return false }
+        guard !state.pendingConnectAcceptedIncomingRequest else { return false }
+        guard state.durableSessionProjection == .inactive else { return false }
+        guard state.relationship == .none else { return false }
+        guard state.channel?.membership == .absent else { return false }
+        return true
     }
 
     private static func shouldProjectWakeReadyForConnectedDegradation(

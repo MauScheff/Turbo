@@ -9,7 +9,9 @@ import SwiftUI
 
 private enum ContentRoute {
     case splash
+    case accountChoice
     case profileSetup
+    case handleSetup
     case live
 }
 
@@ -20,17 +22,28 @@ struct ContentView: View {
     @State private var isShowingProfileSheet: Bool = false
     @State private var isShowingDevIdentitySheet: Bool = false
     @State private var isShowingDiagnostics: Bool = false
+    @State private var contactDetailsContactID: UUID?
     @State private var draftDevUserHandle: String = ""
     @State private var draftPeerHandle: String = ""
+    @State private var draftExistingIdentityReference: String = ""
     @State private var draftProfileName: String = ""
+    @State private var draftHandleBody: String = ""
+    @State private var draftLocalContactName: String = ""
     @State private var isSavingDevIdentity: Bool = false
     @State private var isSavingProfileName: Bool = false
+    @State private var isCreatingIdentity: Bool = false
     @State private var isSigningOut: Bool = false
+    @State private var isRestoringIdentity: Bool = false
     @State private var isOpeningPeer: Bool = false
+    @State private var isDeletingContact: Bool = false
     @State private var isResettingDevState: Bool = false
     @State private var isUploadingDiagnostics: Bool = false
     @State private var isRequestingMicrophonePermission: Bool = false
+    @State private var isRunningDirectQuicDebugAction: Bool = false
     @State private var diagnosticsUploadStatus: String?
+    @State private var identityRestoreError: String?
+    @State private var handleSetupError: String?
+    @State private var contactDeleteError: String?
     @Environment(\.colorScheme) private var colorScheme
 
     @MainActor
@@ -43,8 +56,12 @@ struct ContentView: View {
             switch route {
             case .splash:
                 splashView
+            case .accountChoice:
+                accountChoiceView
             case .profileSetup:
                 profileSetupView
+            case .handleSetup:
+                handleSetupView
             case .live:
                 mainView
             }
@@ -53,6 +70,9 @@ struct ContentView: View {
             await viewModel.initializeIfNeeded()
             if draftProfileName.isEmpty {
                 draftProfileName = viewModel.currentProfileName
+            }
+            if route == .splash, viewModel.hasCompletedIdentityOnboarding {
+                route = .live
             }
         }
         .overlay(alignment: .top) {
@@ -80,7 +100,7 @@ struct ContentView: View {
         .sheet(isPresented: $isShowingAddContactSheet) {
             TurboAddContactSheet(
                 draftReference: $draftPeerHandle,
-                currentIdentityCode: viewModel.currentIdentityCode,
+                currentIdentityHandle: viewModel.currentIdentityHandle,
                 currentShareLink: viewModel.currentIdentityShareLink,
                 quickPeerHandles: viewModel.quickPeerHandles,
                 isOpeningPeer: isOpeningPeer,
@@ -93,7 +113,7 @@ struct ContentView: View {
         .sheet(isPresented: $isShowingProfileSheet) {
             TurboProfileSheet(
                 draftProfileName: $draftProfileName,
-                currentIdentityCode: viewModel.currentIdentityCode,
+                currentIdentityHandle: viewModel.currentIdentityHandle,
                 currentShareLink: viewModel.currentIdentityShareLink,
                 isSavingProfileName: isSavingProfileName,
                 isSigningOut: isSigningOut,
@@ -120,6 +140,33 @@ struct ContentView: View {
                 }
             )
         }
+        .sheet(
+            isPresented: Binding(
+                get: { contactDetailsContactID != nil && detailContact != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        contactDetailsContactID = nil
+                        contactDeleteError = nil
+                        isDeletingContact = false
+                    }
+                }
+            )
+        ) {
+            if let detailContact {
+                TurboContactDetailSheet(
+                    contact: detailContact,
+                    draftLocalName: $draftLocalContactName,
+                    shareLink: viewModel.contactShareLink(for: detailContact.id) ?? "",
+                    did: viewModel.contactDID(for: detailContact.id) ?? "",
+                    isDeletingContact: isDeletingContact,
+                    deleteErrorMessage: contactDeleteError,
+                    onClose: { contactDetailsContactID = nil },
+                    onSaveLocalName: saveLocalContactName,
+                    onClearLocalName: clearLocalContactName,
+                    onDeleteContact: deleteContactFromDetails
+                )
+            }
+        }
         .sheet(isPresented: $isShowingDevIdentitySheet) {
             TurboDevIdentitySheet(
                 draftDevUserHandle: $draftDevUserHandle,
@@ -133,6 +180,9 @@ struct ContentView: View {
             TurboDiagnosticsSheet(
                 report: viewModel.latestSelfCheckReport,
                 projection: viewModel.stateMachineProjection,
+                directQuic: viewModel.developerIdentityControlsEnabled
+                    ? viewModel.selectedDirectQuicDiagnosticsSummary
+                    : nil,
                 microphonePermissionStatus: viewModel.microphonePermissionStatusText,
                 needsMicrophonePermission: viewModel.needsMicrophonePermission,
                 logFilePath: viewModel.diagnostics.logFilePath,
@@ -141,10 +191,17 @@ struct ContentView: View {
                 uploadStatus: diagnosticsUploadStatus,
                 isUploading: isUploadingDiagnostics,
                 isRequestingMicrophonePermission: isRequestingMicrophonePermission,
+                isRunningDirectQuicDebugAction: isRunningDirectQuicDebugAction,
                 onClose: { isShowingDiagnostics = false },
                 onUpload: uploadDiagnostics,
                 onClear: { viewModel.diagnostics.clear() },
-                onRequestMicrophonePermission: requestMicrophonePermission
+                onRequestMicrophonePermission: requestMicrophonePermission,
+                onImportDirectQuicIdentity: importDirectQuicIdentityFromDiagnostics,
+                onUseInstalledDirectQuicIdentity: useInstalledDirectQuicIdentityFromDiagnostics,
+                onSetRelayOnlyForced: setDirectPathRelayOnlyForced,
+                onForceDirectQuicProbe: forceDirectQuicProbeFromDiagnostics,
+                onClearDirectQuicRetryBackoff: clearDirectQuicRetryBackoffFromDiagnostics,
+                onCancelDirectQuicAttempt: cancelDirectQuicAttemptFromDiagnostics
             )
         }
         .onOpenURL { url in
@@ -159,11 +216,14 @@ struct ContentView: View {
     private var mainView: some View {
         VStack(spacing: 16) {
             TurboHeaderView(
-                wordmarkName: wordmarkName,
                 statusMessage: viewModel.statusMessage,
+                transportPathState: viewModel.mediaTransportPathState,
+                transportPathTint: transportPathTint,
                 latestErrorText: latestDiagnosticsErrorText,
                 microphonePermissionStatus: viewModel.microphonePermissionStatusText,
                 needsMicrophonePermission: viewModel.needsMicrophonePermission,
+                showsResolvedMicrophoneStatus: viewModel.developerIdentityControlsEnabled,
+                showsAddContactButton: !viewModel.contacts.isEmpty,
                 onAddContact: {
                     isShowingAddContactSheet = true
                 },
@@ -185,7 +245,10 @@ struct ContentView: View {
                     contactSections: viewModel.contactListSections,
                     activeStatusPill: contactStatusPillModel,
                     itemStatusPill: contactListItemStatusPillModel,
+                    activeSubtitle: { viewModel.contactSubtitle(for: $0) },
+                    itemSubtitle: contactListItemSubtitle,
                     selectContact: viewModel.selectContact,
+                    showContactDetails: showContactDetails,
                     endSystemSession: viewModel.endSystemSession
                 )
             }
@@ -207,6 +270,19 @@ struct ContentView: View {
         .padding()
     }
 
+    private var transportPathTint: Color {
+        switch viewModel.mediaTransportPathState {
+        case .relay:
+            return .orange
+        case .promoting:
+            return .blue
+        case .direct:
+            return .green
+        case .recovering:
+            return .red
+        }
+    }
+
     private var splashView: some View {
         TurboSplashView(
             wordmarkName: wordmarkName,
@@ -219,10 +295,28 @@ struct ContentView: View {
                         viewModel.selectContact(contact)
                     }
                 } else {
-                    draftProfileName = viewModel.currentProfileName
-                    route = .profileSetup
+                    draftExistingIdentityReference = ""
+                    identityRestoreError = nil
+                    route = .accountChoice
                 }
             }
+        )
+    }
+
+    private var accountChoiceView: some View {
+        TurboIdentityChoiceView(
+            wordmarkName: wordmarkName,
+            draftExistingIdentityReference: $draftExistingIdentityReference,
+            isRestoring: isRestoringIdentity,
+            errorMessage: identityRestoreError,
+            onChooseNew: {
+                draftProfileName = viewModel.currentProfileName
+                draftHandleBody = TurboHandle.suggestedEditableBody(from: draftProfileName)
+                identityRestoreError = nil
+                handleSetupError = nil
+                route = .profileSetup
+            },
+            onRestore: restoreExistingIdentityAndContinue
         )
     }
 
@@ -232,7 +326,17 @@ struct ContentView: View {
             draftProfileName: $draftProfileName,
             isSaving: isSavingProfileName,
             onShuffle: shuffleSuggestedProfileName,
-            onContinue: saveProfileNameAndContinue
+            onContinue: continueToHandleSetup
+        )
+    }
+
+    private var handleSetupView: some View {
+        TurboHandleSetupView(
+            wordmarkName: wordmarkName,
+            draftHandleBody: $draftHandleBody,
+            isSaving: isCreatingIdentity,
+            errorMessage: handleSetupError,
+            onContinue: createIdentityAndContinue
         )
     }
 
@@ -242,6 +346,11 @@ struct ContentView: View {
 
     private var latestDiagnosticsErrorText: String? {
         viewModel.topChromeDiagnosticsErrorText
+    }
+
+    private var detailContact: Contact? {
+        guard let contactDetailsContactID else { return nil }
+        return viewModel.contact(for: contactDetailsContactID)
     }
 
     private var addContactStatusMessage: String? {
@@ -254,6 +363,44 @@ struct ContentView: View {
 
     private func openPeer(_ handle: String) {
         beginOpeningPeer(handle)
+    }
+
+    private func showContactDetails(for contact: Contact) {
+        contactDetailsContactID = contact.id
+        draftLocalContactName = viewModel.contactLocalName(for: contact.id) ?? ""
+        contactDeleteError = nil
+        isDeletingContact = false
+    }
+
+    private func saveLocalContactName() {
+        guard let contactDetailsContactID else { return }
+        viewModel.updateLocalContactName(draftLocalContactName, for: contactDetailsContactID)
+        draftLocalContactName = viewModel.contactLocalName(for: contactDetailsContactID) ?? ""
+    }
+
+    private func clearLocalContactName() {
+        guard let contactDetailsContactID else { return }
+        viewModel.updateLocalContactName(nil, for: contactDetailsContactID)
+        draftLocalContactName = ""
+    }
+
+    private func deleteContactFromDetails() {
+        guard let contactDetailsContactID else { return }
+        contactDeleteError = nil
+        isDeletingContact = true
+        Task {
+            let deleted = await viewModel.deleteContact(contactDetailsContactID)
+            await MainActor.run {
+                isDeletingContact = false
+                if deleted {
+                    draftLocalContactName = ""
+                    contactDeleteError = nil
+                    self.contactDetailsContactID = nil
+                } else {
+                    contactDeleteError = viewModel.backendStatusMessage
+                }
+            }
+        }
     }
 
     private func beginOpeningPeer(_ handle: String, ensureInitialized: Bool = false) {
@@ -282,6 +429,10 @@ struct ContentView: View {
         route = .live
         isShowingAddContactSheet = false
         beginOpeningPeer(reference, ensureInitialized: true)
+    }
+
+    private func contactListItemSubtitle(_ item: ContactListItem) -> String {
+        viewModel.contactSubtitle(for: item.contact, requestCount: item.presentation.requestCount)
     }
 
     private func runSelfCheckAndShowDiagnostics() {
@@ -347,19 +498,126 @@ struct ContentView: View {
         }
     }
 
+    private func setDirectPathRelayOnlyForced(_ isForced: Bool) {
+        isRunningDirectQuicDebugAction = true
+        Task {
+            await viewModel.setDirectPathRelayOnlyForcedForDebug(isForced)
+            await MainActor.run {
+                isRunningDirectQuicDebugAction = false
+            }
+        }
+    }
+
+    private func importDirectQuicIdentityFromDiagnostics(fileURL: URL, password: String) {
+        isRunningDirectQuicDebugAction = true
+        Task {
+            await viewModel.importDirectQuicIdentityForDebug(
+                from: fileURL,
+                password: password
+            )
+            await MainActor.run {
+                isRunningDirectQuicDebugAction = false
+            }
+        }
+    }
+
+    private func useInstalledDirectQuicIdentityFromDiagnostics() {
+        isRunningDirectQuicDebugAction = true
+        Task {
+            await MainActor.run {
+                viewModel.adoptInstalledDirectQuicIdentityForDebug()
+                isRunningDirectQuicDebugAction = false
+            }
+        }
+    }
+
+    private func forceDirectQuicProbeFromDiagnostics() {
+        isRunningDirectQuicDebugAction = true
+        Task {
+            await viewModel.forceSelectedDirectQuicProbeForDebug()
+            await MainActor.run {
+                isRunningDirectQuicDebugAction = false
+            }
+        }
+    }
+
+    private func clearDirectQuicRetryBackoffFromDiagnostics() {
+        isRunningDirectQuicDebugAction = true
+        Task {
+            await MainActor.run {
+                viewModel.clearSelectedDirectQuicRetryBackoffForDebug()
+                isRunningDirectQuicDebugAction = false
+            }
+        }
+    }
+
+    private func cancelDirectQuicAttemptFromDiagnostics() {
+        isRunningDirectQuicDebugAction = true
+        Task {
+            await viewModel.cancelSelectedDirectQuicAttemptForDebug()
+            await MainActor.run {
+                isRunningDirectQuicDebugAction = false
+            }
+        }
+    }
+
     private func shuffleSuggestedProfileName() {
         draftProfileName = TurboSuggestedProfileName.generate()
     }
 
-    private func saveProfileNameAndContinue() {
-        let profileName = draftProfileName
-        isSavingProfileName = true
+    private func restoreExistingIdentityAndContinue() {
+        let reference = draftExistingIdentityReference
+        isRestoringIdentity = true
+        identityRestoreError = nil
         Task {
-            await viewModel.updateProfileName(profileName, markOnboardingComplete: true)
+            let restored = await viewModel.restoreExistingIdentity(from: reference)
             await MainActor.run {
-                draftProfileName = viewModel.currentProfileName
-                isSavingProfileName = false
-                route = .live
+                isRestoringIdentity = false
+                if restored {
+                    draftProfileName = viewModel.currentProfileName
+                    draftHandleBody = TurboHandle.normalizedEditableBody(viewModel.currentIdentityHandle)
+                    draftExistingIdentityReference = ""
+                    route = .live
+                } else {
+                    identityRestoreError = "Couldn’t restore that handle."
+                }
+            }
+        }
+    }
+
+    private func continueToHandleSetup() {
+        draftHandleBody = TurboHandle.suggestedEditableBody(from: draftProfileName)
+        handleSetupError = nil
+        route = .handleSetup
+    }
+
+    private func createIdentityAndContinue() {
+        let profileName = draftProfileName
+        let handleBody = TurboHandle.normalizedEditableBody(draftHandleBody)
+        guard TurboHandle.isValidEditableBody(handleBody) else {
+            handleSetupError = "Use 3–20 lowercase letters or numbers."
+            return
+        }
+
+        isCreatingIdentity = true
+        handleSetupError = nil
+        Task {
+            let created = await viewModel.createFreshIdentity(
+                handle: TurboHandle.canonicalHandle(fromEditableBody: handleBody),
+                profileName: profileName
+            )
+            await MainActor.run {
+                isCreatingIdentity = false
+                if created {
+                    draftProfileName = viewModel.currentProfileName
+                    draftHandleBody = handleBody
+                    route = .live
+                } else {
+                    handleSetupError =
+                        viewModel.backendStatusMessage.isEmpty
+                        ? "Couldn’t claim that handle."
+                        : viewModel.backendStatusMessage
+                }
             }
         }
     }
@@ -384,7 +642,11 @@ struct ContentView: View {
                 isSigningOut = false
                 isShowingProfileSheet = false
                 draftPeerHandle = ""
+                draftExistingIdentityReference = ""
                 draftProfileName = viewModel.currentProfileName
+                draftHandleBody = TurboHandle.suggestedEditableBody(from: draftProfileName)
+                identityRestoreError = nil
+                handleSetupError = nil
                 route = .splash
             }
         }

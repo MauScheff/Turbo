@@ -124,6 +124,10 @@ def is_local_base_url(base_url: str) -> bool:
     return hostname in {"localhost", "127.0.0.1"}
 
 
+def share_path_component(handle: str) -> str:
+    return handle.lstrip("@")
+
+
 def require_request_relationship_contract(payload: dict[str, Any], *, label: str) -> None:
     relationship = payload.get("requestRelationship")
     require(isinstance(relationship, dict), f"{label} missing requestRelationship contract: {payload}")
@@ -545,7 +549,9 @@ async def main() -> int:
         components = first_detail.get("components")
         require(isinstance(components, list) and components, f"aasa missing path components: {app_site_association}")
         component_paths = {component.get("/") for component in components if isinstance(component, dict)}
-        require("/p/*" in component_paths, f"aasa missing /p/* component: {app_site_association}")
+        require("/*" in component_paths, f"aasa missing root-handle component: {app_site_association}")
+        require("/@*" in component_paths, f"aasa missing /@* alias component: {app_site_association}")
+        require("/p/*" in component_paths, f"aasa missing legacy /p/* component: {app_site_association}")
         require("/id/*/did.json" in component_paths, f"aasa missing did component: {app_site_association}")
 
         run_check(
@@ -605,7 +611,10 @@ async def main() -> int:
             current["user_id"] = session["userId"]
             current["public_id"] = session.get("publicId", current["handle"])
             current["share_code"] = session.get("shareCode", current["public_id"])
-            current["share_link"] = session.get("shareLink", f"{args.base_url.rstrip('/')}/p/{current['share_code']}")
+            current["share_link"] = session.get(
+                "shareLink",
+                f"{args.base_url.rstrip('/')}/{share_path_component(current['share_code'])}",
+            )
             current["did"] = session.get("did", f"did:web:beepbeep.to:id:{current['public_id']}")
             current["profile_name"] = f"Route Probe {current['handle'].lstrip('@').title()}"
 
@@ -631,14 +640,14 @@ async def main() -> int:
                 f"share-page:{current['handle']}",
                 lambda current=current: request_text(
                     args.base_url,
-                    f"/p/{urllib.parse.quote(current['share_code'])}",
+                    f"/{urllib.parse.quote(share_path_component(current['share_code']))}",
                     None,
                     insecure=args.insecure,
                 ),
             )
             require("Open in BeepBeep" in share_page_html, f"share page missing app CTA: {share_page_html[:400]}")
             require(current["share_link"] in share_page_html, f"share page missing share link: {share_page_html[:400]}")
-            require(current["share_code"] in share_page_html, f"share page missing share code: {share_page_html[:400]}")
+            require(current["share_code"] in share_page_html, f"share page missing share handle: {share_page_html[:400]}")
             require(current["profile_name"] in share_page_html, f"share page missing updated profile name: {share_page_html[:400]}")
             require("apple-itunes-app" in share_page_html, f"share page missing smart app banner metadata: {share_page_html[:400]}")
             require("app-id=6762493911" in share_page_html, f"share page missing app store id: {share_page_html[:400]}")
@@ -1205,21 +1214,6 @@ async def main() -> int:
         require(isinstance(caller_summary.get("membership"), dict), f"contact-summaries:caller:post-direct missing membership contract: {caller_summary}")
         require_summary_status_contract(caller_summary, label="contact-summaries:caller:post-direct")
 
-        for current in (caller, callee):
-            join_payload = run_check(
-                results,
-                f"channel-join:{current['handle']}",
-                lambda current=current: request(
-                    args.base_url,
-                    f"/v1/channels/{channel_id}/join",
-                    current["handle"],
-                    method="POST",
-                    body={"deviceId": current["device_id"]},
-                    insecure=args.insecure,
-                ),
-            )
-            require(join_payload.get("channelId") == channel_id, f"join route mismatched channel: {join_payload}")
-
         async with connected_websocket_pair(args.base_url, caller, callee, args.insecure) as websocket_pair:
             results.append(
                 CheckResult(
@@ -1229,6 +1223,21 @@ async def main() -> int:
                     payload={"callerAck": websocket_pair["callerAck"], "calleeAck": websocket_pair["calleeAck"]},
                 )
             )
+
+            for current in (caller, callee):
+                join_payload = run_check(
+                    results,
+                    f"channel-join:{current['handle']}",
+                    lambda current=current: request(
+                        args.base_url,
+                        f"/v1/channels/{channel_id}/join",
+                        current["handle"],
+                        method="POST",
+                        body={"deviceId": current["device_id"]},
+                        insecure=args.insecure,
+                    ),
+                )
+                require(join_payload.get("channelId") == channel_id, f"join route mismatched channel: {join_payload}")
 
             caller_state = run_check(
                 results,

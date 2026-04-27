@@ -2,6 +2,13 @@ import Foundation
 
 enum TurboIncomingLink {
     private static let shareHost = "beepbeep.to"
+    private static let didPrefix = "did:web:beepbeep.to:id:"
+    private static let rootShareLinkPrefix = "https://beepbeep.to/"
+    private static let bareRootShareLinkPrefix = "beepbeep.to/"
+    private static let handleShareLinkPrefix = "https://beepbeep.to/@"
+    private static let bareHandleShareLinkPrefix = "beepbeep.to/@"
+    private static let legacyShareLinkPrefix = "https://beepbeep.to/p/"
+    private static let legacyBareShareLinkPrefix = "beepbeep.to/p/"
 
     static func reference(from url: URL) -> String? {
         guard let scheme = url.scheme?.lowercased() else { return nil }
@@ -19,13 +26,20 @@ enum TurboIncomingLink {
     private static func webReference(from url: URL) -> String? {
         guard let host = url.host?.lowercased(), host == shareHost else { return nil }
         let pathComponents = url.pathComponents.filter { $0 != "/" }
+        guard !pathComponents.isEmpty else { return nil }
+
+        if pathComponents.count == 1,
+           let handle = canonicalHandle(fromPathComponent: pathComponents[0]) {
+            return canonicalShareLink(for: handle)
+        }
+
         guard pathComponents.count >= 2 else { return nil }
 
         switch (pathComponents[0], pathComponents[1]) {
         case ("p", let code) where !code.isEmpty:
             return canonicalShareLink(for: code)
         case ("id", let code) where !code.isEmpty:
-            return "did:web:\(shareHost):id:\(code)"
+            return "did:web:\(shareHost):id:\(TurboHandle.normalizedStoredHandle(code))"
         default:
             return nil
         }
@@ -40,7 +54,7 @@ enum TurboIncomingLink {
         }
 
         if host == "id", let code = pathComponents.first, !code.isEmpty {
-            return "did:web:\(shareHost):id:\(code)"
+            return "did:web:\(shareHost):id:\(TurboHandle.normalizedStoredHandle(code))"
         }
 
         guard host == "add",
@@ -54,7 +68,56 @@ enum TurboIncomingLink {
     }
 
     private static func canonicalShareLink(for code: String) -> String {
-        let encodedCode = code.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? code
-        return "https://\(shareHost)/p/\(encodedCode)"
+        let encodedHandle =
+            TurboHandle.sharePathComponent(from: code)
+                .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+            ?? TurboHandle.sharePathComponent(from: code)
+        return "https://\(shareHost)/\(encodedHandle)"
+    }
+
+    private static func canonicalHandle(fromPathComponent component: String) -> String? {
+        let canonical = TurboHandle.normalizedStoredHandle(component)
+        let body = TurboHandle.body(from: canonical)
+        guard !body.isEmpty, !TurboHandle.isReservedURLBody(body) else { return nil }
+        return canonical.count > 1 ? canonical : nil
+    }
+
+    static func publicID(from reference: String) -> String? {
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let url = URL(string: trimmed),
+           let normalizedReference = Self.reference(from: url),
+           normalizedReference != trimmed {
+            return publicID(from: normalizedReference)
+        }
+
+        let normalized = trimmed.lowercased()
+        let rawPublicID: String
+        if normalized.hasPrefix(didPrefix) {
+            rawPublicID = String(normalized.dropFirst(didPrefix.count))
+        } else if normalized.hasPrefix(handleShareLinkPrefix) {
+            rawPublicID = "@\(String(normalized.dropFirst(handleShareLinkPrefix.count)))"
+        } else if normalized.hasPrefix(bareHandleShareLinkPrefix) {
+            rawPublicID = "@\(String(normalized.dropFirst(bareHandleShareLinkPrefix.count)))"
+        } else if normalized.hasPrefix(rootShareLinkPrefix) {
+            rawPublicID = String(normalized.dropFirst(rootShareLinkPrefix.count))
+        } else if normalized.hasPrefix(bareRootShareLinkPrefix) {
+            rawPublicID = String(normalized.dropFirst(bareRootShareLinkPrefix.count))
+        } else if normalized.hasPrefix(legacyShareLinkPrefix) {
+            rawPublicID = String(normalized.dropFirst(legacyShareLinkPrefix.count))
+        } else if normalized.hasPrefix(legacyBareShareLinkPrefix) {
+            rawPublicID = String(normalized.dropFirst(legacyBareShareLinkPrefix.count))
+        } else {
+            rawPublicID = normalized
+        }
+
+        let publicID = rawPublicID.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map(String.init) ?? rawPublicID
+        let body = TurboHandle.body(from: publicID)
+        guard !TurboHandle.isReservedURLBody(body) else { return nil }
+        let canonical = TurboHandle.normalizedStoredHandle(publicID)
+        return canonical == "@" ? nil : canonical
     }
 }

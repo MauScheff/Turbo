@@ -239,8 +239,137 @@ extension PTTViewModel {
         contactSummaryByContactID[contactID]
     }
 
+    func contact(for contactID: UUID) -> Contact? {
+        contacts.first(where: { $0.id == contactID })
+    }
+
     func contactName(for contactID: UUID) -> String? {
-        contacts.first(where: { $0.id == contactID })?.name
+        contact(for: contactID)?.name
+    }
+
+    func contactProfileName(for contactID: UUID) -> String? {
+        contact(for: contactID)?.profileName
+    }
+
+    func contactLocalName(for contactID: UUID) -> String? {
+        contact(for: contactID)?.localName
+    }
+
+    func contactSubtitle(for contact: Contact, requestCount: Int? = nil) -> String {
+        let base: String
+        if contact.hasLocalNameOverride {
+            base = "\(contact.profileName) • \(contact.handle)"
+        } else {
+            base = contact.handle
+        }
+
+        guard let requestCount, requestCount > 1 else { return base }
+        return "\(base) • \(requestCount)x"
+    }
+
+    func contactShareLink(for contactID: UUID) -> String? {
+        guard let handle = contact(for: contactID)?.handle else { return nil }
+        let pathComponent = TurboHandle.sharePathComponent(from: handle)
+        let encodedHandle = pathComponent.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? pathComponent
+        return "https://beepbeep.to/\(encodedHandle)"
+    }
+
+    func contactDID(for contactID: UUID) -> String? {
+        guard let handle = contact(for: contactID)?.handle else { return nil }
+        return "did:web:beepbeep.to:id:\(handle)"
+    }
+
+    func updateLocalContactName(_ localName: String?, for contactID: UUID) {
+        let stored = TurboContactAliasStore.storeLocalName(localName, for: contactID, ownerKey: currentContactAliasOwnerKey)
+        updateContact(contactID) { contact in
+            contact.localName = stored
+        }
+        if selectedContactId == contactID {
+            updateStatusForSelectedContact()
+        }
+    }
+
+    func deleteContact(_ contactID: UUID) async -> Bool {
+        guard let existingContact = contact(for: contactID) else { return true }
+        guard let backend = backendServices else {
+            backendStatusMessage = "Backend unavailable"
+            diagnostics.record(
+                .backend,
+                level: .error,
+                message: "Delete contact failed: backend unavailable",
+                metadata: ["contactId": contactID.uuidString, "handle": existingContact.handle]
+            )
+            return false
+        }
+
+        if selectedContactId != contactID {
+            selectContact(existingContact)
+        }
+
+        let requiresDisconnect =
+            selectedContactId == contactID
+            || activeConversationContactID == contactID
+            || mediaSessionContactID == contactID
+            || systemSessionMatches(contactID)
+            || isJoined
+            || pttCoordinator.state.systemChannelUUID != nil
+
+        if requiresDisconnect {
+            await requestDisconnectSelectedPeer()
+        }
+
+        do {
+            _ = try await backend.forgetContact(
+                otherHandle: existingContact.remoteUserId == nil ? existingContact.handle : nil,
+                otherUserId: existingContact.remoteUserId
+            )
+        } catch {
+            let message = error.localizedDescription
+            backendStatusMessage = "Delete failed: \(message)"
+            diagnostics.record(
+                .backend,
+                level: .error,
+                message: "Delete contact failed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "handle": existingContact.handle,
+                    "error": message,
+                ]
+            )
+            return false
+        }
+
+        _ = TurboContactAliasStore.storeLocalName(nil, for: contactID, ownerKey: currentContactAliasOwnerKey)
+        let retainedSummaries = contactSummaryByContactID
+            .filter { $0.key != contactID }
+            .map { BackendContactSummaryUpdate(contactID: $0.key, summary: $0.value) }
+        let retainedIncomingInvites = incomingInviteByContactID
+            .filter { $0.key != contactID }
+            .map { BackendInviteUpdate(contactID: $0.key, invite: $0.value) }
+        let retainedOutgoingInvites = outgoingInviteByContactID
+            .filter { $0.key != contactID }
+            .map { BackendInviteUpdate(contactID: $0.key, invite: $0.value) }
+
+        backendSyncCoordinator.send(.contactSummariesUpdated(retainedSummaries))
+        backendSyncCoordinator.send(.invitesUpdated(
+            incoming: retainedIncomingInvites,
+            outgoing: retainedOutgoingInvites,
+            now: .now
+        ))
+        backendSyncCoordinator.send(.channelStateCleared(contactID: contactID))
+        clearRemoteAudioActivity(for: contactID)
+        pttWakeRuntime.clear(for: contactID)
+        untrackContact(contactID)
+        if selectedContactId == contactID {
+            resetSelection()
+        }
+        contacts.removeAll { $0.id == contactID }
+        pruneContactsToAuthoritativeState()
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("contact-deleted")
+        await refreshContactSummaries()
+        await refreshInvites()
+        return contact(for: contactID) == nil
     }
 
     func requestCooldownRemaining(for contactID: UUID, now: Date = .now) -> Int? {
@@ -390,11 +519,13 @@ extension PTTViewModel {
         channelId: String,
         displayName: String? = nil
     ) -> UUID {
+        let stableID = Contact.stableID(remoteUserId: remoteUserId, fallbackHandle: Contact.normalizedHandle(handle))
         let result = ContactDirectory.ensureContact(
             handle: handle,
             remoteUserId: remoteUserId,
             channelId: channelId,
             displayName: displayName,
+            localName: TurboContactAliasStore.localName(for: stableID, ownerKey: currentContactAliasOwnerKey),
             existingContacts: contacts
         )
         contacts = result.contacts
@@ -502,6 +633,7 @@ extension PTTViewModel {
     var authoritativeContactIDs: Set<UUID> {
         ContactDirectory.authoritativeContactIDs(
             trackedContactIDs: trackedContactIDs,
+            summaryContactIDs: Set(contactSummaryByContactID.keys),
             selectedContactID: selectedContactId,
             activeChannelID: activeChannelId,
             mediaSessionContactID: mediaSessionContactID,

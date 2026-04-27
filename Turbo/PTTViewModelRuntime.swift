@@ -103,6 +103,10 @@ final class BackendRuntimeState {
         trackedContactIDs.insert(contactID)
     }
 
+    func untrack(contactID: UUID) {
+        trackedContactIDs.remove(contactID)
+    }
+
     func clearTrackedContacts() {
         trackedContactIDs = []
     }
@@ -541,6 +545,10 @@ final class MediaRuntimeState {
     var session: MediaSession?
     var contactID: UUID?
     var connectionState: MediaConnectionState = .idle
+    var transportPathState: MediaTransportPathState = .relay
+    let directQuicUpgrade = DirectQuicUpgradeRuntimeState()
+    var directQuicProbeController: DirectQuicProbeController?
+    var directQuicPromotionTimeoutTask: Task<Void, Never>?
     var sendAudioChunk: (@Sendable (String) async throws -> Void)?
     var startupState: MediaSessionStartupState = .idle
     var pendingInteractivePrewarmAfterAudioDeactivationContactID: UUID?
@@ -625,10 +633,16 @@ final class MediaRuntimeState {
     func reset(deactivateAudioSession: Bool = true) {
         interactivePrewarmRecoveryTask?.cancel()
         interactivePrewarmRecoveryTask = nil
+        directQuicPromotionTimeoutTask?.cancel()
+        directQuicPromotionTimeoutTask = nil
+        directQuicProbeController?.cancel(reason: "media-runtime-reset")
+        directQuicProbeController = nil
         session?.close(deactivateAudioSession: deactivateAudioSession)
         session = nil
         contactID = nil
         connectionState = .idle
+        transportPathState = .relay
+        directQuicUpgrade.reset()
         sendAudioChunk = nil
         startupState = .idle
     }
@@ -645,6 +659,49 @@ final class MediaRuntimeState {
     func replaceInteractivePrewarmRecoveryTask(with task: Task<Void, Never>?) {
         interactivePrewarmRecoveryTask?.cancel()
         interactivePrewarmRecoveryTask = task
+    }
+
+    func replaceDirectQuicPromotionTimeoutTask(with task: Task<Void, Never>?) {
+        directQuicPromotionTimeoutTask?.cancel()
+        directQuicPromotionTimeoutTask = task
+    }
+
+    func updateTransportPathState(_ state: MediaTransportPathState) {
+        transportPathState = state
+    }
+
+    func replaceDirectQuicProbeController(with controller: DirectQuicProbeController?) {
+        directQuicProbeController?.cancel(reason: "replaced")
+        directQuicProbeController = controller
+    }
+}
+
+enum MediaTransportPathState: String, Equatable {
+    case relay
+    case promoting
+    case direct
+    case recovering
+
+    var label: String {
+        switch self {
+        case .relay:
+            return "Relay"
+        case .promoting:
+            return "Promoting"
+        case .direct:
+            return "Direct"
+        case .recovering:
+            return "Recovering"
+        }
+    }
+
+    var showsSecureIcon: Bool {
+        switch self {
+        case .relay, .direct:
+            return true
+        case .promoting, .recovering:
+            return false
+        }
     }
 }
 
@@ -684,9 +741,11 @@ struct BackendServices {
     let telemetryEnabled: Bool
 
     var supportsWebSocket: Bool { client.supportsWebSocket }
+    var supportsDirectQuicUpgrade: Bool { client.supportsDirectQuicUpgrade }
     var isWebSocketConnected: Bool { client.isWebSocketConnected }
     var deviceID: String { client.deviceID }
     var usesLocalHTTPBackend: Bool { mode == "local-http" }
+    var directQuicPolicy: TurboDirectQuicPolicy? { client.directQuicPolicy }
 
     func fetchRuntimeConfig() async throws -> TurboBackendRuntimeConfig {
         try await client.fetchRuntimeConfig()
@@ -742,6 +801,20 @@ struct BackendServices {
 
     func resolveIdentity(reference: String) async throws -> TurboUserLookupResponse {
         try await client.resolveIdentity(reference: reference)
+    }
+
+    func rememberContact(
+        otherHandle: String? = nil,
+        otherUserId: String? = nil
+    ) async throws -> TurboRememberContactResponse {
+        try await client.rememberContact(otherHandle: otherHandle, otherUserId: otherUserId)
+    }
+
+    func forgetContact(
+        otherHandle: String? = nil,
+        otherUserId: String? = nil
+    ) async throws -> TurboForgetContactResponse {
+        try await client.forgetContact(otherHandle: otherHandle, otherUserId: otherUserId)
     }
 
     func lookupPresence(handle: String) async throws -> TurboUserPresenceResponse {

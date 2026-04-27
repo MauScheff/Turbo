@@ -1,48 +1,72 @@
 import SwiftUI
 
 struct TurboHeaderView: View {
-    let wordmarkName: String
     let statusMessage: String
+    let transportPathState: MediaTransportPathState
+    let transportPathTint: Color
     let latestErrorText: String?
     let microphonePermissionStatus: String
     let needsMicrophonePermission: Bool
+    let showsResolvedMicrophoneStatus: Bool
+    let showsAddContactButton: Bool
     let onAddContact: () -> Void
     let onShowProfile: () -> Void
     let onRequestMicrophonePermission: () -> Void
 
+    private let navigationButtonWidth: CGFloat = 32
+
     var body: some View {
         VStack(spacing: 8) {
             ZStack {
-                Image(wordmarkName)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(height: 22)
-                    .accessibilityLabel("BeepBeep")
+                Text(statusMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .padding(.horizontal, 48)
 
                 HStack(spacing: 12) {
-                    Spacer()
-
-                    Button(action: onAddContact) {
-                        Image(systemName: "plus.circle")
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .accessibilityLabel("Add contact")
-                    }
-
                     Button(action: onShowProfile) {
                         Image(systemName: "person.crop.circle")
                             .font(.title3.weight(.semibold))
                             .foregroundStyle(.primary)
                             .accessibilityLabel("Profile")
                     }
+                    .frame(width: navigationButtonWidth, height: navigationButtonWidth)
+
+                    Spacer(minLength: 0)
+
+                    if showsAddContactButton {
+                        Button(action: onAddContact) {
+                            Image(systemName: "plus.circle")
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .accessibilityLabel("Add contact")
+                        }
+                        .frame(width: navigationButtonWidth, height: navigationButtonWidth)
+                    } else {
+                        Color.clear
+                            .frame(width: navigationButtonWidth, height: navigationButtonWidth)
+                    }
                 }
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 6)
 
-            Text(statusMessage)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                if transportPathState.showsSecureIcon {
+                    Image(systemName: "lock.fill")
+                        .font(.caption2.weight(.semibold))
+                }
+
+                Text(transportPathState.label)
+                    .font(.caption2.weight(.semibold))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(transportPathTint.opacity(0.14))
+            .foregroundStyle(transportPathTint)
+            .clipShape(Capsule())
 
             if needsMicrophonePermission {
                 Button(action: onRequestMicrophonePermission) {
@@ -52,7 +76,7 @@ struct TurboHeaderView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
-            } else {
+            } else if showsResolvedMicrophoneStatus {
                 Text(microphonePermissionStatus)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -84,7 +108,7 @@ struct TurboEmptyContactsView: View {
                 Text("No contacts yet")
                     .font(.title3.weight(.semibold))
 
-                Text("Add someone by QR, link, or code to start talking.")
+                Text("Add someone by QR, link, or handle to start talking.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

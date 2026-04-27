@@ -10,7 +10,7 @@ import VisionKit
 
 struct TurboAddContactSheet: View {
     @Binding var draftReference: String
-    let currentIdentityCode: String
+    let currentIdentityHandle: String
     let currentShareLink: String
     let quickPeerHandles: [String]
     let isOpeningPeer: Bool
@@ -21,6 +21,7 @@ struct TurboAddContactSheet: View {
 
     @State private var copiedStatus: String?
     @State private var isShowingScanner: Bool = false
+    @State private var isShowingShareSheet: Bool = false
 
     private var isBusy: Bool {
         isOpeningPeer || isResettingDevState
@@ -30,19 +31,22 @@ struct TurboAddContactSheet: View {
         draftReference.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var shareURL: URL? {
-        URL(string: currentShareLink)
-    }
-
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    addByReferenceCard
-                    scanQRCodeCard
-                    shareIdentityCard
+            GeometryReader { geometry in
+                let columnWidth = TurboLayout.contentWidth(for: geometry.size.width)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        nearbyActionsCard
+                        addByReferenceCard
+                    }
+                    .frame(width: columnWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, TurboLayout.horizontalPadding)
+                    .padding(.top, 8)
+                    .padding(.bottom, 28)
                 }
-                .padding()
             }
             .navigationTitle("Add Contact")
             .navigationBarTitleDisplayMode(.inline)
@@ -57,31 +61,60 @@ struct TurboAddContactSheet: View {
                     onCodeScanned: handleScannedCode(_:)
                 )
             }
+            .sheet(isPresented: $isShowingShareSheet) {
+                TurboShareIdentitySheet(
+                    currentIdentityHandle: currentIdentityHandle,
+                    currentShareLink: currentShareLink,
+                    copiedStatus: $copiedStatus,
+                    onClose: { isShowingShareSheet = false }
+                )
+            }
+        }
+    }
+
+    private var nearbyActionsCard: some View {
+        TurboSection(
+            title: "Add nearby",
+            subtitle: "Scan someone else, or show your own BeepBeep."
+        ) {
+            HStack(spacing: 10) {
+                Button("Scan QR") {
+                    isShowingScanner = true
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(maxWidth: .infinity, minHeight: 50)
+                .disabled(isBusy)
+
+                Button("Show My QR") {
+                    isShowingShareSheet = true
+                }
+                .buttonStyle(.bordered)
+                .frame(maxWidth: .infinity, minHeight: 50)
+                .disabled(isBusy)
+            }
         }
     }
 
     private var addByReferenceCard: some View {
-        TurboAddContactCard(
-            title: "Add by code or link",
-            subtitle: "Paste a BeepBeep code, share link, or DID."
+        TurboSection(
+            title: "Add by handle or link",
+            subtitle: "Enter a BeepBeep handle or link."
         ) {
             VStack(alignment: .leading, spacing: 12) {
-                TextField("Code, link, or DID", text: $draftReference)
+                TextField("Handle or link", text: $draftReference)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 12)
-                    .background(Color(uiColor: .secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .turboFieldStyle()
 
                 HStack(spacing: 10) {
                     Button {
                         onOpenReference(trimmedDraftReference)
                     } label: {
-                        Text(isOpeningPeer ? "Opening…" : "Open")
-                            .frame(maxWidth: .infinity)
+                        Text(isOpeningPeer ? "Opening…" : "Continue")
+                            .frame(maxWidth: .infinity, minHeight: 50)
                     }
                     .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: TurboLayout.primaryButtonMaxWidth)
                     .disabled(trimmedDraftReference.isEmpty || isBusy)
 
                     Button("Paste") {
@@ -122,88 +155,6 @@ struct TurboAddContactSheet: View {
         }
     }
 
-    private var scanQRCodeCard: some View {
-        TurboAddContactCard(
-            title: "Scan QR",
-            subtitle: "Use the camera to add someone nearby."
-        ) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "qrcode.viewfinder")
-                    .font(.title2.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 30)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Scan a BeepBeep QR code.")
-                        .font(.subheadline.weight(.semibold))
-
-                    Text("Use the camera to open the same BeepBeep share link shown below.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 12)
-
-                Button("Scan") {
-                    isShowingScanner = true
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isBusy)
-            }
-        }
-    }
-
-    private var shareIdentityCard: some View {
-        TurboAddContactCard(
-            title: "Share your BeepBeep",
-            subtitle: "Let someone scan this or open your link."
-        ) {
-            VStack(alignment: .center, spacing: 14) {
-                TurboQRCodeView(payload: currentShareLink)
-                    .frame(width: 188, height: 188)
-
-                VStack(spacing: 4) {
-                    Text(currentIdentityCode)
-                        .font(.title3.weight(.semibold))
-
-                    Text(currentShareLink)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .textSelection(.enabled)
-                }
-
-                HStack(spacing: 10) {
-                    Button("Copy Code") {
-                        UIPasteboard.general.string = currentIdentityCode
-                        copiedStatus = "Copied code"
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Copy Link") {
-                        UIPasteboard.general.string = currentShareLink
-                        copiedStatus = "Copied link"
-                    }
-                    .buttonStyle(.bordered)
-
-                    if let shareURL {
-                        ShareLink(item: shareURL) {
-                            Text("Share")
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                }
-
-                if let copiedStatus {
-                    Text(copiedStatus)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity)
-        }
-    }
-
     private func handleScannedCode(_ code: String) {
         draftReference = code
         isShowingScanner = false
@@ -211,38 +162,86 @@ struct TurboAddContactSheet: View {
     }
 }
 
-private struct TurboAddContactCard<Content: View>: View {
-    let title: String
-    let subtitle: String
-    let content: Content
+private struct TurboShareIdentitySheet: View {
+    let currentIdentityHandle: String
+    let currentShareLink: String
+    @Binding var copiedStatus: String?
+    let onClose: () -> Void
 
-    init(
-        title: String,
-        subtitle: String,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.title = title
-        self.subtitle = subtitle
-        self.content = content()
+    private var shareURL: URL? {
+        URL(string: currentShareLink)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline)
+        NavigationStack {
+            GeometryReader { geometry in
+                let columnWidth = TurboLayout.contentWidth(for: geometry.size.width)
 
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                ScrollView {
+                    TurboSection(
+                        title: "Share your BeepBeep",
+                        subtitle: "Let someone scan this or open your link.",
+                        showsDivider: false
+                    ) {
+                        VStack(alignment: .center, spacing: 16) {
+                            TurboQRCodeView(payload: currentShareLink)
+                                .frame(width: 188, height: 188)
+
+                            VStack(spacing: 6) {
+                                Text(currentIdentityHandle)
+                                    .font(.title3.weight(.semibold))
+
+                                Text(currentShareLink)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .textSelection(.enabled)
+                            }
+
+                            HStack(spacing: 10) {
+                                Button("Copy Handle") {
+                                    UIPasteboard.general.string = currentIdentityHandle
+                                    copiedStatus = "Copied handle"
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button("Copy Link") {
+                                    UIPasteboard.general.string = currentShareLink
+                                    copiedStatus = "Copied link"
+                                }
+                                .buttonStyle(.bordered)
+
+                                if let shareURL {
+                                    ShareLink(item: shareURL) {
+                                        Text("Share")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                }
+                            }
+
+                            if let copiedStatus {
+                                Text(copiedStatus)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .frame(width: columnWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, TurboLayout.horizontalPadding)
+                    .padding(.top, 8)
+                    .padding(.bottom, 28)
+                }
             }
-
-            content
+            .navigationTitle("Your QR")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done", action: onClose)
+                }
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(18)
-        .background(Color.gray.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 }
 
@@ -315,7 +314,7 @@ private struct TurboQRScannerSheet: View {
                 if !scannerSupported {
                     scannerMessage(
                         title: "Scanning unavailable",
-                        detail: "This device does not support live QR scanning. You can still paste a BeepBeep link or code."
+                        detail: "This device does not support live QR scanning. You can still paste a BeepBeep link or handle."
                     )
                 } else {
                     switch cameraAuthorizationStatus {
@@ -331,7 +330,7 @@ private struct TurboQRScannerSheet: View {
                     @unknown default:
                         scannerMessage(
                             title: "Camera unavailable",
-                            detail: "The camera could not be prepared right now. You can still paste a BeepBeep link or code."
+                            detail: "The camera could not be prepared right now. You can still paste a BeepBeep link or handle."
                         )
                     }
                 }

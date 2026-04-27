@@ -1,6 +1,63 @@
+turbo.identity.publicIdFromReference : Text -> Optional Text
+turbo.identity.publicIdFromReference reference =
+  use Nat ==
+  use Text drop size startsWith trim toLowercase ++
+  normalized = reference |> trim |> toLowercase
+  didPrefix = "did:web:beepbeep.to:id:"
+  rootShareLinkPrefix = "https://beepbeep.to/"
+  bareRootShareLinkPrefix = "beepbeep.to/"
+  handleShareLinkPrefix = "https://beepbeep.to/@"
+  bareHandleShareLinkPrefix = "beepbeep.to/@"
+  legacyShareLinkPrefix = "https://beepbeep.to/p/"
+  legacyBareShareLinkPrefix = "beepbeep.to/p/"
+  rawPublicId =
+    if startsWith didPrefix normalized then drop (size didPrefix) normalized
+    else if startsWith handleShareLinkPrefix normalized then "@" ++ drop (size handleShareLinkPrefix) normalized
+    else if startsWith bareHandleShareLinkPrefix normalized then "@" ++ drop (size bareHandleShareLinkPrefix) normalized
+    else if startsWith legacyShareLinkPrefix normalized then drop (size legacyShareLinkPrefix) normalized
+    else if startsWith legacyBareShareLinkPrefix normalized then drop (size legacyBareShareLinkPrefix) normalized
+    else if startsWith rootShareLinkPrefix normalized then drop (size rootShareLinkPrefix) normalized
+    else if startsWith bareRootShareLinkPrefix normalized then drop (size bareRootShareLinkPrefix) normalized
+    else normalized
+  publicId =
+    match List.head (Text.splitOnText "/" rawPublicId) with
+      None         -> rawPublicId
+      Some segment -> segment
+  canonical =
+    if size publicId == 0 then ""
+    else if startsWith "@" publicId then publicId
+    else "@" ++ publicId
+  if size canonical == 1 then None else Some canonical
+
+turbo.identity.shareLink : User -> Text
+turbo.identity.shareLink user =
+  use Text ++
+  "https://beepbeep.to/" ++ sharePathSegment user
+
+turbo.identity.sharePathSegment : User -> Text
+turbo.identity.sharePathSegment user =
+  use Nat >
+  use Text drop size startsWith
+  currentHandle = shareCode user
+  if startsWith "@" currentHandle && size currentHandle > 1 then drop 1 currentHandle else currentHandle
+
+turbo.identity.publicIdFromReference.tests.examples : [Result]
+turbo.identity.publicIdFromReference.tests.examples = test.verify do
+  ensureEqual (Some "@alice") (publicIdFromReference "alice")
+  ensureEqual (Some "@alice") (publicIdFromReference "@alice")
+  ensureEqual (Some "@alice") (publicIdFromReference " did:web:beepbeep.to:id:alice ")
+  ensureEqual (Some "@alice") (publicIdFromReference "https://beepbeep.to/alice")
+  ensureEqual (Some "@alice") (publicIdFromReference "beepbeep.to/alice")
+  ensureEqual (Some "@alice") (publicIdFromReference "https://beepbeep.to/@alice")
+  ensureEqual (Some "@alice") (publicIdFromReference "beepbeep.to/@alice")
+  ensureEqual (Some "@alice") (publicIdFromReference "https://beepbeep.to/p/alice")
+  ensureEqual None (publicIdFromReference "")
+
 turbo.store.users.getByPublicId : Database -> Text -> '{Exception, Remote} Optional User
 turbo.store.users.getByPublicId db publicId = do
-  getByHandle db publicId ()
+  match publicIdFromReference publicId with
+    None          -> None
+    Some canonical -> getByHandle db canonical ()
 
 turbo.service.internal.htmlEscape : Text -> Text
 turbo.service.internal.htmlEscape text =
@@ -33,7 +90,7 @@ turbo.service.share.appIdentifier = "7MQU7TLQQ2.com.rounded.Turbo"
 turbo.service.share.customSchemeLink : User -> Text
 turbo.service.share.customSchemeLink user =
   use Text ++
-  "beepbeep://p/" ++ shareCode user
+  "beepbeep://add?ref=" ++ service.internal.urlQueryEscape (shareCode user)
 
 turbo.service.share.qrImageLink : User -> Text
 turbo.service.share.qrImageLink user =
@@ -60,15 +117,26 @@ turbo.service.share.didDocumentJson user =
 
 turbo.service.share.appleAppSiteAssociationJson : Json
 turbo.service.share.appleAppSiteAssociationJson =
-  use object addList addText empty
+  use object addBoolean addList addText empty
   appComponent path =
     empty
       |> addText "/" path
+  excludedComponent path =
+    empty
+      |> addText "/" path
+      |> addBoolean "exclude" true
   details =
     empty
       |> addList "appIDs" [Json.text appIdentifier]
       |> addList "components"
-        [ appComponent "/p/*"
+        [ excludedComponent "/.well-known/*"
+        , excludedComponent "/apple-app-site-association"
+        , excludedComponent "/health"
+        , excludedComponent "/v1/*"
+        , excludedComponent "/id/*"
+        , appComponent "/*"
+        , appComponent "/@*"
+        , appComponent "/p/*"
         , appComponent "/id/*/did.json"
         ]
   empty
@@ -88,21 +156,30 @@ turbo.service.share.notFoundHtml publicId =
     , "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
     , "  <title>BeepBeep</title>"
     , "  <style>"
-    , "    :root { color-scheme: dark; --bg: #0b1018; --ink: #f5f0e8; --muted: #9ca7b5; --accent: #ff6b2c; }"
+    , "    :root { color-scheme: light; --bg: #f6f6f1; --ink: #121826; --muted: #667085; --line: rgba(18,24,38,0.1); }"
     , "    * { box-sizing: border-box; }"
-    , "    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: radial-gradient(circle at top, #1d2b3f 0%, #0b1018 55%, #05070b 100%); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Display\", sans-serif; padding: 24px; }"
-    , "    main { width: min(540px, 100%); }"
-    , "    h1 { font-size: clamp(2.6rem, 10vw, 4.6rem); line-height: 0.92; margin: 0 0 12px; }"
-    , "    p { margin: 0; color: var(--muted); font-size: 1rem; line-height: 1.6; }"
-    , "    .label { color: var(--accent); font-size: 0.8rem; font-weight: 700; letter-spacing: 0.22em; margin-bottom: 18px; }"
-    , "    .code { margin-top: 22px; font-size: 1.1rem; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }"
+    , "    body { margin: 0; min-height: 100vh; background: linear-gradient(180deg, #fbfbf8 0%, #f4f4ef 100%); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Display\", sans-serif; }"
+    , "    main { min-height: 100vh; display: flex; justify-content: center; padding: 24px; }"
+    , "    .shell { width: min(420px, 100%); padding-top: clamp(64px, 14vh, 120px); }"
+    , "    .label { margin: 0 0 22px; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.22em; color: var(--muted); }"
+    , "    h1 { margin: 0; font-size: clamp(2.5rem, 11vw, 3.7rem); line-height: 0.94; letter-spacing: -0.05em; }"
+    , "    p { margin: 12px 0 0; color: var(--muted); font-size: 1rem; line-height: 1.6; }"
+    , "    .section { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--line); }"
+    , "    .kicker { margin: 0; font-size: 0.74rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); }"
+    , "    .code { margin-top: 10px; font-size: 1rem; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }"
     , "  </style>"
     , "</head>"
     , "<body>"
     , "  <main>"
-    , "    <div class=\"label\">BEEPBEEP</div>"
-    , "    <h1>That link no longer points to someone.</h1>"
-    , "    <p>The shared code <span class=\"code\">" ++ escapedPublicId ++ "</span> does not currently resolve to a BeepBeep identity.</p>"
+    , "    <section class=\"shell\">"
+    , "      <p class=\"label\">BEEPBEEP</p>"
+    , "      <h1>That link no longer points to someone.</h1>"
+    , "      <p>This share page is no longer connected to a BeepBeep identity.</p>"
+    , "      <div class=\"section\">"
+    , "        <p class=\"kicker\">Handle</p>"
+    , "        <p class=\"code\">" ++ escapedPublicId ++ "</p>"
+    , "      </div>"
+    , "    </section>"
     , "  </main>"
     , "</body>"
     , "</html>"
@@ -112,7 +189,7 @@ turbo.service.share.pageHtml : User -> Text
 turbo.service.share.pageHtml user =
   use Text ++
   escapedName = service.internal.htmlEscape (profileName user)
-  escapedCode = service.internal.htmlEscape (shareCode user)
+  escapedHandle = service.internal.htmlEscape (shareCode user)
   escapedLink = service.internal.htmlEscape (shareLink user)
   escapedDid = service.internal.htmlEscape (did user)
   escapedScheme = service.internal.htmlEscape (customSchemeLink user)
@@ -125,81 +202,75 @@ turbo.service.share.pageHtml user =
     , "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
     , "  <title>" ++ escapedName ++ " on BeepBeep</title>"
     , "  <meta name=\"apple-itunes-app\" content=\"app-id=6762493911, app-argument=" ++ escapedLink ++ "\">"
-    , "  <meta name=\"theme-color\" content=\"#0d141d\">"
+    , "  <meta name=\"theme-color\" content=\"#f6f6f1\">"
     , "  <style>"
-    , "    :root { color-scheme: dark; --bg: #0d141d; --ink: #f8f3eb; --muted: #9ea8b6; --accent: #ff6b2c; --accent-soft: #ffd06a; --line: rgba(255,255,255,0.12); --paper: #fffdf6; }"
+    , "    :root { color-scheme: light; --bg: #f6f6f1; --surface: rgba(255,255,255,0.72); --ink: #121826; --muted: #667085; --line: rgba(18,24,38,0.1); --accent: #121826; --accent-ink: #ffffff; --paper: #ffffff; }"
     , "    * { box-sizing: border-box; }"
-    , "    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top, rgba(255,126,58,0.22), transparent 34%), radial-gradient(circle at 85% 14%, rgba(255,208,106,0.18), transparent 28%), linear-gradient(180deg, #101723 0%, #070a0f 100%); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Display\", sans-serif; }"
-    , "    main { min-height: 100vh; display: grid; align-items: center; padding: clamp(24px, 4vw, 48px); }"
-    , "    .hero { width: min(980px, 100%); display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(248px, 312px); gap: clamp(28px, 5vw, 60px); align-items: end; }"
-    , "    .copy { min-width: 0; }"
-    , "    .eyebrow { margin: 0 0 18px; font-size: 0.78rem; font-weight: 800; letter-spacing: 0.28em; color: var(--accent-soft); }"
-    , "    h1 { margin: 0; font-size: clamp(3.4rem, 14vw, 7.6rem); line-height: 0.9; letter-spacing: -0.05em; max-width: 9ch; }"
-    , "    .lede { margin: 18px 0 0; max-width: 34rem; font-size: clamp(1rem, 2.8vw, 1.22rem); line-height: 1.6; color: var(--muted); }"
-    , "    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }"
-    , "    .button { appearance: none; border: 0; border-radius: 999px; padding: 15px 22px; font: inherit; font-weight: 700; cursor: pointer; text-decoration: none; transition: transform 160ms ease, opacity 160ms ease, background 160ms ease; }"
-    , "    .button:hover { transform: translateY(-1px); }"
-    , "    .button.primary { background: var(--accent); color: #130901; }"
-    , "    .button.secondary { background: rgba(255,255,255,0.06); color: var(--ink); border: 1px solid var(--line); }"
-    , "    .meta { display: grid; gap: 18px; margin-top: 36px; padding-top: 22px; border-top: 1px solid var(--line); max-width: 38rem; }"
+    , "    body { margin: 0; min-height: 100vh; background: linear-gradient(180deg, #fbfbf8 0%, #f3f4ef 100%); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Display\", sans-serif; }"
+    , "    main { min-height: 100vh; display: flex; justify-content: center; padding: 24px; }"
+    , "    .shell { width: min(420px, 100%); padding-top: clamp(64px, 14vh, 120px); padding-bottom: 32px; }"
+    , "    .eyebrow { margin: 0 0 22px; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.22em; color: var(--muted); }"
+    , "    h1 { margin: 0; font-size: clamp(2.9rem, 12vw, 4.1rem); line-height: 0.94; letter-spacing: -0.05em; }"
+    , "    .lede { margin: 14px 0 0; font-size: 1rem; line-height: 1.6; color: var(--muted); }"
+    , "    .actions { display: grid; gap: 10px; margin-top: 30px; }"
+    , "    .button { appearance: none; display: inline-flex; align-items: center; justify-content: center; width: 100%; border-radius: 18px; padding: 15px 18px; font: inherit; font-weight: 600; cursor: pointer; text-decoration: none; transition: opacity 160ms ease, background 160ms ease, border-color 160ms ease; }"
+    , "    .button.primary { border: 0; background: var(--accent); color: var(--accent-ink); }"
+    , "    .button.secondary { border: 1px solid var(--line); background: transparent; color: var(--ink); }"
+    , "    .button:active { opacity: 0.82; }"
+    , "    .section { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--line); }"
     , "    .kicker { margin: 0; font-size: 0.74rem; font-weight: 700; letter-spacing: 0.18em; color: var(--muted); text-transform: uppercase; }"
-    , "    .code { margin: 6px 0 0; font-size: clamp(1.2rem, 4vw, 1.55rem); font-weight: 700; letter-spacing: 0.06em; }"
+    , "    .code { margin: 10px 0 0; font-size: 1.35rem; font-weight: 600; letter-spacing: 0.04em; }"
     , "    .mono { margin: 8px 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.94rem; line-height: 1.5; color: var(--ink); word-break: break-all; }"
-    , "    details { margin-top: 8px; }"
+    , "    details { margin-top: 10px; }"
     , "    summary { cursor: pointer; color: var(--muted); }"
-    , "    .install-group { margin-top: 32px; max-width: 32rem; }"
+    , "    .qr-panel { margin-top: 22px; padding: 20px; border: 1px solid var(--line); border-radius: 28px; background: var(--surface); backdrop-filter: blur(14px); }"
+    , "    .qr-frame { aspect-ratio: 1; width: min(232px, 100%); margin: 0 auto; border-radius: 24px; background: var(--paper); display: grid; place-items: center; padding: 16px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.05); }"
+    , "    .qr-frame img { width: 100%; height: auto; display: block; }"
+    , "    .qr-note { margin: 14px 0 0; color: var(--muted); font-size: 0.92rem; line-height: 1.5; text-align: center; }"
+    , "    .qr-fallback { text-align: center; color: var(--muted); font-size: 0.92rem; line-height: 1.5; }"
+    , "    .install-group { margin-top: 30px; }"
     , "    .install { margin: 0; color: var(--muted); line-height: 1.6; }"
     , "    .install strong { color: var(--ink); }"
     , "    .install[hidden] { display: none; }"
-    , "    .qr-shell { justify-self: end; width: min(100%, 312px); }"
-    , "    .qr-panel { padding: 18px; background: rgba(255,255,255,0.05); border: 1px solid var(--line); border-radius: 28px; backdrop-filter: blur(18px); }"
-    , "    .qr-frame { aspect-ratio: 1; width: 100%; border-radius: 22px; background: var(--paper); display: grid; place-items: center; padding: 18px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06); }"
-    , "    .qr-frame canvas, .qr-frame img { width: 100%; height: auto; display: block; }"
-    , "    .qr-note { margin: 14px 6px 0; color: var(--muted); font-size: 0.92rem; line-height: 1.5; }"
-    , "    .qr-fallback { text-align: center; color: #1d232f; font-size: 0.92rem; line-height: 1.5; }"
-    , "    @media (max-width: 900px) { .hero { grid-template-columns: 1fr; } .qr-shell { justify-self: start; width: min(280px, 100%); } h1 { max-width: 100%; } }"
-    , "    @media (max-width: 720px) { .actions { flex-direction: column; align-items: stretch; } .button { text-align: center; } }"
+    , "    @media (max-width: 420px) { .shell { padding-top: 48px; } h1 { font-size: 2.65rem; } }"
     , "  </style>"
     , "</head>"
     , "<body>"
     , "  <main>"
-    , "    <section class=\"hero\">"
-    , "      <div class=\"copy\">"
-    , "        <p class=\"eyebrow\">ADD ME ON BEEPBEEP</p>"
-    , "        <h1>" ++ escapedName ++ "</h1>"
-    , "        <p class=\"lede\">Open this on your iPhone to jump straight into BeepBeep, or scan the QR from another device to add this contact instantly.</p>"
-    , "        <div class=\"actions\">"
-    , "          <a id=\"open-app\" class=\"button primary\" href=\"" ++ escapedScheme ++ "\">Open in BeepBeep</a>"
-    , "          <button class=\"button secondary\" type=\"button\" data-copy=\"" ++ escapedLink ++ "\" onclick=\"copyValue(this)\">Copy Link</button>"
-    , "        </div>"
-    , "        <div class=\"meta\">"
-    , "          <div>"
-    , "            <p class=\"kicker\">Code</p>"
-    , "            <p class=\"code\">" ++ escapedCode ++ "</p>"
-    , "          </div>"
-    , "          <div>"
-    , "            <p class=\"kicker\">Share link</p>"
-    , "            <p class=\"mono\">" ++ escapedLink ++ "</p>"
-    , "          </div>"
-    , "          <details>"
-    , "            <summary>Identity details</summary>"
-    , "            <p class=\"mono\">" ++ escapedDid ++ "</p>"
-    , "          </details>"
-    , "        </div>"
-    , "        <div class=\"install-group\">"
-    , "          <p id=\"install-default\" class=\"install\"><strong>Open on iPhone.</strong> Scan the QR or send yourself this link, then open it from your phone to jump into BeepBeep.</p>"
-    , "          <p id=\"install-ios\" class=\"install\" hidden><strong>On iPhone now?</strong> Tap Open in BeepBeep or use the banner above. If the app is not installed yet, get it from the App Store.</p>"
-    , "          <p id=\"install-android\" class=\"install\" hidden><strong>Android is not supported yet.</strong> Keep this page open and scan the QR or open the same link from an iPhone instead.</p>"
-    , "        </div>"
+    , "    <section class=\"shell\">"
+    , "      <p class=\"eyebrow\">ADD ME ON BEEPBEEP</p>"
+    , "      <h1>" ++ escapedName ++ "</h1>"
+    , "      <p class=\"lede\">Open this on your iPhone to jump straight into BeepBeep, or scan the QR from another device to add this contact.</p>"
+    , "      <div class=\"actions\">"
+    , "        <a id=\"open-app\" class=\"button primary\" href=\"" ++ escapedScheme ++ "\">Open in BeepBeep</a>"
+    , "        <button class=\"button secondary\" type=\"button\" data-copy=\"" ++ escapedLink ++ "\" onclick=\"copyValue(this)\">Copy Link</button>"
     , "      </div>"
-    , "      <aside class=\"qr-shell\">"
+    , "      <div class=\"section\">"
+    , "        <p class=\"kicker\">Handle</p>"
+    , "        <p class=\"code\">" ++ escapedHandle ++ "</p>"
+    , "      </div>"
+    , "      <div class=\"section\">"
+    , "        <p class=\"kicker\">Share link</p>"
+    , "        <p class=\"mono\">" ++ escapedLink ++ "</p>"
+    , "        <details>"
+    , "          <summary>Identity details</summary>"
+    , "          <p class=\"mono\">" ++ escapedDid ++ "</p>"
+    , "        </details>"
+    , "      </div>"
+    , "      <div class=\"section\">"
+    , "        <p class=\"kicker\">Scan</p>"
     , "        <div class=\"qr-panel\">"
     , "          <div id=\"qr\" class=\"qr-frame\">"
     , "            <img src=\"" ++ escapedQrImage ++ "\" alt=\"QR code for this BeepBeep share link\" referrerpolicy=\"no-referrer\" onerror=\"handleQRLoadError()\">"
     , "          </div>"
     , "          <p class=\"qr-note\">Scan this in BeepBeep or with your phone camera to open the same share link.</p>"
     , "        </div>"
-    , "      </aside>"
+    , "      </div>"
+    , "      <div class=\"install-group section\">"
+    , "        <p id=\"install-default\" class=\"install\"><strong>Open on iPhone.</strong> Scan the QR or send yourself this link, then open it from your phone to jump into BeepBeep.</p>"
+    , "        <p id=\"install-ios\" class=\"install\" hidden><strong>On iPhone now?</strong> Tap Open in BeepBeep or use the banner above. If the app is not installed yet, get it from the App Store.</p>"
+    , "        <p id=\"install-android\" class=\"install\" hidden><strong>Android is not supported yet.</strong> Keep this page open and scan the QR or open the same link from an iPhone instead.</p>"
+    , "      </div>"
     , "    </section>"
     , "  </main>"
     , "  <script>"
@@ -223,7 +294,7 @@ turbo.service.share.pageHtml user =
     , "    function handleQRLoadError() {"
     , "      const shell = document.getElementById('qr');"
     , "      if (!shell) return;"
-    , "      shell.innerHTML = '<div class=\"qr-fallback\">Open BeepBeep and enter the code above.</div>';"
+    , "      shell.innerHTML = '<div class=\"qr-fallback\">Open BeepBeep and enter the handle above.</div>';"
     , "    }"
     , "    (function configurePlatformHints() {"
     , "      const ua = navigator.userAgent || '';"
@@ -266,6 +337,28 @@ turbo.service.share.page db = do
     None      -> notFound.html (notFoundHtml publicIdText)
     Some user -> ok.html (pageHtml user)
 
+turbo.service.share.handlePage : Database -> '{Route, Exception, Remote} ()
+turbo.service.share.handlePage db = do
+  use Parser /
+  use Text startsWith
+  rawPathSegment = route GET Parser.text
+  reservedRootPath =
+    rawPathSegment == ".well-known"
+      || rawPathSegment == "apple-app-site-association"
+      || rawPathSegment == "health"
+      || rawPathSegment == "id"
+      || rawPathSegment == "p"
+      || rawPathSegment == "v1"
+  canonicalPublicId =
+    if startsWith "@" rawPathSegment then rawPathSegment
+    else "@" ++ rawPathSegment
+  if reservedRootPath then
+    notFound.html (notFoundHtml rawPathSegment)
+  else
+    match getByPublicId db canonicalPublicId () with
+      None      -> notFound.html (notFoundHtml canonicalPublicId)
+      Some user -> ok.html (pageHtml user)
+
 turbo.service.share.didDocument : Database -> '{Route, Exception, Remote} ()
 turbo.service.share.didDocument db = do
   use Parser /
@@ -290,20 +383,21 @@ turbo.service.routes.share db =
   use Route or
   or service.share.appleAppSiteAssociationRoot
     (or service.share.appleAppSiteAssociationWellKnown
-      (or (service.share.page db) (service.share.didDocument db)))
+      (or (service.share.page db)
+        (or (service.share.didDocument db) (service.share.handlePage db))))
 
 turbo.service.httpWithConfig : Text -> Boolean -> Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
 turbo.service.httpWithConfig mode supportsWebSocket db =
   use Route or
   or health
-    (or (service.routes.share db)
-      (or (service.config mode supportsWebSocket)
-        (or (uploadEvent db)
-          (or (internal.routes db)
-            (or (dev db)
-              (or (service.presence.heartbeat db)
-                (or (background db)
-                  (or (offline db)
-                    (or (auth db)
-                      (or (users db)
-                        (or (invites db) (channels db)))))))))))
+    (or (service.config mode supportsWebSocket)
+      (or (uploadEvent db)
+        (or (internal.routes db)
+          (or (dev db)
+            (or (service.presence.heartbeat db)
+              (or (background db)
+                (or (offline db)
+                  (or (auth db)
+                    (or (users db)
+                      (or (invites db)
+                        (or (channels db) (service.routes.share db)))))))))))

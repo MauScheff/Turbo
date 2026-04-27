@@ -13,12 +13,75 @@ enum ConversationState: String {
 
 struct Contact: Identifiable, Hashable {
     let id: UUID
-    var name: String
+    var profileName: String
+    var localName: String?
     var handle: String
     var isOnline: Bool
     var channelId: UUID
     var backendChannelId: String?
     var remoteUserId: String?
+
+    init(
+        id: UUID,
+        name: String,
+        handle: String,
+        isOnline: Bool,
+        channelId: UUID,
+        backendChannelId: String? = nil,
+        remoteUserId: String? = nil,
+        localName: String? = nil
+    ) {
+        self.init(
+            id: id,
+            profileName: name,
+            localName: localName,
+            handle: handle,
+            isOnline: isOnline,
+            channelId: channelId,
+            backendChannelId: backendChannelId,
+            remoteUserId: remoteUserId
+        )
+    }
+
+    init(
+        id: UUID,
+        profileName: String,
+        localName: String? = nil,
+        handle: String,
+        isOnline: Bool,
+        channelId: UUID,
+        backendChannelId: String? = nil,
+        remoteUserId: String? = nil
+    ) {
+        self.id = id
+        self.profileName = Self.normalizedProfileName(profileName, fallbackHandle: handle)
+        self.localName = Self.normalizedLocalName(localName)
+        self.handle = handle
+        self.isOnline = isOnline
+        self.channelId = channelId
+        self.backendChannelId = backendChannelId
+        self.remoteUserId = remoteUserId
+    }
+
+    var name: String {
+        get {
+            Self.presentedName(
+                localName: localName,
+                profileName: profileName,
+                handle: handle
+            )
+        }
+        set {
+            profileName = Self.normalizedProfileName(newValue, fallbackHandle: handle)
+        }
+    }
+
+    var hasLocalNameOverride: Bool {
+        guard let localName else { return false }
+        let normalizedLocal = localName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedLocal.isEmpty else { return false }
+        return normalizedLocal.localizedCaseInsensitiveCompare(profileName) != .orderedSame
+    }
 
     static func stableID(remoteUserId: String?, fallbackHandle: String) -> UUID {
         let identitySeed: String
@@ -44,16 +107,29 @@ struct Contact: Identifiable, Hashable {
     }
 
     static func displayName(for handle: String) -> String {
-        let normalized = normalizedHandle(handle)
-        let raw = normalized.hasPrefix("@") ? String(normalized.dropFirst()) : normalized
-        guard !raw.isEmpty else { return normalized }
+        let raw = TurboHandle.body(from: handle)
+        guard !raw.isEmpty else { return normalizedHandle(handle) }
         return raw.prefix(1).uppercased() + raw.dropFirst()
     }
 
     static func normalizedHandle(_ handle: String) -> String {
-        let trimmed = handle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "turbo-ios" }
-        return trimmed.lowercased()
+        TurboHandle.normalizedStoredHandle(handle)
+    }
+
+    static func normalizedProfileName(_ profileName: String, fallbackHandle: String) -> String {
+        let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return displayName(for: fallbackHandle) }
+        return trimmed
+    }
+
+    static func normalizedLocalName(_ localName: String?) -> String? {
+        guard let localName else { return nil }
+        let trimmed = localName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func presentedName(localName: String?, profileName: String, handle: String) -> String {
+        normalizedLocalName(localName) ?? normalizedProfileName(profileName, fallbackHandle: handle)
     }
 }
 
@@ -2063,21 +2139,26 @@ enum ContactDirectory {
         remoteUserId: String,
         channelId: String,
         displayName: String? = nil,
+        localName: String? = nil,
         existingContacts: [Contact]
     ) -> (contacts: [Contact], contactID: UUID) {
         let normalizedHandle = Contact.normalizedHandle(handle)
         let stableID = Contact.stableID(remoteUserId: remoteUserId, fallbackHandle: normalizedHandle)
         let stableChannelID = channelId.isEmpty ? nil : stableChannelUUID(for: channelId)
+        let normalizedLocalName = Contact.normalizedLocalName(localName)
 
         var contacts = existingContacts
         if let index = contacts.firstIndex(where: {
             ($0.remoteUserId != nil && $0.remoteUserId == remoteUserId)
                 || Contact.normalizedHandle($0.handle) == normalizedHandle
         }) {
-            let trimmedName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmedName.isEmpty {
-                contacts[index].name = trimmedName
+            if let displayName {
+                contacts[index].profileName = Contact.normalizedProfileName(
+                    displayName,
+                    fallbackHandle: normalizedHandle
+                )
             }
+            contacts[index].localName = normalizedLocalName
             contacts[index].handle = normalizedHandle
             contacts[index].remoteUserId = remoteUserId
             if let stableChannelID {
@@ -2090,13 +2171,14 @@ enum ContactDirectory {
             return (contacts, contacts[index].id)
         }
 
+        let normalizedProfileName =
+            Contact.normalizedProfileName(displayName ?? "", fallbackHandle: normalizedHandle)
+
         contacts.append(
             Contact(
                 id: stableID,
-                name: {
-                    let trimmedName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    return trimmedName.isEmpty ? Contact.displayName(for: normalizedHandle) : trimmedName
-                }(),
+                profileName: normalizedProfileName,
+                localName: normalizedLocalName,
                 handle: normalizedHandle,
                 isOnline: false,
                 channelId: stableChannelID ?? UUID(),
@@ -2119,13 +2201,16 @@ enum ContactDirectory {
 
     static func authoritativeContactIDs(
         trackedContactIDs: Set<UUID>,
+        summaryContactIDs: Set<UUID>,
         selectedContactID: UUID?,
         activeChannelID: UUID?,
         mediaSessionContactID: UUID?,
         pendingJoinContactID: UUID?,
         inviteContactIDs: Set<UUID>
     ) -> Set<UUID> {
-        var ids = trackedContactIDs.union(inviteContactIDs)
+        var ids = trackedContactIDs
+            .union(summaryContactIDs)
+            .union(inviteContactIDs)
         if let selectedContactID {
             ids.insert(selectedContactID)
         }

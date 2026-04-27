@@ -146,6 +146,11 @@ extension PTTViewModel {
         return message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "device session not connected"
     }
 
+    func shouldProceedWithBackendJoinWithoutWebSocket(_ error: Error) -> Bool {
+        guard case .webSocketUnavailable = error as? TurboBackendError else { return false }
+        return true
+    }
+
     func declineIncomingRequestForSelectedContact() async {
         guard let contact = selectedContact else {
             statusMessage = "Pick a contact"
@@ -411,8 +416,8 @@ extension PTTViewModel {
             let remoteUser = try await backend.resolveIdentity(reference: handle)
             guard remoteUser.userId != backend.currentUserID else {
                 backendCommandCoordinator.send(.operationFailed("cannot open self"))
-                statusMessage = "Pick another code"
-                backendStatusMessage = "That code belongs to this device account"
+                statusMessage = "Pick another handle"
+                backendStatusMessage = "That handle belongs to this device account"
                 return
             }
             let contactID = ensureContactExists(
@@ -426,6 +431,20 @@ extension PTTViewModel {
             trackContact(contactID)
             if let contact = contacts.first(where: { $0.id == contactID }) {
                 selectContact(contact)
+            }
+            do {
+                _ = try await backend.rememberContact(otherUserId: remoteUser.userId)
+            } catch {
+                diagnostics.record(
+                    .backend,
+                    level: .error,
+                    message: "Remember contact failed",
+                    metadata: [
+                        "reference": handle,
+                        "publicId": remoteUser.publicId,
+                        "error": error.localizedDescription,
+                    ]
+                )
             }
             if let presence = try? await backend.lookupPresence(handle: remoteUser.publicId) {
                 updateContact(contactID) { contact in
@@ -784,7 +803,21 @@ extension PTTViewModel {
                 "handle": request.handle,
             ]
         )
-        try await backend.waitForWebSocketConnection()
+        do {
+            try await backend.waitForWebSocketConnection()
+        } catch {
+            guard shouldProceedWithBackendJoinWithoutWebSocket(error) else {
+                throw error
+            }
+            diagnostics.record(
+                .backend,
+                message: "Proceeding with backend join while WebSocket remains unavailable",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "handle": request.handle,
+                ]
+            )
+        }
     }
 
     private func performRecoverableBackendJoin(

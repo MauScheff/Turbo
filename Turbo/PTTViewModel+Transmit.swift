@@ -1386,7 +1386,7 @@ extension PTTViewModel {
         }
     }
 
-    private func configureOutgoingAudioRoute(target: TransmitTarget) {
+    func configureOutgoingAudioRoute(target: TransmitTarget) {
         guard let backend = backendServices else {
             mediaServices.replaceSendAudioChunk(nil)
             mediaServices.session()?.updateSendAudioChunk(nil)
@@ -1404,6 +1404,30 @@ extension PTTViewModel {
         let fromDeviceID = backend.deviceID
         let toUserID = target.userID
         let toDeviceID = target.deviceID
+        let transportSend: @Sendable (String) async throws -> Void
+        let transportKind: String
+
+        if shouldUseDirectQuicTransport(for: target.contactID),
+           let directTransport = mediaRuntime.directQuicProbeController {
+            transportKind = "direct-quic"
+            transportSend = { payload in
+                try await directTransport.sendAudioPayload(payload)
+            }
+        } else {
+            transportKind = "relay-websocket"
+            transportSend = { payload in
+                let envelope = TurboSignalEnvelope(
+                    type: .audioChunk,
+                    channelId: channelID,
+                    fromUserId: fromUserID,
+                    fromDeviceId: fromDeviceID,
+                    toUserId: toUserID,
+                    toDeviceId: toDeviceID,
+                    payload: payload
+                )
+                try await backend.sendSignal(envelope)
+            }
+        }
 
         let sendAudioChunk: @Sendable (String) async throws -> Void = { [weak self] payload in
             if let self,
@@ -1412,16 +1436,7 @@ extension PTTViewModel {
                     target: target
                 )
             }
-            let envelope = TurboSignalEnvelope(
-                type: .audioChunk,
-                channelId: channelID,
-                fromUserId: fromUserID,
-                fromDeviceId: fromDeviceID,
-                toUserId: toUserID,
-                toDeviceId: toDeviceID,
-                payload: payload
-            )
-            try await backend.sendSignal(envelope)
+            try await transportSend(payload)
         }
         mediaServices.replaceSendAudioChunk(sendAudioChunk)
         mediaServices.session()?.updateSendAudioChunk(sendAudioChunk)
@@ -1431,7 +1446,8 @@ extension PTTViewModel {
             metadata: [
                 "contactId": target.contactID.uuidString,
                 "channelId": target.channelID,
-                "deviceId": target.deviceID
+                "deviceId": target.deviceID,
+                "transport": transportKind,
             ]
         )
     }
@@ -2056,6 +2072,7 @@ extension PTTViewModel {
             )
             media.markStartupSucceeded()
             applyPreferredAudioOutputRouteIfPossible()
+            await maybeStartDirectQuicProbe(for: contactID)
         } catch {
             let message = error.localizedDescription
             media.markStartupFailed(startupContext, message)
@@ -2075,6 +2092,18 @@ extension PTTViewModel {
     }
 
     func closeMediaSession(deactivateAudioSession: Bool = true) {
+        if let contactID = mediaSessionContactID,
+           let attempt = mediaRuntime.directQuicUpgrade.attempt(for: contactID) {
+            cancelDirectQuicPromotionTimeout()
+            Task { [weak self] in
+                guard let self else { return }
+                await self.sendDirectQuicHangup(
+                    for: contactID,
+                    attempt: attempt,
+                    reason: "media-session-closed"
+                )
+            }
+        }
         let shouldDeactivateAudioSession =
             deactivateAudioSession && !shouldPreserveAudioSessionDuringMediaClose()
         if deactivateAudioSession && !shouldDeactivateAudioSession {

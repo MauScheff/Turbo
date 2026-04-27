@@ -7,6 +7,18 @@ import UIKit
 
 @MainActor
 struct TurboTests {
+    private func makeDirectQuicNominatedPath(
+        attemptID: String = "attempt-1"
+    ) -> DirectQuicNominatedPath {
+        DirectQuicNominatedPath(
+            attemptId: attemptID,
+            source: .outboundProbe,
+            localPort: 50_000,
+            remoteAddress: "203.0.113.20",
+            remotePort: 54_321,
+            remoteCandidateKind: .serverReflexive
+        )
+    }
 
     @Test func audioOutputPreferenceCyclesBetweenSpeakerAndPhone() {
         #expect(AudioOutputPreference.speaker.next == .phone)
@@ -24,9 +36,58 @@ struct TurboTests {
         }
     }
 
+    @Test func incomingLinkPublicIDParsesHandleLinkAndDid() {
+        #expect(TurboIncomingLink.publicID(from: "maurice") == "@maurice")
+        #expect(TurboIncomingLink.publicID(from: "@maurice") == "@maurice")
+        #expect(TurboIncomingLink.publicID(from: "https://beepbeep.to/maurice") == "@maurice")
+        #expect(TurboIncomingLink.publicID(from: "https://beepbeep.to/@maurice") == "@maurice")
+        #expect(TurboIncomingLink.publicID(from: "https://beepbeep.to/p/maurice") == "@maurice")
+        #expect(TurboIncomingLink.publicID(from: "did:web:beepbeep.to:id:maurice") == "@maurice")
+    }
+
     @Test func identityProfileStoreNormalizesWhitespace() {
         let normalized = TurboIdentityProfileStore.normalizedProfileName("  Sunny Otter  ")
         #expect(normalized == "Sunny Otter")
+    }
+
+    @Test func handleSuggestionUsesOnlyLowercaseLettersAndNumbers() {
+        let suggested = TurboHandle.suggestedEditableBody(from: "Lively Sparrow")
+        #expect(suggested == "livelysparrow")
+        #expect(TurboHandle.isValidEditableBody(suggested))
+    }
+
+    @Test func contactDisplayNamePrefersLocalOverride() {
+        var contact = Contact(
+            id: UUID(),
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: UUID(),
+            localName: "Studio Blake"
+        )
+
+        #expect(contact.name == "Studio Blake")
+        #expect(contact.hasLocalNameOverride)
+
+        contact.localName = nil
+
+        #expect(contact.name == "Blake")
+        #expect(contact.hasLocalNameOverride == false)
+    }
+
+    @Test func contactAliasStoreScopesAliasesByOwner() {
+        let contactID = UUID()
+        let firstOwner = "owner-a-\(UUID().uuidString)"
+        let secondOwner = "owner-b-\(UUID().uuidString)"
+
+        let stored = TurboContactAliasStore.storeLocalName("  Harbor Blake  ", for: contactID, ownerKey: firstOwner)
+        #expect(stored == "Harbor Blake")
+        #expect(TurboContactAliasStore.localName(for: contactID, ownerKey: firstOwner) == "Harbor Blake")
+        #expect(TurboContactAliasStore.localName(for: contactID, ownerKey: secondOwner) == nil)
+
+        let cleared = TurboContactAliasStore.storeLocalName(nil, for: contactID, ownerKey: firstOwner)
+        #expect(cleared == nil)
+        #expect(TurboContactAliasStore.localName(for: contactID, ownerKey: firstOwner) == nil)
     }
 
     @Test func telemetryEventRequestEncodesMetadataTextAndFlagsAsStrings() throws {
@@ -71,6 +132,972 @@ struct TurboTests {
         #expect(json?["metadataText"] == #"{"prebuilt":"payload"}"#)
         #expect(json?["devTraffic"] == "false")
         #expect(json?["alert"] == "false")
+    }
+
+    @Test func backendRuntimeConfigDecodesDirectQuicCapabilityAndPolicy() throws {
+        let json = """
+        {
+          "mode": "cloud",
+          "supportsWebSocket": true,
+          "telemetryEnabled": true,
+          "supportsDirectQuicUpgrade": true,
+          "directQuicPolicy": {
+            "stunServers": [
+              { "host": "stun1.example.com", "port": 3478 },
+              { "host": "stun2.example.com" }
+            ],
+            "promotionTimeoutMs": 2500,
+            "retryBackoffMs": 15000
+          }
+        }
+        """
+
+        let config = try JSONDecoder().decode(
+            TurboBackendRuntimeConfig.self,
+            from: Data(json.utf8)
+        )
+
+        #expect(config.mode == "cloud")
+        #expect(config.supportsWebSocket)
+        #expect(config.telemetryEnabled == true)
+        #expect(config.supportsDirectQuicUpgrade == true)
+        #expect(
+            config.directQuicPolicy
+                == TurboDirectQuicPolicy(
+                    stunServers: [
+                        TurboDirectQuicStunServer(host: "stun1.example.com", port: 3478),
+                        TurboDirectQuicStunServer(host: "stun2.example.com", port: nil),
+                    ],
+                    promotionTimeoutMs: 2500,
+                    retryBackoffMs: 15000
+                )
+        )
+    }
+
+    @Test func directQuicStunCodecParsesXorMappedAddressResponse() throws {
+        let transactionID = Data([
+            0x63, 0x61, 0x66, 0x65,
+            0x62, 0x61, 0x62, 0x65,
+            0x12, 0x34, 0x56, 0x78,
+        ])
+        let mappedPort: UInt16 = 54_321
+        let mappedAddress = [UInt8(203), 0, 113, 20]
+        let xoredPort = mappedPort ^ 0x2112
+        let xoredAddress = zip(
+            mappedAddress,
+            [UInt8(0x21), 0x12, 0xA4, 0x42]
+        ).map { $0 ^ $1 }
+
+        var response = Data()
+        response.append(contentsOf: UInt16(0x0101).bigEndianBytes)
+        response.append(contentsOf: UInt16(12).bigEndianBytes)
+        response.append(contentsOf: UInt32(0x2112A442).bigEndianBytes)
+        response.append(transactionID)
+        response.append(contentsOf: UInt16(0x0020).bigEndianBytes)
+        response.append(contentsOf: UInt16(8).bigEndianBytes)
+        response.append(0x00)
+        response.append(0x01)
+        response.append(contentsOf: xoredPort.bigEndianBytes)
+        response.append(contentsOf: xoredAddress)
+
+        let parsed = try DirectQuicStunCodec.parseBindingResponse(
+            response,
+            expectedTransactionID: transactionID
+        )
+
+        #expect(parsed == DirectQuicStunMappedAddress(address: "203.0.113.20", port: 54_321))
+    }
+
+    @Test func directPathDebugOverridePrefersLaunchArgumentsOverEnvironmentAndDefaults() {
+        let suiteName = "TurboTests.direct-path-debug-override.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            Issue.record("failed to create isolated user defaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        defaults.set(false, forKey: TurboDirectPathDebugOverride.storageKey)
+
+        #expect(
+            TurboDirectPathDebugOverride.isRelayOnlyForced(
+                arguments: [TurboDirectPathDebugOverride.launchArgument, "true"],
+                environment: [TurboDirectPathDebugOverride.environmentKey: "false"],
+                defaults: defaults
+            )
+        )
+        #expect(
+            TurboDirectPathDebugOverride.isRelayOnlyForced(
+                arguments: [TurboDirectPathDebugOverride.launchArgument, "false"],
+                environment: [TurboDirectPathDebugOverride.environmentKey: "true"],
+                defaults: defaults
+            ) == false
+        )
+    }
+
+    @Test func directPathDebugOverrideFallsBackFromEnvironmentToDefaults() {
+        let suiteName = "TurboTests.direct-path-debug-defaults.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            Issue.record("failed to create isolated user defaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        defaults.set(true, forKey: TurboDirectPathDebugOverride.storageKey)
+
+        #expect(
+            TurboDirectPathDebugOverride.isRelayOnlyForced(
+                arguments: [],
+                environment: [TurboDirectPathDebugOverride.environmentKey: "false"],
+                defaults: defaults
+            ) == false
+        )
+        #expect(
+            TurboDirectPathDebugOverride.isRelayOnlyForced(
+                arguments: [],
+                environment: [:],
+                defaults: defaults
+            )
+        )
+    }
+
+    @Test func directQuicIdentityConfigurationPrefersLaunchEnvironmentDefaultsThenBundle() {
+        let suiteName = "TurboTests.direct-quic-identity.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            Issue.record("failed to create isolated user defaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        defaults.set("defaults-label", forKey: DirectQuicIdentityConfiguration.storageKey)
+
+        #expect(
+            DirectQuicIdentityConfiguration.resolvedLabel(
+                arguments: [DirectQuicIdentityConfiguration.launchArgument, "launch-label"],
+                environment: [DirectQuicIdentityConfiguration.environmentKey: "env-label"],
+                defaults: defaults,
+                bundleInfo: [DirectQuicIdentityConfiguration.infoPlistKey: "bundle-label"]
+            ) == "launch-label"
+        )
+        #expect(
+            DirectQuicIdentityConfiguration.resolvedLabel(
+                arguments: [],
+                environment: [DirectQuicIdentityConfiguration.environmentKey: "env-label"],
+                defaults: defaults,
+                bundleInfo: [DirectQuicIdentityConfiguration.infoPlistKey: "bundle-label"]
+            ) == "env-label"
+        )
+        #expect(
+            DirectQuicIdentityConfiguration.resolvedLabel(
+                arguments: [],
+                environment: [:],
+                defaults: defaults,
+                bundleInfo: [DirectQuicIdentityConfiguration.infoPlistKey: "bundle-label"]
+            ) == "defaults-label"
+        )
+        defaults.removeObject(forKey: DirectQuicIdentityConfiguration.storageKey)
+        #expect(
+            DirectQuicIdentityConfiguration.resolvedLabel(
+                arguments: [],
+                environment: [:],
+                defaults: defaults,
+                bundleInfo: [DirectQuicIdentityConfiguration.infoPlistKey: "bundle-label"]
+            ) == "bundle-label"
+        )
+    }
+
+    @Test func directQuicIdentityConfigurationPreferredLabelUsesDeviceIDAndSanitizesFallback() {
+        #expect(
+            DirectQuicIdentityConfiguration.preferredLabel(
+                deviceID: "ABC-123",
+                fallbackHandle: "@ignored"
+            ) == "turbo.direct-quic.identity.abc-123"
+        )
+        #expect(
+            DirectQuicIdentityConfiguration.preferredLabel(
+                deviceID: nil,
+                fallbackHandle: "@Drift Sparrow"
+            ) == "turbo.direct-quic.identity.drift-sparrow"
+        )
+    }
+
+    @MainActor
+    @Test func directQuicAttemptRoleUsesStableDeviceOrdering() {
+        let viewModel = PTTViewModel()
+
+        #expect(
+            viewModel.directQuicAttemptRole(
+                localDeviceID: "device-a",
+                peerDeviceID: "device-b"
+            ) == .listenerOfferer
+        )
+        #expect(
+            viewModel.directQuicAttemptRole(
+                localDeviceID: "device-z",
+                peerDeviceID: "device-b"
+            ) == .dialerAnswerer
+        )
+    }
+
+    @MainActor
+    @Test func directQuicExpectedPeerCertificateFingerprintPrefersAnswerThenOffer() {
+        let contactID = UUID()
+        let viewModel = PTTViewModel()
+        let candidate = TurboDirectQuicCandidate(
+            foundation: "host-a",
+            component: "media",
+            transport: "udp",
+            priority: 100,
+            kind: .host,
+            address: "203.0.113.10",
+            port: 4433,
+            relatedAddress: nil,
+            relatedPort: nil
+        )
+        let offerOnlyAttempt = DirectQuicUpgradeAttempt(
+            contactID: contactID,
+            channelID: "channel-1",
+            attemptId: "attempt-1",
+            peerDeviceID: "peer-device",
+            startedAt: .distantPast,
+            lastUpdatedAt: .distantPast,
+            isDirectActive: false,
+            remoteOffer: TurboDirectQuicOfferPayload(
+                attemptId: "attempt-1",
+                channelId: "channel-1",
+                fromDeviceId: "peer-device",
+                toDeviceId: "local-device",
+                quicAlpn: "turbo-ptt",
+                certificateFingerprint: "sha256:offer",
+                candidates: [candidate],
+                roleIntent: .listener
+            ),
+            remoteAnswer: nil,
+            remoteCandidates: [candidate],
+            remoteCandidateCount: 1,
+            remoteEndOfCandidates: false,
+            lastHangupReason: nil
+        )
+        let answeredAttempt = DirectQuicUpgradeAttempt(
+            contactID: contactID,
+            channelID: "channel-1",
+            attemptId: "attempt-1",
+            peerDeviceID: "peer-device",
+            startedAt: .distantPast,
+            lastUpdatedAt: .distantPast,
+            isDirectActive: false,
+            remoteOffer: offerOnlyAttempt.remoteOffer,
+            remoteAnswer: TurboDirectQuicAnswerPayload(
+                attemptId: "attempt-1",
+                accepted: true,
+                certificateFingerprint: "sha256:answer",
+                candidates: [candidate]
+            ),
+            remoteCandidates: [candidate],
+            remoteCandidateCount: 1,
+            remoteEndOfCandidates: false,
+            lastHangupReason: nil
+        )
+
+        #expect(
+            viewModel.directQuicExpectedPeerCertificateFingerprint(for: offerOnlyAttempt)
+            == "sha256:offer"
+        )
+        #expect(
+            viewModel.directQuicExpectedPeerCertificateFingerprint(for: answeredAttempt)
+            == "sha256:answer"
+        )
+    }
+
+    @MainActor
+    @Test func directQuicCandidateBatchUsesTrickledCandidateOrFallsBackToAccumulatedCandidates() {
+        let contactID = UUID()
+        let viewModel = PTTViewModel()
+        let firstCandidate = TurboDirectQuicCandidate(
+            foundation: "host-a",
+            component: "media",
+            transport: "udp",
+            priority: 100,
+            kind: .host,
+            address: "203.0.113.10",
+            port: 4433,
+            relatedAddress: nil,
+            relatedPort: nil
+        )
+        let secondCandidate = TurboDirectQuicCandidate(
+            foundation: "srflx-b",
+            component: "media",
+            transport: "udp",
+            priority: 99,
+            kind: .serverReflexive,
+            address: "198.51.100.22",
+            port: 51820,
+            relatedAddress: "10.0.0.2",
+            relatedPort: 4433
+        )
+        let attempt = DirectQuicUpgradeAttempt(
+            contactID: contactID,
+            channelID: "channel-1",
+            attemptId: "attempt-1",
+            peerDeviceID: "peer-device",
+            startedAt: .distantPast,
+            lastUpdatedAt: .distantPast,
+            isDirectActive: false,
+            remoteOffer: nil,
+            remoteAnswer: nil,
+            remoteCandidates: [firstCandidate, secondCandidate],
+            remoteCandidateCount: 2,
+            remoteEndOfCandidates: false,
+            lastHangupReason: nil
+        )
+
+        #expect(
+            viewModel.directQuicCandidateBatchToProbe(
+                for: attempt,
+                payload: TurboDirectQuicCandidatePayload(
+                    attemptId: "attempt-1",
+                    candidate: secondCandidate
+                )
+            ) == [secondCandidate]
+        )
+        #expect(
+            viewModel.directQuicCandidateBatchToProbe(
+                for: attempt,
+                payload: TurboDirectQuicCandidatePayload(
+                    attemptId: "attempt-1",
+                    candidate: nil,
+                    endOfCandidates: true
+                )
+            ) == [firstCandidate, secondCandidate]
+        )
+    }
+
+    @Test func directQuicProbeBatchSelectionDistinguishesInFlightViableAndDuplicateCandidates() {
+        let viableCandidate = TurboDirectQuicCandidate(
+            foundation: "srflx-a",
+            component: "media",
+            transport: "udp",
+            priority: 100,
+            kind: .serverReflexive,
+            address: "198.51.100.40",
+            port: 51820,
+            relatedAddress: "10.0.0.4",
+            relatedPort: 4433
+        )
+        let invalidCandidate = TurboDirectQuicCandidate(
+            foundation: "tcp-a",
+            component: "media",
+            transport: "tcp",
+            priority: 50,
+            kind: .host,
+            address: "203.0.113.11",
+            port: 4433,
+            relatedAddress: nil,
+            relatedPort: nil
+        )
+
+        let inFlight = DirectQuicProbeController.selectCandidatesForProbeBatch(
+            inputCandidates: [viableCandidate],
+            attemptedCandidateKeys: [],
+            probeInFlight: true
+        )
+        let noViable = DirectQuicProbeController.selectCandidatesForProbeBatch(
+            inputCandidates: [invalidCandidate],
+            attemptedCandidateKeys: [],
+            probeInFlight: false
+        )
+        let noNew = DirectQuicProbeController.selectCandidatesForProbeBatch(
+            inputCandidates: [viableCandidate],
+            attemptedCandidateKeys: [DirectQuicProbeController.candidateKey(viableCandidate)],
+            probeInFlight: false
+        )
+        let ready = DirectQuicProbeController.selectCandidatesForProbeBatch(
+            inputCandidates: [invalidCandidate, viableCandidate],
+            attemptedCandidateKeys: [],
+            probeInFlight: false
+        )
+
+        #expect(inFlight == .immediate(
+            DirectQuicCandidateProbeOutcome(
+                disposition: .probeAlreadyInFlight,
+                inputCandidateCount: 1,
+                viableCandidateCount: 1,
+                newlyAttemptedCandidateCount: 0,
+                lastErrorDescription: nil
+            )
+        ))
+        #expect(noViable == .immediate(
+            DirectQuicCandidateProbeOutcome(
+                disposition: .noViableCandidates,
+                inputCandidateCount: 1,
+                viableCandidateCount: 0,
+                newlyAttemptedCandidateCount: 0,
+                lastErrorDescription: nil
+            )
+        ))
+        #expect(noNew == .immediate(
+            DirectQuicCandidateProbeOutcome(
+                disposition: .noNewCandidates,
+                inputCandidateCount: 1,
+                viableCandidateCount: 1,
+                newlyAttemptedCandidateCount: 0,
+                lastErrorDescription: nil
+            )
+        ))
+        #expect(ready == .ready([viableCandidate], viableCandidateCount: 1))
+    }
+
+    @Test func directQuicOfferEnvelopeRoundTripsTypedPayload() throws {
+        let candidate = TurboDirectQuicCandidate(
+            foundation: "host-a",
+            component: "rtp",
+            transport: "udp",
+            priority: 100,
+            kind: .host,
+            address: "203.0.113.10",
+            port: 4433,
+            relatedAddress: nil,
+            relatedPort: nil
+        )
+        let payload = TurboDirectQuicOfferPayload(
+            attemptId: "attempt-1",
+            channelId: "channel-1",
+            fromDeviceId: "local-device",
+            toDeviceId: "remote-device",
+            quicAlpn: "turbo-ptt",
+            certificateFingerprint: "sha256:abc123",
+            candidates: [candidate],
+            roleIntent: .symmetric
+        )
+        let envelope = try TurboSignalEnvelope.directQuicOffer(
+            channelId: "channel-1",
+            fromUserId: "user-a",
+            fromDeviceId: "local-device",
+            toUserId: "user-b",
+            toDeviceId: "remote-device",
+            payload: payload
+        )
+
+        let decoded = try envelope.decodeDirectQuicSignalPayload()
+
+        #expect(envelope.type == .offer)
+        #expect(decoded == .offer(payload))
+    }
+
+    @Test func directQuicAnswerEnvelopeRoundTripsCertificateFingerprint() throws {
+        let payload = TurboDirectQuicAnswerPayload(
+            attemptId: "attempt-1",
+            accepted: true,
+            certificateFingerprint: "sha256:def456",
+            candidates: []
+        )
+        let envelope = try TurboSignalEnvelope.directQuicAnswer(
+            channelId: "channel-1",
+            fromUserId: "user-b",
+            fromDeviceId: "remote-device",
+            toUserId: "user-a",
+            toDeviceId: "local-device",
+            payload: payload
+        )
+
+        let decoded = try envelope.decodeDirectQuicSignalPayload()
+
+        #expect(envelope.type == .answer)
+        #expect(decoded == .answer(payload))
+    }
+
+    @Test func directQuicPayloadRejectsUnsupportedProtocolVersion() throws {
+        let envelope = TurboSignalEnvelope(
+            type: .answer,
+            channelId: "channel-1",
+            fromUserId: "user-a",
+            fromDeviceId: "local-device",
+            toUserId: "user-b",
+            toDeviceId: "remote-device",
+            payload: """
+            {"protocol":"quic-direct-v2","attemptId":"attempt-1","accepted":true,"candidates":[]}
+            """
+        )
+
+        #expect(throws: TurboDirectQuicPayloadError.self) {
+            _ = try envelope.decodeDirectQuicSignalPayload()
+        }
+    }
+
+    @Test func directQuicUpgradeRuntimeTracksPromotionAndFallback() {
+        let contactID = UUID()
+        let candidate = TurboDirectQuicCandidate(
+            foundation: "srflx-a",
+            component: "rtp",
+            transport: "udp",
+            priority: 101,
+            kind: .serverReflexive,
+            address: "198.51.100.20",
+            port: 51820,
+            relatedAddress: "10.0.0.2",
+            relatedPort: 51820
+        )
+        let runtime = DirectQuicUpgradeRuntimeState()
+
+        let promotion = runtime.observeIncomingSignal(
+            contactID: contactID,
+            channelID: "channel-1",
+            signal: .offer(
+                TurboDirectQuicOfferPayload(
+                    attemptId: "attempt-1",
+                    channelId: "channel-1",
+                    fromDeviceId: "remote-device",
+                    toDeviceId: "local-device",
+                    quicAlpn: "turbo-ptt",
+                    certificateFingerprint: "sha256:def456",
+                    candidates: [candidate],
+                    roleIntent: .dialer
+                )
+            )
+        )
+
+        #expect(promotion.pathState == .promoting)
+        #expect(runtime.attempt(for: contactID)?.remoteCandidateCount == 1)
+
+        let fallback = runtime.observeIncomingSignal(
+            contactID: contactID,
+            channelID: "channel-1",
+            signal: .hangup(
+                TurboDirectQuicHangupPayload(
+                    attemptId: "attempt-1",
+                    reason: "probe-timeout"
+                )
+            )
+        )
+
+        #expect(fallback.pathState == .relay)
+        #expect(runtime.attempt(for: contactID) == nil)
+    }
+
+    @Test func directQuicUpgradeRuntimeDeduplicatesRemoteCandidatesAndTracksEndOfCandidates() {
+        let contactID = UUID()
+        let candidate = TurboDirectQuicCandidate(
+            foundation: "srflx-a",
+            component: "media",
+            transport: "udp",
+            priority: 101,
+            kind: .serverReflexive,
+            address: "198.51.100.20",
+            port: 51820,
+            relatedAddress: "10.0.0.2",
+            relatedPort: 51820
+        )
+        let runtime = DirectQuicUpgradeRuntimeState()
+
+        _ = runtime.observeIncomingSignal(
+            contactID: contactID,
+            channelID: "channel-1",
+            signal: .answer(
+                TurboDirectQuicAnswerPayload(
+                    attemptId: "attempt-1",
+                    accepted: true,
+                    certificateFingerprint: "sha256:def456",
+                    candidates: [candidate]
+                )
+            )
+        )
+        _ = runtime.observeIncomingSignal(
+            contactID: contactID,
+            channelID: "channel-1",
+            signal: .candidate(
+                TurboDirectQuicCandidatePayload(
+                    attemptId: "attempt-1",
+                    candidate: candidate
+                )
+            )
+        )
+        _ = runtime.observeIncomingSignal(
+            contactID: contactID,
+            channelID: "channel-1",
+            signal: .candidate(
+                TurboDirectQuicCandidatePayload(
+                    attemptId: "attempt-1",
+                    candidate: nil,
+                    endOfCandidates: true
+                )
+            )
+        )
+
+        let attempt = runtime.attempt(for: contactID)
+        #expect(attempt?.remoteCandidates == [candidate])
+        #expect(attempt?.remoteCandidateCount == 1)
+        #expect(attempt?.remoteEndOfCandidates == true)
+    }
+
+    @Test func directQuicUpgradeRuntimeMarksRecoveringWhenActiveDirectPathIsLost() {
+        let contactID = UUID()
+        let runtime = DirectQuicUpgradeRuntimeState()
+
+        _ = runtime.observeIncomingSignal(
+            contactID: contactID,
+            channelID: "channel-1",
+            signal: .answer(
+                TurboDirectQuicAnswerPayload(
+                    attemptId: "attempt-1",
+                    accepted: true,
+                    certificateFingerprint: "sha256:def456",
+                    candidates: []
+                )
+            )
+        )
+
+        let direct = runtime.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        )
+        #expect(runtime.attempt(for: contactID)?.nominatedPath == makeDirectQuicNominatedPath())
+
+        let recovering = runtime.observeIncomingSignal(
+            contactID: contactID,
+            channelID: "channel-1",
+            signal: .hangup(
+                TurboDirectQuicHangupPayload(
+                    attemptId: "attempt-1",
+                    reason: "path-lost"
+                )
+            )
+        )
+
+        #expect(direct?.pathState == .direct)
+        #expect(recovering.pathState == .recovering)
+        #expect(recovering.reason == "path-lost")
+    }
+
+    @Test func directQuicUpgradeRuntimeFallsBackOnRejectedAnswer() {
+        let contactID = UUID()
+        let runtime = DirectQuicUpgradeRuntimeState()
+        let begin = runtime.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-1",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        let fallback = runtime.observeIncomingSignal(
+            contactID: contactID,
+            channelID: "channel-1",
+            signal: .answer(
+                TurboDirectQuicAnswerPayload(
+                    attemptId: "attempt-1",
+                    accepted: false,
+                    rejectionReason: "identity-missing"
+                )
+            )
+        )
+
+        #expect(begin.pathState == .promoting)
+        #expect(fallback.pathState == .relay)
+        #expect(fallback.reason == "identity-missing")
+        #expect(runtime.attempt(for: contactID) == nil)
+    }
+
+    @Test func directQuicUpgradeRuntimeAppliesRetryBackoffAfterFallback() {
+        let contactID = UUID()
+        let runtime = DirectQuicUpgradeRuntimeState()
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+
+        _ = runtime.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-1",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device",
+            now: start
+        )
+        let fallback = runtime.clearAttempt(
+            for: contactID,
+            fallbackReason: "promotion-timeout",
+            retryBackoff: DirectQuicRetryBackoffRequest(
+                milliseconds: 15_000,
+                reason: "promotion-timeout",
+                category: .connectivity,
+                attemptId: "attempt-1"
+            ),
+            now: start
+        )
+
+        #expect(fallback.pathState == .relay)
+        #expect(runtime.canBeginLocalAttempt(for: contactID, now: start.addingTimeInterval(5)) == false)
+        #expect(runtime.retryBackoffRemaining(for: contactID, now: start.addingTimeInterval(5)) != nil)
+        #expect(
+            runtime.retryBackoffState(for: contactID, now: start.addingTimeInterval(5))
+                == DirectQuicRetryBackoffState(
+                    notBefore: start.addingTimeInterval(15),
+                    milliseconds: 15_000,
+                    reason: "promotion-timeout",
+                    category: .connectivity,
+                    attemptId: "attempt-1"
+                )
+        )
+        #expect(runtime.canBeginLocalAttempt(for: contactID, now: start.addingTimeInterval(16)))
+        #expect(runtime.retryBackoffRemaining(for: contactID, now: start.addingTimeInterval(16)) == nil)
+    }
+
+    @Test func directQuicRetryBackoffPolicyElevatesSecurityAndPeerRejectionReasons() {
+        #expect(
+            DirectQuicRetryBackoffPolicy.category(for: "promotion-timeout") == .connectivity
+        )
+        #expect(
+            DirectQuicRetryBackoffPolicy.category(for: "peer-certificate-fingerprint-mismatch") == .security
+        )
+        #expect(
+            DirectQuicRetryBackoffPolicy.category(for: "identity-missing") == .peerRejected
+        )
+        #expect(
+            DirectQuicRetryBackoffPolicy.milliseconds(
+                baseMilliseconds: 15_000,
+                reason: "promotion-timeout"
+            ) == 15_000
+        )
+        #expect(
+            DirectQuicRetryBackoffPolicy.milliseconds(
+                baseMilliseconds: 15_000,
+                reason: "answer-send-failed"
+            ) == 30_000
+        )
+        #expect(
+            DirectQuicRetryBackoffPolicy.milliseconds(
+                baseMilliseconds: 15_000,
+                reason: "peer-certificate-fingerprint-mismatch"
+            ) == 60_000
+        )
+    }
+
+    @Test func directQuicUpgradeRuntimeCanClearRetryBackoffWithoutResettingAttempts() {
+        let contactID = UUID()
+        let runtime = DirectQuicUpgradeRuntimeState()
+        let start = Date(timeIntervalSinceReferenceDate: 2_000)
+
+        _ = runtime.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-2",
+            attemptID: "attempt-2",
+            peerDeviceID: "peer-device",
+            now: start
+        )
+        runtime.applyRetryBackoff(
+            for: contactID,
+            request: DirectQuicRetryBackoffRequest(
+                milliseconds: 15_000,
+                reason: "promotion-timeout",
+                category: .connectivity,
+                attemptId: "attempt-2"
+            ),
+            now: start
+        )
+
+        runtime.clearRetryBackoff(for: contactID)
+
+        #expect(runtime.attempt(for: contactID)?.attemptId == "attempt-2")
+        #expect(runtime.retryBackoffState(for: contactID, now: start.addingTimeInterval(1)) == nil)
+        #expect(runtime.retryBackoffRemaining(for: contactID, now: start.addingTimeInterval(1)) == nil)
+    }
+
+    @Test func directQuicWireCodecRoundTripsDelimitedMessages() throws {
+        let encodedHello = try DirectQuicWireCodec.encode(.probeHello)
+        let encodedAudio = try DirectQuicWireCodec.encode(.audioChunk("payload-1"))
+        var buffer = encodedHello + encodedAudio
+
+        let decoded = try DirectQuicWireCodec.decodeAvailable(from: &buffer)
+
+        #expect(decoded == [.probeHello, .audioChunk("payload-1")])
+        #expect(buffer.isEmpty)
+    }
+
+    @Test func directQuicWireCodecLeavesPartialFrameBuffered() throws {
+        let encoded = try DirectQuicWireCodec.encode(.audioChunk("payload-2"))
+        let splitIndex = encoded.index(before: encoded.endIndex)
+        var buffer = Data(encoded[..<splitIndex])
+
+        let initialDecode = try DirectQuicWireCodec.decodeAvailable(from: &buffer)
+        #expect(initialDecode.isEmpty)
+        buffer.append(encoded[splitIndex...])
+
+        let completedDecode = try DirectQuicWireCodec.decodeAvailable(from: &buffer)
+        #expect(completedDecode == [.audioChunk("payload-2")])
+        #expect(buffer.isEmpty)
+    }
+
+    @Test func directQuicWireCodecRoundTripsConsentMessages() throws {
+        let encodedPing = try DirectQuicWireCodec.encode(.consentPing("ping-1"))
+        let encodedAck = try DirectQuicWireCodec.encode(.consentAck("ping-1"))
+        var buffer = encodedPing + encodedAck
+
+        let decoded = try DirectQuicWireCodec.decodeAvailable(from: &buffer)
+
+        #expect(decoded == [.consentPing("ping-1"), .consentAck("ping-1")])
+        #expect(buffer.isEmpty)
+    }
+
+    @MainActor
+    @Test func directQuicTransportSelectionRequiresActivePathAndController() {
+        let contactID = UUID()
+        let viewModel = PTTViewModel()
+
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-1",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        #expect(viewModel.shouldUseDirectQuicTransport(for: contactID) == false)
+
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        #expect(viewModel.shouldUseDirectQuicTransport(for: contactID) == false)
+
+        _ = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        )
+        #expect(viewModel.shouldUseDirectQuicTransport(for: contactID))
+    }
+
+    @MainActor
+    @Test func directQuicHangupFromActivePathFallsBackToRelay() async throws {
+        let contactID = UUID()
+        let channelID = "channel-1"
+        let channelUUID = UUID()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(
+                mode: "cloud",
+                supportsWebSocket: true,
+                supportsDirectQuicUpgrade: true
+            )
+        )
+
+        let viewModel = PTTViewModel()
+        viewModel.backendRuntime.applyAuthenticatedSession(
+            client: client,
+            userID: "user-self",
+            mode: "cloud",
+            telemetryEnabled: true
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: channelID,
+                remoteUserId: "user-peer"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: channelID,
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        _ = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        )
+        viewModel.mediaRuntime.updateTransportPathState(.direct)
+
+        let envelope = try TurboSignalEnvelope.directQuicHangup(
+            channelId: channelID,
+            fromUserId: "user-peer",
+            fromDeviceId: "peer-device",
+            toUserId: "user-self",
+            toDeviceId: client.deviceID,
+            payload: TurboDirectQuicHangupPayload(
+                attemptId: "attempt-1",
+                reason: "peer-ended"
+            )
+        )
+
+        viewModel.handleIncomingDirectQuicControlSignal(envelope, contactID: contactID)
+        await Task.yield()
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(viewModel.mediaTransportPathState == .relay)
+        #expect(viewModel.mediaRuntime.directQuicUpgrade.attempt(for: contactID) == nil)
+        #expect(viewModel.mediaRuntime.directQuicProbeController == nil)
+    }
+
+    @MainActor
+    @Test func directQuicAcceptedAnswerWithoutPeerFingerprintFallsBackToRelay() async {
+        let contactID = UUID()
+        let channelID = "channel-1"
+        let channelUUID = UUID()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(
+                mode: "cloud",
+                supportsWebSocket: true,
+                supportsDirectQuicUpgrade: true
+            )
+        )
+
+        let viewModel = PTTViewModel()
+        viewModel.backendRuntime.applyAuthenticatedSession(
+            client: client,
+            userID: "user-self",
+            mode: "cloud",
+            telemetryEnabled: true
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: channelID,
+                remoteUserId: "user-peer"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: channelID,
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        viewModel.mediaRuntime.updateTransportPathState(.promoting)
+
+        await viewModel.handleDirectQuicAnswer(
+            TurboDirectQuicAnswerPayload(
+                attemptId: "attempt-1",
+                accepted: true,
+                certificateFingerprint: nil,
+                candidates: []
+            ),
+            envelope: TurboSignalEnvelope(
+                type: .answer,
+                channelId: channelID,
+                fromUserId: "user-peer",
+                fromDeviceId: "peer-device",
+                toUserId: "user-self",
+                toDeviceId: client.deviceID,
+                payload: #"{"protocol":"quic-direct-v1","attemptId":"attempt-1","accepted":true,"candidates":[]}"#
+            ),
+            contactID: contactID
+        )
+
+        #expect(viewModel.mediaTransportPathState == .relay)
+        #expect(viewModel.mediaRuntime.directQuicUpgrade.attempt(for: contactID) == nil)
+        #expect(viewModel.mediaRuntime.directQuicProbeController == nil)
     }
 
     @Test func speakerOverridePlanSkipsOverrideWhenSpeakerAlreadyActive() {
@@ -1203,8 +2230,9 @@ struct TurboTests {
         #expect(contacts.map(\.handle) == ["@avery", "@blake"])
     }
 
-    @Test func authoritativeContactIDsOnlyIncludeTrackedAndActivePeers() {
+    @Test func authoritativeContactIDsIncludeTrackedSummaryInviteAndActivePeers() {
         let tracked = Set([UUID(), UUID()])
+        let summary = UUID()
         let selected = UUID()
         let active = UUID()
         let media = UUID()
@@ -1213,6 +2241,7 @@ struct TurboTests {
 
         let ids = ContactDirectory.authoritativeContactIDs(
             trackedContactIDs: tracked,
+            summaryContactIDs: [summary],
             selectedContactID: selected,
             activeChannelID: active,
             mediaSessionContactID: media,
@@ -1220,7 +2249,23 @@ struct TurboTests {
             inviteContactIDs: [invite]
         )
 
-        #expect(ids == tracked.union([selected, active, media, pending, invite]))
+        #expect(ids == tracked.union([summary, selected, active, media, pending, invite]))
+    }
+
+    @Test func summaryContactsRemainAuthoritativeWithoutTracking() {
+        let summaryOnly = UUID()
+
+        let ids = ContactDirectory.authoritativeContactIDs(
+            trackedContactIDs: [],
+            summaryContactIDs: [summaryOnly],
+            selectedContactID: nil,
+            activeChannelID: nil,
+            mediaSessionContactID: nil,
+            pendingJoinContactID: nil,
+            inviteContactIDs: []
+        )
+
+        #expect(ids == [summaryOnly])
     }
 
     @Test func requestContactsRemainAuthoritativeWithoutTracking() {
@@ -1228,6 +2273,7 @@ struct TurboTests {
 
         let ids = ContactDirectory.authoritativeContactIDs(
             trackedContactIDs: [],
+            summaryContactIDs: [],
             selectedContactID: nil,
             activeChannelID: nil,
             mediaSessionContactID: nil,
@@ -2947,9 +3993,38 @@ struct TurboTests {
         #expect(result.contacts.count == 1)
         #expect(result.contactID == existingContactID)
         #expect(refreshed.id == existingContactID)
-        #expect(refreshed.handle == "maurice")
+        #expect(refreshed.handle == "@maurice")
         #expect(refreshed.name == "Maurice")
         #expect(refreshed.remoteUserId == "user-blake")
+    }
+
+    @Test func ensureContactPreservesExistingProfileNameWhenRefreshOmitsDisplayName() {
+        let existingContactID = Contact.stableID(remoteUserId: "user-blake", fallbackHandle: "@blake")
+        let existing = [
+            Contact(
+                id: existingContactID,
+                profileName: "Lively Sparrow",
+                handle: "@blake",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: nil,
+                remoteUserId: "user-blake"
+            )
+        ]
+
+        let result = ContactDirectory.ensureContact(
+            handle: "@blake",
+            remoteUserId: "user-blake",
+            channelId: "",
+            displayName: nil,
+            existingContacts: existing
+        )
+
+        let refreshed = try! #require(result.contacts.first)
+        #expect(result.contacts.count == 1)
+        #expect(refreshed.id == existingContactID)
+        #expect(refreshed.profileName == "Lively Sparrow")
+        #expect(refreshed.name == "Lively Sparrow")
     }
 
     @Test func backendSyncStateClearsStaleChannelStateWhenContactSummaryHasNoChannel() {
@@ -3728,6 +4803,109 @@ struct TurboTests {
         #expect(transition.state.selectedPeerState.phase == .waitingForPeer)
         #expect(transition.state.selectedPeerState.statusMessage == "Connecting...")
         #expect(!transition.state.selectedPeerState.canTransmitNow)
+    }
+
+    @Test func selectedPeerReducerClearsRequesterAutoJoinShortcutWhenBackendFallsBackToAbsentChannelWithoutRequest() {
+        let contactID = UUID()
+        let selection = SelectedPeerSelection(
+            contactID: contactID,
+            contactName: "Blake",
+            contactIsOnline: true
+        )
+
+        var armedState = SelectedPeerReducer.reduce(
+            state: reduceSelectedPeerState([
+                .selectedContactChanged(selection),
+                .relationshipUpdated(.none),
+                .baseStateUpdated(.idle),
+                .channelUpdated(nil),
+                .localSessionUpdated(
+                    isJoined: false,
+                    activeChannelID: nil,
+                    pendingAction: .none,
+                    pendingConnectAcceptedIncomingRequest: false,
+                    localJoinFailure: nil
+                ),
+                .shortcutPolicyUpdated(requesterAutoJoinOnPeerAcceptanceEnabled: true),
+                .systemSessionUpdated(.none, matchesSelectedContact: false)
+            ]),
+            event: .joinRequested
+        ).state
+        armedState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = true
+
+        let transition = SelectedPeerReducer.reduce(
+            state: armedState,
+            event: .channelUpdated(
+                ChannelReadinessSnapshot(
+                    channelState: makeChannelState(
+                        status: .idle,
+                        canTransmit: false,
+                        selfJoined: false,
+                        peerJoined: false,
+                        peerDeviceConnected: false
+                    )
+                )
+            )
+        )
+
+        #expect(!transition.state.requesterAutoJoinOnPeerAcceptanceArmed)
+        #expect(!transition.state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight)
+        #expect(transition.effects.isEmpty)
+        #expect(transition.state.selectedPeerState.phase == .idle)
+        #expect(transition.state.selectedPeerState.statusMessage == "Blake is online")
+    }
+
+    @Test func selectedPeerReducerKeepsRequesterAutoJoinArmedAcrossAcceptedButNotYetPeerReadyGap() {
+        let contactID = UUID()
+        let selection = SelectedPeerSelection(
+            contactID: contactID,
+            contactName: "Blake",
+            contactIsOnline: true
+        )
+
+        let requestedState = SelectedPeerReducer.reduce(
+            state: reduceSelectedPeerState([
+                .selectedContactChanged(selection),
+                .relationshipUpdated(.none),
+                .baseStateUpdated(.idle),
+                .channelUpdated(nil),
+                .localSessionUpdated(
+                    isJoined: false,
+                    activeChannelID: nil,
+                    pendingAction: .none,
+                    pendingConnectAcceptedIncomingRequest: false,
+                    localJoinFailure: nil
+                ),
+                .shortcutPolicyUpdated(requesterAutoJoinOnPeerAcceptanceEnabled: true),
+                .systemSessionUpdated(.none, matchesSelectedContact: false)
+            ]),
+            event: .joinRequested
+        ).state
+        let armedState = SelectedPeerReducer.reduce(
+            state: requestedState,
+            event: .relationshipUpdated(.none)
+        ).state
+
+        let acceptedButNotYetPeerReady = SelectedPeerReducer.reduce(
+            state: armedState,
+            event: .channelUpdated(
+                ChannelReadinessSnapshot(
+                    channelState: makeChannelState(
+                        status: .idle,
+                        canTransmit: false,
+                        selfJoined: false,
+                        peerJoined: false,
+                        peerDeviceConnected: false
+                    )
+                )
+            )
+        )
+
+        #expect(acceptedButNotYetPeerReady.effects.isEmpty)
+        #expect(acceptedButNotYetPeerReady.state.requesterAutoJoinOnPeerAcceptanceArmed)
+        #expect(!acceptedButNotYetPeerReady.state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight)
+        #expect(acceptedButNotYetPeerReady.state.selectedPeerState.phase == .waitingForPeer)
+        #expect(acceptedButNotYetPeerReady.state.selectedPeerState.statusMessage == "Connecting...")
     }
 
     @Test func selectedPeerReducerSkipsPeerReadyFlashWhileRequesterAutoJoinIsArmed() {
@@ -4662,8 +5840,8 @@ struct TurboTests {
               "publicId": "maurice",
               "displayName": "Maurice",
               "profileName": "Maurice",
-              "shareCode": "maurice",
-              "shareLink": "https://beepbeep.to/p/maurice",
+              "shareCode": "@maurice",
+              "shareLink": "https://beepbeep.to/maurice",
               "did": "did:web:beepbeep.to:id:maurice",
               "subjectKind": "agent"
             }
@@ -4675,28 +5853,28 @@ struct TurboTests {
         #expect(user.handle == "@legacy")
         #expect(user.publicId == "maurice")
         #expect(user.profileName == "Maurice")
-        #expect(user.shareCode == "maurice")
-        #expect(user.shareLink == "https://beepbeep.to/p/maurice")
+        #expect(user.shareCode == "@maurice")
+        #expect(user.shareLink == "https://beepbeep.to/maurice")
         #expect(user.did == "did:web:beepbeep.to:id:maurice")
         #expect(user.subjectKind == "agent")
     }
 
     @Test func incomingLinkParsesCanonicalSharePage() {
-        let url = URL(string: "https://beepbeep.to/p/maurice?utm_source=test#card")!
+        let url = URL(string: "https://beepbeep.to/maurice?utm_source=test#card")!
 
-        #expect(TurboIncomingLink.reference(from: url) == "https://beepbeep.to/p/maurice")
+        #expect(TurboIncomingLink.reference(from: url) == "https://beepbeep.to/maurice")
     }
 
     @Test func incomingLinkParsesCustomSchemeSharePage() {
         let url = URL(string: "beepbeep://p/maurice")!
 
-        #expect(TurboIncomingLink.reference(from: url) == "https://beepbeep.to/p/maurice")
+        #expect(TurboIncomingLink.reference(from: url) == "https://beepbeep.to/maurice")
     }
 
     @Test func incomingLinkParsesCustomSchemeDidTarget() {
         let url = URL(string: "beepbeep://id/maurice")!
 
-        #expect(TurboIncomingLink.reference(from: url) == "did:web:beepbeep.to:id:maurice")
+        #expect(TurboIncomingLink.reference(from: url) == "did:web:beepbeep.to:id:@maurice")
     }
 
     @Test func incomingLinkRejectsUnrelatedURLs() {
@@ -12341,6 +13519,57 @@ struct TurboTests {
         #expect(targets.first?.handle == "@blake")
     }
 
+    @MainActor
+    @Test func trackedPresenceFallbackClearsStaleChannelReferenceWhenSummaryIsMissing() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let originalChannelID = "channel-blake"
+        let originalStableChannelUUID = ContactDirectory.stableChannelUUID(for: originalChannelID)
+
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: originalStableChannelUUID,
+                backendChannelId: originalChannelID,
+                remoteUserId: "user-blake"
+            )
+        ]
+        viewModel.trackContact(contactID)
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: TurboChannelStateResponse(
+                    channelId: originalChannelID,
+                    selfUserId: "self-user",
+                    peerUserId: "user-blake",
+                    peerHandle: "@blake",
+                    selfOnline: true,
+                    peerOnline: true,
+                    selfJoined: false,
+                    peerJoined: false,
+                    peerDeviceConnected: false,
+                    hasIncomingRequest: false,
+                    hasOutgoingRequest: false,
+                    requestCount: 0,
+                    activeTransmitterUserId: nil,
+                    transmitLeaseExpiresAt: nil,
+                    status: ConversationState.idle.rawValue,
+                    canTransmit: false
+                )
+            )
+        )
+
+        viewModel.clearStaleTrackedChannelReferencesMissingFromSummaries(excluding: [:])
+
+        #expect(viewModel.contacts.first?.backendChannelId == nil)
+        #expect(viewModel.contacts.first?.channelId != originalStableChannelUUID)
+        #expect(viewModel.backendSyncCoordinator.state.syncState.channelStates[contactID] == nil)
+        #expect(viewModel.backendSyncCoordinator.state.syncState.channelReadiness[contactID] == nil)
+    }
+
     @Test func backendClientPresenceLookupUsesCanonicalPresenceEndpoint() {
         let path = TurboBackendClient.presenceLookupPath(for: "@blake")
 
@@ -14752,7 +15981,7 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func backendJoinPreparationWaitsForWebSocketConnection() async {
+    @Test func backendJoinPreparationWaitsForWebSocketConnectionButDoesNotBlockJoinIfItNeverConnects() async {
         let viewModel = PTTViewModel()
         let client = TurboBackendClient(config: makeUnreachableBackendConfig())
         client.setRuntimeConfigForTesting(
@@ -14785,20 +16014,13 @@ struct TurboTests {
 
         do {
             try await viewModel.prepareBackendJoinControlPlaneIfNeeded(backend, request: request)
-            Issue.record("Expected websocket-backed join preparation to fail without a connected session")
-        } catch let error as TurboBackendError {
-            switch error {
-            case .webSocketUnavailable:
-                break
-            default:
-                Issue.record("Expected TurboBackendError.webSocketUnavailable, got \(error)")
-            }
         } catch {
-            Issue.record("Expected TurboBackendError.webSocketUnavailable, got \(error)")
+            Issue.record("Expected websocket-backed join preparation to proceed after reconnect attempt, got \(error)")
         }
 
         #expect(observedStates.contains(.connecting))
         #expect(viewModel.diagnosticsTranscript.contains("Waiting for backend WebSocket before join"))
+        #expect(viewModel.diagnosticsTranscript.contains("Proceeding with backend join while WebSocket remains unavailable"))
     }
 
     @MainActor
@@ -18377,4 +19599,10 @@ private func makeUnreachableBackendConfig() -> TurboBackendConfig {
         devUserHandle: "@self",
         deviceID: "test-device"
     )
+}
+
+private extension FixedWidthInteger {
+    var bigEndianBytes: [UInt8] {
+        withUnsafeBytes(of: self.bigEndian, Array.init)
+    }
 }

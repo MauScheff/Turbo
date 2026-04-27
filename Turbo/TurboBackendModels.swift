@@ -837,8 +837,8 @@ struct TurboBackendConfig {
 
     private static func normalizeDevUserHandle(_ handle: String) -> String {
         let trimmed = handle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return generatedLocalPublicID() }
-        return trimmed.lowercased()
+        guard !trimmed.isEmpty else { return TurboHandle.normalizedStoredHandle(generatedLocalPublicID()) }
+        return TurboHandle.normalizedStoredHandle(trimmed)
     }
 
     private static func persistedDeviceID() -> String {
@@ -850,6 +850,65 @@ struct TurboBackendConfig {
         let newValue = UUID().uuidString.lowercased()
         defaults.set(newValue, forKey: key)
         return newValue
+    }
+}
+
+enum TurboDirectPathDebugOverride {
+    static let storageKey = "TurboDebugForceRelayOnly"
+    static let launchArgument = "-TurboDebugForceRelayOnly"
+    static let environmentKey = "TURBO_DEBUG_FORCE_RELAY_ONLY"
+
+    static func isRelayOnlyForced(
+        processInfo: ProcessInfo = .processInfo,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        isRelayOnlyForced(
+            arguments: processInfo.arguments,
+            environment: processInfo.environment,
+            defaults: defaults
+        )
+    }
+
+    static func isRelayOnlyForced(
+        arguments: [String],
+        environment: [String: String],
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        if let launchArgumentValue = launchArgumentValue(arguments),
+           let parsed = parseBoolean(launchArgumentValue) {
+            return parsed
+        }
+        if arguments.contains(launchArgument) {
+            return true
+        }
+        if let environmentValue = environment[environmentKey],
+           let parsed = parseBoolean(environmentValue) {
+            return parsed
+        }
+        return defaults.bool(forKey: storageKey)
+    }
+
+    static func setRelayOnlyForced(_ isForced: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(isForced, forKey: storageKey)
+    }
+
+    private static func launchArgumentValue(_ arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: launchArgument),
+              arguments.indices.contains(index + 1) else {
+            return nil
+        }
+        return arguments[index + 1]
+    }
+
+    private static func parseBoolean(_ rawValue: String) -> Bool? {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return nil
+        }
     }
 }
 
@@ -876,6 +935,219 @@ enum TurboSignalKind: String, Codable {
     case audioChunk = "audio-chunk"
     case receiverReady = "receiver-ready"
     case receiverNotReady = "receiver-not-ready"
+
+    var isDirectQuicControlSignal: Bool {
+        switch self {
+        case .offer, .answer, .iceCandidate, .hangup:
+            return true
+        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady:
+            return false
+        }
+    }
+}
+
+nonisolated enum TurboDirectQuicRoleIntent: String, Codable, Equatable {
+    case dialer
+    case listener
+    case symmetric
+}
+
+nonisolated enum TurboDirectQuicCandidateKind: String, Codable, Equatable {
+    case host
+    case serverReflexive = "srflx"
+    case relay
+}
+
+nonisolated struct TurboDirectQuicCandidate: Codable, Equatable {
+    let foundation: String
+    let component: String
+    let transport: String
+    let priority: Int
+    let kind: TurboDirectQuicCandidateKind
+    let address: String
+    let port: Int
+    let relatedAddress: String?
+    let relatedPort: Int?
+}
+
+protocol TurboDirectQuicSignalingPayload: Codable {
+    nonisolated var protocolVersion: String { get }
+}
+
+extension TurboDirectQuicSignalingPayload {
+    nonisolated static var expectedProtocolVersion: String { "quic-direct-v1" }
+
+    nonisolated var usesExpectedProtocolVersion: Bool {
+        protocolVersion == Self.expectedProtocolVersion
+    }
+}
+
+nonisolated struct TurboDirectQuicOfferPayload: TurboDirectQuicSignalingPayload, Equatable {
+    let protocolVersion: String
+    let attemptId: String
+    let channelId: String
+    let fromDeviceId: String
+    let toDeviceId: String
+    let quicAlpn: String
+    let certificateFingerprint: String
+    let candidates: [TurboDirectQuicCandidate]
+    let roleIntent: TurboDirectQuicRoleIntent?
+
+    init(
+        protocolVersion: String = Self.expectedProtocolVersion,
+        attemptId: String,
+        channelId: String,
+        fromDeviceId: String,
+        toDeviceId: String,
+        quicAlpn: String,
+        certificateFingerprint: String,
+        candidates: [TurboDirectQuicCandidate],
+        roleIntent: TurboDirectQuicRoleIntent?
+    ) {
+        self.protocolVersion = protocolVersion
+        self.attemptId = attemptId
+        self.channelId = channelId
+        self.fromDeviceId = fromDeviceId
+        self.toDeviceId = toDeviceId
+        self.quicAlpn = quicAlpn
+        self.certificateFingerprint = certificateFingerprint
+        self.candidates = candidates
+        self.roleIntent = roleIntent
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion = "protocol"
+        case attemptId
+        case channelId
+        case fromDeviceId
+        case toDeviceId
+        case quicAlpn
+        case certificateFingerprint
+        case candidates
+        case roleIntent
+    }
+}
+
+nonisolated struct TurboDirectQuicAnswerPayload: TurboDirectQuicSignalingPayload, Equatable {
+    let protocolVersion: String
+    let attemptId: String
+    let accepted: Bool
+    let certificateFingerprint: String?
+    let candidates: [TurboDirectQuicCandidate]
+    let rejectionReason: String?
+
+    init(
+        protocolVersion: String = Self.expectedProtocolVersion,
+        attemptId: String,
+        accepted: Bool,
+        certificateFingerprint: String? = nil,
+        candidates: [TurboDirectQuicCandidate] = [],
+        rejectionReason: String? = nil
+    ) {
+        self.protocolVersion = protocolVersion
+        self.attemptId = attemptId
+        self.accepted = accepted
+        self.certificateFingerprint = certificateFingerprint
+        self.candidates = candidates
+        self.rejectionReason = rejectionReason
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion = "protocol"
+        case attemptId
+        case accepted
+        case certificateFingerprint
+        case candidates
+        case rejectionReason
+    }
+}
+
+nonisolated struct TurboDirectQuicCandidatePayload: TurboDirectQuicSignalingPayload, Equatable {
+    let protocolVersion: String
+    let attemptId: String
+    let candidate: TurboDirectQuicCandidate?
+    let endOfCandidates: Bool
+
+    init(
+        protocolVersion: String = Self.expectedProtocolVersion,
+        attemptId: String,
+        candidate: TurboDirectQuicCandidate?,
+        endOfCandidates: Bool = false
+    ) {
+        self.protocolVersion = protocolVersion
+        self.attemptId = attemptId
+        self.candidate = candidate
+        self.endOfCandidates = endOfCandidates
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion = "protocol"
+        case attemptId
+        case candidate
+        case endOfCandidates
+    }
+}
+
+nonisolated struct TurboDirectQuicHangupPayload: TurboDirectQuicSignalingPayload, Equatable {
+    let protocolVersion: String
+    let attemptId: String
+    let reason: String
+
+    init(
+        protocolVersion: String = Self.expectedProtocolVersion,
+        attemptId: String,
+        reason: String
+    ) {
+        self.protocolVersion = protocolVersion
+        self.attemptId = attemptId
+        self.reason = reason
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion = "protocol"
+        case attemptId
+        case reason
+    }
+}
+
+enum TurboDirectQuicSignalPayload: Equatable {
+    case offer(TurboDirectQuicOfferPayload)
+    case answer(TurboDirectQuicAnswerPayload)
+    case candidate(TurboDirectQuicCandidatePayload)
+    case hangup(TurboDirectQuicHangupPayload)
+
+    var attemptId: String {
+        switch self {
+        case .offer(let payload):
+            return payload.attemptId
+        case .answer(let payload):
+            return payload.attemptId
+        case .candidate(let payload):
+            return payload.attemptId
+        case .hangup(let payload):
+            return payload.attemptId
+        }
+    }
+}
+
+enum TurboDirectQuicPayloadError: Error, LocalizedError, Equatable {
+    case wrongSignalKind(expected: TurboSignalKind, actual: TurboSignalKind)
+    case notDirectQuicSignal(TurboSignalKind)
+    case unsupportedProtocolVersion(String)
+    case invalidJSON(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .wrongSignalKind(let expected, let actual):
+            return "Expected \(expected.rawValue) direct QUIC signal but received \(actual.rawValue)"
+        case .notDirectQuicSignal(let signalKind):
+            return "\(signalKind.rawValue) is not a direct QUIC signaling message"
+        case .unsupportedProtocolVersion(let version):
+            return "Unsupported direct QUIC protocol version \(version)"
+        case .invalidJSON(let message):
+            return "Invalid direct QUIC payload JSON: \(message)"
+        }
+    }
 }
 
 enum TurboPTTPushEvent: String, Codable, Equatable {
@@ -935,6 +1207,148 @@ struct TurboSignalEnvelope: Codable {
     let toUserId: String
     let toDeviceId: String
     let payload: String
+
+    static func directQuicOffer(
+        channelId: String,
+        fromUserId: String,
+        fromDeviceId: String,
+        toUserId: String,
+        toDeviceId: String,
+        payload: TurboDirectQuicOfferPayload
+    ) throws -> TurboSignalEnvelope {
+        try makeDirectQuicEnvelope(
+            type: .offer,
+            channelId: channelId,
+            fromUserId: fromUserId,
+            fromDeviceId: fromDeviceId,
+            toUserId: toUserId,
+            toDeviceId: toDeviceId,
+            payload: payload
+        )
+    }
+
+    static func directQuicAnswer(
+        channelId: String,
+        fromUserId: String,
+        fromDeviceId: String,
+        toUserId: String,
+        toDeviceId: String,
+        payload: TurboDirectQuicAnswerPayload
+    ) throws -> TurboSignalEnvelope {
+        try makeDirectQuicEnvelope(
+            type: .answer,
+            channelId: channelId,
+            fromUserId: fromUserId,
+            fromDeviceId: fromDeviceId,
+            toUserId: toUserId,
+            toDeviceId: toDeviceId,
+            payload: payload
+        )
+    }
+
+    static func directQuicCandidate(
+        channelId: String,
+        fromUserId: String,
+        fromDeviceId: String,
+        toUserId: String,
+        toDeviceId: String,
+        payload: TurboDirectQuicCandidatePayload
+    ) throws -> TurboSignalEnvelope {
+        try makeDirectQuicEnvelope(
+            type: .iceCandidate,
+            channelId: channelId,
+            fromUserId: fromUserId,
+            fromDeviceId: fromDeviceId,
+            toUserId: toUserId,
+            toDeviceId: toDeviceId,
+            payload: payload
+        )
+    }
+
+    static func directQuicHangup(
+        channelId: String,
+        fromUserId: String,
+        fromDeviceId: String,
+        toUserId: String,
+        toDeviceId: String,
+        payload: TurboDirectQuicHangupPayload
+    ) throws -> TurboSignalEnvelope {
+        try makeDirectQuicEnvelope(
+            type: .hangup,
+            channelId: channelId,
+            fromUserId: fromUserId,
+            fromDeviceId: fromDeviceId,
+            toUserId: toUserId,
+            toDeviceId: toDeviceId,
+            payload: payload
+        )
+    }
+
+    func decodeDirectQuicSignalPayload() throws -> TurboDirectQuicSignalPayload {
+        switch type {
+        case .offer:
+            return .offer(try decodeDirectQuicPayload(TurboDirectQuicOfferPayload.self, expectedKind: .offer))
+        case .answer:
+            return .answer(try decodeDirectQuicPayload(TurboDirectQuicAnswerPayload.self, expectedKind: .answer))
+        case .iceCandidate:
+            return .candidate(try decodeDirectQuicPayload(TurboDirectQuicCandidatePayload.self, expectedKind: .iceCandidate))
+        case .hangup:
+            return .hangup(try decodeDirectQuicPayload(TurboDirectQuicHangupPayload.self, expectedKind: .hangup))
+        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady:
+            throw TurboDirectQuicPayloadError.notDirectQuicSignal(type)
+        }
+    }
+
+    private static func makeDirectQuicEnvelope<Payload: TurboDirectQuicSignalingPayload>(
+        type: TurboSignalKind,
+        channelId: String,
+        fromUserId: String,
+        fromDeviceId: String,
+        toUserId: String,
+        toDeviceId: String,
+        payload: Payload
+    ) throws -> TurboSignalEnvelope {
+        let encodedPayload = try encodeDirectQuicPayload(payload)
+        return TurboSignalEnvelope(
+            type: type,
+            channelId: channelId,
+            fromUserId: fromUserId,
+            fromDeviceId: fromDeviceId,
+            toUserId: toUserId,
+            toDeviceId: toDeviceId,
+            payload: encodedPayload
+        )
+    }
+
+    private static func encodeDirectQuicPayload<Payload: TurboDirectQuicSignalingPayload>(
+        _ payload: Payload
+    ) throws -> String {
+        let data = try JSONEncoder().encode(payload)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw TurboDirectQuicPayloadError.invalidJSON("encoded payload was not UTF-8")
+        }
+        return json
+    }
+
+    private func decodeDirectQuicPayload<Payload: TurboDirectQuicSignalingPayload>(
+        _ payloadType: Payload.Type,
+        expectedKind: TurboSignalKind
+    ) throws -> Payload {
+        guard type == expectedKind else {
+            throw TurboDirectQuicPayloadError.wrongSignalKind(expected: expectedKind, actual: type)
+        }
+        let data = Data(payload.utf8)
+        let decodedPayload: Payload
+        do {
+            decodedPayload = try JSONDecoder().decode(payloadType, from: data)
+        } catch {
+            throw TurboDirectQuicPayloadError.invalidJSON(error.localizedDescription)
+        }
+        guard decodedPayload.usesExpectedProtocolVersion else {
+            throw TurboDirectQuicPayloadError.unsupportedProtocolVersion(decodedPayload.protocolVersion)
+        }
+        return decodedPayload
+    }
 }
 
 struct TurboAuthSessionResponse: Decodable {
@@ -965,7 +1379,7 @@ struct TurboAuthSessionResponse: Decodable {
         self.displayName = displayName
         self.profileName = profileName ?? displayName
         self.shareCode = shareCode ?? self.publicId
-        self.shareLink = shareLink ?? "https://beepbeep.to/p/\(self.shareCode)"
+        self.shareLink = shareLink ?? "https://beepbeep.to/\(TurboHandle.sharePathComponent(from: self.shareCode))"
         self.did = did ?? "did:web:beepbeep.to:id:\(self.publicId)"
         self.subjectKind = subjectKind
     }
@@ -990,7 +1404,7 @@ struct TurboAuthSessionResponse: Decodable {
         displayName = try container.decode(String.self, forKey: .displayName)
         profileName = try container.decodeIfPresent(String.self, forKey: .profileName) ?? displayName
         shareCode = try container.decodeIfPresent(String.self, forKey: .shareCode) ?? publicId
-        shareLink = try container.decodeIfPresent(String.self, forKey: .shareLink) ?? "https://beepbeep.to/p/\(shareCode)"
+        shareLink = try container.decodeIfPresent(String.self, forKey: .shareLink) ?? "https://beepbeep.to/\(TurboHandle.sharePathComponent(from: shareCode))"
         did = try container.decodeIfPresent(String.self, forKey: .did) ?? "did:web:beepbeep.to:id:\(publicId)"
         subjectKind = try container.decodeIfPresent(String.self, forKey: .subjectKind) ?? "human"
     }
@@ -1000,25 +1414,43 @@ struct TurboProfileUpdateRequest: Encodable {
     let profileName: String
 }
 
+struct TurboRememberContactResponse: Decodable {
+    let status: String
+    let otherUserId: String
+}
+
+struct TurboForgetContactResponse: Decodable {
+    let status: String
+    let otherUserId: String
+}
+
 struct TurboBackendRuntimeConfig: Decodable {
     let mode: String
     let supportsWebSocket: Bool
     let telemetryEnabled: Bool?
+    let supportsDirectQuicUpgrade: Bool
+    let directQuicPolicy: TurboDirectQuicPolicy?
 
     init(
         mode: String,
         supportsWebSocket: Bool,
-        telemetryEnabled: Bool? = nil
+        telemetryEnabled: Bool? = nil,
+        supportsDirectQuicUpgrade: Bool = false,
+        directQuicPolicy: TurboDirectQuicPolicy? = nil
     ) {
         self.mode = mode
         self.supportsWebSocket = supportsWebSocket
         self.telemetryEnabled = telemetryEnabled
+        self.supportsDirectQuicUpgrade = supportsDirectQuicUpgrade
+        self.directQuicPolicy = directQuicPolicy
     }
 
     private enum CodingKeys: String, CodingKey {
         case mode
         case supportsWebSocket
         case telemetryEnabled
+        case supportsDirectQuicUpgrade
+        case directQuicPolicy
     }
 
     init(from decoder: any Decoder) throws {
@@ -1026,7 +1458,30 @@ struct TurboBackendRuntimeConfig: Decodable {
         mode = try container.decode(String.self, forKey: .mode)
         supportsWebSocket = try container.decode(Bool.self, forKey: .supportsWebSocket)
         telemetryEnabled = try container.decodeIfPresent(Bool.self, forKey: .telemetryEnabled)
+        supportsDirectQuicUpgrade = try container.decodeIfPresent(Bool.self, forKey: .supportsDirectQuicUpgrade) ?? false
+        directQuicPolicy = try container.decodeIfPresent(TurboDirectQuicPolicy.self, forKey: .directQuicPolicy)
     }
+}
+
+struct TurboDirectQuicPolicy: Decodable, Equatable {
+    let stunServers: [TurboDirectQuicStunServer]?
+    let promotionTimeoutMs: Int?
+    let retryBackoffMs: Int?
+
+    init(
+        stunServers: [TurboDirectQuicStunServer]? = nil,
+        promotionTimeoutMs: Int? = nil,
+        retryBackoffMs: Int? = nil
+    ) {
+        self.stunServers = stunServers
+        self.promotionTimeoutMs = promotionTimeoutMs
+        self.retryBackoffMs = retryBackoffMs
+    }
+}
+
+nonisolated struct TurboDirectQuicStunServer: Decodable, Equatable {
+    let host: String
+    let port: Int?
 }
 
 struct TurboSeedResponse: Decodable {
@@ -1115,7 +1570,7 @@ struct TurboUserLookupResponse: Decodable {
         self.displayName = displayName
         self.profileName = profileName ?? displayName
         self.shareCode = shareCode ?? self.publicId
-        self.shareLink = shareLink ?? "https://beepbeep.to/p/\(self.shareCode)"
+        self.shareLink = shareLink ?? "https://beepbeep.to/\(TurboHandle.sharePathComponent(from: self.shareCode))"
         self.did = did ?? "did:web:beepbeep.to:id:\(self.publicId)"
         self.subjectKind = subjectKind
     }
@@ -1140,7 +1595,7 @@ struct TurboUserLookupResponse: Decodable {
         displayName = try container.decode(String.self, forKey: .displayName)
         profileName = try container.decodeIfPresent(String.self, forKey: .profileName) ?? displayName
         shareCode = try container.decodeIfPresent(String.self, forKey: .shareCode) ?? publicId
-        shareLink = try container.decodeIfPresent(String.self, forKey: .shareLink) ?? "https://beepbeep.to/p/\(shareCode)"
+        shareLink = try container.decodeIfPresent(String.self, forKey: .shareLink) ?? "https://beepbeep.to/\(TurboHandle.sharePathComponent(from: shareCode))"
         did = try container.decodeIfPresent(String.self, forKey: .did) ?? "did:web:beepbeep.to:id:\(publicId)"
         subjectKind = try container.decodeIfPresent(String.self, forKey: .subjectKind) ?? "human"
     }
@@ -1197,7 +1652,7 @@ struct TurboUserPresenceResponse: Decodable {
         self.displayName = displayName
         self.profileName = profileName ?? displayName
         self.shareCode = shareCode ?? self.publicId
-        self.shareLink = shareLink ?? "https://beepbeep.to/p/\(self.shareCode)"
+        self.shareLink = shareLink ?? "https://beepbeep.to/\(TurboHandle.sharePathComponent(from: self.shareCode))"
         self.did = did ?? "did:web:beepbeep.to:id:\(self.publicId)"
         self.subjectKind = subjectKind
         self.isOnline = isOnline
@@ -1224,7 +1679,7 @@ struct TurboUserPresenceResponse: Decodable {
         displayName = try container.decode(String.self, forKey: .displayName)
         profileName = try container.decodeIfPresent(String.self, forKey: .profileName) ?? displayName
         shareCode = try container.decodeIfPresent(String.self, forKey: .shareCode) ?? publicId
-        shareLink = try container.decodeIfPresent(String.self, forKey: .shareLink) ?? "https://beepbeep.to/p/\(shareCode)"
+        shareLink = try container.decodeIfPresent(String.self, forKey: .shareLink) ?? "https://beepbeep.to/\(TurboHandle.sharePathComponent(from: shareCode))"
         did = try container.decodeIfPresent(String.self, forKey: .did) ?? "did:web:beepbeep.to:id:\(publicId)"
         subjectKind = try container.decodeIfPresent(String.self, forKey: .subjectKind) ?? "human"
         isOnline = try container.decode(Bool.self, forKey: .isOnline)

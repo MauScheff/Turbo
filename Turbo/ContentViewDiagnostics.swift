@@ -1,9 +1,11 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import UIKit
 
 struct TurboDiagnosticsView: View {
     let report: DevSelfCheckReport?
     let projection: StateMachineProjection
+    let directQuic: DirectQuicDiagnosticsSummary?
     let microphonePermissionStatus: String
     let needsMicrophonePermission: Bool
     let logFilePath: String?
@@ -11,7 +13,14 @@ struct TurboDiagnosticsView: View {
     let entries: [DiagnosticsEntry]
     let uploadStatus: String?
     let isRequestingMicrophonePermission: Bool
+    let isRunningDirectQuicDebugAction: Bool
     let onRequestMicrophonePermission: () -> Void
+    let onImportDirectQuicIdentity: () -> Void
+    let onUseInstalledDirectQuicIdentity: () -> Void
+    let onSetRelayOnlyForced: (Bool) -> Void
+    let onForceDirectQuicProbe: () -> Void
+    let onClearDirectQuicRetryBackoff: () -> Void
+    let onCancelDirectQuicAttempt: () -> Void
 
     var body: some View {
         List {
@@ -93,6 +102,92 @@ struct TurboDiagnosticsView: View {
                         onRequestMicrophonePermission()
                     }
                     .disabled(isRequestingMicrophonePermission)
+                }
+            }
+
+            if let directQuic {
+                Section("Direct QUIC") {
+                    diagnosticsRow("Selected", directQuic.selectedHandle ?? "none")
+                    diagnosticsRow("Role", directQuic.role ?? "none")
+                    diagnosticsRow("Identity label", directQuic.identityLabel ?? "none")
+                    diagnosticsRow("Identity status", directQuic.identityStatus)
+                    diagnosticsRow("Installed identities", "\(directQuic.installedIdentityCount)")
+                    diagnosticsRow("Path state", directQuic.transportPathState.label)
+                    diagnosticsRow("Relay-only override", directQuic.relayOnlyOverride ? "on" : "off")
+                    diagnosticsRow("Backend advertised", directQuic.backendAdvertisesUpgrade ? "yes" : "no")
+                    diagnosticsRow("Effective upgrade", directQuic.effectiveUpgradeEnabled ? "yes" : "no")
+                    diagnosticsRow("Probe controller", directQuic.probeControllerReady ? "ready" : "idle")
+                    diagnosticsRow("Local device", directQuic.localDeviceID ?? "none")
+                    diagnosticsRow("Peer device", directQuic.peerDeviceID ?? "none")
+                    diagnosticsRow("Attempt", directQuic.attemptID ?? "none")
+                    diagnosticsRow("Channel", directQuic.channelID ?? "none")
+                    diagnosticsRow("Attempt active", directQuic.isDirectActive ? "yes" : "no")
+                    diagnosticsRow("Remote candidates", "\(directQuic.remoteCandidateCount)")
+                    diagnosticsRow("End of candidates", directQuic.remoteEndOfCandidates ? "yes" : "no")
+                    diagnosticsRow("Started", formattedDateTime(directQuic.attemptStartedAt))
+                    diagnosticsRow("Updated", formattedDateTime(directQuic.lastUpdatedAt))
+                    diagnosticsRow(
+                        "Nominated path",
+                        nominatedPathText(directQuic)
+                    )
+                    diagnosticsRow(
+                        "Retry backoff",
+                        retryBackoffText(directQuic)
+                    )
+                    diagnosticsRow("STUN servers", "\(directQuic.stunServerCount)")
+                    diagnosticsRow("Promotion timeout", "\(directQuic.promotionTimeoutMilliseconds) ms")
+                    diagnosticsRow("Base retry backoff", "\(directQuic.retryBackoffBaseMilliseconds) ms")
+
+                    Toggle(
+                        "Relay-only override",
+                        isOn: Binding(
+                            get: { directQuic.relayOnlyOverride },
+                            set: onSetRelayOnlyForced
+                        )
+                    )
+                    .disabled(isRunningDirectQuicDebugAction)
+
+                    Button(isRunningDirectQuicDebugAction ? "Running…" : "Import PKCS#12 identity") {
+                        onImportDirectQuicIdentity()
+                    }
+                    .disabled(isRunningDirectQuicDebugAction)
+
+                    Button(isRunningDirectQuicDebugAction ? "Running…" : "Use installed identity") {
+                        onUseInstalledDirectQuicIdentity()
+                    }
+                    .disabled(
+                        isRunningDirectQuicDebugAction
+                            || directQuic.installedIdentityCount == 0
+                    )
+
+                    Button(isRunningDirectQuicDebugAction ? "Running…" : "Force probe") {
+                        onForceDirectQuicProbe()
+                    }
+                    .disabled(
+                        isRunningDirectQuicDebugAction
+                            || directQuic.selectedHandle == nil
+                            || directQuic.relayOnlyOverride
+                            || directQuic.peerDeviceID == nil
+                            || directQuic.attemptID != nil
+                    )
+
+                    Button("Clear retry backoff") {
+                        onClearDirectQuicRetryBackoff()
+                    }
+                    .disabled(
+                        isRunningDirectQuicDebugAction
+                            || directQuic.selectedHandle == nil
+                            || directQuic.retryRemainingMilliseconds == nil
+                    )
+
+                    Button("Cancel current attempt") {
+                        onCancelDirectQuicAttempt()
+                    }
+                    .disabled(
+                        isRunningDirectQuicDebugAction
+                            || directQuic.selectedHandle == nil
+                            || directQuic.attemptID == nil
+                    )
                 }
             }
 
@@ -197,6 +292,31 @@ struct TurboDiagnosticsView: View {
             return .secondary
         }
     }
+
+    private func formattedDateTime(_ value: Date?) -> String {
+        guard let value else { return "none" }
+        return value.formatted(date: .omitted, time: .standard)
+    }
+
+    private func nominatedPathText(_ summary: DirectQuicDiagnosticsSummary) -> String {
+        guard let address = summary.nominatedRemoteAddress,
+              let port = summary.nominatedRemotePort else {
+            return "none"
+        }
+        let source = summary.nominatedPathSource ?? "unknown"
+        let kind = summary.nominatedRemoteCandidateKind ?? "observed"
+        return "\(source) \(address):\(port) (\(kind))"
+    }
+
+    private func retryBackoffText(_ summary: DirectQuicDiagnosticsSummary) -> String {
+        guard let reason = summary.retryReason,
+              let category = summary.retryCategory,
+              let remainingMilliseconds = summary.retryRemainingMilliseconds else {
+            return "none"
+        }
+        let totalMilliseconds = summary.retryBackoffMilliseconds ?? remainingMilliseconds
+        return "\(category) \(remainingMilliseconds)ms remaining of \(totalMilliseconds)ms (\(reason))"
+    }
 }
 
 struct TurboDevIdentitySheet: View {
@@ -241,9 +361,62 @@ struct TurboDevIdentitySheet: View {
     }
 }
 
+struct TurboDirectQuicIdentityImportSheet: View {
+    let fileName: String
+    let suggestedLabel: String
+    @Binding var password: String
+    let isImporting: Bool
+    let onCancel: () -> Void
+    let onImport: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("PKCS#12 file") {
+                    Text(fileName)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                }
+
+                Section("Direct QUIC identity") {
+                    diagnosticsTextRow("Label", suggestedLabel)
+                    SecureField("PKCS#12 password", text: $password)
+                        .textContentType(.password)
+                }
+            }
+            .navigationTitle("Import Identity")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel)
+                        .disabled(isImporting)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isImporting ? "Importing…" : "Import", action: onImport)
+                        .disabled(isImporting)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    @ViewBuilder
+    private func diagnosticsTextRow(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
 struct TurboDiagnosticsSheet: View {
     let report: DevSelfCheckReport?
     let projection: StateMachineProjection
+    let directQuic: DirectQuicDiagnosticsSummary?
     let microphonePermissionStatus: String
     let needsMicrophonePermission: Bool
     let logFilePath: String?
@@ -252,16 +425,29 @@ struct TurboDiagnosticsSheet: View {
     let uploadStatus: String?
     let isUploading: Bool
     let isRequestingMicrophonePermission: Bool
+    let isRunningDirectQuicDebugAction: Bool
     let onClose: () -> Void
     let onUpload: () -> Void
     let onClear: () -> Void
     let onRequestMicrophonePermission: () -> Void
+    let onImportDirectQuicIdentity: (URL, String) -> Void
+    let onUseInstalledDirectQuicIdentity: () -> Void
+    let onSetRelayOnlyForced: (Bool) -> Void
+    let onForceDirectQuicProbe: () -> Void
+    let onClearDirectQuicRetryBackoff: () -> Void
+    let onCancelDirectQuicAttempt: () -> Void
+
+    @State private var isShowingDirectQuicIdentityImporter: Bool = false
+    @State private var pendingDirectQuicIdentityImportURL: URL?
+    @State private var draftDirectQuicIdentityPassword: String = ""
+    @State private var isShowingDirectQuicIdentityImportSheet: Bool = false
 
     var body: some View {
         NavigationStack {
             TurboDiagnosticsView(
                 report: report,
                 projection: projection,
+                directQuic: directQuic,
                 microphonePermissionStatus: microphonePermissionStatus,
                 needsMicrophonePermission: needsMicrophonePermission,
                 logFilePath: logFilePath,
@@ -269,7 +455,16 @@ struct TurboDiagnosticsSheet: View {
                 entries: entries,
                 uploadStatus: uploadStatus,
                 isRequestingMicrophonePermission: isRequestingMicrophonePermission,
-                onRequestMicrophonePermission: onRequestMicrophonePermission
+                isRunningDirectQuicDebugAction: isRunningDirectQuicDebugAction,
+                onRequestMicrophonePermission: onRequestMicrophonePermission,
+                onImportDirectQuicIdentity: {
+                    isShowingDirectQuicIdentityImporter = true
+                },
+                onUseInstalledDirectQuicIdentity: onUseInstalledDirectQuicIdentity,
+                onSetRelayOnlyForced: onSetRelayOnlyForced,
+                onForceDirectQuicProbe: onForceDirectQuicProbe,
+                onClearDirectQuicRetryBackoff: onClearDirectQuicRetryBackoff,
+                onCancelDirectQuicAttempt: onCancelDirectQuicAttempt
             )
             .navigationTitle("Diagnostics")
             .toolbar {
@@ -287,5 +482,38 @@ struct TurboDiagnosticsSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .sheet(isPresented: $isShowingDirectQuicIdentityImportSheet) {
+            TurboDirectQuicIdentityImportSheet(
+                fileName: pendingDirectQuicIdentityImportURL?.lastPathComponent ?? "Identity",
+                suggestedLabel: directQuic?.identityLabel ?? "pending",
+                password: $draftDirectQuicIdentityPassword,
+                isImporting: isRunningDirectQuicDebugAction,
+                onCancel: {
+                    pendingDirectQuicIdentityImportURL = nil
+                    draftDirectQuicIdentityPassword = ""
+                    isShowingDirectQuicIdentityImportSheet = false
+                },
+                onImport: {
+                    guard let fileURL = pendingDirectQuicIdentityImportURL else { return }
+                    onImportDirectQuicIdentity(fileURL, draftDirectQuicIdentityPassword)
+                    pendingDirectQuicIdentityImportURL = nil
+                    draftDirectQuicIdentityPassword = ""
+                    isShowingDirectQuicIdentityImportSheet = false
+                }
+            )
+        }
+        .fileImporter(
+            isPresented: $isShowingDirectQuicIdentityImporter,
+            allowedContentTypes: [UTType(importedAs: "com.rsa.pkcs-12")]
+        ) { result in
+            switch result {
+            case .success(let url):
+                pendingDirectQuicIdentityImportURL = url
+                draftDirectQuicIdentityPassword = ""
+                isShowingDirectQuicIdentityImportSheet = true
+            case .failure:
+                break
+            }
+        }
     }
 }

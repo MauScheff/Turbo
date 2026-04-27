@@ -62,6 +62,40 @@ struct StateMachineProjection: Equatable {
     }
 }
 
+struct DirectQuicDiagnosticsSummary: Equatable {
+    let selectedHandle: String?
+    let role: String?
+    let identityLabel: String?
+    let identityStatus: String
+    let installedIdentityCount: Int
+    let relayOnlyOverride: Bool
+    let backendAdvertisesUpgrade: Bool
+    let effectiveUpgradeEnabled: Bool
+    let transportPathState: MediaTransportPathState
+    let localDeviceID: String?
+    let peerDeviceID: String?
+    let attemptID: String?
+    let channelID: String?
+    let isDirectActive: Bool
+    let remoteCandidateCount: Int
+    let remoteEndOfCandidates: Bool
+    let attemptStartedAt: Date?
+    let lastUpdatedAt: Date?
+    let nominatedPathSource: String?
+    let nominatedRemoteAddress: String?
+    let nominatedRemotePort: Int?
+    let nominatedRemoteCandidateKind: String?
+    let retryReason: String?
+    let retryCategory: String?
+    let retryAttemptID: String?
+    let retryRemainingMilliseconds: Int?
+    let retryBackoffMilliseconds: Int?
+    let stunServerCount: Int
+    let promotionTimeoutMilliseconds: Int
+    let retryBackoffBaseMilliseconds: Int
+    let probeControllerReady: Bool
+}
+
 enum DiagnosticsInvariantScope: String, Codable, CaseIterable {
     case local
     case backend

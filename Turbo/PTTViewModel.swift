@@ -396,6 +396,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         backendRuntime.track(contactID: contactID)
     }
 
+    func untrackContact(_ contactID: UUID) {
+        backendRuntime.untrack(contactID: contactID)
+    }
+
     func resetTransportFaults() {
         backendRuntime.transportFaults.reset()
         diagnostics.record(.backend, message: "Reset transport fault injection state")
@@ -500,6 +504,82 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         )
     }
 
+    var isDirectPathRelayOnlyForced: Bool {
+        TurboDirectPathDebugOverride.isRelayOnlyForced()
+    }
+
+    var backendAdvertisesDirectQuicUpgrade: Bool {
+        backendServices?.supportsDirectQuicUpgrade == true
+    }
+
+    var effectiveDirectQuicUpgradeEnabled: Bool {
+        backendAdvertisesDirectQuicUpgrade && !isDirectPathRelayOnlyForced
+    }
+
+    var selectedDirectQuicDiagnosticsSummary: DirectQuicDiagnosticsSummary {
+        let contactID = selectedContactId
+        let selectedHandle = selectedContact?.handle
+        let attempt = contactID.flatMap { mediaRuntime.directQuicUpgrade.attempt(for: $0) }
+        let retryBackoff = contactID.flatMap { mediaRuntime.directQuicUpgrade.retryBackoffState(for: $0) }
+        let retryRemainingMilliseconds = contactID.flatMap {
+            mediaRuntime.directQuicUpgrade.retryBackoffRemaining(for: $0).map { Int($0 * 1_000) }
+        }
+        let directQuicPolicy = backendServices?.directQuicPolicy
+        let localDeviceID = backendServices?.deviceID
+        let peerDeviceID = attempt?.peerDeviceID ?? contactID.flatMap { directQuicPeerDeviceID(for: $0) }
+        let identityStatus = DirectQuicIdentityConfiguration.status()
+        let installedIdentityCount = DirectQuicIdentityConfiguration.installedIdentityCount()
+        let directQuicRole = localDeviceID.flatMap { localDeviceID in
+            peerDeviceID.map { peerDeviceID in
+                directQuicAttemptRole(
+                    localDeviceID: localDeviceID,
+                    peerDeviceID: peerDeviceID
+                )
+            }
+        }
+
+        return DirectQuicDiagnosticsSummary(
+            selectedHandle: selectedHandle,
+            role: directQuicRole.map { role in
+                switch role {
+                case .listenerOfferer:
+                    return "listener-offerer"
+                case .dialerAnswerer:
+                    return "dialer-answerer"
+                }
+            },
+            identityLabel: identityStatus.resolvedLabel,
+            identityStatus: identityStatus.diagnosticsText,
+            installedIdentityCount: installedIdentityCount,
+            relayOnlyOverride: isDirectPathRelayOnlyForced,
+            backendAdvertisesUpgrade: backendAdvertisesDirectQuicUpgrade,
+            effectiveUpgradeEnabled: effectiveDirectQuicUpgradeEnabled,
+            transportPathState: mediaTransportPathState,
+            localDeviceID: localDeviceID,
+            peerDeviceID: peerDeviceID,
+            attemptID: attempt?.attemptId,
+            channelID: attempt?.channelID,
+            isDirectActive: attempt?.isDirectActive ?? false,
+            remoteCandidateCount: attempt?.remoteCandidateCount ?? 0,
+            remoteEndOfCandidates: attempt?.remoteEndOfCandidates ?? false,
+            attemptStartedAt: attempt?.startedAt,
+            lastUpdatedAt: attempt?.lastUpdatedAt,
+            nominatedPathSource: attempt?.nominatedPath?.source.rawValue,
+            nominatedRemoteAddress: attempt?.nominatedPath?.remoteAddress,
+            nominatedRemotePort: attempt?.nominatedPath?.remotePort,
+            nominatedRemoteCandidateKind: attempt?.nominatedPath?.remoteCandidateKind?.rawValue,
+            retryReason: retryBackoff?.reason,
+            retryCategory: retryBackoff?.category.rawValue,
+            retryAttemptID: retryBackoff?.attemptId,
+            retryRemainingMilliseconds: retryRemainingMilliseconds,
+            retryBackoffMilliseconds: retryBackoff?.milliseconds,
+            stunServerCount: directQuicPolicy?.stunServers?.count ?? 0,
+            promotionTimeoutMilliseconds: directQuicPromotionTimeoutMilliseconds(),
+            retryBackoffBaseMilliseconds: directQuicRetryBackoffMilliseconds(),
+            probeControllerReady: mediaRuntime.directQuicProbeController != nil
+        )
+    }
+
     var latestSelfCheckReport: DevSelfCheckReport? {
         selfCheckCoordinator.state.latestReport
     }
@@ -560,6 +640,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         mediaRuntime.connectionState
     }
 
+    var mediaTransportPathState: MediaTransportPathState {
+        mediaRuntime.transportPathState
+    }
+
     var mediaSessionContactID: UUID? {
         mediaRuntime.contactID
     }
@@ -587,10 +671,16 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         backendRuntime.config?.devUserHandle ?? "bb-local"
     }
 
-    var currentIdentityCode: String {
+    var currentIdentityHandle: String {
         backendRuntime.currentShareCode
             ?? backendRuntime.currentPublicID
             ?? currentDevUserHandle
+    }
+
+    var currentContactAliasOwnerKey: String {
+        backendRuntime.currentUserID
+            ?? backendRuntime.currentPublicID
+            ?? currentIdentityHandle
     }
 
     var currentProfileName: String {
@@ -608,10 +698,11 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             return currentShareLink
         }
 
-        let encodedCode =
-            currentIdentityCode.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
-            ?? currentIdentityCode
-        return "https://beepbeep.to/p/\(encodedCode)"
+        let pathComponent = TurboHandle.sharePathComponent(from: currentIdentityHandle)
+        let encodedHandle =
+            pathComponent.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+            ?? pathComponent
+        return "https://beepbeep.to/\(encodedHandle)"
     }
 
     var developerIdentityControlsEnabled: Bool {
@@ -788,6 +879,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var diagnosticsStateFields: [String: String] {
         let projection = stateMachineProjection
         let selectedSession = projection.selectedSession
+        let directQuic = selectedDirectQuicDiagnosticsSummary
         return [
             "identity": currentDevUserHandle,
             "selectedContact": selectedContact?.handle ?? "none",
@@ -839,6 +931,34 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "remoteWakeCapability": selectedSession.remoteWakeCapability ?? "unavailable",
             "remoteWakeCapabilityKind": selectedSession.remoteWakeCapabilityKind ?? "unavailable",
             "backendCanTransmit": selectedSession.backendCanTransmit.map(String.init(describing:)) ?? "none",
+            "directQuicRelayOnlyOverride": String(directQuic.relayOnlyOverride),
+            "directQuicBackendAdvertised": String(directQuic.backendAdvertisesUpgrade),
+            "directQuicEnabled": String(directQuic.effectiveUpgradeEnabled),
+            "directQuicRole": directQuic.role ?? "none",
+            "directQuicIdentityLabel": directQuic.identityLabel ?? "none",
+            "directQuicIdentityStatus": directQuic.identityStatus,
+            "directQuicInstalledIdentityCount": String(directQuic.installedIdentityCount),
+            "directQuicTransportPath": directQuic.transportPathState.rawValue,
+            "directQuicLocalDeviceId": directQuic.localDeviceID ?? "none",
+            "directQuicPeerDeviceId": directQuic.peerDeviceID ?? "none",
+            "directQuicAttemptId": directQuic.attemptID ?? "none",
+            "directQuicChannelId": directQuic.channelID ?? "none",
+            "directQuicIsActive": String(directQuic.isDirectActive),
+            "directQuicRemoteCandidateCount": String(directQuic.remoteCandidateCount),
+            "directQuicRemoteEndOfCandidates": String(directQuic.remoteEndOfCandidates),
+            "directQuicNominatedPathSource": directQuic.nominatedPathSource ?? "none",
+            "directQuicNominatedRemoteAddress": directQuic.nominatedRemoteAddress ?? "none",
+            "directQuicNominatedRemotePort": directQuic.nominatedRemotePort.map(String.init) ?? "none",
+            "directQuicNominatedRemoteCandidateKind": directQuic.nominatedRemoteCandidateKind ?? "none",
+            "directQuicRetryReason": directQuic.retryReason ?? "none",
+            "directQuicRetryCategory": directQuic.retryCategory ?? "none",
+            "directQuicRetryAttemptId": directQuic.retryAttemptID ?? "none",
+            "directQuicRetryRemainingMs": directQuic.retryRemainingMilliseconds.map(String.init) ?? "none",
+            "directQuicRetryBackoffMs": directQuic.retryBackoffMilliseconds.map(String.init) ?? "none",
+            "directQuicStunServerCount": String(directQuic.stunServerCount),
+            "directQuicPromotionTimeoutMs": String(directQuic.promotionTimeoutMilliseconds),
+            "directQuicRetryBackoffBaseMs": String(directQuic.retryBackoffBaseMilliseconds),
+            "directQuicProbeControllerReady": String(directQuic.probeControllerReady),
             "status": statusMessage,
             "backendStatus": backendStatusMessage
         ]
