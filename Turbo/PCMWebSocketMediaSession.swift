@@ -1,5 +1,6 @@
 import Foundation
 import AVFAudio
+import CryptoKit
 
 enum PlaybackBufferReceivePlan: Equatable {
     case deferUntilIOCycle
@@ -13,24 +14,36 @@ actor AudioChunkSender {
     private let reportEvent: (@Sendable (String, [String: String]) async -> Void)?
     // Wake transmit can legitimately buffer a few seconds of speech while the
     // background receiver re-establishes its playback path after PTT activation.
-    private let maximumPendingPayloads = 128
-    private let maximumPayloadsPerMessage = 4
-    private let payloadBatchCollectionNanoseconds: UInt64 = 220_000_000
-    private let transportAvailabilityPollNanoseconds: UInt64 = 50_000_000
-    private let transportAvailabilityMaxAttempts = 20
+    private let maximumPendingPayloads: Int
+    private let maximumPayloadsPerMessage: Int
+    private let payloadBatchCollectionNanoseconds: UInt64
+    private let payloadBatchCollectionPollNanoseconds: UInt64 = 10_000_000
+    private let transportAvailabilityPollNanoseconds: UInt64
+    private let transportAvailabilityMaxAttempts: Int
     private var pendingPayloads: [String] = []
     private var isDraining = false
-    private var outboundTransportDispatchReportBudget = 3
-    private var outboundTransportSuccessReportBudget = 3
+    private var flushPendingImmediately = false
+    private var outboundTransportDispatchReportBudget = 64
+    private var outboundTransportSuccessReportBudget = 64
 
     init(
         sendChunk: (@Sendable (String) async throws -> Void)?,
         reportFailure: @escaping @Sendable (String) async -> Void,
-        reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil
+        reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil,
+        maximumPendingPayloads: Int = 128,
+        maximumPayloadsPerMessage: Int = 4,
+        payloadBatchCollectionNanoseconds: UInt64 = 220_000_000,
+        transportAvailabilityPollNanoseconds: UInt64 = 50_000_000,
+        transportAvailabilityMaxAttempts: Int = 20
     ) {
         self.sendChunk = sendChunk
         self.reportFailure = reportFailure
         self.reportEvent = reportEvent
+        self.maximumPendingPayloads = maximumPendingPayloads
+        self.maximumPayloadsPerMessage = maximumPayloadsPerMessage
+        self.payloadBatchCollectionNanoseconds = payloadBatchCollectionNanoseconds
+        self.transportAvailabilityPollNanoseconds = transportAvailabilityPollNanoseconds
+        self.transportAvailabilityMaxAttempts = transportAvailabilityMaxAttempts
     }
 
     func updateSendChunk(_ handler: (@Sendable (String) async throws -> Void)?) {
@@ -50,11 +63,17 @@ actor AudioChunkSender {
     func reset() {
         pendingPayloads.removeAll(keepingCapacity: false)
         isDraining = false
-        outboundTransportDispatchReportBudget = 3
-        outboundTransportSuccessReportBudget = 3
+        flushPendingImmediately = false
+        resetReportingBudgets()
+    }
+
+    func resetReportingBudgets() {
+        outboundTransportDispatchReportBudget = 64
+        outboundTransportSuccessReportBudget = 64
     }
 
     func finishDraining(pollNanoseconds: UInt64 = 10_000_000) async {
+        flushPendingImmediately = true
         while isDraining || !pendingPayloads.isEmpty {
             try? await Task.sleep(nanoseconds: pollNanoseconds)
         }
@@ -88,24 +107,38 @@ actor AudioChunkSender {
     }
 
     private func nextTransportPayload() async -> String {
-        if Self.shouldWaitForMorePayloads(
-            pendingPayloadCount: pendingPayloads.count,
-            maximumPayloadsPerMessage: maximumPayloadsPerMessage
-        ) {
-            try? await Task.sleep(nanoseconds: payloadBatchCollectionNanoseconds)
-        }
+        await waitForBatchCollectionIfNeeded()
 
         let batchCount = min(maximumPayloadsPerMessage, pendingPayloads.count)
         let batch = Array(pendingPayloads.prefix(batchCount))
         pendingPayloads.removeFirst(batchCount)
+        if pendingPayloads.isEmpty {
+            flushPendingImmediately = false
+        }
         return AudioChunkPayloadCodec.encode(batch)
+    }
+
+    private func waitForBatchCollectionIfNeeded() async {
+        var waitedNanoseconds: UInt64 = 0
+        while Self.shouldWaitForMorePayloads(
+            pendingPayloadCount: pendingPayloads.count,
+            maximumPayloadsPerMessage: maximumPayloadsPerMessage,
+            flushRequested: flushPendingImmediately
+        ), waitedNanoseconds < payloadBatchCollectionNanoseconds {
+            let remainingNanoseconds = payloadBatchCollectionNanoseconds - waitedNanoseconds
+            let sleepNanoseconds = min(payloadBatchCollectionPollNanoseconds, remainingNanoseconds)
+            try? await Task.sleep(nanoseconds: sleepNanoseconds)
+            waitedNanoseconds += sleepNanoseconds
+        }
     }
 
     nonisolated static func shouldWaitForMorePayloads(
         pendingPayloadCount: Int,
-        maximumPayloadsPerMessage: Int
+        maximumPayloadsPerMessage: Int,
+        flushRequested: Bool = false
     ) -> Bool {
-        pendingPayloadCount > 0 && pendingPayloadCount < maximumPayloadsPerMessage
+        guard !flushRequested else { return false }
+        return pendingPayloadCount > 0 && pendingPayloadCount < maximumPayloadsPerMessage
     }
 
     private func waitForTransportIfNeeded() async -> (@Sendable (String) async throws -> Void)? {
@@ -134,6 +167,8 @@ actor AudioChunkSender {
             [
                 "payloadLength": String(payload.count),
                 "pendingPayloadCount": String(pendingPayloadCount),
+                "transportDigest": AudioChunkPayloadCodec.transportDigest(payload),
+                "decodedChunkCount": String(AudioChunkPayloadCodec.decode(payload).count),
             ]
         )
     }
@@ -149,6 +184,8 @@ actor AudioChunkSender {
             [
                 "payloadLength": String(payload.count),
                 "pendingPayloadCount": String(pendingPayloadCount),
+                "transportDigest": AudioChunkPayloadCodec.transportDigest(payload),
+                "decodedChunkCount": String(AudioChunkPayloadCodec.decode(payload).count),
             ]
         )
     }
@@ -219,6 +256,31 @@ enum AudioChunkPayloadCodec {
 
         return chunks
     }
+
+    nonisolated static func transportDigest(_ payload: String, prefixBytes: Int = 6) -> String {
+        let digest = SHA256.hash(data: Data(payload.utf8))
+        return digest.prefix(prefixBytes).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+enum CaptureSendState: Equatable {
+    case idle
+    case sending
+    case stopping(graceDeadlineNanoseconds: UInt64)
+
+    static func shouldAcceptCapturedBuffer(
+        _ state: CaptureSendState,
+        nowNanoseconds: UInt64
+    ) -> Bool {
+        switch state {
+        case .idle:
+            return false
+        case .sending:
+            return true
+        case .stopping(let graceDeadlineNanoseconds):
+            return nowNanoseconds <= graceDeadlineNanoseconds
+        }
+    }
 }
 
 final class PCMWebSocketMediaSession: MediaSession {
@@ -255,7 +317,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     private var playbackConverter: AVAudioConverter?
     private var isPlaybackReady = false
     private var isCaptureReady = false
-    private var isSendingAudio = false
+    private var captureSendState: CaptureSendState = .idle
     private var inputTapInstalled = false
     private var pendingPlaybackBuffers: [AVAudioPCMBuffer] = []
     private var pendingRemoteAudioChunks: [Data] = []
@@ -269,6 +331,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     private var convertedBufferReportBudget = 3
     private var enqueuedPayloadReportBudget = 3
     private var activeAudioSessionOwnership: MediaSessionActivationMode?
+    private let captureStopGraceNanoseconds: UInt64 = 120_000_000
 
     init(
         sendAudioChunk: (@Sendable (String) async throws -> Void)?,
@@ -397,12 +460,17 @@ final class PCMWebSocketMediaSession: MediaSession {
             "Starting audio capture with transport state",
             metadata: ["configured": String(currentSendAudioChunk != nil)]
         )
+        await audioChunkSender.resetReportingBudgets()
         resetPlaybackForTransmit()
         setSendingAudio(true)
     }
 
     func stopSendingAudio() async throws {
-        setSendingAudio(false)
+        let stopGraceDeadline = beginCaptureStopGraceIfNeeded()
+        if let stopGraceDeadline {
+            try? await Task.sleep(nanoseconds: captureStopGraceNanoseconds)
+            finishCaptureStopGraceIfNeeded(expectedDeadlineNanoseconds: stopGraceDeadline)
+        }
         await audioChunkSender.finishDraining()
     }
 
@@ -447,7 +515,7 @@ final class PCMWebSocketMediaSession: MediaSession {
 
     func close(deactivateAudioSession: Bool) {
         stateLock.lock()
-        isSendingAudio = false
+        captureSendState = .idle
         stateLock.unlock()
         Task {
             await audioChunkSender.reset()
@@ -560,7 +628,44 @@ final class PCMWebSocketMediaSession: MediaSession {
     private func setSendingAudio(_ newValue: Bool) {
         stateLock.lock()
         defer { stateLock.unlock() }
-        isSendingAudio = newValue
+        captureSendState = newValue ? .sending : .idle
+    }
+
+    private func beginCaptureStopGraceIfNeeded() -> UInt64? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard case .sending = captureSendState else {
+            captureSendState = .idle
+            return nil
+        }
+        let deadline = DispatchTime.now().uptimeNanoseconds + captureStopGraceNanoseconds
+        captureSendState = .stopping(graceDeadlineNanoseconds: deadline)
+        return deadline
+    }
+
+    private func finishCaptureStopGraceIfNeeded(expectedDeadlineNanoseconds: UInt64) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard case .stopping(let currentDeadlineNanoseconds) = captureSendState,
+              currentDeadlineNanoseconds == expectedDeadlineNanoseconds else {
+            return
+        }
+        captureSendState = .idle
+    }
+
+    private func shouldSendCapturedBuffer(nowNanoseconds: UInt64) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        let shouldAccept = CaptureSendState.shouldAcceptCapturedBuffer(
+            captureSendState,
+            nowNanoseconds: nowNanoseconds
+        )
+        if !shouldAccept,
+           case .stopping = captureSendState {
+            captureSendState = .idle
+        }
+        return shouldAccept
     }
 
     private func prepareCapturePathIfNeeded() throws {
@@ -630,10 +735,8 @@ final class PCMWebSocketMediaSession: MediaSession {
     }
 
     private func handleCapturedBuffer(_ buffer: AVAudioPCMBuffer) {
-        stateLock.lock()
-        let shouldSend = isSendingAudio
-        stateLock.unlock()
-        guard shouldSend, state == .connected else { return }
+        let nowNanoseconds = DispatchTime.now().uptimeNanoseconds
+        guard shouldSendCapturedBuffer(nowNanoseconds: nowNanoseconds), state == .connected else { return }
         reportCapturedBufferIfNeeded(buffer)
         guard let convertedBuffer = convertCapturedBuffer(buffer) else { return }
         reportConvertedBufferIfNeeded(convertedBuffer)
@@ -691,6 +794,7 @@ final class PCMWebSocketMediaSession: MediaSession {
         convertedBufferReportBudget = 3
         enqueuedPayloadReportBudget = 3
     }
+
 
     private func convertCapturedBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         guard let converter = captureConverter else { return nil }

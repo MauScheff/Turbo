@@ -1163,10 +1163,17 @@ extension PTTViewModel {
                 await refreshChannelState(for: contactID)
             }
         case .audioChunk:
+            let decodedChunkCount = AudioChunkPayloadCodec.decode(envelope.payload).count
             diagnostics.record(
                 .media,
                 message: "Audio chunk received",
-                metadata: ["channelId": envelope.channelId, "fromDeviceId": envelope.fromDeviceId]
+                metadata: [
+                    "channelId": envelope.channelId,
+                    "fromDeviceId": envelope.fromDeviceId,
+                    "payloadLength": String(envelope.payload.count),
+                    "transportDigest": AudioChunkPayloadCodec.transportDigest(envelope.payload),
+                    "decodedChunkCount": String(decodedChunkCount),
+                ]
             )
             Task {
                 await handleIncomingAudioPayload(

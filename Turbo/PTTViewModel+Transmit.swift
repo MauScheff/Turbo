@@ -66,11 +66,26 @@ extension PTTViewModel {
     }
 
     func desiredLocalReceiverAudioReadiness(for contactID: UUID) -> Bool {
+        guard mediaSessionContactID == contactID else { return false }
+        guard mediaConnectionState == .connected else { return false }
+
+        switch pttWakeRuntime.incomingWakeActivationState(for: contactID) {
+        case .systemActivated, .appManagedFallback:
+            // Wake-activated receive should publish ready from the actual
+            // connected playback session even if the selected-session
+            // projection is still polluted by a stale local transmit path.
+            return true
+        case .signalBuffered,
+             .awaitingSystemActivation,
+             .systemActivationTimedOutWaitingForForeground,
+             .systemActivationInterruptedByTransmitEnd,
+             .none:
+            break
+        }
+
         let projection = selectedPeerProjection(for: contactID)
         guard projection.durableSession == .connected else { return false }
         guard projection.connectedExecution == nil else { return false }
-        guard mediaSessionContactID == contactID else { return false }
-        guard mediaConnectionState == .connected else { return false }
         return true
     }
 

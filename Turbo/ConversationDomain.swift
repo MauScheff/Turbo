@@ -1929,7 +1929,17 @@ private extension ConversationDerivationContext {
 
         if sessionTransmitReady && canTransmit {
             switch localMediaWarmupState {
-            case .cold, .prewarming:
+            case .cold:
+                if remoteAudioReadinessState == .wakeCapable,
+                   case .wakeCapable = remoteWakeCapabilityState {
+                    return .wakeReady
+                }
+                return .waiting(reason: .localAudioPrewarm, statusMessage: "Preparing audio...")
+            case .prewarming:
+                if remoteAudioReadinessState == .wakeCapable,
+                   case .wakeCapable = remoteWakeCapabilityState {
+                    return .wakeReady
+                }
                 return .waiting(reason: .localAudioPrewarm, statusMessage: "Preparing audio...")
             case .failed:
                 return .waiting(reason: .localAudioPrewarm, statusMessage: "Audio unavailable")

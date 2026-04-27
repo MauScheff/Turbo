@@ -752,6 +752,33 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     private func shouldSurfaceTopChromeDiagnosticsError(_ entry: DiagnosticsEntry) -> Bool {
+        if entry.subsystem == .invariant,
+           let invariantID = entry.metadata["invariantID"] {
+            let selectedSession = selectedSessionDiagnosticsSummary
+            switch invariantID {
+            case "selected.wake_capable_peer_blocked_on_local_audio_prewarm":
+                return selectedSession.selectedPhase == "waitingForPeer"
+                    && selectedSession.selectedPhaseDetail.contains("localAudioPrewarm")
+                    && selectedSession.systemSession.hasPrefix("active(")
+                    && selectedSession.backendReadiness == "ready"
+                    && selectedSession.backendSelfJoined == true
+                    && selectedSession.backendPeerJoined == true
+                    && selectedSession.remoteAudioReadiness == "wakeCapable"
+                    && selectedSession.remoteWakeCapabilityKind == "wake-capable"
+            case "selected.backend_ready_missing_remote_audio_signal":
+                return selectedSession.selectedPhase == "waitingForPeer"
+                    && selectedSession.selectedPhaseDetail.contains("remoteAudioPrewarm")
+                    && selectedSession.mediaState == "connected"
+                    && selectedSession.backendReadiness == "ready"
+                    && selectedSession.backendSelfJoined == true
+                    && selectedSession.backendPeerJoined == true
+                    && selectedSession.backendPeerDeviceConnected == true
+                    && backendRuntime.signalingJoinRecoveryTask == nil
+            default:
+                break
+            }
+        }
+
         switch (entry.subsystem, entry.message) {
         case (.pushToTalk, "PTT init failed"):
             return !pttSystemClient.isReady

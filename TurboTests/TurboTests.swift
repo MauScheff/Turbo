@@ -1566,7 +1566,7 @@ struct TurboTests {
         #expect(state.canTransmitNow == false)
     }
 
-    @Test func selectedPeerStateWaitsForLocalPrewarmWhenPeerDeviceIsConnectedButRemoteWakeMetadataLags() {
+    @Test func selectedPeerStateUsesWakeReadyWhenPeerDeviceIsConnectedAndRemotePublishesWakeCapability() {
         let contactID = UUID()
         let state = ConversationStateMachine.selectedPeerState(
             for: ConversationDerivationContext(
@@ -1595,10 +1595,10 @@ struct TurboTests {
             relationship: .none
         )
 
-        #expect(state.phase == .waitingForPeer)
-        #expect(state.statusMessage == "Preparing audio...")
+        #expect(state.phase == .wakeReady)
+        #expect(state.statusMessage == "Hold to talk to wake Blake")
         #expect(state.canTransmitNow == false)
-        #expect(!state.allowsHoldToTalk)
+        #expect(state.allowsHoldToTalk)
     }
 
     @Test func selectedPeerStateWaitsForRemoteAudioReadinessWhenWakeCapabilityIsUnavailable() {
@@ -8234,6 +8234,130 @@ struct TurboTests {
         #expect(primaryAction.isEnabled == false)
     }
 
+    @Test func selectedPeerStateKeepsWakeReadyWhenPeerBackgroundedLeavesLocalMediaCold() {
+        let contactID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .ready,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: true,
+            localIsTransmitting: false,
+            peerSignalIsTransmitting: false,
+            activeChannelID: contactID,
+            systemSessionMatchesContact: true,
+            systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+            pendingAction: .none,
+            localJoinFailure: nil,
+            mediaState: .closed,
+            localMediaWarmupState: .cold,
+            hadConnectedSessionContinuity: true,
+            channel: ChannelReadinessSnapshot(
+                channelState: TurboChannelStateResponse(
+                    channelId: "channel",
+                    selfUserId: "self",
+                    peerUserId: "peer",
+                    peerHandle: "@blake",
+                    selfOnline: true,
+                    peerOnline: true,
+                    selfJoined: true,
+                    peerJoined: true,
+                    peerDeviceConnected: true,
+                    hasIncomingRequest: false,
+                    hasOutgoingRequest: false,
+                    requestCount: 0,
+                    activeTransmitterUserId: nil,
+                    transmitLeaseExpiresAt: nil,
+                    status: ConversationState.ready.rawValue,
+                    canTransmit: true
+                ),
+                readiness: makeChannelReadiness(
+                    status: .ready,
+                    remoteAudioReadiness: .wakeCapable,
+                    remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+                )
+            )
+        )
+
+        let selectedPeerState = ConversationStateMachine.selectedPeerState(for: context, relationship: .none)
+        let primaryAction = ConversationStateMachine.primaryAction(
+            selectedPeerState: selectedPeerState,
+            isSelectedChannelJoined: true,
+            isTransmitting: false,
+            requestCooldownRemaining: nil
+        )
+
+        #expect(selectedPeerState.phase == .wakeReady)
+        #expect(selectedPeerState.statusMessage == "Hold to talk to wake Blake")
+        #expect(selectedPeerState.canTransmitNow == false)
+        #expect(selectedPeerState.allowsHoldToTalk)
+        #expect(primaryAction.kind == .holdToTalk)
+        #expect(primaryAction.isEnabled)
+    }
+
+    @Test func selectedPeerStateKeepsWakeReadyWhileLocalAudioPrewarmsForWakeCapablePeer() {
+        let contactID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .ready,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: true,
+            localIsTransmitting: false,
+            peerSignalIsTransmitting: false,
+            activeChannelID: contactID,
+            systemSessionMatchesContact: true,
+            systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+            pendingAction: .none,
+            localJoinFailure: nil,
+            mediaState: .preparing,
+            localMediaWarmupState: .prewarming,
+            hadConnectedSessionContinuity: true,
+            channel: ChannelReadinessSnapshot(
+                channelState: TurboChannelStateResponse(
+                    channelId: "channel",
+                    selfUserId: "self",
+                    peerUserId: "peer",
+                    peerHandle: "@blake",
+                    selfOnline: true,
+                    peerOnline: true,
+                    selfJoined: true,
+                    peerJoined: true,
+                    peerDeviceConnected: true,
+                    hasIncomingRequest: false,
+                    hasOutgoingRequest: false,
+                    requestCount: 0,
+                    activeTransmitterUserId: nil,
+                    transmitLeaseExpiresAt: nil,
+                    status: ConversationState.ready.rawValue,
+                    canTransmit: true
+                ),
+                readiness: makeChannelReadiness(
+                    status: .ready,
+                    remoteAudioReadiness: .wakeCapable,
+                    remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+                )
+            )
+        )
+
+        let selectedPeerState = ConversationStateMachine.selectedPeerState(for: context, relationship: .none)
+        let primaryAction = ConversationStateMachine.primaryAction(
+            selectedPeerState: selectedPeerState,
+            isSelectedChannelJoined: true,
+            isTransmitting: false,
+            requestCooldownRemaining: nil
+        )
+
+        #expect(selectedPeerState.phase == .wakeReady)
+        #expect(selectedPeerState.statusMessage == "Hold to talk to wake Blake")
+        #expect(selectedPeerState.canTransmitNow == false)
+        #expect(selectedPeerState.allowsHoldToTalk)
+        #expect(primaryAction.kind == .holdToTalk)
+        #expect(primaryAction.isEnabled)
+    }
+
     @Test func pttWakeRuntimeBuffersAudioUntilActivation() {
         let contactID = UUID()
         let channelUUID = UUID()
@@ -9148,6 +9272,18 @@ struct TurboTests {
         #expect(decoded == ["chunk-1", "chunk-2", "chunk-3"])
     }
 
+    @Test func audioChunkPayloadCodecTransportDigestIsStableForSamePayload() {
+        let payload = AudioChunkPayloadCodec.encode(["chunk-1", "chunk-2"])
+        let samePayloadDigest = AudioChunkPayloadCodec.transportDigest(payload)
+        let repeatedDigest = AudioChunkPayloadCodec.transportDigest(payload)
+        let differentDigest = AudioChunkPayloadCodec.transportDigest(
+            AudioChunkPayloadCodec.encode(["chunk-1", "chunk-3"])
+        )
+
+        #expect(samePayloadDigest == repeatedDigest)
+        #expect(samePayloadDigest != differentDigest)
+    }
+
     @Test func playbackBufferReceivePlanStartsNodeWithoutDuplicatingCurrentBuffer() {
         #expect(
             PCMWebSocketMediaSession.playbackBufferReceivePlan(
@@ -9395,6 +9531,62 @@ struct TurboTests {
 
         let deliveredPayloads = await recorder.snapshot().flatMap(AudioChunkPayloadCodec.decode)
         #expect(deliveredPayloads == ["chunk-1", "chunk-2"])
+    }
+
+    @Test func audioChunkSenderFinishDrainingFlushesPartialBatchWithoutWaitingForFullBatchWindow() async {
+        actor Recorder {
+            var payloads: [String] = []
+
+            func append(_ payload: String) {
+                payloads.append(payload)
+            }
+
+            func count() -> Int {
+                payloads.count
+            }
+        }
+
+        let recorder = Recorder()
+        let sender = AudioChunkSender(
+            sendChunk: { payload in
+                await recorder.append(payload)
+            },
+            reportFailure: { _ in },
+            payloadBatchCollectionNanoseconds: 1_000_000_000
+        )
+
+        let enqueueTask = Task {
+            await sender.enqueue("chunk-1")
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        await sender.finishDraining(pollNanoseconds: 1_000_000)
+        let elapsedNanoseconds = DispatchTime.now().uptimeNanoseconds - startedAt
+        await enqueueTask.value
+
+        #expect(await recorder.count() == 1)
+        #expect(elapsedNanoseconds < 500_000_000)
+    }
+
+    @Test func captureSendStateKeepsAcceptingBuffersDuringStopTailGrace() {
+        let nowNanoseconds: UInt64 = 2_000_000_000
+        let state = CaptureSendState.stopping(
+            graceDeadlineNanoseconds: nowNanoseconds + 120_000_000
+        )
+
+        #expect(
+            CaptureSendState.shouldAcceptCapturedBuffer(
+                state,
+                nowNanoseconds: nowNanoseconds + 40_000_000
+            )
+        )
+        #expect(
+            !CaptureSendState.shouldAcceptCapturedBuffer(
+                state,
+                nowNanoseconds: nowNanoseconds + 121_000_000
+            )
+        )
     }
 
     @MainActor
@@ -14147,6 +14339,89 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func wakeActivatedReceiverPublishesReadyFromConnectedPlaybackSessionDespiteStaleLocalTransmitState() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: channelUUID,
+            backendChannelId: "channel",
+            remoteUserId: "peer-user"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+        viewModel.applicationStateOverride = .background
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.syncPTTState()
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(status: .ready, canTransmit: true)
+            )
+        )
+        viewModel.backendSyncCoordinator.send(
+            .channelReadinessUpdated(
+                contactID: contactID,
+                readiness: makeChannelReadiness(status: .ready)
+            )
+        )
+
+        let staleRequest = TransmitRequestContext(
+            contactID: contactID,
+            contactHandle: contact.handle,
+            backendChannelID: "channel",
+            remoteUserID: "peer-user",
+            channelUUID: channelUUID,
+            usesLocalHTTPBackend: false,
+            backendSupportsWebSocket: true
+        )
+        await viewModel.transmitCoordinator.handle(.systemPressRequested(staleRequest))
+        viewModel.transmitRuntime.markPressBegan()
+        viewModel.syncTransmitState()
+
+        viewModel.pttWakeRuntime.store(
+            PendingIncomingPTTPush(
+                contactID: contactID,
+                channelUUID: channelUUID,
+                payload: TurboPTTPushPayload(
+                    event: .transmitStart,
+                    channelId: "channel",
+                    activeSpeaker: "@blake",
+                    senderUserId: "peer-user",
+                    senderDeviceId: "peer-device"
+                ),
+                hasConfirmedIncomingPush: true,
+                activationState: .systemActivated
+            )
+        )
+
+        await viewModel.ensureMediaSession(
+            for: contactID,
+            activationMode: .systemActivated,
+            startupMode: .playbackOnly
+        )
+
+        #expect(viewModel.mediaConnectionState == .connected)
+        #expect(viewModel.pttWakeRuntime.incomingWakeActivationState(for: contactID) == .systemActivated)
+        #expect(viewModel.transmitDomainSnapshot.phase == .requesting(contactID: contactID))
+        #expect(viewModel.desiredLocalReceiverAudioReadiness(for: contactID))
+    }
+
+    @MainActor
     @Test func outgoingAudioSendGateWaitsForRemoteReceiverReadinessRecovery() async throws {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -17709,6 +17984,121 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func diagnosticsExportIncludesWakeCapablePeerBlockedOnLocalAudioPrewarmInvariant() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        store.captureState(
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "waitingForPeer",
+                "selectedPeerPhaseDetail": "waitingForPeer(reason: BeepBeep.SelectedPeerWaitingReason.localAudioPrewarm)",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "hadConnectedSessionContinuity": "true",
+                "isTransmitting": "false",
+                "systemSession": "active(contactID: 123, channelUUID: 456)",
+                "backendChannelStatus": "ready",
+                "backendReadiness": "ready",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "remoteAudioReadiness": "wakeCapable",
+                "remoteWakeCapabilityKind": "wake-capable",
+                "selectedPeerStatus": "Preparing audio..."
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=waitingForPeer")
+
+        #expect(exported.contains("[selected.wake_capable_peer_blocked_on_local_audio_prewarm]"))
+        #expect(
+            store.invariantViolations.contains {
+                $0.invariantID == "selected.wake_capable_peer_blocked_on_local_audio_prewarm"
+            }
+        )
+        #expect(
+            store.latestError?.message
+                == "peer is wake-capable, but selectedPeerPhase is still waitingForPeer on local audio prewarm"
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsSuppressesWakeCapableLocalAudioPrewarmInvariantWhenPeerAudioIsReady() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        store.captureState(
+            reason: "selected-status-refresh",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "waitingForPeer",
+                "selectedPeerPhaseDetail": "waitingForPeer(reason: BeepBeep.SelectedPeerWaitingReason.localAudioPrewarm)",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "hadConnectedSessionContinuity": "true",
+                "isTransmitting": "false",
+                "systemSession": "active(contactID: 123, channelUUID: 456)",
+                "backendChannelStatus": "ready",
+                "backendReadiness": "ready",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "remoteAudioReadiness": "ready",
+                "remoteWakeCapabilityKind": "wake-capable",
+                "selectedPeerStatus": "Preparing audio..."
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=waitingForPeer")
+
+        #expect(!exported.contains("[selected.wake_capable_peer_blocked_on_local_audio_prewarm]"))
+        #expect(
+            !store.invariantViolations.contains {
+                $0.invariantID == "selected.wake_capable_peer_blocked_on_local_audio_prewarm"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsSuppressesWakeCapableLocalAudioPrewarmInvariantWhenPeerAudioIsWaiting() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        store.captureState(
+            reason: "selected-status-refresh",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "waitingForPeer",
+                "selectedPeerPhaseDetail": "waitingForPeer(reason: BeepBeep.SelectedPeerWaitingReason.localAudioPrewarm)",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "hadConnectedSessionContinuity": "true",
+                "isTransmitting": "false",
+                "systemSession": "active(contactID: 123, channelUUID: 456)",
+                "backendChannelStatus": "ready",
+                "backendReadiness": "ready",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "remoteAudioReadiness": "waiting",
+                "remoteWakeCapabilityKind": "wake-capable",
+                "selectedPeerStatus": "Preparing audio..."
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=waitingForPeer")
+
+        #expect(!exported.contains("[selected.wake_capable_peer_blocked_on_local_audio_prewarm]"))
+        #expect(
+            !store.invariantViolations.contains {
+                $0.invariantID == "selected.wake_capable_peer_blocked_on_local_audio_prewarm"
+            }
+        )
+    }
+
+    @MainActor
     @Test func recoveredBackendReadyMissingRemoteAudioSignalDoesNotSurfaceInTopChrome() {
         let viewModel = PTTViewModel()
         viewModel.diagnostics.clear()
@@ -17717,6 +18107,25 @@ struct TurboTests {
             .invariant,
             level: .error,
             message: "backend says the peer is ready and connected, but selectedPeerPhase is still waitingForPeer on remote audio prewarm"
+        )
+
+        #expect(viewModel.topChromeDiagnosticsErrorText == nil)
+    }
+
+    @MainActor
+    @Test func recoveredWakeCapableLocalAudioPrewarmInvariantDoesNotSurfaceInTopChrome() {
+        let viewModel = PTTViewModel()
+        viewModel.diagnostics.clear()
+
+        viewModel.diagnostics.record(
+            .invariant,
+            level: .error,
+            message: "peer is wake-capable, but selectedPeerPhase is still waitingForPeer on local audio prewarm",
+            metadata: [
+                "invariantID": "selected.wake_capable_peer_blocked_on_local_audio_prewarm",
+                "remoteAudioReadiness": "wakeCapable",
+                "remoteWakeCapabilityKind": "wake-capable",
+            ]
         )
 
         #expect(viewModel.topChromeDiagnosticsErrorText == nil)

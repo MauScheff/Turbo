@@ -1,0 +1,205 @@
+turbo.service.ws.internal.activeTransmitMatchesSender :
+  UserId -> DeviceId -> Optional TransmitState -> Boolean
+turbo.service.ws.internal.activeTransmitMatchesSender
+  fromUserId
+  fromDeviceId
+  activeTransmit =
+  match activeTransmit with
+    Some (TransmitState _ activeFromUserId activeFromDeviceId _ _ _ _) ->
+      sameSenderUser =
+        textEqual
+          (UserId.toText activeFromUserId)
+          (UserId.toText fromUserId)
+      sameSenderDevice =
+        textEqual
+          (DeviceId.toText activeFromDeviceId)
+          (DeviceId.toText fromDeviceId)
+      sameSenderUser && sameSenderDevice
+    None -> false
+
+test> turbo.service.ws.internal.activeTransmitMatchesSender.tests.examples =
+  verify do
+    channelId = turbo.domain.ChannelId.fromText "channel-123"
+    senderUserId = turbo.domain.UserId.fromText "sender-user"
+    senderDeviceId = turbo.domain.DeviceId.fromText "sender-device"
+    targetUserId = turbo.domain.UserId.fromText "target-user"
+    targetDeviceId = turbo.domain.DeviceId.fromText "target-device"
+    otherUserId = turbo.domain.UserId.fromText "other-user"
+    otherDeviceId = turbo.domain.DeviceId.fromText "other-device"
+    startedAt = Instant.epoch
+    expiresAt = Instant.epoch
+    activeTransmit =
+      Some
+        (TransmitState
+          channelId
+          senderUserId
+          senderDeviceId
+          targetUserId
+          targetDeviceId
+          startedAt
+          expiresAt)
+
+    ensure
+      (turbo.service.ws.internal.activeTransmitMatchesSender
+        senderUserId
+        senderDeviceId
+        activeTransmit)
+
+    ensureEqual
+      false
+      (turbo.service.ws.internal.activeTransmitMatchesSender
+        otherUserId
+        senderDeviceId
+        activeTransmit)
+
+    ensureEqual
+      false
+      (turbo.service.ws.internal.activeTransmitMatchesSender
+        senderUserId
+        otherDeviceId
+        activeTransmit)
+
+    ensureEqual
+      false
+      (turbo.service.ws.internal.activeTransmitMatchesSender
+        senderUserId
+        senderDeviceId
+        None)
+
+turbo.service.ws.internal.appendActiveTransmitSenderPresenceDriftInvariant :
+  Database
+  -> UserId
+  -> ChannelId
+  -> DeviceId
+  -> SignalKind
+  -> '{Exception, Storage, Remote} ()
+turbo.service.ws.internal.appendActiveTransmitSenderPresenceDriftInvariant
+  db
+  currentUserId
+  channelId
+  deviceId
+  signalKind =
+    do
+      use Text ++
+      metadata =
+        "channelId="
+          ++ ChannelId.toText channelId
+          ++ " deviceId="
+          ++ DeviceId.toText deviceId
+          ++ " signalKind="
+          ++ SignalKind.toText signalKind
+      appendInvariantEvent
+        db
+        currentUserId
+        "channel.active_transmit_sender_presence_drift"
+        "backend"
+        "backend"
+        "active transmit matched the signaling sender while raw joined presence was missing"
+        (Some metadata)
+        ()
+
+turbo.service.ws.internal.resolveEnvelopeTarget :
+  Database
+  -> UserId
+  -> DeviceId
+  -> SignalEnvelope
+  -> '{Exception, Storage, Remote, Random} Either Text SignalEnvelope
+turbo.service.ws.internal.resolveEnvelopeTarget
+  db currentUserId currentDeviceId = cases
+  SignalEnvelope kind channelId fromUserId fromDeviceId toUserId _ payload ->
+    do
+      use Boolean not
+      sameUser =
+        textEqual (UserId.toText currentUserId) (UserId.toText fromUserId)
+      sameDevice =
+        textEqual
+          (DeviceId.toText currentDeviceId) (DeviceId.toText fromDeviceId)
+      activeTransmit = currentTransmit db channelId ()
+      senderIsJoined =
+        isDeviceJoinedInChannel db fromUserId fromDeviceId channelId ()
+      senderMatchesActiveTransmit =
+        turbo.service.ws.internal.activeTransmitMatchesSender
+          fromUserId
+          fromDeviceId
+          activeTransmit
+      transmitOwnedSignal =
+        turbo.service.ws.internal.signalUsesActiveTransmitTarget kind
+      senderAuthorizedByActiveTransmit =
+        transmitOwnedSignal && senderMatchesActiveTransmit
+      senderIsAuthorized =
+        senderIsJoined || senderAuthorizedByActiveTransmit
+      if not sameUser
+        || not sameDevice then
+        Left "signaling sender does not match authenticated socket"
+      else
+        _ =
+          if senderAuthorizedByActiveTransmit && not senderIsJoined then
+            turbo.service.ws.internal.appendActiveTransmitSenderPresenceDriftInvariant
+              db
+              currentUserId
+              channelId
+              fromDeviceId
+              kind
+              ()
+          else ()
+        if not senderIsAuthorized then
+          Left "signaling sender device is not joined to this channel"
+        else
+          targetPlan =
+            turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit
+              kind
+              fromUserId
+              fromDeviceId
+              toUserId
+              activeTransmit
+          match targetPlan with
+            SignalTargetResolutionUseActiveTransmitTarget targetDeviceId ->
+              Right
+                (SignalEnvelope
+                  kind
+                  channelId
+                  fromUserId
+                  fromDeviceId
+                  toUserId
+                  targetDeviceId
+                  payload)
+            SignalTargetResolutionUseConnectedPresence ->
+              match getConnectedForUserInChannel db toUserId channelId () with
+                None ->
+                  Left
+                    "target user has no connected receiving device in this channel"
+                Some (DevicePresence targetDeviceId _ _ _ _) ->
+                  Right
+                    (SignalEnvelope
+                      kind
+                      channelId
+                      fromUserId
+                      fromDeviceId
+                      toUserId
+                      targetDeviceId
+                      payload)
+
+turbo.service.ws.internal.resolveEnvelopeTarget.doc : Doc
+turbo.service.ws.internal.resolveEnvelopeTarget.doc =
+  {{
+  {{
+  docExample 4 do
+    db currentUserId currentDeviceId envelope ->
+      resolveEnvelopeTarget db currentUserId currentDeviceId envelope }}
+  resolves a routable signaling envelope only when the authenticated sender
+  device is authorized for the in-channel signal.
+
+  The normal authorization path still requires the sender device to appear as
+  the joined in-channel presence. For active transmit signal kinds, a matching
+  backend transmit lease can also authorize the sender temporarily so
+  transmit-owned signaling does not collapse during presence/session drift.
+
+  For active transmit signal kinds, routing preserves the backend-chosen
+  transmit target device so wake-capable delivery does not depend on a second
+  presence lookup catching up first. Other signal kinds still route through the
+  latest connected in-channel presence.
+
+  **Also see:** {currentTransmit}, {{
+  docLink (docEmbedTermLink do isDeviceJoinedInChannel) }}, {{
+  docLink (docEmbedTermLink do getConnectedForUserInChannel) }}
+  }}

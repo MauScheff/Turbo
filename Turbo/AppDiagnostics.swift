@@ -651,6 +651,7 @@ final class DiagnosticsStore {
             }
         }
 
+        let remoteAudioReadiness = fields["remoteAudioReadiness"] ?? "unknown"
         let connectableWakeStatuses = Set(["waiting-for-peer", "ready", "transmitting", "receiving"])
         if remoteWakeCapabilityKind == "wake-capable",
            connectableWakeStatuses.contains(backendChannelStatus) {
@@ -691,6 +692,35 @@ final class DiagnosticsStore {
                         "systemSession": systemSession,
                         "backendChannelStatus": backendChannelStatus,
                         "backendReadiness": backendReadiness,
+                        "remoteWakeCapabilityKind": remoteWakeCapabilityKind,
+                    ]
+                )
+            )
+        }
+
+        if phase == "waitingForPeer",
+           phaseDetail.contains("localAudioPrewarm"),
+           isJoined == true,
+           hadConnectedSessionContinuity == true,
+           systemSession.hasPrefix("active("),
+           backendReadiness == "ready",
+           backendSelfJoined == true,
+           backendPeerJoined == true,
+           remoteAudioReadiness == "wakeCapable",
+           remoteWakeCapabilityKind == "wake-capable" {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.wake_capable_peer_blocked_on_local_audio_prewarm",
+                    scope: .backend,
+                    message: "peer is wake-capable, but selectedPeerPhase is still waitingForPeer on local audio prewarm",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "systemSession": systemSession,
+                        "backendChannelStatus": backendChannelStatus,
+                        "backendReadiness": backendReadiness,
+                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
+                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
                         "remoteWakeCapabilityKind": remoteWakeCapabilityKind,
                     ]
                 )
