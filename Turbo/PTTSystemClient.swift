@@ -43,6 +43,7 @@ protocol PTTSystemClientProtocol: AnyObject {
     func leaveChannel(channelUUID: UUID) throws
     func beginTransmitting(channelUUID: UUID) throws
     func stopTransmitting(channelUUID: UUID) throws
+    func setTransmissionMode(_ mode: PTTransmissionMode, channelUUID: UUID) async throws
     func setActiveRemoteParticipant(name: String?, channelUUID: UUID) async throws
     func setAccessoryButtonEventsEnabled(_ enabled: Bool, channelUUID: UUID) async throws
     func setServiceStatus(_ status: PTServiceStatus, channelUUID: UUID) async throws
@@ -186,6 +187,19 @@ final class ApplePTTSystemClient: PTTSystemClientProtocol {
     func stopTransmitting(channelUUID: UUID) throws {
         guard let manager else { throw PTTSystemClientError.notReady }
         manager.stopTransmitting(channelUUID: channelUUID)
+    }
+
+    func setTransmissionMode(_ mode: PTTransmissionMode, channelUUID: UUID) async throws {
+        guard let manager else { throw PTTSystemClientError.notReady }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            manager.setTransmissionMode(mode, channelUUID: channelUUID) { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
     }
 
     func setActiveRemoteParticipant(name: String?, channelUUID: UUID) async throws {
@@ -341,6 +355,8 @@ final class SimulatorPTTSystemClient: PTTSystemClientProtocol {
             callbacks.didDeactivateAudioSession(audioSession)
         }
     }
+
+    func setTransmissionMode(_ mode: PTTransmissionMode, channelUUID _: UUID) async throws {}
 
     func setActiveRemoteParticipant(name _: String?, channelUUID _: UUID) async throws {}
 

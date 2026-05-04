@@ -102,6 +102,22 @@ enum ReceiveExecutionReducer {
 
 final class ReceiveExecutionRuntimeState {
     var remoteAudioSilenceTasks: [UUID: Task<Void, Never>] = [:]
+    private var pendingPlaybackDrainStartedAtNanosecondsByContactID: [UUID: UInt64] = [:]
+
+    func pendingPlaybackDrainDeferralElapsedNanoseconds(
+        for contactID: UUID,
+        nowNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> UInt64 {
+        if let startedAt = pendingPlaybackDrainStartedAtNanosecondsByContactID[contactID] {
+            return nowNanoseconds >= startedAt ? nowNanoseconds - startedAt : 0
+        }
+        pendingPlaybackDrainStartedAtNanosecondsByContactID[contactID] = nowNanoseconds
+        return 0
+    }
+
+    func clearPendingPlaybackDrainDeferral(for contactID: UUID) {
+        pendingPlaybackDrainStartedAtNanosecondsByContactID[contactID] = nil
+    }
 
     func replaceRemoteAudioSilenceTask(
         for contactID: UUID,
@@ -109,6 +125,9 @@ final class ReceiveExecutionRuntimeState {
     ) {
         remoteAudioSilenceTasks[contactID]?.cancel()
         remoteAudioSilenceTasks[contactID] = task
+        if task == nil {
+            clearPendingPlaybackDrainDeferral(for: contactID)
+        }
     }
 
     func replaceRemoteAudioSilenceTasks(_ tasks: [UUID: Task<Void, Never>]) {
@@ -123,6 +142,7 @@ final class ReceiveExecutionRuntimeState {
             task.cancel()
         }
         remoteAudioSilenceTasks = [:]
+        pendingPlaybackDrainStartedAtNanosecondsByContactID = [:]
     }
 }
 

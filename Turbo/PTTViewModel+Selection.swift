@@ -581,7 +581,10 @@ extension PTTViewModel {
         updateStatusForSelectedContact()
         captureDiagnosticsState("selected-contact")
         Task {
-            await prewarmLocalMediaIfNeeded(for: contact.id)
+            await prewarmForegroundTalkPathIfNeeded(
+                for: contact.id,
+                reason: "selected-contact"
+            )
         }
     }
 

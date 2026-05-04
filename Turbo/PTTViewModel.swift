@@ -115,9 +115,14 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var backendBootstrapRetryDelayNanoseconds: UInt64 = 2_000_000_000
     var remoteAudioInitialChunkTimeoutNanoseconds: UInt64 = 5_000_000_000
     var remoteAudioSilenceTimeoutNanoseconds: UInt64 = 1_500_000_000
+    var remoteAudioPendingPlaybackDrainMaxNanoseconds: UInt64 = 5_000_000_000
+    var foregroundAppManagedInteractiveAudioPrewarmEnabled = true
     var lastReportedPTTServiceStatus: PTServiceStatus?
     var lastReportedPTTServiceStatusChannelUUID: UUID?
     var lastReportedPTTServiceStatusReason: String?
+    var lastReportedPTTTransmissionMode: PTTransmissionMode?
+    var lastReportedPTTTransmissionModeChannelUUID: UUID?
+    var lastReportedPTTTransmissionModeReason: String?
     var lastReportedPTTAccessoryButtonEventsChannelUUID: UUID?
     var lastReportedPTTAccessoryButtonEventsReason: String?
     var lastReportedPTTDescriptorName: String?
@@ -796,6 +801,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         switch (entry.subsystem, entry.message) {
         case (.pushToTalk, "PTT init failed"):
             return !pttSystemClient.isReady
+        case (.media, "Direct QUIC media path lost"):
+            return false
         case (.invariant, "backend says the peer is ready and connected, but selectedPeerPhase is still waitingForPeer on remote audio prewarm"):
             let selectedSession = selectedSessionDiagnosticsSummary
             return selectedSession.selectedPhase == "waitingForPeer"
@@ -1224,7 +1231,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             applicationState: .active
         )
         if let selectedContactId {
-            await maybeStartAutomaticDirectQuicProbe(
+            await prewarmForegroundTalkPathIfNeeded(
                 for: selectedContactId,
                 reason: "application-became-active"
             )

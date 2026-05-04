@@ -441,7 +441,36 @@ nonisolated enum DirectQuicWireMessageKind: String, Codable, Equatable {
     case probeAck = "probe-ack"
     case consentPing = "consent-ping"
     case consentAck = "consent-ack"
+    case receiverPrewarmRequest = "receiver-prewarm-request"
+    case receiverPrewarmAck = "receiver-prewarm-ack"
+    case warmPing = "warm-ping"
+    case warmPong = "warm-pong"
     case audioChunk = "audio-chunk"
+}
+
+nonisolated struct DirectQuicReceiverPrewarmPayload: Codable, Equatable, Sendable {
+    let requestId: String
+    let channelId: String
+    let fromDeviceId: String
+    let reason: String
+    let directQuicAttemptId: String?
+}
+
+nonisolated enum DirectQuicReceiverPrewarmPayloadCodec {
+    static func encode(_ payload: DirectQuicReceiverPrewarmPayload) throws -> String {
+        let data = try JSONEncoder().encode(payload)
+        guard let encoded = String(data: data, encoding: .utf8) else {
+            throw DirectQuicProbeError.proofFailed("receiver prewarm payload encoding failed")
+        }
+        return encoded
+    }
+
+    static func decode(_ payload: String?) throws -> DirectQuicReceiverPrewarmPayload {
+        guard let payload, let data = payload.data(using: .utf8) else {
+            throw DirectQuicProbeError.proofFailed("receiver prewarm payload missing")
+        }
+        return try JSONDecoder().decode(DirectQuicReceiverPrewarmPayload.self, from: data)
+    }
 }
 
 nonisolated struct DirectQuicWireMessage: Codable, Equatable {
@@ -456,6 +485,28 @@ nonisolated struct DirectQuicWireMessage: Codable, Equatable {
 
     static func consentAck(_ id: String?) -> DirectQuicWireMessage {
         DirectQuicWireMessage(kind: .consentAck, payload: id)
+    }
+
+    static func receiverPrewarmRequest(_ payload: DirectQuicReceiverPrewarmPayload) throws -> DirectQuicWireMessage {
+        DirectQuicWireMessage(
+            kind: .receiverPrewarmRequest,
+            payload: try DirectQuicReceiverPrewarmPayloadCodec.encode(payload)
+        )
+    }
+
+    static func receiverPrewarmAck(_ payload: DirectQuicReceiverPrewarmPayload) throws -> DirectQuicWireMessage {
+        DirectQuicWireMessage(
+            kind: .receiverPrewarmAck,
+            payload: try DirectQuicReceiverPrewarmPayloadCodec.encode(payload)
+        )
+    }
+
+    static func warmPing(_ id: String) -> DirectQuicWireMessage {
+        DirectQuicWireMessage(kind: .warmPing, payload: id)
+    }
+
+    static func warmPong(_ id: String?) -> DirectQuicWireMessage {
+        DirectQuicWireMessage(kind: .warmPong, payload: id)
     }
 
     static func audioChunk(_ payload: String) -> DirectQuicWireMessage {
@@ -563,7 +614,10 @@ nonisolated private final class ContinuationGate: @unchecked Sendable {
 
 nonisolated final class DirectQuicProbeController: @unchecked Sendable {
     private static let consentIntervalNanoseconds: UInt64 = 1_000_000_000
-    private static let consentTimeoutSeconds: TimeInterval = 3
+    // Apple PTT activation can hold the first transmit/receive path for several
+    // seconds. Keep the app-level consent watchdog longer than that activation
+    // window so a warm Direct QUIC path is not torn down just before audio starts.
+    private static let consentTimeoutSeconds: TimeInterval = 10
 
     private let queue = DispatchQueue(label: "Turbo.DirectQuicProbe")
     private let stateLock = NSLock()
@@ -579,6 +633,9 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
     private var verifiedPeerCertificateFingerprint: String?
     private var nominatedPath: DirectQuicNominatedPath?
     private var onIncomingAudioPayload: (@Sendable (String) async -> Void)?
+    private var onReceiverPrewarmRequest: (@Sendable (DirectQuicReceiverPrewarmPayload) async -> Void)?
+    private var onReceiverPrewarmAck: (@Sendable (DirectQuicReceiverPrewarmPayload) async -> Void)?
+    private var onWarmPong: (@Sendable (String?) async -> Void)?
     private var onPathLost: (@Sendable (String) async -> Void)?
     private var suppressPathLostCallback = false
     private var remoteCandidateKeysAttempted: Set<String> = []
@@ -773,6 +830,9 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
 
     func activateMediaTransport(
         onIncomingAudioPayload: @escaping @Sendable (String) async -> Void,
+        onReceiverPrewarmRequest: (@Sendable (DirectQuicReceiverPrewarmPayload) async -> Void)? = nil,
+        onReceiverPrewarmAck: (@Sendable (DirectQuicReceiverPrewarmPayload) async -> Void)? = nil,
+        onWarmPong: (@Sendable (String?) async -> Void)? = nil,
         onPathLost: @escaping @Sendable (String) async -> Void
     ) async throws {
         let connection = withLockedState { outboundConnection ?? inboundConnection }
@@ -783,6 +843,9 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         withLockedState {
             suppressPathLostCallback = false
             self.onIncomingAudioPayload = onIncomingAudioPayload
+            self.onReceiverPrewarmRequest = onReceiverPrewarmRequest
+            self.onReceiverPrewarmAck = onReceiverPrewarmAck
+            self.onWarmPong = onWarmPong
             self.onPathLost = onPathLost
             activeMediaConnection = connection
             activeReceiveBuffer.removeAll(keepingCapacity: false)
@@ -808,6 +871,21 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         try await send(message: .audioChunk(payload), on: connection)
     }
 
+    func sendReceiverPrewarmRequest(_ payload: DirectQuicReceiverPrewarmPayload) async throws {
+        let connection = try activeControlConnection()
+        try await send(message: .receiverPrewarmRequest(payload), on: connection)
+    }
+
+    func sendReceiverPrewarmAck(_ payload: DirectQuicReceiverPrewarmPayload) async throws {
+        let connection = try activeControlConnection()
+        try await send(message: .receiverPrewarmAck(payload), on: connection)
+    }
+
+    func sendWarmPing(id: String) async throws {
+        let connection = try activeControlConnection()
+        try await send(message: .warmPing(id), on: connection)
+    }
+
     func preparedLocalCandidates(matching attemptId: String) -> [TurboDirectQuicCandidate] {
         withLockedState {
             guard let preparedOffer, preparedOffer.attemptId == attemptId else {
@@ -830,6 +908,9 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         let resources = withLockedState { () -> (NWListener?, NWConnection?, NWConnection?, Task<Void, Never>?) in
             suppressPathLostCallback = true
             onIncomingAudioPayload = nil
+            onReceiverPrewarmRequest = nil
+            onReceiverPrewarmAck = nil
+            onWarmPong = nil
             onPathLost = nil
             activeMediaConnection = nil
             activeReceiveBuffer.removeAll(keepingCapacity: false)
@@ -1376,6 +1457,16 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         }
     }
 
+    private func activeControlConnection() throws -> NWConnection {
+        let connection = withLockedState {
+            activeMediaConnection ?? outboundConnection ?? inboundConnection
+        }
+        guard let connection else {
+            throw DirectQuicProbeError.connectionFailed("direct QUIC control path is unavailable")
+        }
+        return connection
+    }
+
     private func receiveNextMessage(
         on connection: NWConnection,
         errorPrefix: String
@@ -1493,6 +1584,53 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
                                 guard self.outstandingConsentID == decodedMessage.payload else { return }
                                 self.outstandingConsentID = nil
                                 self.outstandingConsentSentAt = nil
+                            }
+                        case .receiverPrewarmRequest:
+                            do {
+                                let payload = try DirectQuicReceiverPrewarmPayloadCodec.decode(decodedMessage.payload)
+                                let onReceiverPrewarmRequest = self.withLockedState { self.onReceiverPrewarmRequest }
+                                Task {
+                                    await onReceiverPrewarmRequest?(payload)
+                                }
+                            } catch {
+                                Task {
+                                    await self.report(
+                                        "Direct QUIC receiver prewarm request decode failed",
+                                        metadata: ["error": error.localizedDescription]
+                                    )
+                                }
+                            }
+                        case .receiverPrewarmAck:
+                            do {
+                                let payload = try DirectQuicReceiverPrewarmPayloadCodec.decode(decodedMessage.payload)
+                                let onReceiverPrewarmAck = self.withLockedState { self.onReceiverPrewarmAck }
+                                Task {
+                                    await onReceiverPrewarmAck?(payload)
+                                }
+                            } catch {
+                                Task {
+                                    await self.report(
+                                        "Direct QUIC receiver prewarm ack decode failed",
+                                        metadata: ["error": error.localizedDescription]
+                                    )
+                                }
+                            }
+                        case .warmPing:
+                            let pingID = decodedMessage.payload
+                            Task {
+                                do {
+                                    try await self.send(message: .warmPong(pingID), on: connection)
+                                } catch {
+                                    await self.report(
+                                        "Direct QUIC warm pong failed",
+                                        metadata: ["error": error.localizedDescription]
+                                    )
+                                }
+                            }
+                        case .warmPong:
+                            let onWarmPong = self.withLockedState { self.onWarmPong }
+                            Task {
+                                await onWarmPong?(decodedMessage.payload)
                             }
                         }
                     }

@@ -780,6 +780,12 @@ extension PTTViewModel {
                         reason: "websocket-connected"
                     )
                 }
+                if let selectedContactId {
+                    await prewarmForegroundTalkPathIfNeeded(
+                        for: selectedContactId,
+                        reason: "websocket-connected"
+                    )
+                }
             }
         }
     }

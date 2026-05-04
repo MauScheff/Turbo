@@ -126,6 +126,59 @@ extension PTTViewModel {
         }
     }
 
+    func syncPTTTransmissionMode(reason: String) {
+        guard let channelUUID = pttCoordinator.state.systemChannelUUID else {
+            lastReportedPTTTransmissionMode = nil
+            lastReportedPTTTransmissionModeChannelUUID = nil
+            lastReportedPTTTransmissionModeReason = nil
+            return
+        }
+
+        let mode = PTTransmissionMode.fullDuplex
+        guard lastReportedPTTTransmissionMode != mode
+            || lastReportedPTTTransmissionModeChannelUUID != channelUUID else {
+            return
+        }
+
+        lastReportedPTTTransmissionMode = mode
+        lastReportedPTTTransmissionModeChannelUUID = channelUUID
+        lastReportedPTTTransmissionModeReason = reason
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await pttSystemClient.setTransmissionMode(mode, channelUUID: channelUUID)
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Updated PTT transmission mode",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "mode": String(describing: mode),
+                        "reason": reason,
+                        "applicationState": String(describing: UIApplication.shared.applicationState),
+                    ]
+                )
+            } catch {
+                if lastReportedPTTTransmissionModeChannelUUID == channelUUID {
+                    lastReportedPTTTransmissionMode = nil
+                    lastReportedPTTTransmissionModeChannelUUID = nil
+                    lastReportedPTTTransmissionModeReason = nil
+                }
+                diagnostics.record(
+                    .pushToTalk,
+                    level: .error,
+                    message: "Failed to update PTT transmission mode",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "mode": String(describing: mode),
+                        "reason": reason,
+                        "error": error.localizedDescription,
+                    ]
+                )
+            }
+        }
+    }
+
     func syncPTTAccessoryButtonEvents(reason: String) {
         guard let channelUUID = pttCoordinator.state.systemChannelUUID else {
             lastReportedPTTAccessoryButtonEventsChannelUUID = nil
@@ -168,6 +221,127 @@ extension PTTViewModel {
                     ]
                 )
             }
+        }
+    }
+
+    func setSystemActiveRemoteParticipant(
+        name: String?,
+        channelUUID: UUID,
+        contactID: UUID?,
+        reason: String
+    ) async throws {
+        let startedAt = Date()
+        if let contactID, name != nil {
+            recordWakeReceiveTiming(
+                stage: "active-remote-participant-requested",
+                contactID: contactID,
+                channelUUID: channelUUID,
+                subsystem: .pushToTalk,
+                metadata: [
+                    "participant": name ?? "none",
+                    "reason": reason,
+                ],
+                ifAbsent: true
+            )
+        }
+        diagnostics.record(
+            .pushToTalk,
+            message: name == nil
+                ? "Requesting active remote participant clear"
+                : "Requesting active remote participant set",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "contactId": contactID?.uuidString ?? "none",
+                "participant": name ?? "none",
+                "reason": reason,
+                "pttTransmissionMode": lastReportedPTTTransmissionMode.map(String.init(describing:)) ?? "none",
+                "pttTransmissionModeReason": lastReportedPTTTransmissionModeReason ?? "none",
+                "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
+                "applicationState": String(describing: UIApplication.shared.applicationState),
+            ]
+        )
+
+        do {
+            try await pttSystemClient.setActiveRemoteParticipant(name: name, channelUUID: channelUUID)
+            if let contactID, name != nil {
+                recordWakeReceiveTiming(
+                    stage: "active-remote-participant-completed",
+                    contactID: contactID,
+                    channelUUID: channelUUID,
+                    subsystem: .pushToTalk,
+                    metadata: [
+                        "participant": name ?? "none",
+                        "reason": reason,
+                        "durationMs": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                    ],
+                    ifAbsent: true
+                )
+            }
+            diagnostics.record(
+                .pushToTalk,
+                message: name == nil
+                    ? "Completed active remote participant clear"
+                    : "Completed active remote participant set",
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "contactId": contactID?.uuidString ?? "none",
+                    "participant": name ?? "none",
+                    "reason": reason,
+                    "durationMs": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                    "pttTransmissionMode": lastReportedPTTTransmissionMode.map(String.init(describing:)) ?? "none",
+                    "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
+                ]
+            )
+        } catch {
+            if name == nil && isExpectedPTTRemoteParticipantClearFailure(error) {
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Active remote participant clear found no active participant",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "contactId": contactID?.uuidString ?? "none",
+                        "participant": "none",
+                        "reason": reason,
+                        "durationMs": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                        "pttTransmissionMode": lastReportedPTTTransmissionMode.map(String.init(describing:)) ?? "none",
+                        "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
+                        "error": error.localizedDescription,
+                    ]
+                )
+                throw error
+            }
+            if let contactID, name != nil {
+                recordWakeReceiveTiming(
+                    stage: "active-remote-participant-failed",
+                    contactID: contactID,
+                    channelUUID: channelUUID,
+                    subsystem: .pushToTalk,
+                    metadata: [
+                        "participant": name ?? "none",
+                        "reason": reason,
+                        "durationMs": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                        "error": error.localizedDescription,
+                    ]
+                )
+            }
+            diagnostics.record(
+                .pushToTalk,
+                level: .error,
+                message: name == nil
+                    ? "Active remote participant clear failed"
+                    : "Active remote participant set failed",
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "contactId": contactID?.uuidString ?? "none",
+                    "participant": name ?? "none",
+                    "reason": reason,
+                    "durationMs": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                    "pttTransmissionMode": lastReportedPTTTransmissionMode.map(String.init(describing:)) ?? "none",
+                    "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
+                    "error": error.localizedDescription,
+                ]
+            )
+            throw error
         }
     }
 
@@ -547,6 +721,10 @@ extension PTTViewModel {
         }
 
         return false
+    }
+
+    func isExpectedPTTRemoteParticipantClearFailure(_ error: Error) -> Bool {
+        isExpectedPTTStopFailure(error)
     }
 
     func isRecoverablePTTChannelUnavailable(_ error: Error) -> Bool {

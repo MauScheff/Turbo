@@ -263,6 +263,7 @@ struct TransmitStartupTimingState {
     private(set) var channelUUID: UUID?
     private(set) var backendChannelID: String?
     private(set) var source: String?
+    private(set) var stageElapsedMillisecondsByName: [String: Int] = [:]
 
     mutating func start(
         contactID: UUID,
@@ -276,11 +277,29 @@ struct TransmitStartupTimingState {
         self.channelUUID = channelUUID
         self.backendChannelID = backendChannelID
         self.source = source
+        stageElapsedMillisecondsByName = [:]
     }
 
     func elapsedMilliseconds(at date: Date = Date()) -> Int? {
         guard let pressRequestedAt else { return nil }
         return Int(date.timeIntervalSince(pressRequestedAt) * 1000)
+    }
+
+    mutating func noteStage(_ stage: String, at date: Date = Date()) -> Int? {
+        guard let elapsed = elapsedMilliseconds(at: date) else { return nil }
+        stageElapsedMillisecondsByName[stage] = elapsed
+        return elapsed
+    }
+
+    mutating func noteStageIfAbsent(_ stage: String, at date: Date = Date()) -> Int? {
+        if let existing = stageElapsedMillisecondsByName[stage] {
+            return existing
+        }
+        return noteStage(stage, at: date)
+    }
+
+    func elapsedMilliseconds(for stage: String) -> Int? {
+        stageElapsedMillisecondsByName[stage]
     }
 
     mutating func reset() {
@@ -289,6 +308,7 @@ struct TransmitStartupTimingState {
         channelUUID = nil
         backendChannelID = nil
         source = nil
+        stageElapsedMillisecondsByName = [:]
     }
 }
 
@@ -589,6 +609,10 @@ final class MediaRuntimeState {
     var startupState: MediaSessionStartupState = .idle
     var pendingInteractivePrewarmAfterAudioDeactivationContactID: UUID?
     var interactivePrewarmRecoveryTask: Task<Void, Never>?
+    private var outboundReceiverPrewarmRequestIDByContactID: [UUID: String] = [:]
+    private var handledReceiverPrewarmRequestIDs: Set<String> = []
+    private(set) var receiverPrewarmAckRequestIDByContactID: [UUID: String] = [:]
+    private(set) var directQuicWarmPongIDByContactID: [UUID: String] = [:]
 
     var hasSession: Bool {
         session != nil
@@ -688,6 +712,10 @@ final class MediaRuntimeState {
             transportPathState = .relay
             directQuicUpgrade.reset()
         }
+        outboundReceiverPrewarmRequestIDByContactID = [:]
+        handledReceiverPrewarmRequestIDs = []
+        receiverPrewarmAckRequestIDByContactID = [:]
+        directQuicWarmPongIDByContactID = [:]
         sendAudioChunk = nil
         startupState = .idle
     }
@@ -724,6 +752,33 @@ final class MediaRuntimeState {
         directQuicProbeController?.cancel(reason: "replaced")
         directQuicProbeController = controller
     }
+
+    func receiverPrewarmRequestID(for contactID: UUID) -> String {
+        if let existing = outboundReceiverPrewarmRequestIDByContactID[contactID] {
+            return existing
+        }
+        let requestID = UUID().uuidString.lowercased()
+        outboundReceiverPrewarmRequestIDByContactID[contactID] = requestID
+        return requestID
+    }
+
+    func markReceiverPrewarmRequestHandled(_ requestID: String) -> Bool {
+        handledReceiverPrewarmRequestIDs.insert(requestID).inserted
+    }
+
+    func markReceiverPrewarmAckReceived(contactID: UUID, requestID: String) {
+        receiverPrewarmAckRequestIDByContactID[contactID] = requestID
+    }
+
+    func markDirectQuicWarmPongReceived(contactID: UUID, pingID: String?) {
+        directQuicWarmPongIDByContactID[contactID] = pingID ?? ""
+    }
+
+    func clearReceiverPrewarmState(for contactID: UUID) {
+        outboundReceiverPrewarmRequestIDByContactID[contactID] = nil
+        receiverPrewarmAckRequestIDByContactID[contactID] = nil
+        directQuicWarmPongIDByContactID[contactID] = nil
+    }
 }
 
 enum MediaTransportPathState: String, Equatable {
@@ -752,6 +807,16 @@ enum MediaTransportPathState: String, Equatable {
         case .promoting, .recovering:
             return false
         }
+    }
+}
+
+struct FirstTalkReadinessProjection: Equatable {
+    let localMediaWarm: Bool
+    let receiverWarm: Bool
+    let transportWarm: Bool
+
+    var isReady: Bool {
+        localMediaWarm && receiverWarm && transportWarm
     }
 }
 

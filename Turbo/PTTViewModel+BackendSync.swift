@@ -8,6 +8,12 @@
 import Foundation
 import UIKit
 
+private enum PendingPlaybackDrainDecision {
+    case notPending
+    case deferTimeout(elapsedNanoseconds: UInt64)
+    case exceeded(elapsedNanoseconds: UInt64)
+}
+
 extension PTTViewModel {
     private func remoteAudioTimeoutNanoseconds(for phase: RemoteReceiveTimeoutPhase) -> UInt64 {
         switch phase {
@@ -51,17 +57,37 @@ extension PTTViewModel {
         let resolvedPhase = phase
             ?? receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.timeoutPhase
             ?? .drainingAudio
-        if shouldDeferRemoteAudioSilenceTimeoutForPendingPlayback(for: contactID, phase: resolvedPhase) {
+        switch pendingPlaybackDrainDecision(for: contactID, phase: resolvedPhase) {
+        case .deferTimeout(let elapsedNanoseconds):
             diagnostics.record(
                 .media,
                 message: "Deferred remote audio silence timeout while playback is still draining",
                 metadata: [
                     "contactId": contactID.uuidString,
                     "phase": resolvedPhase.rawValue,
+                    "elapsedMilliseconds": String(elapsedNanoseconds / 1_000_000),
+                    "maxMilliseconds": String(remoteAudioPendingPlaybackDrainMaxNanoseconds / 1_000_000),
                 ]
             )
             runReceiveExecutionEffect(.scheduleRemoteSilenceTimeout(contactID: contactID, phase: resolvedPhase))
             return
+        case .exceeded(let elapsedNanoseconds):
+            diagnostics.recordInvariantViolation(
+                invariantID: "selected.receiving_stale_pending_playback_drain",
+                scope: .local,
+                message: "selectedPeerPhase=receiving while pending playback drain exceeded maximum duration",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "phase": resolvedPhase.rawValue,
+                    "elapsedMilliseconds": String(elapsedNanoseconds / 1_000_000),
+                    "maxMilliseconds": String(remoteAudioPendingPlaybackDrainMaxNanoseconds / 1_000_000),
+                    "backendChannelStatus": selectedChannelSnapshot(for: contactID)?.status?.rawValue ?? "none",
+                    "backendReadiness": selectedChannelSnapshot(for: contactID)?.readinessStatus?.kind ?? "none",
+                    "selectedPeerPhase": String(describing: selectedPeerState(for: contactID).phase),
+                ]
+            )
+        case .notPending:
+            break
         }
         if shouldDeferRemoteAudioSilenceTimeout(for: contactID, phase: resolvedPhase) {
             diagnostics.record(
@@ -78,6 +104,7 @@ extension PTTViewModel {
             return
         }
         receiveExecutionRuntime.replaceRemoteAudioSilenceTask(for: contactID, with: nil)
+        receiveExecutionRuntime.clearPendingPlaybackDrainDeferral(for: contactID)
         receiveExecutionCoordinator.send(.silenceTimeoutElapsed(contactID: contactID))
         diagnostics.record(
             .media,
@@ -119,13 +146,27 @@ extension PTTViewModel {
         }
     }
 
-    private func shouldDeferRemoteAudioSilenceTimeoutForPendingPlayback(
+    private func pendingPlaybackDrainDecision(
         for contactID: UUID,
         phase: RemoteReceiveTimeoutPhase
-    ) -> Bool {
-        guard phase == .drainingAudio else { return false }
-        guard mediaSessionContactID == contactID else { return false }
-        return mediaServices.session()?.hasPendingPlayback() == true
+    ) -> PendingPlaybackDrainDecision {
+        guard phase == .drainingAudio else { return .notPending }
+        guard mediaSessionContactID == contactID else {
+            receiveExecutionRuntime.clearPendingPlaybackDrainDeferral(for: contactID)
+            return .notPending
+        }
+        guard mediaServices.session()?.hasPendingPlayback() == true else {
+            receiveExecutionRuntime.clearPendingPlaybackDrainDeferral(for: contactID)
+            return .notPending
+        }
+
+        let elapsedNanoseconds = receiveExecutionRuntime
+            .pendingPlaybackDrainDeferralElapsedNanoseconds(for: contactID)
+        guard elapsedNanoseconds < remoteAudioPendingPlaybackDrainMaxNanoseconds else {
+            receiveExecutionRuntime.clearPendingPlaybackDrainDeferral(for: contactID)
+            return .exceeded(elapsedNanoseconds: elapsedNanoseconds)
+        }
+        return .deferTimeout(elapsedNanoseconds: elapsedNanoseconds)
     }
 
     private func shouldDeferRemoteAudioSilenceTimeout(
@@ -451,9 +492,16 @@ extension PTTViewModel {
         for contactID: UUID,
         channelId: String,
         senderUserId: String,
-        senderDeviceId: String
+        senderDeviceId: String,
+        scheduleFallback: Bool = true
     ) {
-        guard !pttWakeRuntime.hasPendingWake(for: contactID) else { return }
+        let alreadyPending = pttWakeRuntime.hasPendingWake(for: contactID)
+        if alreadyPending {
+            if scheduleFallback {
+                scheduleWakePlaybackFallback(for: contactID)
+            }
+            return
+        }
         guard let channelUUID = channelUUID(for: contactID) else { return }
         let speakerName =
             contacts.first(where: { $0.id == contactID })?.name
@@ -472,6 +520,17 @@ extension PTTViewModel {
                 )
             )
         )
+        recordWakeReceiveTiming(
+            stage: "provisional-wake-candidate-created",
+            contactID: contactID,
+            channelUUID: channelUUID,
+            channelID: channelId,
+            subsystem: .pushToTalk,
+            metadata: [
+                "senderDeviceId": senderDeviceId,
+                "senderUserId": senderUserId,
+            ]
+        )
         diagnostics.record(
             .pushToTalk,
             message: "Created provisional wake candidate from signal path",
@@ -481,7 +540,9 @@ extension PTTViewModel {
                 "channelId": channelId,
             ]
         )
-        scheduleWakePlaybackFallback(for: contactID)
+        if scheduleFallback {
+            scheduleWakePlaybackFallback(for: contactID)
+        }
     }
 
     func clearRemoteAudioActivity(for contactID: UUID) {
@@ -632,6 +693,73 @@ extension PTTViewModel {
 
         if shouldClearRemoteParticipant {
             await updateSystemRemoteParticipant(for: contactID, isActive: false)
+        }
+    }
+
+    func prepareReceiverForBackendPeerTransmitFromChannelRefreshIfNeeded(
+        contactID: UUID,
+        effectiveChannelState: TurboChannelStateResponse,
+        effectiveChannelReadiness: TurboChannelReadinessResponse?
+    ) async {
+        let backendShowsPeerTransmit =
+            effectiveChannelState.conversationStatus == .receiving
+            || effectiveChannelReadiness?.statusView.isPeerTransmitting == true
+        guard backendShowsPeerTransmit else { return }
+        guard !remoteTransmittingContactIDs.contains(contactID) else { return }
+        guard shouldTreatIncomingSignalAsWakeCandidate(for: contactID) else { return }
+
+        let senderUserId =
+            effectiveChannelState.activeTransmitterUserId
+            ?? effectiveChannelReadiness?.activeTransmitterUserId
+            ?? contacts.first(where: { $0.id == contactID })?.remoteUserId
+            ?? effectiveChannelState.peerUserId
+        let senderDeviceId: String = {
+            if case .wakeCapable(let targetDeviceId) = effectiveChannelReadiness?.remoteWakeCapability {
+                return targetDeviceId
+            }
+            return "backend-channel-refresh"
+        }()
+
+        ensurePendingWakeCandidate(
+            for: contactID,
+            channelId: effectiveChannelState.channelId,
+            senderUserId: senderUserId,
+            senderDeviceId: senderDeviceId,
+            scheduleFallback: false
+        )
+        recordWakeReceiveTiming(
+            stage: "backend-peer-transmit-refresh-observed",
+            contactID: contactID,
+            channelID: effectiveChannelState.channelId,
+            subsystem: .backend,
+            metadata: [
+                "senderUserId": senderUserId,
+                "senderDeviceId": senderDeviceId,
+                "channelStatus": effectiveChannelState.statusKind,
+                "readinessStatus": effectiveChannelReadiness?.statusKind ?? "none",
+            ],
+            ifAbsent: true
+        )
+        diagnostics.record(
+            .backend,
+            message: "Preparing receiver from backend peer-transmitting refresh",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": effectiveChannelState.channelId,
+                "senderUserId": senderUserId,
+                "senderDeviceId": senderDeviceId,
+            ]
+        )
+
+        if shouldSetSystemRemoteParticipantFromSignalPath(
+            for: contactID,
+            applicationState: currentApplicationState()
+        ) {
+            await updateSystemRemoteParticipant(
+                for: contactID,
+                isActive: true,
+                reason: "backend-refresh-remote-active"
+            )
         }
     }
 
@@ -1084,6 +1212,16 @@ extension PTTViewModel {
                 senderDeviceId: fromDeviceID
             )
         }
+        recordWakeReceiveTiming(
+            stage: "signal-audio-received",
+            contactID: contactID,
+            channelID: channelID,
+            metadata: [
+                "fromDeviceId": fromDeviceID,
+                "fromUserId": fromUserID,
+            ],
+            ifAbsent: true
+        )
         markRemoteAudioActivity(for: contactID, source: .audioChunk)
         if selectedContactId == nil {
             selectedContactId = contactID
@@ -1093,6 +1231,17 @@ extension PTTViewModel {
         }
         if pttWakeRuntime.shouldBufferAudioChunk(for: contactID) {
             pttWakeRuntime.bufferAudioChunk(payload, for: contactID)
+            recordWakeReceiveTiming(
+                stage: "first-audio-buffered",
+                contactID: contactID,
+                channelID: channelID,
+                ifAbsent: true
+            )
+            recordWakeReceiveTiming(
+                stage: "latest-audio-buffered",
+                contactID: contactID,
+                channelID: channelID
+            )
             diagnostics.record(
                 .media,
                 message: "Buffered wake audio chunk until PTT activation",
@@ -1132,6 +1281,52 @@ extension PTTViewModel {
         }
 
         switch envelope.type {
+        case .transmitStart where envelope.payload == "ptt-prepare":
+            pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
+            if shouldTreatIncomingSignalAsWakeCandidate(for: contactID) {
+                ensurePendingWakeCandidate(
+                    for: contactID,
+                    channelId: envelope.channelId,
+                    senderUserId: envelope.fromUserId,
+                    senderDeviceId: envelope.fromDeviceId,
+                    scheduleFallback: false
+                )
+            }
+            recordWakeReceiveTiming(
+                stage: "backend-peer-transmit-prepare-observed",
+                contactID: contactID,
+                channelID: envelope.channelId,
+                subsystem: .websocket,
+                metadata: [
+                    "fromDeviceId": envelope.fromDeviceId,
+                    "fromUserId": envelope.fromUserId,
+                    "payloadLength": String(envelope.payload.count),
+                ],
+                ifAbsent: true
+            )
+            diagnostics.record(
+                .websocket,
+                message: "Receiver transmit prepare signal received",
+                metadata: ["type": envelope.type.rawValue, "channelId": envelope.channelId]
+            )
+            if selectedContactId == contactID {
+                updateStatusForSelectedContact()
+                captureDiagnosticsState("backend-signal:transmit-prepare")
+            }
+            Task {
+                if shouldSetSystemRemoteParticipantFromSignalPath(
+                    for: contactID,
+                    applicationState: currentApplicationState()
+                ) {
+                    await updateSystemRemoteParticipant(
+                        for: contactID,
+                        isActive: true,
+                        reason: "backend-sync-remote-prepare"
+                    )
+                }
+                await refreshContactSummaries()
+                await refreshChannelState(for: contactID)
+            }
         case .transmitStart, .transmitStop:
             let shouldDeferReceiveTeardown = envelope.type == .transmitStop
                 && shouldDeferReceiveTeardownUntilRemoteAudioDrain(for: contactID)
@@ -1146,6 +1341,18 @@ extension PTTViewModel {
                         senderDeviceId: envelope.fromDeviceId
                     )
                 }
+                recordWakeReceiveTiming(
+                    stage: "backend-peer-transmitting-observed",
+                    contactID: contactID,
+                    channelID: envelope.channelId,
+                    subsystem: .websocket,
+                    metadata: [
+                        "fromDeviceId": envelope.fromDeviceId,
+                        "fromUserId": envelope.fromUserId,
+                        "payloadLength": String(envelope.payload.count),
+                    ],
+                    ifAbsent: true
+                )
             } else {
                 pttWakeRuntime.suppressProvisionalWakeCandidate(for: contactID)
                 if let activationState = pttWakeRuntime.incomingWakeActivationState(for: contactID),
@@ -1306,14 +1513,25 @@ extension PTTViewModel {
         }
     }
 
-    func updateSystemRemoteParticipant(for contactID: UUID, isActive: Bool) async {
+    func updateSystemRemoteParticipant(
+        for contactID: UUID,
+        isActive: Bool,
+        reason: String? = nil
+    ) async {
         guard let channelUUID = channelUUID(for: contactID) else { return }
         let participantName = isActive
             ? contacts.first(where: { $0.id == contactID })?.name
                 ?? contacts.first(where: { $0.id == contactID })?.handle
             : nil
+        let resolvedReason =
+            reason ?? (isActive ? "backend-sync-remote-active" : "backend-sync-remote-inactive")
         do {
-            try await pttSystemClient.setActiveRemoteParticipant(name: participantName, channelUUID: channelUUID)
+            try await setSystemActiveRemoteParticipant(
+                name: participantName,
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: resolvedReason
+            )
             diagnostics.record(
                 .pushToTalk,
                 message: isActive ? "Set active remote participant" : "Cleared active remote participant",
@@ -1506,6 +1724,11 @@ extension PTTViewModel {
                     .channelReadinessUpdated(contactID: contactID, readiness: effectiveChannelReadiness)
                 )
             }
+            await prepareReceiverForBackendPeerTransmitFromChannelRefreshIfNeeded(
+                contactID: contactID,
+                effectiveChannelState: effectiveChannelState,
+                effectiveChannelReadiness: effectiveChannelReadiness
+            )
             updateContact(contactID) { contact in
                 contact.isOnline = effectiveChannelState.peerOnline
                 contact.remoteUserId = effectiveChannelState.peerUserId

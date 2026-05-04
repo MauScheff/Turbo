@@ -486,9 +486,105 @@ enum WakeExecutionReducer {
     }
 }
 
+struct WakeReceiveTimingState {
+    private(set) var contactID: UUID?
+    private(set) var channelUUID: UUID?
+    private(set) var channelID: String?
+    private(set) var source: String?
+    private var startedAt: Date?
+    private(set) var stageElapsedMillisecondsByName: [String: Int] = [:]
+
+    var isActive: Bool {
+        startedAt != nil
+    }
+
+    mutating func start(
+        contactID: UUID,
+        channelUUID: UUID,
+        channelID: String?,
+        source: String,
+        at date: Date = Date()
+    ) {
+        self.contactID = contactID
+        self.channelUUID = channelUUID
+        self.channelID = channelID
+        self.source = source
+        startedAt = date
+        stageElapsedMillisecondsByName = [:]
+        _ = noteStage("wake-started", at: date)
+    }
+
+    mutating func startIfNeeded(
+        contactID: UUID,
+        channelUUID: UUID,
+        channelID: String?,
+        source: String,
+        at date: Date = Date()
+    ) {
+        guard isActive,
+              self.contactID == contactID,
+              self.channelUUID == channelUUID else {
+            start(
+                contactID: contactID,
+                channelUUID: channelUUID,
+                channelID: channelID,
+                source: source,
+                at: date
+            )
+            return
+        }
+        updateContext(
+            channelID: channelID,
+            source: self.source ?? source
+        )
+    }
+
+    mutating func updateContext(channelID: String?, source: String? = nil) {
+        if let channelID {
+            self.channelID = channelID
+        }
+        if let source {
+            self.source = source
+        }
+    }
+
+    mutating func noteStage(_ stage: String, at date: Date = Date()) -> Int? {
+        guard let startedAt else { return nil }
+        let elapsedMilliseconds = max(0, Int(date.timeIntervalSince(startedAt) * 1000))
+        stageElapsedMillisecondsByName[stage] = elapsedMilliseconds
+        return elapsedMilliseconds
+    }
+
+    mutating func noteStageIfAbsent(_ stage: String, at date: Date = Date()) -> Int? {
+        guard stageElapsedMillisecondsByName[stage] == nil else {
+            return stageElapsedMillisecondsByName[stage]
+        }
+        return noteStage(stage, at: date)
+    }
+
+    func elapsedMilliseconds(for stage: String) -> Int? {
+        stageElapsedMillisecondsByName[stage]
+    }
+
+    func elapsedMilliseconds(at date: Date = Date()) -> Int? {
+        guard let startedAt else { return nil }
+        return max(0, Int(date.timeIntervalSince(startedAt) * 1000))
+    }
+
+    mutating func reset() {
+        contactID = nil
+        channelUUID = nil
+        channelID = nil
+        source = nil
+        startedAt = nil
+        stageElapsedMillisecondsByName = [:]
+    }
+}
+
 final class PTTWakeRuntimeState {
     private let maximumBufferedAudioChunks = 12
     private(set) var state = WakeExecutionSessionState()
+    private(set) var timing = WakeReceiveTimingState()
     private var playbackFallbackTasks: [UUID: Task<Void, Never>] = [:]
 
     var wakeReceiveState: WakeReceiveState {
@@ -520,26 +616,48 @@ final class PTTWakeRuntimeState {
 
     func store(_ push: PendingIncomingPTTPush) {
         apply(.store(push))
+        timing.startIfNeeded(
+            contactID: push.contactID,
+            channelUUID: push.channelUUID,
+            channelID: push.payload.channelId,
+            source: push.hasConfirmedIncomingPush ? "incoming-push" : "provisional-signal"
+        )
     }
 
     func confirmIncomingPush(for channelUUID: UUID, payload: TurboPTTPushPayload) {
         apply(.confirmIncomingPush(channelUUID: channelUUID, payload: payload))
+        if timing.channelUUID == channelUUID {
+            timing.updateContext(channelID: payload.channelId)
+            _ = timing.noteStage("incoming-push-confirmed")
+        }
     }
 
     func markAudioSessionActivated(for channelUUID: UUID) {
         apply(.markAudioSessionActivated(channelUUID: channelUUID))
+        if timing.channelUUID == channelUUID {
+            _ = timing.noteStage("system-audio-activation-observed")
+        }
     }
 
     func markAppManagedFallbackStarted(for contactID: UUID) {
         apply(.markAppManagedFallbackStarted(contactID: contactID))
+        if timing.contactID == contactID {
+            _ = timing.noteStage("app-managed-fallback-started")
+        }
     }
 
     func markFallbackDeferredUntilForeground(for contactID: UUID) {
         apply(.markFallbackDeferredUntilForeground(contactID: contactID))
+        if timing.contactID == contactID {
+            _ = timing.noteStage("fallback-deferred-until-foreground")
+        }
     }
 
     func markSystemActivationInterruptedByTransmitEnd(for contactID: UUID) {
         apply(.markSystemActivationInterruptedByTransmitEnd(contactID: contactID))
+        if timing.contactID == contactID {
+            _ = timing.noteStage("system-activation-interrupted-by-transmit-end")
+        }
     }
 
     func shouldBufferAudioChunk(for contactID: UUID) -> Bool {
@@ -580,12 +698,48 @@ final class PTTWakeRuntimeState {
 
     func bufferAudioChunk(_ payload: String, for contactID: UUID) {
         apply(.bufferAudioChunk(contactID: contactID, payload: payload))
+        if timing.contactID == contactID {
+            _ = timing.noteStageIfAbsent("first-audio-buffered")
+            _ = timing.noteStage("latest-audio-buffered")
+        }
     }
 
     func takeBufferedAudioChunks(for contactID: UUID) -> [String] {
         let bufferedAudioChunks = state.bufferedAudioChunks(for: contactID)
         apply(.clearBufferedAudioChunks(contactID: contactID))
         return bufferedAudioChunks
+    }
+
+    func noteTimingStage(
+        _ stage: String,
+        for contactID: UUID,
+        ifAbsent: Bool = false
+    ) {
+        guard timing.contactID == contactID else { return }
+        if ifAbsent {
+            _ = timing.noteStageIfAbsent(stage)
+        } else {
+            _ = timing.noteStage(stage)
+        }
+    }
+
+    func beginTiming(
+        contactID: UUID,
+        channelUUID: UUID,
+        channelID: String?,
+        source: String
+    ) {
+        timing.startIfNeeded(
+            contactID: contactID,
+            channelUUID: channelUUID,
+            channelID: channelID,
+            source: source
+        )
+    }
+
+    func resetTiming(for contactID: UUID) {
+        guard timing.contactID == contactID else { return }
+        timing.reset()
     }
 
     func bufferedAudioChunkCount(for contactID: UUID) -> Int {
@@ -611,10 +765,12 @@ final class PTTWakeRuntimeState {
 
     func clear(for contactID: UUID) {
         apply(.clear(contactID: contactID))
+        resetTiming(for: contactID)
     }
 
     func clearAll(clearSuppression: Bool = true) {
         apply(.clearAll(clearSuppression: clearSuppression))
+        timing.reset()
     }
 
     func incomingWakeActivationState(for contactID: UUID) -> IncomingWakeActivationState? {

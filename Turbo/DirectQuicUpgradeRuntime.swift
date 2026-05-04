@@ -161,10 +161,12 @@ enum DirectQuicUpgradeTransition: Equatable {
 final class DirectQuicUpgradeRuntimeState {
     private(set) var attemptByContactID: [UUID: DirectQuicUpgradeAttempt] = [:]
     private var retryBackoffStateByContactID: [UUID: DirectQuicRetryBackoffState] = [:]
+    private var fastConnectivityRetryCountByContactID: [UUID: Int] = [:]
 
     func reset() {
         attemptByContactID = [:]
         retryBackoffStateByContactID = [:]
+        fastConnectivityRetryCountByContactID = [:]
     }
 
     func attempt(for contactID: UUID) -> DirectQuicUpgradeAttempt? {
@@ -216,6 +218,22 @@ final class DirectQuicUpgradeRuntimeState {
             category: request.category,
             attemptId: request.attemptId
         )
+    }
+
+    func consumeFastConnectivityRetry(
+        for contactID: UUID,
+        maxAttempts: Int
+    ) -> Int? {
+        guard maxAttempts > 0 else { return nil }
+        let consumed = fastConnectivityRetryCountByContactID[contactID] ?? 0
+        guard consumed < maxAttempts else { return nil }
+        let next = consumed + 1
+        fastConnectivityRetryCountByContactID[contactID] = next
+        return next
+    }
+
+    func fastConnectivityRetryCount(for contactID: UUID) -> Int {
+        fastConnectivityRetryCountByContactID[contactID] ?? 0
     }
 
     func clearRetryBackoff(for contactID: UUID) {
@@ -343,6 +361,7 @@ final class DirectQuicUpgradeRuntimeState {
         attempt.nominatedPath = nominatedPath
         attempt.lastUpdatedAt = now
         attemptByContactID[contactID] = attempt
+        fastConnectivityRetryCountByContactID.removeValue(forKey: contactID)
         return .directActivated(attempt)
     }
 

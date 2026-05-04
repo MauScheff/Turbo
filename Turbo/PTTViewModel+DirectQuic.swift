@@ -1,8 +1,12 @@
 import Foundation
+import UIKit
 
 extension PTTViewModel {
     private var defaultDirectQuicPromotionTimeoutMilliseconds: Int { 2_500 }
     private var defaultDirectQuicRetryBackoffMilliseconds: Int { 15_000 }
+    private var foregroundDirectQuicPathLostRetryBackoffMilliseconds: Int { 1_000 }
+    private var foregroundDirectQuicInitialConnectivityRetryBackoffMilliseconds: Int { 1_000 }
+    private var foregroundDirectQuicInitialConnectivityRetryLimit: Int { 2 }
 
     func directQuicAttemptRole(
         localDeviceID: String,
@@ -95,19 +99,83 @@ extension PTTViewModel {
 
     func directQuicRetryBackoffRequest(
         reason: String,
-        attemptID: String? = nil
+        attemptID: String? = nil,
+        preferredMilliseconds: Int? = nil
     ) -> DirectQuicRetryBackoffRequest? {
         let baseMilliseconds = directQuicRetryBackoffMilliseconds()
         let resolvedMilliseconds = DirectQuicRetryBackoffPolicy.milliseconds(
             baseMilliseconds: baseMilliseconds,
             reason: reason
         )
-        guard resolvedMilliseconds > 0 else { return nil }
+        let milliseconds = preferredMilliseconds.map { min(max($0, 0), resolvedMilliseconds) }
+            ?? resolvedMilliseconds
+        guard milliseconds > 0 else { return nil }
         return DirectQuicRetryBackoffRequest(
-            milliseconds: resolvedMilliseconds,
+            milliseconds: milliseconds,
             reason: reason,
             category: DirectQuicRetryBackoffPolicy.category(for: reason),
             attemptId: attemptID
+        )
+    }
+
+    func directQuicPathLostRetryBackoffRequest(
+        for contactID: UUID,
+        reason: String,
+        attemptID: String
+    ) -> DirectQuicRetryBackoffRequest? {
+        let isActiveTransmitPath = transmitProjection.activeTarget?.contactID == contactID
+        let isForegroundSelectedPath =
+            currentApplicationState() == .active
+            && selectedContactId == contactID
+        let preferredMilliseconds =
+            (isActiveTransmitPath || isForegroundSelectedPath)
+            ? foregroundDirectQuicPathLostRetryBackoffMilliseconds
+            : nil
+        return directQuicRetryBackoffRequest(
+            reason: reason,
+            attemptID: attemptID,
+            preferredMilliseconds: preferredMilliseconds
+        )
+    }
+
+    func directQuicPromotionRetryBackoffRequest(
+        for contactID: UUID,
+        reason: String,
+        attemptID: String?
+    ) -> DirectQuicRetryBackoffRequest? {
+        let isForegroundSelectedPath =
+            currentApplicationState() == .active
+            && selectedContactId == contactID
+        let isConnectivityFailure =
+            DirectQuicRetryBackoffPolicy.category(for: reason) == .connectivity
+        let fastRetryNumber =
+            (isForegroundSelectedPath && isConnectivityFailure)
+            ? mediaRuntime.directQuicUpgrade.consumeFastConnectivityRetry(
+                for: contactID,
+                maxAttempts: foregroundDirectQuicInitialConnectivityRetryLimit
+            )
+            : nil
+        let preferredMilliseconds = fastRetryNumber == nil
+            ? nil
+            : foregroundDirectQuicInitialConnectivityRetryBackoffMilliseconds
+        if let fastRetryNumber {
+            diagnostics.record(
+                .media,
+                message: "Using fast direct QUIC promotion retry",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "attemptId": attemptID ?? "",
+                    "fastRetryNumber": String(fastRetryNumber),
+                    "fastRetryLimit": String(foregroundDirectQuicInitialConnectivityRetryLimit),
+                    "retryBackoffMs": String(foregroundDirectQuicInitialConnectivityRetryBackoffMilliseconds),
+                ]
+            )
+        }
+        return directQuicRetryBackoffRequest(
+            reason: reason,
+            attemptID: attemptID,
+            preferredMilliseconds: preferredMilliseconds
         )
     }
 
@@ -142,7 +210,7 @@ extension PTTViewModel {
            !shouldAllowDirectQuicDebugBypassForAutomaticProbe() {
             return "backend-capability-disabled"
         }
-        guard backendServices != nil else {
+        guard let backend = backendServices else {
             return "backend-unavailable"
         }
         guard selectedContactId == contactID else {
@@ -161,8 +229,14 @@ extension PTTViewModel {
         guard mediaRuntime.directQuicUpgrade.retryBackoffState(for: contactID) == nil else {
             return "retry-backoff"
         }
-        guard directQuicPeerDeviceID(for: contactID) != nil else {
+        guard let peerDeviceID = directQuicPeerDeviceID(for: contactID) else {
             return "peer-device-missing"
+        }
+        guard directQuicAttemptRole(
+            localDeviceID: backend.deviceID,
+            peerDeviceID: peerDeviceID
+        ) == .listenerOfferer else {
+            return "not-listener-offerer"
         }
         guard systemSessionMatches(contactID),
               isJoined,
@@ -551,7 +625,8 @@ extension PTTViewModel {
         }
 
         let retryBackoff = applyRetryBackoff
-            ? directQuicRetryBackoffRequest(
+            ? directQuicPromotionRetryBackoffRequest(
+                for: contactID,
                 reason: reason,
                 attemptID: attempt.attemptId
             )
@@ -596,6 +671,36 @@ extension PTTViewModel {
                         guard let self else { return }
                         await self.handleIncomingDirectQuicAudioPayload(
                             payload,
+                            contactID: contactID,
+                            attemptID: attemptID
+                        )
+                    }
+                },
+                onReceiverPrewarmRequest: { [weak self] payload in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        await self.handleIncomingDirectQuicReceiverPrewarmRequest(
+                            payload,
+                            contactID: contactID,
+                            attemptID: attemptID
+                        )
+                    }
+                },
+                onReceiverPrewarmAck: { [weak self] payload in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.handleDirectQuicReceiverPrewarmAck(
+                            payload,
+                            contactID: contactID,
+                            attemptID: attemptID
+                        )
+                    }
+                },
+                onWarmPong: { [weak self] pingID in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.handleDirectQuicWarmPong(
+                            pingID,
                             contactID: contactID,
                             attemptID: attemptID
                         )
@@ -661,6 +766,226 @@ extension PTTViewModel {
            activeTarget.contactID == contactID {
             configureOutgoingAudioRoute(target: activeTarget)
         }
+        await requestReceiverPrewarmForFirstTalk(
+            for: contactID,
+            reason: "direct-quic-activated"
+        )
+    }
+
+    func requestReceiverPrewarmForFirstTalk(
+        for contactID: UUID,
+        reason: String
+    ) async {
+        if shouldUseDirectQuicTransport(for: contactID),
+           await sendDirectQuicReceiverPrewarmRequest(for: contactID, reason: reason) {
+            await sendDirectQuicWarmPingIfPossible(for: contactID, reason: reason)
+            return
+        }
+
+        await syncLocalReceiverAudioReadinessSignal(
+            for: contactID,
+            reason: "receiver-prewarm-request"
+        )
+    }
+
+    @discardableResult
+    func sendDirectQuicReceiverPrewarmRequest(
+        for contactID: UUID,
+        reason: String
+    ) async -> Bool {
+        guard let backend = backendServices,
+              let contact = contacts.first(where: { $0.id == contactID }),
+              let channelID = contact.backendChannelId,
+              let attempt = directQuicAttempt(for: contactID),
+              attempt.isDirectActive,
+              let controller = mediaRuntime.directQuicProbeController else {
+            return false
+        }
+
+        let requestID = mediaRuntime.receiverPrewarmRequestID(for: contactID)
+        let payload = DirectQuicReceiverPrewarmPayload(
+            requestId: requestID,
+            channelId: channelID,
+            fromDeviceId: backend.deviceID,
+            reason: reason,
+            directQuicAttemptId: attempt.attemptId
+        )
+
+        do {
+            try await controller.sendReceiverPrewarmRequest(payload)
+            diagnostics.record(
+                .media,
+                message: "Direct QUIC receiver prewarm request sent",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "attemptId": attempt.attemptId,
+                    "requestId": requestID,
+                    "reason": reason,
+                ]
+            )
+            return true
+        } catch {
+            diagnostics.record(
+                .media,
+                message: "Direct QUIC receiver prewarm request failed; using relay readiness fallback",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "attemptId": attempt.attemptId,
+                    "requestId": requestID,
+                    "error": error.localizedDescription,
+                ]
+            )
+            return false
+        }
+    }
+
+    func handleIncomingDirectQuicReceiverPrewarmRequest(
+        _ payload: DirectQuicReceiverPrewarmPayload,
+        contactID: UUID,
+        attemptID: String
+    ) async {
+        let isFirstDelivery = mediaRuntime.markReceiverPrewarmRequestHandled(payload.requestId)
+        diagnostics.record(
+            .media,
+            message: isFirstDelivery
+                ? "Direct QUIC receiver prewarm request received"
+                : "Direct QUIC receiver prewarm request replayed",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": payload.channelId,
+                "attemptId": attemptID,
+                "requestId": payload.requestId,
+                "reason": payload.reason,
+            ]
+        )
+
+        if isFirstDelivery {
+            await prewarmLocalMediaIfNeeded(for: contactID)
+            await syncLocalReceiverAudioReadinessSignal(
+                for: contactID,
+                reason: "direct-quic-receiver-prewarm"
+            )
+        }
+
+        guard let controller = mediaRuntime.directQuicProbeController else { return }
+        do {
+            try await controller.sendReceiverPrewarmAck(payload)
+            diagnostics.record(
+                .media,
+                message: "Direct QUIC receiver prewarm ack sent",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": payload.channelId,
+                    "attemptId": attemptID,
+                    "requestId": payload.requestId,
+                ]
+            )
+        } catch {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Direct QUIC receiver prewarm ack failed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": payload.channelId,
+                    "attemptId": attemptID,
+                    "requestId": payload.requestId,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
+    }
+
+    func handleDirectQuicReceiverPrewarmAck(
+        _ payload: DirectQuicReceiverPrewarmPayload,
+        contactID: UUID,
+        attemptID: String
+    ) {
+        mediaRuntime.markReceiverPrewarmAckReceived(
+            contactID: contactID,
+            requestID: payload.requestId
+        )
+        if let existing = channelReadinessByContactID[contactID] {
+            backendSyncCoordinator.send(
+                .channelReadinessUpdated(
+                    contactID: contactID,
+                    readiness: existing.settingRemoteAudioReadiness(.ready)
+                )
+            )
+        }
+        diagnostics.record(
+            .media,
+            message: "Direct QUIC receiver prewarm ack received",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": payload.channelId,
+                "attemptId": attemptID,
+                "requestId": payload.requestId,
+            ]
+        )
+        updateStatusForSelectedContact()
+    }
+
+    func sendDirectQuicWarmPingIfPossible(
+        for contactID: UUID,
+        reason: String
+    ) async {
+        guard shouldUseDirectQuicTransport(for: contactID),
+              let attempt = directQuicAttempt(for: contactID),
+              attempt.isDirectActive,
+              let controller = mediaRuntime.directQuicProbeController else {
+            return
+        }
+
+        let pingID = UUID().uuidString.lowercased()
+        do {
+            try await controller.sendWarmPing(id: pingID)
+            diagnostics.record(
+                .media,
+                message: "Direct QUIC warm ping sent",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": attempt.channelID,
+                    "attemptId": attempt.attemptId,
+                    "pingId": pingID,
+                    "reason": reason,
+                ]
+            )
+        } catch {
+            diagnostics.record(
+                .media,
+                message: "Direct QUIC warm ping failed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": attempt.channelID,
+                    "attemptId": attempt.attemptId,
+                    "pingId": pingID,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
+    }
+
+    func handleDirectQuicWarmPong(
+        _ pingID: String?,
+        contactID: UUID,
+        attemptID: String
+    ) {
+        mediaRuntime.markDirectQuicWarmPongReceived(
+            contactID: contactID,
+            pingID: pingID
+        )
+        diagnostics.record(
+            .media,
+            message: "Direct QUIC warm pong received",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "attemptId": attemptID,
+                "pingId": pingID ?? "",
+            ]
+        )
     }
 
     func handleIncomingDirectQuicAudioPayload(
@@ -684,6 +1009,16 @@ extension PTTViewModel {
                 "fromDeviceId": fromDeviceID,
             ]
         )
+        recordWakeReceiveTiming(
+            stage: "direct-quic-audio-received",
+            contactID: contactID,
+            channelID: attempt.channelID,
+            metadata: [
+                "attemptId": attemptID,
+                "fromDeviceId": fromDeviceID,
+            ],
+            ifAbsent: true
+        )
         await handleIncomingAudioPayload(
             payload,
             channelID: attempt.channelID,
@@ -700,7 +1035,7 @@ extension PTTViewModel {
     ) async {
         diagnostics.record(
             .media,
-            level: .error,
+            level: .notice,
             message: "Direct QUIC media path lost",
             metadata: [
                 "contactId": contactID.uuidString,
@@ -711,7 +1046,8 @@ extension PTTViewModel {
         )
         mediaRuntime.directQuicUpgrade.applyRetryBackoff(
             for: contactID,
-            request: directQuicRetryBackoffRequest(
+            request: directQuicPathLostRetryBackoffRequest(
+                for: contactID,
                 reason: reason,
                 attemptID: attemptID
             )
@@ -1166,7 +1502,8 @@ extension PTTViewModel {
             cancelDirectQuicPromotionTimeout()
             mediaRuntime.directQuicUpgrade.applyRetryBackoff(
                 for: contactID,
-                request: directQuicRetryBackoffRequest(
+                request: directQuicPromotionRetryBackoffRequest(
+                    for: contactID,
                     reason: payload.reason,
                     attemptID: payload.attemptId
                 )

@@ -152,6 +152,7 @@ extension PTTViewModel {
             ]
         )
         syncPTTSystemChannelDescriptor(channelUUID, reason: "resolved-restored-channel")
+        syncPTTTransmissionMode(reason: "resolved-restored-channel")
         syncPTTServiceStatus(reason: "resolved-restored-channel")
         if let backendChannelID = contact.backendChannelId {
             await pttSystemPolicyCoordinator.handle(.backendChannelReady(backendChannelID))
@@ -206,6 +207,29 @@ extension PTTViewModel {
         let contactID =
             contactId(for: channelUUID)
             ?? contacts.first(where: { $0.backendChannelId == payload.channelId })?.id
+        if payload.event == .transmitStart,
+           result == "activeRemoteParticipant",
+           let contactID {
+            pttWakeRuntime.beginTiming(
+                contactID: contactID,
+                channelUUID: channelUUID,
+                channelID: payload.channelId,
+                source: "incoming-push-result"
+            )
+            recordWakeReceiveTiming(
+                stage: "incoming-push-result-active-participant-returned",
+                contactID: contactID,
+                channelUUID: channelUUID,
+                channelID: payload.channelId,
+                subsystem: .pushToTalk,
+                metadata: [
+                    "event": payload.event.rawValue,
+                    "result": result,
+                    "senderDeviceId": payload.senderDeviceId ?? "none",
+                ],
+                ifAbsent: true
+            )
+        }
         diagnostics.record(
             .pushToTalk,
             message: "Returning incoming PTT push result",
@@ -295,6 +319,18 @@ extension PTTViewModel {
                         )
                     )
                 }
+                recordWakeReceiveTiming(
+                    stage: "incoming-push-confirmed",
+                    contactID: contactID,
+                    channelUUID: channelUUID,
+                    channelID: payload.channelId,
+                    subsystem: .pushToTalk,
+                    metadata: [
+                        "event": payload.event.rawValue,
+                        "senderDeviceId": payload.senderDeviceId ?? "none",
+                    ],
+                    ifAbsent: true
+                )
                 pttWakeRuntime.clearPlaybackFallbackTask(for: contactID)
                 diagnostics.record(
                     .pushToTalk,
@@ -396,9 +432,11 @@ extension PTTViewModel {
         payload: TurboPTTPushPayload
     ) async {
         do {
-            try await pttSystemClient.setActiveRemoteParticipant(
+            try await setSystemActiveRemoteParticipant(
                 name: payload.participantName,
-                channelUUID: channelUUID
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "incoming-push-reinforcement"
             )
             diagnostics.record(
                 .pushToTalk,
@@ -449,6 +487,7 @@ extension PTTViewModel {
             )
             syncPTTState()
             syncPTTSystemChannelDescriptor(channelUUID, reason: "did-join")
+            syncPTTTransmissionMode(reason: "did-join")
             syncPTTServiceStatus(reason: "did-join")
             syncPTTAccessoryButtonEvents(reason: "did-join")
             diagnostics.record(
@@ -504,6 +543,9 @@ extension PTTViewModel {
             syncPTTState()
             lastReportedPTTServiceStatus = nil
             lastReportedPTTServiceStatusChannelUUID = nil
+            lastReportedPTTTransmissionMode = nil
+            lastReportedPTTTransmissionModeChannelUUID = nil
+            lastReportedPTTTransmissionModeReason = nil
             diagnostics.record(
                 .pushToTalk,
                 message: "Left channel",
@@ -661,6 +703,17 @@ extension PTTViewModel {
                 )
             )
             syncPTTState()
+            recordTransmitStartupTiming(
+                stage: "system-transmit-ended",
+                contactID: matchingActiveTarget?.contactID ?? contactId(for: channelUUID),
+                channelUUID: channelUUID,
+                channelID: matchingActiveTarget?.channelID,
+                subsystem: .pushToTalk,
+                metadata: [
+                    "callbackSource": source,
+                    "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
+                ]
+            )
             diagnostics.record(
                 .pushToTalk,
                 message: "System transmit ended",
@@ -696,6 +749,16 @@ extension PTTViewModel {
                     "activeChannelId": matchingActiveTarget?.channelID ?? "none",
                 ],
                 channelId: matchingActiveTarget?.channelID
+            )
+            recordTransmitStartupTimingSummary(
+                reason: "system-transmit-ended",
+                contactID: matchingActiveTarget?.contactID ?? contactId(for: channelUUID),
+                channelUUID: channelUUID,
+                channelID: matchingActiveTarget?.channelID,
+                metadata: [
+                    "callbackSource": source,
+                    "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
+                ]
             )
             switch transmitRuntime.handleSystemTransmitEnded(
                 applicationStateIsActive: applicationState == .active,
@@ -873,6 +936,7 @@ extension PTTViewModel {
         pttCoordinator.send(.restoredChannel(channelUUID: channelUUID, contactID: contactID))
         syncPTTState()
         syncPTTSystemChannelDescriptor(channelUUID, reason: "restored-channel")
+        syncPTTTransmissionMode(reason: "restored-channel")
         syncPTTServiceStatus(reason: "restored-channel")
         syncPTTAccessoryButtonEvents(reason: "restored-channel")
         if let contactID {
@@ -881,7 +945,10 @@ extension PTTViewModel {
                     await pttSystemPolicyCoordinator.handle(.backendChannelReady(backendChannelID))
                     syncPTTSystemPolicyState()
                 }
-                await prewarmLocalMediaIfNeeded(for: contactID)
+                await prewarmForegroundTalkPathIfNeeded(
+                    for: contactID,
+                    reason: "restored-channel"
+                )
             }
         }
         captureDiagnosticsState("ptt-callback:restored")
@@ -897,6 +964,9 @@ extension PTTViewModel {
                     "applicationState": String(describing: UIApplication.shared.applicationState),
                     "pendingWakeChannelUUID": pttWakeRuntime.pendingIncomingPush?.channelUUID.uuidString ?? "none",
                     "pendingWakeContactId": pttWakeRuntime.pendingIncomingPush?.contactID.uuidString ?? "none",
+                    "pttTransmissionMode": lastReportedPTTTransmissionMode.map(String.init(describing:)) ?? "none",
+                    "pttTransmissionModeReason": lastReportedPTTTransmissionModeReason ?? "none",
+                    "systemChannelUUID": pttCoordinator.state.systemChannelUUID?.uuidString ?? "none",
                 ],
                 uniquingKeysWith: { _, new in new }
             )
@@ -917,6 +987,9 @@ extension PTTViewModel {
                     "applicationState": String(describing: UIApplication.shared.applicationState),
                     "pendingWakeChannelUUID": pttWakeRuntime.pendingIncomingPush?.channelUUID.uuidString ?? "none",
                     "pendingWakeContactId": pttWakeRuntime.pendingIncomingPush?.contactID.uuidString ?? "none",
+                    "pttTransmissionMode": lastReportedPTTTransmissionMode.map(String.init(describing:)) ?? "none",
+                    "pttTransmissionModeReason": lastReportedPTTTransmissionModeReason ?? "none",
+                    "systemChannelUUID": pttCoordinator.state.systemChannelUUID?.uuidString ?? "none",
                 ],
                 uniquingKeysWith: { _, new in new }
             )
