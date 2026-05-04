@@ -156,7 +156,7 @@ extension PTTViewModel {
 
         diagnostics.record(
             .backend,
-            message: "Recovering backend join after signaling drift notice",
+            message: "Validating backend join drift before recovery",
             metadata: [
                 "contactId": contact.id.uuidString,
                 "handle": contact.handle,
@@ -171,6 +171,52 @@ extension PTTViewModel {
                 guard let self else { return }
                 defer { self.backendRuntime.signalingJoinRecoveryTask = nil }
                 self.controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
+                if self.backendSyncCoordinator.state.syncState.channelStates[contactID] == nil,
+                   self.shouldReassertBackendJoinAfterSignalingDrift(for: contactID) {
+                    self.diagnostics.record(
+                        .backend,
+                        message: "Reasserting backend join after signaling drift notice without cached channel state",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "handle": contact.handle,
+                            "notice": message,
+                        ]
+                    )
+                    await self.reassertBackendJoin(for: contact)
+                    await self.refreshChannelState(for: contactID)
+                    await self.refreshContactSummaries()
+                    await self.syncLocalReceiverAudioReadinessSignal(
+                        for: contactID,
+                        reason: "backend-signaling-recovery"
+                    )
+                    self.captureDiagnosticsState("backend-signaling:recovered")
+                    return
+                }
+                await self.refreshChannelState(for: contactID)
+                guard self.shouldReassertBackendJoinAfterSignalingDrift(for: contactID) else {
+                    self.diagnostics.record(
+                        .backend,
+                        message: "Self-healing stale backend join drift by reconciling local session",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "handle": contact.handle,
+                            "notice": message,
+                        ]
+                    )
+                    await self.reconcileSelectedSessionIfNeeded()
+                    await self.refreshContactSummaries()
+                    self.captureDiagnosticsState("backend-signaling:self-healed")
+                    return
+                }
+                self.diagnostics.record(
+                    .backend,
+                    message: "Reasserting backend join after signaling drift notice",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "handle": contact.handle,
+                        "notice": message,
+                    ]
+                )
                 await self.reassertBackendJoin(for: contact)
                 await self.refreshChannelState(for: contactID)
                 await self.refreshContactSummaries()
@@ -192,6 +238,24 @@ extension PTTViewModel {
             ? String(normalized.dropFirst("signaling ".count))
             : normalized
         return stripped == "sender device is not joined to this channel"
+    }
+
+    func shouldReassertBackendJoinAfterSignalingDrift(for contactID: UUID) -> Bool {
+        guard signalingJoinRecoveryContact()?.id == contactID else { return false }
+        guard let channelState = backendSyncCoordinator.state.syncState.channelStates[contactID] else {
+            return true
+        }
+
+        guard channelState.membership.hasLocalMembership else { return false }
+
+        switch channelState.conversationStatus {
+        case nil:
+            return false
+        case .idle:
+            return false
+        case .requested, .incomingRequest, .waitingForPeer, .ready, .transmitting, .receiving:
+            return true
+        }
     }
 
     func signalingJoinRecoveryContact() -> Contact? {
@@ -246,9 +310,11 @@ extension PTTViewModel {
                 ]
             )
             do {
+                let apnsEnvironment = TurboAPNSEnvironmentResolver.current()
                 _ = try await backend.uploadEphemeralToken(
                     channelId: request.backendChannelID,
-                    token: request.tokenHex
+                    token: request.tokenHex,
+                    apnsEnvironment: apnsEnvironment
                 )
                 pttSystemPolicyCoordinator.send(.tokenUploadFinished(request))
                 diagnostics.record(
@@ -257,6 +323,7 @@ extension PTTViewModel {
                     metadata: [
                         "backendChannelId": request.backendChannelID,
                         "tokenPrefix": String(request.tokenHex.prefix(8)),
+                        "apnsEnvironment": apnsEnvironment.rawValue,
                         "systemChannelUUID": pttCoordinator.state.systemChannelUUID?.uuidString ?? "none",
                     ]
                 )
@@ -306,7 +373,10 @@ extension PTTViewModel {
             )
             _ = try await client.registerDevice(
                 label: UIDevice.current.name,
-                alertPushToken: alertPushTokenHex.isEmpty ? nil : alertPushTokenHex
+                alertPushToken: alertPushTokenHex.isEmpty ? nil : alertPushTokenHex,
+                alertPushEnvironment: alertPushTokenHex.isEmpty
+                    ? nil
+                    : TurboAPNSEnvironmentResolver.current()
             )
             _ = try await client.heartbeatPresence()
             applyAuthenticatedBackendSession(

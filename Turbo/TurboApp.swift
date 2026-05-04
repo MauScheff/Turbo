@@ -24,7 +24,7 @@ private enum AppAudioSessionBootstrapper {
             try session.setCategory(
                 .playAndRecord,
                 mode: .default,
-                options: [.defaultToSpeaker, .allowBluetoothHFP]
+                options: MediaSessionAudioPolicy.routeCapableOptions
             )
         } catch {
             print("Failed to configure launch audio session category:", error.localizedDescription)

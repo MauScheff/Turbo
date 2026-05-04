@@ -34,7 +34,7 @@ actor AudioChunkSender {
         maximumPayloadsPerMessage: Int = 4,
         payloadBatchCollectionNanoseconds: UInt64 = 220_000_000,
         transportAvailabilityPollNanoseconds: UInt64 = 50_000_000,
-        transportAvailabilityMaxAttempts: Int = 20
+        transportAvailabilityMaxAttempts: Int = 80
     ) {
         self.sendChunk = sendChunk
         self.reportFailure = reportFailure
@@ -321,6 +321,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     private var inputTapInstalled = false
     private var pendingPlaybackBuffers: [AVAudioPCMBuffer] = []
     private var pendingRemoteAudioChunks: [Data] = []
+    private var scheduledPlaybackBufferCount = 0
     private var playbackStartTask: Task<Void, Never>?
     private var startTask: Task<Void, Error>?
     private let maximumPendingPlaybackBuffers = 24
@@ -513,6 +514,37 @@ final class PCMWebSocketMediaSession: MediaSession {
         }
     }
 
+    func audioRouteDidChange() async {
+        guard isPlaybackReady || isCaptureReady else { return }
+        do {
+            playbackConverter = nil
+            if isPlaybackReady {
+                try preparePlaybackPathIfNeeded()
+                try startPlaybackEngineIfNeeded()
+            }
+            if isCaptureReady {
+                try refreshCapturePathForCurrentRoute()
+            }
+            await report(
+                "Media session refreshed for audio route change",
+                metadata: audioSessionMetadata(AVAudioSession.sharedInstance())
+            )
+        } catch {
+            await report(
+                "Media session audio route refresh failed",
+                metadata: ["error": error.localizedDescription]
+            )
+        }
+    }
+
+    func hasPendingPlayback() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return !pendingRemoteAudioChunks.isEmpty
+            || !pendingPlaybackBuffers.isEmpty
+            || scheduledPlaybackBufferCount > 0
+    }
+
     func close(deactivateAudioSession: Bool) {
         stateLock.lock()
         captureSendState = .idle
@@ -526,6 +558,7 @@ final class PCMWebSocketMediaSession: MediaSession {
         playbackStartTask = nil
         pendingPlaybackBuffers.removeAll(keepingCapacity: false)
         pendingRemoteAudioChunks.removeAll(keepingCapacity: false)
+        scheduledPlaybackBufferCount = 0
 
         if inputTapInstalled {
             captureEngine.inputNode.removeTap(onBus: 0)
@@ -886,7 +919,12 @@ final class PCMWebSocketMediaSession: MediaSession {
     }
 
     private func schedulePlaybackBuffer(_ playbackBuffer: AVAudioPCMBuffer) {
-        playerNode.scheduleBuffer(playbackBuffer, completionHandler: nil)
+        stateLock.lock()
+        scheduledPlaybackBufferCount += 1
+        stateLock.unlock()
+        playerNode.scheduleBuffer(playbackBuffer) { [weak self] in
+            self?.markScheduledPlaybackBufferCompleted()
+        }
         Task {
             await report(
                 "Playback buffer scheduled",
@@ -896,6 +934,12 @@ final class PCMWebSocketMediaSession: MediaSession {
                 ]
             )
         }
+    }
+
+    private func markScheduledPlaybackBufferCompleted() {
+        stateLock.lock()
+        scheduledPlaybackBufferCount = max(0, scheduledPlaybackBufferCount - 1)
+        stateLock.unlock()
     }
 
     static func playbackBufferReceivePlan(
@@ -1076,12 +1120,23 @@ final class PCMWebSocketMediaSession: MediaSession {
     private func audioSessionMetadata(_ session: AVAudioSession) -> [String: String] {
         let outputs = session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ",")
         let inputs = session.currentRoute.inputs.map(\.portType.rawValue).joined(separator: ",")
+        let outputNames = session.currentRoute.outputs.map(\.portName).joined(separator: ",")
+        let inputNames = session.currentRoute.inputs.map(\.portName).joined(separator: ",")
+        let availableInputs =
+            session.availableInputs?
+                .map { "\($0.portName):\($0.portType.rawValue)" }
+                .joined(separator: ",")
+            ?? ""
         return [
             "category": session.category.rawValue,
             "mode": session.mode.rawValue,
+            "categoryOptions": String(session.categoryOptions.rawValue),
             "sampleRate": String(session.sampleRate),
             "outputs": outputs.isEmpty ? "none" : outputs,
-            "inputs": inputs.isEmpty ? "none" : inputs
+            "outputNames": outputNames.isEmpty ? "none" : outputNames,
+            "inputs": inputs.isEmpty ? "none" : inputs,
+            "inputNames": inputNames.isEmpty ? "none" : inputNames,
+            "availableInputs": availableInputs.isEmpty ? "none" : availableInputs
         ]
     }
 }

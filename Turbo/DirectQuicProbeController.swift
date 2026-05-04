@@ -144,6 +144,7 @@ nonisolated enum DirectQuicIdentityConfiguration {
         let addQuery = [
             kSecValueRef: identity,
             kSecAttrLabel: label,
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ] as NSDictionary
         let addStatus = SecItemAdd(addQuery, nil)
         guard addStatus == errSecSuccess
@@ -194,6 +195,24 @@ nonisolated enum DirectQuicIdentityConfiguration {
         guard status == errSecSuccess, let item else { return nil }
         let identity = item as! SecIdentity
         return identity
+    }
+
+    static func loadIdentity(label: String) throws -> SecIdentity {
+        var item: CFTypeRef?
+        let identityQuery: [CFString: Any] = [
+            kSecClass: kSecClassIdentity,
+            kSecAttrLabel: label,
+            kSecReturnRef: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+        ]
+        let status = SecItemCopyMatching(identityQuery as CFDictionary, &item)
+        guard status == errSecSuccess, let item else {
+            if status == errSecItemNotFound {
+                throw DirectQuicProbeError.identityNotFound(label)
+            }
+            throw DirectQuicProbeError.identityLookupFailed(label, status)
+        }
+        return item as! SecIdentity
     }
 
     private static func installedIdentities() throws -> [SecIdentity] {
@@ -317,6 +336,7 @@ nonisolated enum DirectQuicInstalledIdentityAdoptionError: Error, LocalizedError
 nonisolated enum DirectQuicProbeError: Error, LocalizedError, Equatable {
     case identityLabelMissing
     case identityNotFound(String)
+    case identityLookupFailed(String, OSStatus)
     case certificateMissing
     case fingerprintEncodingFailed
     case listenerFailed(String)
@@ -332,6 +352,11 @@ nonisolated enum DirectQuicProbeError: Error, LocalizedError, Equatable {
             return "Direct QUIC identity label is not configured"
         case .identityNotFound(let label):
             return "Direct QUIC identity '\(label)' was not found in the Keychain"
+        case .identityLookupFailed(let label, let status):
+            if let message = SecCopyErrorMessageString(status, nil) as String? {
+                return "Direct QUIC identity '\(label)' lookup failed: \(message) (\(status))"
+            }
+            return "Direct QUIC identity '\(label)' lookup failed: OSStatus \(status)"
         case .certificateMissing:
             return "Direct QUIC identity is missing its certificate"
         case .fingerprintEncodingFailed:
@@ -1553,16 +1578,19 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
     }
 
     private static func loadIdentity(label: String) throws -> SecIdentity {
-        if let labeledIdentity = DirectQuicIdentityConfiguration.loadIdentityIfPresent(label: label) {
-            return labeledIdentity
+        do {
+            return try DirectQuicIdentityConfiguration.loadIdentity(label: label)
+        } catch DirectQuicProbeError.identityNotFound {
+            if let fingerprint = DirectQuicIdentityConfiguration.selectedInstalledIdentityFingerprint(),
+               let installedIdentity = DirectQuicIdentityConfiguration.loadInstalledIdentityMatchingFingerprint(
+                    fingerprint
+               ) {
+                return installedIdentity
+            }
+            throw DirectQuicProbeError.identityNotFound(label)
+        } catch {
+            throw error
         }
-        if let fingerprint = DirectQuicIdentityConfiguration.selectedInstalledIdentityFingerprint(),
-           let installedIdentity = DirectQuicIdentityConfiguration.loadInstalledIdentityMatchingFingerprint(
-                fingerprint
-           ) {
-            return installedIdentity
-        }
-        throw DirectQuicProbeError.identityNotFound(label)
     }
 
     private static func fingerprint(for identity: SecIdentity) throws -> String {

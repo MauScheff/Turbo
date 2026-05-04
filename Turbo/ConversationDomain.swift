@@ -931,6 +931,7 @@ struct ConversationDerivationContext: Equatable {
     let localJoinFailure: PTTJoinFailure?
     let mediaState: MediaConnectionState
     let localMediaWarmupState: LocalMediaWarmupState
+    let directMediaPathActive: Bool
     let incomingWakeActivationState: IncomingWakeActivationState?
     let hadConnectedSessionContinuity: Bool
     let channel: ChannelReadinessSnapshot?
@@ -959,6 +960,7 @@ struct ConversationDerivationContext: Equatable {
         localJoinFailure: PTTJoinFailure?,
         mediaState: MediaConnectionState = .idle,
         localMediaWarmupState: LocalMediaWarmupState = .cold,
+        directMediaPathActive: Bool = false,
         incomingWakeActivationState: IncomingWakeActivationState? = nil,
         hadConnectedSessionContinuity: Bool = false,
         channel: ChannelReadinessSnapshot?
@@ -988,6 +990,7 @@ struct ConversationDerivationContext: Equatable {
         self.localJoinFailure = localJoinFailure
         self.mediaState = mediaState
         self.localMediaWarmupState = localMediaWarmupState
+        self.directMediaPathActive = directMediaPathActive
         self.incomingWakeActivationState = incomingWakeActivationState
         self.hadConnectedSessionContinuity = hadConnectedSessionContinuity
         self.channel = channel
@@ -1911,6 +1914,7 @@ private extension ConversationDerivationContext {
 
         let effectivePeerDeviceConnected =
             peerDeviceConnected
+            || directMediaPathActive
             || remoteAudioReadinessState == .ready
             || peerSignalIsTransmitting
             || readinessStatus.isTransmitActive
@@ -1928,6 +1932,10 @@ private extension ConversationDerivationContext {
         let authoritativeBackendReady = backendReadyAuthoritativelySatisfiesRemoteAudio
 
         if sessionTransmitReady && canTransmit {
+            if directMediaPathActive {
+                return .ready
+            }
+
             switch localMediaWarmupState {
             case .cold:
                 if remoteAudioReadinessState == .wakeCapable,
@@ -2011,6 +2019,7 @@ private extension ConversationDerivationContext {
         }
 
         return peerDeviceConnected
+            || directMediaPathActive
             || remoteAudioReadinessState == .ready
             || peerSignalIsTransmitting
             || readinessStatus?.isTransmitActive == true
@@ -2067,12 +2076,17 @@ private extension ConversationDerivationContext {
               effectivePeerDeviceConnectedForTransmit else {
             return false
         }
+        let localMediaReadyForTransmit = localMediaWarmupState == .ready || directMediaPathActive
         return canTransmit
-            && localMediaWarmupState == .ready
+            && localMediaReadyForTransmit
             && remoteAudioReadyForTransmit
     }
 
     var remoteAudioReadyForTransmit: Bool {
+        if directMediaPathActive {
+            return true
+        }
+
         guard effectivePeerDeviceConnectedForTransmit else {
             return false
         }

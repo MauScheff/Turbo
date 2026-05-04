@@ -61,6 +61,10 @@ struct AudioOutputRouteOverridePlan: Equatable {
             return AudioOutputRouteOverridePlan(shouldApplySpeakerOverride: false)
         }
 
+        guard outputPortTypes.contains(.builtInReceiver) else {
+            return AudioOutputRouteOverridePlan(shouldApplySpeakerOverride: false)
+        }
+
         let speakerAlreadyActive = outputPortTypes.contains(.builtInSpeaker)
         return AudioOutputRouteOverridePlan(
             shouldApplySpeakerOverride: !speakerAlreadyActive
@@ -102,6 +106,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var backendRuntime = BackendRuntimeState()
     var talkRequestSurfaceState = TalkRequestSurfaceState()
     var transmitRuntime = TransmitRuntimeState()
+    var transmitStartupTiming = TransmitStartupTimingState()
     var transmitTaskRuntime = TransmitTaskRuntimeState()
     var pttWakeRuntime = PTTWakeRuntimeState()
     var receiveExecutionRuntime = ReceiveExecutionRuntimeState()
@@ -113,16 +118,22 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var lastReportedPTTServiceStatus: PTServiceStatus?
     var lastReportedPTTServiceStatusChannelUUID: UUID?
     var lastReportedPTTServiceStatusReason: String?
+    var lastReportedPTTAccessoryButtonEventsChannelUUID: UUID?
+    var lastReportedPTTAccessoryButtonEventsReason: String?
     var lastReportedPTTDescriptorName: String?
     var lastReportedPTTDescriptorChannelUUID: UUID?
     var lastReportedPTTDescriptorReason: String?
+    var systemTransmitBeginRecoveryAttemptsByChannelUUID: [UUID: Int] = [:]
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
     var automaticDiagnosticsPublishEnabled: Bool = true
     var conversationShortcutPolicy: ConversationShortcutPolicy = .load()
     var microphonePermission: AVAudioApplication.recordPermission = AVAudioApplication.shared.recordPermission
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
+    var localNetworkPreflightStatus: LocalNetworkPreflightStatus = .loadStored()
     var audioOutputPreference: AudioOutputPreference = .loadStored()
     var pendingTalkRequestNotificationHandle: String?
+    @ObservationIgnored
+    let localNetworkPermissionPreflight = LocalNetworkPermissionPreflight()
     var applicationStateOverride: UIApplication.State?
     @ObservationIgnored
     var backgroundOfflinePresenceHandler: (@MainActor () async -> Void)?
@@ -630,8 +641,11 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             replaceSendAudioChunk: { [weak self] handler in
                 self?.mediaRuntime.replaceSendAudioChunk(with: handler)
             },
-            reset: { [weak self] deactivateAudioSession in
-                self?.mediaRuntime.reset(deactivateAudioSession: deactivateAudioSession)
+            reset: { [weak self] deactivateAudioSession, preserveDirectQuic in
+                self?.mediaRuntime.reset(
+                    deactivateAudioSession: deactivateAudioSession,
+                    preserveDirectQuic: preserveDirectQuic
+                )
             }
         )
     }
@@ -1162,6 +1176,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     @objc private func handleAudioSessionRouteChangeNotification(_ notification: Notification) {
         let info = notification.userInfo ?? [:]
         let rawReason = (info[AVAudioSessionRouteChangeReasonKey] as? UInt).map(String.init) ?? "unknown"
+        applyPreferredAudioOutputRouteIfPossible()
+        Task { @MainActor [weak self] in
+            await self?.mediaServices.session()?.audioRouteDidChange()
+        }
         diagnostics.record(
             .media,
             message: "Audio session route change notification",
@@ -1205,6 +1223,12 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             reason: "application-became-active",
             applicationState: .active
         )
+        if let selectedContactId {
+            await maybeStartAutomaticDirectQuicProbe(
+                for: selectedContactId,
+                reason: "application-became-active"
+            )
+        }
         await backendSyncCoordinator.handle(.pollRequested(selectedContactID: selectedContactId))
     }
 

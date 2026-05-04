@@ -162,6 +162,42 @@ extension PTTViewModel {
         return contactID
     }
 
+    func clearUnresolvedRestoredSystemSessionIfNeeded(trigger: String) {
+        guard case .mismatched(let channelUUID) = pttCoordinator.state.systemSessionState else {
+            return
+        }
+        guard contactId(for: channelUUID) == nil else { return }
+
+        diagnostics.recordInvariantViolation(
+            invariantID: "ptt.restored_channel_without_backend_contact",
+            scope: .local,
+            message: "restored PTT channel has no contact after authoritative backend refresh",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "trigger": trigger,
+                "selectedContactId": selectedContactId?.uuidString ?? "none",
+                "contactCount": "\(contacts.count)",
+            ]
+        )
+        diagnostics.record(
+            .pushToTalk,
+            message: "Clearing unresolved restored PTT channel",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "trigger": trigger,
+            ]
+        )
+
+        try? pttSystemClient.leaveChannel(channelUUID: channelUUID)
+        pttCoordinator.reset()
+        syncPTTState()
+        tearDownTransmitRuntime(resetCoordinator: true)
+        closeMediaSession()
+        statusMessage = selectedContact == nil ? "Ready to connect" : "Disconnected"
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("ptt-callback:restored-unresolved-cleared")
+    }
+
     func handleWillReturnIncomingPushResult(
         channelUUID: UUID,
         payload: TurboPTTPushPayload,
@@ -414,6 +450,7 @@ extension PTTViewModel {
             syncPTTState()
             syncPTTSystemChannelDescriptor(channelUUID, reason: "did-join")
             syncPTTServiceStatus(reason: "did-join")
+            syncPTTAccessoryButtonEvents(reason: "did-join")
             diagnostics.record(
                 .pushToTalk,
                 message: "Joined channel",
@@ -429,7 +466,12 @@ extension PTTViewModel {
     func handleDidLeaveChannel(_ channelUUID: UUID, reason: String) {
         let contactID = contactId(for: channelUUID)
         let autoRejoinContactID = sessionCoordinator.autoRejoinContactID(afterLeaving: contactID)
+        let applicationState = currentApplicationState()
+        let systemLeaveWasUserInitiated = isUserInitiatedPTTLeaveReason(reason)
         let shouldTreatLocalSystemLeaveAsExplicitTeardown: Bool = {
+            guard applicationState == .active || systemLeaveWasUserInitiated else {
+                return false
+            }
             guard autoRejoinContactID == nil,
                   let contactID,
                   !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) else {
@@ -465,10 +507,19 @@ extension PTTViewModel {
             diagnostics.record(
                 .pushToTalk,
                 message: "Left channel",
-                metadata: ["channelUUID": channelUUID.uuidString, "reason": reason]
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "reason": reason,
+                    "applicationState": String(describing: applicationState),
+                    "systemLeaveWasUserInitiated": String(systemLeaveWasUserInitiated),
+                ]
             )
             captureDiagnosticsState("ptt-callback:left")
         }
+    }
+
+    private func isUserInitiatedPTTLeaveReason(_ reason: String) -> Bool {
+        reason.contains("PTChannelLeaveReason(rawValue: 1)")
     }
 
     func handleFailedToJoinChannel(_ channelUUID: UUID, error: any Error) {
@@ -538,6 +589,7 @@ extension PTTViewModel {
 
     func handleDidBeginTransmitting(_ channelUUID: UUID, source: String) {
         Task {
+            systemTransmitBeginRecoveryAttemptsByChannelUUID.removeValue(forKey: channelUUID)
             let callbackTarget = activeTransmitTarget(for: channelUUID)
             await pttCoordinator.handle(
                 .didBeginTransmitting(
@@ -548,6 +600,14 @@ extension PTTViewModel {
             transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
             transmitRuntime.noteSystemTransmitBegan()
             syncPTTState()
+            recordTransmitStartupTiming(
+                stage: "system-transmit-began",
+                contactID: callbackTarget?.contactID ?? contactId(for: channelUUID),
+                channelUUID: channelUUID,
+                channelID: callbackTarget?.channelID,
+                subsystem: .pushToTalk,
+                metadata: ["callbackSource": source]
+            )
             diagnostics.record(
                 .pushToTalk,
                 message: "System transmit began",
@@ -691,6 +751,54 @@ extension PTTViewModel {
     }
 
     func handleFailedToBeginTransmitting(_ channelUUID: UUID, error: any Error) {
+        if isRecoverablePTTTransmissionInProgress(error),
+           let contactID = contactId(for: channelUUID),
+           transmitRuntime.isPressingTalk,
+           systemTransmitBeginRecoveryAttemptsByChannelUUID[channelUUID, default: 0] == 0 {
+            systemTransmitBeginRecoveryAttemptsByChannelUUID[channelUUID, default: 0] += 1
+            diagnostics.record(
+                .pushToTalk,
+                message: "System transmit begin hit active remote participant; clearing and retrying",
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "contactID": contactID.uuidString,
+                    "error": formatPTTError(error),
+                ]
+            )
+            Task {
+                await clearSystemRemoteParticipantBeforeLocalTransmit(
+                    contactID: contactID,
+                    channelUUID: channelUUID,
+                    reason: "transmit-begin-transmission-in-progress"
+                )
+                guard transmitRuntime.isPressingTalk else {
+                    diagnostics.record(
+                        .pushToTalk,
+                        message: "Skipped system transmit begin retry after local release",
+                        metadata: ["channelUUID": channelUUID.uuidString]
+                    )
+                    return
+                }
+                transmitRuntime.noteSystemTransmitBeginRequested(channelUUID: channelUUID)
+                do {
+                    try pttSystemClient.beginTransmitting(channelUUID: channelUUID)
+                } catch {
+                    diagnostics.record(
+                        .pushToTalk,
+                        level: .error,
+                        message: "System transmit begin retry failed immediately",
+                        metadata: [
+                            "channelUUID": channelUUID.uuidString,
+                            "error": formatPTTError(error),
+                        ]
+                    )
+                    handleFailedToBeginTransmitting(channelUUID, error: error)
+                }
+            }
+            return
+        }
+
+        systemTransmitBeginRecoveryAttemptsByChannelUUID.removeValue(forKey: channelUUID)
         transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
         cancelPendingTransmitWork()
         if isRecoverablePTTChannelUnavailable(error),
@@ -766,6 +874,7 @@ extension PTTViewModel {
         syncPTTState()
         syncPTTSystemChannelDescriptor(channelUUID, reason: "restored-channel")
         syncPTTServiceStatus(reason: "restored-channel")
+        syncPTTAccessoryButtonEvents(reason: "restored-channel")
         if let contactID {
             Task {
                 if let backendChannelID = contacts.first(where: { $0.id == contactID })?.backendChannelId {
@@ -821,12 +930,23 @@ extension PTTViewModel {
     func audioSessionDiagnostics(_ audioSession: AVAudioSession) -> [String: String] {
         let outputs = audioSession.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ",")
         let inputs = audioSession.currentRoute.inputs.map(\.portType.rawValue).joined(separator: ",")
+        let outputNames = audioSession.currentRoute.outputs.map(\.portName).joined(separator: ",")
+        let inputNames = audioSession.currentRoute.inputs.map(\.portName).joined(separator: ",")
+        let availableInputs =
+            audioSession.availableInputs?
+                .map { "\($0.portName):\($0.portType.rawValue)" }
+                .joined(separator: ",")
+            ?? ""
         return [
             "category": audioSession.category.rawValue,
             "mode": audioSession.mode.rawValue,
+            "categoryOptions": String(audioSession.categoryOptions.rawValue),
             "sampleRate": String(audioSession.sampleRate),
             "outputs": outputs.isEmpty ? "none" : outputs,
-            "inputs": inputs.isEmpty ? "none" : inputs
+            "outputNames": outputNames.isEmpty ? "none" : outputNames,
+            "inputs": inputs.isEmpty ? "none" : inputs,
+            "inputNames": inputNames.isEmpty ? "none" : inputNames,
+            "availableInputs": availableInputs.isEmpty ? "none" : availableInputs
         ]
     }
 

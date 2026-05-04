@@ -39,6 +39,8 @@ struct ContentView: View {
     @State private var isResettingDevState: Bool = false
     @State private var isUploadingDiagnostics: Bool = false
     @State private var isRequestingMicrophonePermission: Bool = false
+    @State private var isRequestingLocalNetworkPermission: Bool = false
+    @State private var isRequestingNotificationPermission: Bool = false
     @State private var isRunningDirectQuicDebugAction: Bool = false
     @State private var diagnosticsUploadStatus: String?
     @State private var identityRestoreError: String?
@@ -80,7 +82,7 @@ struct ContentView: View {
                 TurboIncomingTalkRequestBanner(
                     request: activeIncomingTalkRequest,
                     onDismiss: viewModel.dismissIncomingTalkRequestSurface,
-                    onOpen: viewModel.openActiveIncomingTalkRequest
+                    onAccept: viewModel.acceptActiveIncomingTalkRequest
                 )
                 .padding(.horizontal)
                 .padding(.top, route == .splash ? 18 : 10)
@@ -185,17 +187,24 @@ struct ContentView: View {
                     : nil,
                 microphonePermissionStatus: viewModel.microphonePermissionStatusText,
                 needsMicrophonePermission: viewModel.needsMicrophonePermission,
+                notificationPermissionStatus: notificationPermissionButtonTitle,
+                needsNotificationPermission: viewModel.needsAlertNotificationPermission,
+                localNetworkPermissionStatus: viewModel.localNetworkPreflightStatus.detailText,
                 logFilePath: viewModel.diagnostics.logFilePath,
                 diagnosticsTranscript: viewModel.diagnosticsTranscript,
                 entries: viewModel.diagnostics.entries,
                 uploadStatus: diagnosticsUploadStatus,
                 isUploading: isUploadingDiagnostics,
                 isRequestingMicrophonePermission: isRequestingMicrophonePermission,
+                isRequestingLocalNetworkPermission: isRequestingLocalNetworkPermission,
+                isRequestingNotificationPermission: isRequestingNotificationPermission,
                 isRunningDirectQuicDebugAction: isRunningDirectQuicDebugAction,
                 onClose: { isShowingDiagnostics = false },
                 onUpload: uploadDiagnostics,
                 onClear: { viewModel.diagnostics.clear() },
                 onRequestMicrophonePermission: requestMicrophonePermission,
+                onRequestLocalNetworkPermission: requestLocalNetworkPermission,
+                onRequestNotificationPermission: requestNotificationPermission,
                 onImportDirectQuicIdentity: importDirectQuicIdentityFromDiagnostics,
                 onUseInstalledDirectQuicIdentity: useInstalledDirectQuicIdentityFromDiagnostics,
                 onSetRelayOnlyForced: setDirectPathRelayOnlyForced,
@@ -222,8 +231,14 @@ struct ContentView: View {
                 latestErrorText: latestDiagnosticsErrorText,
                 microphonePermissionStatus: viewModel.microphonePermissionStatusText,
                 needsMicrophonePermission: viewModel.needsMicrophonePermission,
+                notificationPermissionStatus: viewModel.alertNotificationAuthorizationStatusText,
+                needsNotificationPermission: viewModel.needsAlertNotificationPermission,
+                localNetworkPermissionStatus: localNetworkPermissionButtonTitle,
+                showsLocalNetworkPermissionControl: viewModel.localNetworkPreflightStatus.shouldShowMainSurfaceControl,
                 showsResolvedMicrophoneStatus: viewModel.developerIdentityControlsEnabled,
+                showsDebugPermissionControls: viewModel.developerIdentityControlsEnabled,
                 showsAddContactButton: !viewModel.contacts.isEmpty,
+                showsAudioRoutePicker: viewModel.isJoined,
                 onAddContact: {
                     isShowingAddContactSheet = true
                 },
@@ -231,7 +246,9 @@ struct ContentView: View {
                     draftProfileName = viewModel.currentProfileName
                     isShowingProfileSheet = true
                 },
-                onRequestMicrophonePermission: requestMicrophonePermission
+                onRequestMicrophonePermission: requestMicrophonePermission,
+                onRequestLocalNetworkPermission: requestLocalNetworkPermission,
+                onRequestNotificationPermission: requestNotificationPermission
             )
             if viewModel.contacts.isEmpty, viewModel.activeConversationContact == nil {
                 TurboEmptyContactsView(onAddContact: {
@@ -267,7 +284,9 @@ struct ContentView: View {
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .padding()
+        .padding(.horizontal)
+        .padding(.top)
+        .padding(.bottom, 2)
     }
 
     private var transportPathTint: Color {
@@ -494,6 +513,52 @@ struct ContentView: View {
             await viewModel.requestMicrophonePermission()
             await MainActor.run {
                 isRequestingMicrophonePermission = false
+            }
+        }
+    }
+
+    private var localNetworkPermissionButtonTitle: String {
+        if isRequestingLocalNetworkPermission {
+            return "Checking local network..."
+        }
+        switch viewModel.localNetworkPreflightStatus {
+        case .notRun:
+            return "Enable local network"
+        case .running:
+            return "Checking local network..."
+        case .completed:
+            return "Local network enabled"
+        case .failed:
+            return "Retry local network"
+        }
+    }
+
+    private var notificationPermissionButtonTitle: String {
+        if isRequestingNotificationPermission {
+            return "Requesting push notifications..."
+        }
+        if viewModel.needsAlertNotificationPermission {
+            return "Enable push notifications"
+        }
+        return viewModel.alertNotificationAuthorizationStatusText
+    }
+
+    private func requestLocalNetworkPermission() {
+        isRequestingLocalNetworkPermission = true
+        Task {
+            await viewModel.requestLocalNetworkPermissionPreflight()
+            await MainActor.run {
+                isRequestingLocalNetworkPermission = false
+            }
+        }
+    }
+
+    private func requestNotificationPermission() {
+        isRequestingNotificationPermission = true
+        Task {
+            await viewModel.requestAlertNotificationPermissionPreflight()
+            await MainActor.run {
+                isRequestingNotificationPermission = false
             }
         }
     }

@@ -40,6 +40,7 @@ export default {
         hasTeamId: Boolean(env.TURBO_APNS_TEAM_ID),
         hasKeyId: Boolean(env.TURBO_APNS_KEY_ID),
         hasPrivateKey: Boolean(env.TURBO_APNS_PRIVATE_KEY),
+        defaultUseSandbox: resolveDefaultSandbox(env),
       });
     }
 
@@ -171,6 +172,8 @@ async function sendApns(body, env) {
     apnsId,
     reason: parseApnsReason(responseText),
     body: responseText || "",
+    resolvedSandbox: sandbox,
+    resolvedHost: host,
     metadata: body.metadata ?? null,
   };
 }
@@ -200,6 +203,13 @@ function resolveSandbox(body, env) {
   if (typeof body.sandbox === "boolean") {
     return body.sandbox;
   }
+  return resolveDefaultSandbox(env);
+}
+
+/**
+ * @param {Env} env
+ */
+function resolveDefaultSandbox(env) {
   return parseBoolean(env.TURBO_APNS_DEFAULT_USE_SANDBOX ?? "true");
 }
 

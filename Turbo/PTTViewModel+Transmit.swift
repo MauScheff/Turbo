@@ -23,6 +23,57 @@ extension PTTViewModel {
     private var remoteReceiverAudioReadyGateTimeoutNanoseconds: UInt64 { 3_500_000_000 }
     private var remoteReceiverAudioReadyGatePollNanoseconds: UInt64 { 50_000_000 }
 
+    func startTransmitStartupTiming(
+        for request: TransmitRequestContext,
+        source: String
+    ) {
+        transmitStartupTiming.start(
+            contactID: request.contactID,
+            channelUUID: request.channelUUID,
+            backendChannelID: request.backendChannelID,
+            source: source
+        )
+        recordTransmitStartupTiming(
+            stage: "press-requested",
+            contactID: request.contactID,
+            channelUUID: request.channelUUID,
+            channelID: request.backendChannelID
+        )
+    }
+
+    func recordTransmitStartupTiming(
+        stage: String,
+        contactID: UUID? = nil,
+        channelUUID: UUID? = nil,
+        channelID: String? = nil,
+        subsystem: DiagnosticsSubsystem = .media,
+        metadata extraMetadata: [String: String] = [:]
+    ) {
+        let resolvedContactID = contactID ?? transmitStartupTiming.contactID
+        let resolvedChannelUUID = channelUUID ?? transmitStartupTiming.channelUUID
+        let resolvedChannelID = channelID ?? transmitStartupTiming.backendChannelID
+        let elapsedMilliseconds = transmitStartupTiming.elapsedMilliseconds()
+        var metadata = extraMetadata
+        metadata["stage"] = stage
+        metadata["pressToStageMs"] = elapsedMilliseconds.map(String.init) ?? "unknown"
+        metadata["contactId"] = resolvedContactID?.uuidString ?? "none"
+        metadata["channelUUID"] = resolvedChannelUUID?.uuidString ?? "none"
+        metadata["channelId"] = resolvedChannelID ?? "none"
+        metadata["source"] = transmitStartupTiming.source ?? "unknown"
+        metadata["applicationState"] = String(describing: currentApplicationState())
+        metadata["mediaState"] = String(describing: mediaConnectionState)
+        metadata["isPTTAudioSessionActive"] = String(isPTTAudioSessionActive)
+        metadata["backendWebSocketConnected"] = String(backendRuntime.isWebSocketConnected)
+        if let resolvedContactID {
+            metadata["directQuicActive"] = String(shouldUseDirectQuicTransport(for: resolvedContactID))
+        }
+        diagnostics.record(
+            subsystem,
+            message: "Transmit startup timing",
+            metadata: metadata
+        )
+    }
+
     func shouldUseAppManagedWakePlaybackFallback(
         applicationState: UIApplication.State
     ) -> Bool {
@@ -202,6 +253,97 @@ extension PTTViewModel {
             for: contactID,
             activationMode: .appManaged,
             startupMode: .interactive
+        )
+        updateStatusForSelectedContact()
+    }
+
+    func shouldPrewarmForegroundTalkPath(
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState == .active else { return false }
+        guard selectedContactId == contactID else { return false }
+        guard isJoined, activeChannelId == contactID else { return false }
+        guard systemSessionMatches(contactID) else { return false }
+        guard !isTransmitting else { return false }
+        guard !transmitCoordinator.state.isPressingTalk else { return false }
+        guard !isPTTAudioSessionActive else { return false }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
+        guard !remoteTransmittingContactIDs.contains(contactID) else { return false }
+        guard let channelSnapshot = selectedChannelSnapshot(for: contactID) else { return false }
+        guard channelSnapshot.membership.hasLocalMembership else { return false }
+        guard channelSnapshot.canTransmit else { return false }
+        return true
+    }
+
+    func foregroundTalkPathNeedsPrewarm(for contactID: UUID) -> Bool {
+        let mediaNeedsWarmup: Bool = {
+            switch localMediaWarmupState(for: contactID) {
+            case .cold, .failed:
+                return true
+            case .prewarming, .ready:
+                return false
+            }
+        }()
+        let webSocketNeedsWarmup =
+            backendServices?.supportsWebSocket == true
+            && backendServices?.isWebSocketConnected != true
+        let localReceiverReadinessNeedsPublish =
+            desiredLocalReceiverAudioReadiness(for: contactID)
+            && channelReadinessByContactID[contactID]?.localAudioReadiness != .ready
+
+        return mediaNeedsWarmup
+            || webSocketNeedsWarmup
+            || localReceiverReadinessNeedsPublish
+            || shouldRequestAutomaticDirectQuicProbe(for: contactID)
+    }
+
+    func prewarmForegroundTalkPathIfNeeded(
+        for contactID: UUID,
+        reason: String,
+        applicationState: UIApplication.State? = nil
+    ) async {
+        let applicationState = applicationState ?? currentApplicationState()
+        guard shouldPrewarmForegroundTalkPath(
+            for: contactID,
+            applicationState: applicationState
+        ) else { return }
+        guard foregroundTalkPathNeedsPrewarm(for: contactID) else { return }
+        guard let contact = contacts.first(where: { $0.id == contactID }),
+              let backendChannelID = contact.backendChannelId else {
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Prewarming foreground talk path",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "handle": contact.handle,
+                "channelId": backendChannelID,
+                "reason": reason,
+                "localMediaWarmupState": String(describing: localMediaWarmupState(for: contactID)),
+                "webSocketConnected": String(backendServices?.isWebSocketConnected == true),
+                "directQuicActive": String(shouldUseDirectQuicTransport(for: contactID)),
+            ]
+        )
+
+        if let backend = backendServices {
+            resumeWebSocketBeforePTTTransportWaitIfNeeded(
+                backend,
+                contactID: contactID,
+                channelID: backendChannelID,
+                reason: "foreground-talk-prewarm-\(reason)"
+            )
+        }
+        await prewarmLocalMediaIfNeeded(for: contactID, applicationState: applicationState)
+        await syncLocalReceiverAudioReadinessSignal(
+            for: contactID,
+            reason: "foreground-talk-prewarm-\(reason)"
+        )
+        await maybeStartAutomaticDirectQuicProbe(
+            for: contactID,
+            reason: "foreground-talk-prewarm-\(reason)"
         )
         updateStatusForSelectedContact()
     }
@@ -445,6 +587,7 @@ extension PTTViewModel {
             usesLocalHTTPBackend: usesLocalHTTPBackend,
             backendSupportsWebSocket: backend.supportsWebSocket
         )
+        startTransmitStartupTiming(for: request, source: "hold-to-talk")
         // Latch the press locally before the async reducer runs so a single
         // hold gesture cannot enqueue multiple begin-transmit attempts.
         transmitRuntime.markPressBegan()
@@ -492,6 +635,7 @@ extension PTTViewModel {
         if selectedContactId == nil {
             selectedContactId = request.contactID
         }
+        startTransmitStartupTiming(for: request, source: "system-originated-\(source)")
         transmitRuntime.markPressBegan()
         transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
         updateStatusForSelectedContact()
@@ -707,8 +851,21 @@ extension PTTViewModel {
         guard let backend = backendServices else { return }
 
         do {
-            try requestSystemTransmitHandoffIfNeeded(for: request)
+            recordTransmitStartupTiming(
+                stage: "begin-work-started",
+                contactID: request.contactID,
+                channelUUID: request.channelUUID,
+                channelID: request.backendChannelID
+            )
+            try await requestSystemTransmitHandoffIfNeeded(for: request)
             if request.backendSupportsWebSocket {
+                recordTransmitStartupTiming(
+                    stage: "websocket-resume-requested",
+                    contactID: request.contactID,
+                    channelUUID: request.channelUUID,
+                    channelID: request.backendChannelID,
+                    subsystem: .websocket
+                )
                 resumeWebSocketBeforePTTTransportWaitIfNeeded(
                     backend,
                     contactID: request.contactID,
@@ -724,6 +881,12 @@ extension PTTViewModel {
             // websocket readiness, which can take several seconds on a cold
             // background path. The later activation step still waits for the
             // websocket before live audio signaling starts.
+            recordTransmitStartupTiming(
+                stage: "backend-lease-requested",
+                contactID: request.contactID,
+                channelUUID: request.channelUUID,
+                channelID: request.backendChannelID
+            )
             let response = try await backend.beginTransmit(channelId: request.backendChannelID)
             let target = TransmitTarget(
                 contactID: request.contactID,
@@ -732,6 +895,15 @@ extension PTTViewModel {
                 channelID: request.backendChannelID
             )
             transmitRuntime.syncActiveTarget(target)
+            if transmitRuntime.isPressingTalk {
+                configureOutgoingAudioRoute(target: target)
+                recordTransmitStartupTiming(
+                    stage: "audio-route-configured-after-lease",
+                    contactID: request.contactID,
+                    channelUUID: request.channelUUID,
+                    channelID: request.backendChannelID
+                )
+            }
             diagnostics.record(
                 .media,
                 message: "Backend transmit lease granted",
@@ -741,6 +913,17 @@ extension PTTViewModel {
                     "startedAt": response.startedAt,
                     "expiresAt": response.expiresAt,
                     "targetDeviceId": response.targetDeviceId,
+                ]
+            )
+            recordTransmitStartupTiming(
+                stage: "backend-lease-granted",
+                contactID: request.contactID,
+                channelUUID: request.channelUUID,
+                channelID: request.backendChannelID,
+                metadata: [
+                    "targetDeviceId": response.targetDeviceId,
+                    "startedAt": response.startedAt,
+                    "expiresAt": response.expiresAt,
                 ]
             )
             sendTelemetryEvent(
@@ -918,11 +1101,24 @@ extension PTTViewModel {
 
     private func requestSystemTransmitHandoffIfNeeded(
         for request: TransmitRequestContext
-    ) throws {
+    ) async throws {
         guard !request.usesLocalHTTPBackend else { return }
         guard let channelUUID = request.channelUUID else { return }
         guard !pttCoordinator.state.isTransmitting || pttCoordinator.state.systemChannelUUID != channelUUID else { return }
         guard !transmitRuntime.isSystemTransmitBeginPending(channelUUID: channelUUID) else { return }
+
+        recordTransmitStartupTiming(
+            stage: "system-handoff-started",
+            contactID: request.contactID,
+            channelUUID: channelUUID,
+            channelID: request.backendChannelID,
+            subsystem: .pushToTalk
+        )
+        await clearSystemRemoteParticipantBeforeLocalTransmit(
+            contactID: request.contactID,
+            channelUUID: channelUUID,
+            reason: "before-system-transmit-handoff"
+        )
 
         if shouldClosePrewarmedMediaBeforeSystemTransmit(for: request.contactID) {
             diagnostics.record(
@@ -934,7 +1130,15 @@ extension PTTViewModel {
                     "mediaState": String(describing: mediaConnectionState),
                 ]
             )
-            closeMediaSession()
+            closeMediaSession(
+                preserveDirectQuic: shouldUseDirectQuicTransport(for: request.contactID)
+            )
+            recordTransmitStartupTiming(
+                stage: "prewarmed-media-closed",
+                contactID: request.contactID,
+                channelUUID: channelUUID,
+                channelID: request.backendChannelID
+            )
         }
 
         diagnostics.record(
@@ -949,9 +1153,101 @@ extension PTTViewModel {
         transmitRuntime.noteSystemTransmitBeginRequested(channelUUID: channelUUID)
         do {
             try pttSystemClient.beginTransmitting(channelUUID: channelUUID)
+            recordTransmitStartupTiming(
+                stage: "system-handoff-requested",
+                contactID: request.contactID,
+                channelUUID: channelUUID,
+                channelID: request.backendChannelID,
+                subsystem: .pushToTalk
+            )
         } catch {
             transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
             throw error
+        }
+    }
+
+    func clearSystemRemoteParticipantBeforeLocalTransmit(
+        contactID: UUID,
+        channelUUID: UUID,
+        reason: String
+    ) async {
+        let startedAt = Date()
+        do {
+            try await pttSystemClient.setActiveRemoteParticipant(
+                name: nil,
+                channelUUID: channelUUID
+            )
+            let durationMilliseconds = Int(Date().timeIntervalSince(startedAt) * 1000)
+            diagnostics.record(
+                .pushToTalk,
+                message: "Cleared active remote participant before local transmit",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "reason": reason,
+                    "durationMs": String(durationMilliseconds),
+                ]
+            )
+            recordTransmitStartupTiming(
+                stage: "remote-participant-clear-completed",
+                contactID: contactID,
+                channelUUID: channelUUID,
+                subsystem: .pushToTalk,
+                metadata: [
+                    "reason": reason,
+                    "durationMs": String(durationMilliseconds),
+                ]
+            )
+        } catch {
+            let durationMilliseconds = Int(Date().timeIntervalSince(startedAt) * 1000)
+            if isRecoverablePTTChannelUnavailable(error) {
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Skipped remote participant clear for unavailable system channel",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                        "reason": reason,
+                        "durationMs": String(durationMilliseconds),
+                        "error": error.localizedDescription,
+                    ]
+                )
+                recordTransmitStartupTiming(
+                    stage: "remote-participant-clear-skipped",
+                    contactID: contactID,
+                    channelUUID: channelUUID,
+                    subsystem: .pushToTalk,
+                    metadata: [
+                        "reason": reason,
+                        "durationMs": String(durationMilliseconds),
+                        "error": error.localizedDescription,
+                    ]
+                )
+                return
+            }
+            diagnostics.record(
+                .pushToTalk,
+                level: .error,
+                message: "Failed to clear active remote participant before local transmit",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "reason": reason,
+                    "durationMs": String(durationMilliseconds),
+                    "error": error.localizedDescription,
+                ]
+            )
+            recordTransmitStartupTiming(
+                stage: "remote-participant-clear-failed",
+                contactID: contactID,
+                channelUUID: channelUUID,
+                subsystem: .pushToTalk,
+                metadata: [
+                    "reason": reason,
+                    "durationMs": String(durationMilliseconds),
+                    "error": error.localizedDescription,
+                ]
+            )
         }
     }
 
@@ -1023,6 +1319,12 @@ extension PTTViewModel {
         }
 
         startRenewingTransmit(target)
+        recordTransmitStartupTiming(
+            stage: "system-activation-started",
+            contactID: target.contactID,
+            channelUUID: channelUUID,
+            channelID: target.channelID
+        )
 
         guard let backend = backendServices, backend.supportsWebSocket else {
             await refreshChannelState(for: target.contactID)
@@ -1035,15 +1337,53 @@ extension PTTViewModel {
                 contactID: target.contactID,
                 channelID: target.channelID
             )
+            recordTransmitStartupTiming(
+                stage: "websocket-wait-started",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID,
+                subsystem: .websocket
+            )
             try await backend.waitForWebSocketConnection()
+            recordTransmitStartupTiming(
+                stage: "websocket-wait-completed",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID,
+                subsystem: .websocket
+            )
             configureOutgoingAudioRoute(target: target)
+            recordTransmitStartupTiming(
+                stage: "media-session-start-requested",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
             await ensureMediaSession(
                 for: target.contactID,
                 activationMode: .systemActivated,
                 startupMode: .interactive
             )
+            recordTransmitStartupTiming(
+                stage: "media-session-start-completed",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
             configureOutgoingAudioRoute(target: target)
+            recordTransmitStartupTiming(
+                stage: "audio-capture-start-requested",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
             try await mediaServices.session()?.startSendingAudio()
+            recordTransmitStartupTiming(
+                stage: "audio-capture-start-completed",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
             try await backend.sendSignal(
                 TurboSignalEnvelope(
                     type: .transmitStart,
@@ -1055,8 +1395,20 @@ extension PTTViewModel {
                     payload: "ptt-begin"
                 )
             )
+            recordTransmitStartupTiming(
+                stage: "transmit-start-signal-sent",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
             transmitRuntime.noteSystemTransmitActivationCompleted(channelUUID: channelUUID)
             activationCompleted = true
+            recordTransmitStartupTiming(
+                stage: "startup-completed",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
             await refreshChannelState(for: target.contactID)
         } catch {
             let message = error.localizedDescription
@@ -1072,10 +1424,94 @@ extension PTTViewModel {
         }
     }
 
+    func startPendingSystemTransmitAudioCaptureIfPossible(
+        channelUUID: UUID,
+        trigger: String
+    ) async {
+        guard !usesLocalHTTPBackend else { return }
+        guard transmitRuntime.isPressingTalk else { return }
+        guard transmitCoordinator.state.isPressingTalk else { return }
+        guard let request = transmitCoordinator.state.pendingRequest else { return }
+        guard request.channelUUID == channelUUID else { return }
+        guard pttCoordinator.state.systemChannelUUID == channelUUID else { return }
+        guard isPTTAudioSessionActive else { return }
+        guard mediaSessionContactID == nil || mediaSessionContactID == request.contactID else { return }
+
+        recordTransmitStartupTiming(
+            stage: "early-media-session-start-requested",
+            contactID: request.contactID,
+            channelUUID: channelUUID,
+            channelID: request.backendChannelID,
+            metadata: ["trigger": trigger]
+        )
+        await ensureMediaSession(
+            for: request.contactID,
+            activationMode: .systemActivated,
+            startupMode: .interactive
+        )
+        recordTransmitStartupTiming(
+            stage: "early-media-session-start-completed",
+            contactID: request.contactID,
+            channelUUID: channelUUID,
+            channelID: request.backendChannelID,
+            metadata: ["trigger": trigger]
+        )
+        do {
+            recordTransmitStartupTiming(
+                stage: "early-audio-capture-start-requested",
+                contactID: request.contactID,
+                channelUUID: channelUUID,
+                channelID: request.backendChannelID,
+                metadata: ["trigger": trigger]
+            )
+            try await mediaServices.session()?.startSendingAudio()
+            recordTransmitStartupTiming(
+                stage: "early-audio-capture-start-completed",
+                contactID: request.contactID,
+                channelUUID: channelUUID,
+                channelID: request.backendChannelID,
+                metadata: ["trigger": trigger]
+            )
+        } catch {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Early transmit audio capture failed",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "channelId": request.backendChannelID,
+                    "trigger": trigger,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
+    }
+
     func handleActivatedAudioSession(_ audioSession: AVAudioSession) async {
         applyPreferredAudioOutputRoute(to: audioSession)
         let activeSystemChannelUUID = pttCoordinator.state.systemChannelUUID
         let activeTarget = activeSystemChannelUUID.flatMap(activeTransmitTarget(for:))
+        if let activeSystemChannelUUID,
+           let activeTarget {
+            recordTransmitStartupTiming(
+                stage: "system-audio-session-activated",
+                contactID: activeTarget.contactID,
+                channelUUID: activeSystemChannelUUID,
+                channelID: activeTarget.channelID,
+                subsystem: .pushToTalk,
+                metadata: [
+                    "category": audioSession.category.rawValue,
+                    "mode": audioSession.mode.rawValue,
+                ]
+            )
+        }
+        if let activeSystemChannelUUID {
+            await startPendingSystemTransmitAudioCaptureIfPossible(
+                channelUUID: activeSystemChannelUUID,
+                trigger: "audio-session-activated"
+            )
+        }
         if let activeTarget,
            audioSession.category != .playAndRecord {
             diagnostics.record(
@@ -1125,7 +1561,10 @@ extension PTTViewModel {
                 message: "Recreating media session after PTT audio activation",
                 metadata: ["contactId": contactID.uuidString]
             )
-            closeMediaSession(deactivateAudioSession: false)
+            closeMediaSession(
+                deactivateAudioSession: false,
+                preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
+            )
             await ensureMediaSession(
                 for: contactID,
                 activationMode: .systemActivated,
@@ -1378,11 +1817,9 @@ extension PTTViewModel {
             return
         }
 
-        let bufferedAudioChunks = pttWakeRuntime.takeBufferedAudioChunks(for: contactID)
-        pttWakeRuntime.markAppManagedFallbackStarted(for: contactID)
         diagnostics.record(
             .media,
-            message: "PTT activation timed out; falling back to app-managed playback",
+            message: "PTT activation timed out; starting app-managed playback fallback",
             metadata: [
                 "contactId": contactID.uuidString,
                 "bufferedChunkCount": String(bufferedChunkCount),
@@ -1395,6 +1832,33 @@ extension PTTViewModel {
             for: contactID,
             activationMode: .appManaged,
             startupMode: .playbackOnly
+        )
+
+        guard pttWakeRuntime.shouldBufferAudioChunk(for: contactID) else {
+            diagnostics.record(
+                .media,
+                message: "Skipped app-managed playback fallback because wake activation changed during startup",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "activationState": String(
+                        describing: pttWakeRuntime.incomingWakeActivationState(for: contactID) ?? .signalBuffered
+                    )
+                ]
+            )
+            return
+        }
+
+        let bufferedAudioChunks = pttWakeRuntime.takeBufferedAudioChunks(for: contactID)
+        pttWakeRuntime.markAppManagedFallbackStarted(for: contactID)
+        diagnostics.record(
+            .media,
+            message: "Flushing buffered wake audio through app-managed playback fallback",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "bufferedChunkCount": String(bufferedAudioChunks.count),
+                "reason": reason
+            ]
         )
         for payload in bufferedAudioChunks {
             await receiveRemoteAudioChunk(payload)
@@ -1419,18 +1883,15 @@ extension PTTViewModel {
         let fromDeviceID = backend.deviceID
         let toUserID = target.userID
         let toDeviceID = target.deviceID
-        let transportSend: @Sendable (String) async throws -> Void
-        let transportKind: String
-
-        if shouldUseDirectQuicTransport(for: target.contactID),
-           let directTransport = mediaRuntime.directQuicProbeController {
-            transportKind = "direct-quic"
-            transportSend = { payload in
-                try await directTransport.sendAudioPayload(payload)
+        let sendAudioChunk: @Sendable (String) async throws -> Void = { [weak self] payload in
+            if let self,
+               await self.takeShouldAwaitInitialOutboundAudioSendGate() {
+                _ = await self.waitForRemoteReceiverAudioReadinessBeforeSendingIfNeeded(
+                    target: target
+                )
             }
-        } else {
-            transportKind = "relay-websocket"
-            transportSend = { payload in
+
+            let relaySend: @Sendable () async throws -> Void = {
                 let envelope = TurboSignalEnvelope(
                     type: .audioChunk,
                     channelId: channelID,
@@ -1442,16 +1903,38 @@ extension PTTViewModel {
                 )
                 try await backend.sendSignal(envelope)
             }
-        }
 
-        let sendAudioChunk: @Sendable (String) async throws -> Void = { [weak self] payload in
-            if let self,
-               await self.takeShouldAwaitInitialOutboundAudioSendGate() {
-                _ = await self.waitForRemoteReceiverAudioReadinessBeforeSendingIfNeeded(
-                    target: target
-                )
+            if let self {
+                let directTransport = await MainActor.run { () -> DirectQuicProbeController? in
+                    guard self.shouldUseDirectQuicTransport(for: target.contactID) else {
+                        return nil
+                    }
+                    return self.mediaRuntime.directQuicProbeController
+                }
+                if let directTransport {
+                    do {
+                        try await directTransport.sendAudioPayload(payload)
+                        return
+                    } catch {
+                        await MainActor.run {
+                            self.diagnostics.record(
+                                .media,
+                                level: .error,
+                                message: "Direct QUIC audio send failed; falling back to relay",
+                                metadata: [
+                                    "contactId": target.contactID.uuidString,
+                                    "channelId": target.channelID,
+                                    "error": error.localizedDescription,
+                                ]
+                            )
+                        }
+                        try await relaySend()
+                        return
+                    }
+                }
             }
-            try await transportSend(payload)
+
+            try await relaySend()
         }
         mediaServices.replaceSendAudioChunk(sendAudioChunk)
         mediaServices.session()?.updateSendAudioChunk(sendAudioChunk)
@@ -1462,7 +1945,8 @@ extension PTTViewModel {
                 "contactId": target.contactID.uuidString,
                 "channelId": target.channelID,
                 "deviceId": target.deviceID,
-                "transport": transportKind,
+                "transport": shouldUseDirectQuicTransport(for: target.contactID) ? "direct-quic" : "relay-websocket",
+                "selection": "dynamic",
             ]
         )
     }
@@ -2018,7 +2502,9 @@ extension PTTViewModel {
     ) async {
         guard contacts.contains(where: { $0.id == contactID }) else { return }
         let media = mediaServices
-        let sessionNeedsContactSwitch = media.contactID() != contactID
+        let existingMediaContactID = media.contactID()
+        let sessionNeedsContactSwitch =
+            existingMediaContactID != nil && existingMediaContactID != contactID
         let sessionNeedsRecreation = shouldRecreateMediaSession(connectionState: mediaConnectionState)
         let sessionNeedsCreation = !media.hasSession()
         let resolvedActivationMode = activationMode ?? pttWakeRuntime.mediaSessionActivationMode(for: contactID)
@@ -2033,7 +2519,9 @@ extension PTTViewModel {
         }
 
         if sessionNeedsRecreation {
-            closeMediaSession()
+            closeMediaSession(
+                preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
+            )
         }
 
         if sessionNeedsCreation || sessionNeedsContactSwitch || sessionNeedsRecreation {
@@ -2087,7 +2575,10 @@ extension PTTViewModel {
             )
             media.markStartupSucceeded()
             applyPreferredAudioOutputRouteIfPossible()
-            await maybeStartDirectQuicProbe(for: contactID)
+            await maybeStartAutomaticDirectQuicProbe(
+                for: contactID,
+                reason: "media-session-started"
+            )
         } catch {
             let message = error.localizedDescription
             media.markStartupFailed(startupContext, message)
@@ -2106,9 +2597,13 @@ extension PTTViewModel {
         }
     }
 
-    func closeMediaSession(deactivateAudioSession: Bool = true) {
+    func closeMediaSession(
+        deactivateAudioSession: Bool = true,
+        preserveDirectQuic: Bool = false
+    ) {
         if let contactID = mediaSessionContactID,
-           let attempt = mediaRuntime.directQuicUpgrade.attempt(for: contactID) {
+           let attempt = mediaRuntime.directQuicUpgrade.attempt(for: contactID),
+           !preserveDirectQuic {
             cancelDirectQuicPromotionTimeout()
             Task { [weak self] in
                 guard let self else { return }
@@ -2118,6 +2613,16 @@ extension PTTViewModel {
                     reason: "media-session-closed"
                 )
             }
+        }
+        if preserveDirectQuic {
+            diagnostics.record(
+                .media,
+                message: "Preserving direct QUIC media path during media close",
+                metadata: [
+                    "contactId": mediaSessionContactID?.uuidString ?? "none",
+                    "reason": "system-transmit-handoff",
+                ]
+            )
         }
         let shouldDeactivateAudioSession =
             deactivateAudioSession && !shouldPreserveAudioSessionDuringMediaClose()
@@ -2134,6 +2639,6 @@ extension PTTViewModel {
                 ]
             )
         }
-        mediaServices.reset(shouldDeactivateAudioSession)
+        mediaServices.reset(shouldDeactivateAudioSession, preserveDirectQuic)
     }
 }

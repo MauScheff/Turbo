@@ -37,6 +37,7 @@ struct SelectedPeerSessionState: Equatable {
     var localJoinFailure: PTTJoinFailure?
     var channel: ChannelReadinessSnapshot?
     var mediaState: MediaConnectionState = .idle
+    var directMediaPathActive = false
     var incomingWakeActivationState: IncomingWakeActivationState?
     var hadConnectedSessionContinuity = false
     var durableSessionProjection: DurableSessionProjection = .inactive
@@ -63,6 +64,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
     let systemSessionState: SystemPTTSessionState
     let systemSessionMatchesContact: Bool
     let mediaState: MediaConnectionState
+    let directMediaPathActive: Bool
     let incomingWakeActivationState: IncomingWakeActivationState?
     let localJoinFailure: PTTJoinFailure?
 }
@@ -145,6 +147,7 @@ enum SelectedPeerReducer {
             nextState.systemSessionState = snapshot.systemSessionState
             nextState.systemSessionMatchesContact = snapshot.systemSessionMatchesContact
             nextState.mediaState = snapshot.mediaState
+            nextState.directMediaPathActive = snapshot.directMediaPathActive
             nextState.incomingWakeActivationState = snapshot.incomingWakeActivationState
         case .selectedContactChanged(let selection):
             switch selection {
@@ -296,6 +299,7 @@ enum SelectedPeerReducer {
                     return .failed
                 }
             }(),
+            directMediaPathActive: state.directMediaPathActive,
             incomingWakeActivationState: state.incomingWakeActivationState,
             hadConnectedSessionContinuity: hadConnectedSessionContinuity,
             channel: state.channel

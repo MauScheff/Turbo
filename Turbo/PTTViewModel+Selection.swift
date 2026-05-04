@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import UIKit
 
 enum ContactPresencePresentation: Equatable {
     case connected
@@ -96,6 +97,7 @@ extension PTTViewModel {
             localJoinFailure: pttCoordinator.state.lastJoinFailure,
             mediaState: mediaConnectionState,
             localMediaWarmupState: localMediaWarmupState(for: contact.id),
+            directMediaPathActive: shouldUseDirectQuicTransport(for: contact.id),
             incomingWakeActivationState: pttWakeRuntime.incomingWakeActivationState(for: contact.id),
             hadConnectedSessionContinuity: selectedContactId == contact.id
                 ? selectedPeerCoordinator.state.hadConnectedSessionContinuity
@@ -168,6 +170,7 @@ extension PTTViewModel {
                     systemSessionState: systemSessionState,
                     systemSessionMatchesContact: systemSessionMatches(contact.id),
                     mediaState: mediaConnectionState,
+                    directMediaPathActive: shouldUseDirectQuicTransport(for: contact.id),
                     incomingWakeActivationState:
                         pttWakeRuntime.incomingWakeActivationState(for: contact.id),
                     localJoinFailure: pttCoordinator.state.lastJoinFailure
@@ -365,6 +368,10 @@ extension PTTViewModel {
         }
         contacts.removeAll { $0.id == contactID }
         pruneContactsToAuthoritativeState()
+        reconcileContactSelectionIfNeeded(
+            reason: "contact-deleted",
+            allowSelectingFallbackContact: currentApplicationState() == .active
+        )
         updateStatusForSelectedContact()
         captureDiagnosticsState("contact-deleted")
         await refreshContactSummaries()
@@ -576,6 +583,77 @@ extension PTTViewModel {
         Task {
             await prewarmLocalMediaIfNeeded(for: contact.id)
         }
+    }
+
+    func reconcileContactSelectionIfNeeded(
+        reason: String,
+        allowSelectingFallbackContact: Bool
+    ) {
+        if let selectedContactId,
+           contacts.contains(where: { $0.id == selectedContactId }) {
+            return
+        }
+
+        if selectedContactId != nil {
+            selectedContactId = nil
+            selectedPeerCoordinator.send(.selectedContactChanged(nil))
+        }
+
+        guard let contact = preferredContactForAutomaticSelection(
+            allowSelectingFallbackContact: allowSelectingFallbackContact
+        ) else {
+            updateStatusForSelectedContact()
+            return
+        }
+
+        diagnostics.record(
+            .state,
+            message: "Auto-selected contact",
+            metadata: ["handle": contact.handle, "reason": reason]
+        )
+        selectContact(contact)
+    }
+
+    @discardableResult
+    func selectContactMatchingNotificationHandle(_ handle: String, reason: String) -> Bool {
+        let normalizedHandle = Contact.normalizedHandle(handle)
+        guard let contact = contacts.first(where: { Contact.normalizedHandle($0.handle) == normalizedHandle }) else {
+            return false
+        }
+
+        diagnostics.record(
+            .pushToTalk,
+            message: "Selected contact from talk request notification",
+            metadata: ["handle": contact.handle, "reason": reason]
+        )
+        selectContact(contact)
+        return true
+    }
+
+    private func preferredContactForAutomaticSelection(
+        allowSelectingFallbackContact: Bool
+    ) -> Contact? {
+        if let incomingRequestContact = contacts
+            .filter({ incomingInviteByContactID[$0.id] != nil })
+            .max(by: { lhs, rhs in
+                let lhsInvite = incomingInviteByContactID[lhs.id]
+                let rhsInvite = incomingInviteByContactID[rhs.id]
+                return inviteRecencyKey(lhsInvite) < inviteRecencyKey(rhsInvite)
+            }) {
+            return incomingRequestContact
+        }
+
+        if let activeChannelId,
+           let activeContact = contacts.first(where: { $0.id == activeChannelId }) {
+            return activeContact
+        }
+
+        guard allowSelectingFallbackContact else { return nil }
+        return contacts.first
+    }
+
+    private func inviteRecencyKey(_ invite: TurboInviteResponse?) -> String {
+        invite?.updatedAt ?? invite?.createdAt ?? ""
     }
 
     func resetSelection() {

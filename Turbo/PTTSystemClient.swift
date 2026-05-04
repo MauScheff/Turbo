@@ -44,6 +44,7 @@ protocol PTTSystemClientProtocol: AnyObject {
     func beginTransmitting(channelUUID: UUID) throws
     func stopTransmitting(channelUUID: UUID) throws
     func setActiveRemoteParticipant(name: String?, channelUUID: UUID) async throws
+    func setAccessoryButtonEventsEnabled(_ enabled: Bool, channelUUID: UUID) async throws
     func setServiceStatus(_ status: PTServiceStatus, channelUUID: UUID) async throws
     func updateChannelDescriptor(name: String, channelUUID: UUID) async throws
 }
@@ -203,6 +204,19 @@ final class ApplePTTSystemClient: PTTSystemClientProtocol {
         }
     }
 
+    func setAccessoryButtonEventsEnabled(_ enabled: Bool, channelUUID: UUID) async throws {
+        guard let manager else { throw PTTSystemClientError.notReady }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            manager.setAccessoryButtonEventsEnabled(enabled, channelUUID: channelUUID) { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
+    }
+
     func setServiceStatus(_ status: PTServiceStatus, channelUUID: UUID) async throws {
         guard let manager else { throw PTTSystemClientError.notReady }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -302,7 +316,11 @@ final class SimulatorPTTSystemClient: PTTSystemClientProtocol {
         }
         isTransmitting = true
         Task { @MainActor in
-            try? audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+            try? audioSession.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: MediaSessionAudioPolicy.routeCapableOptions
+            )
             callbacks.didBeginTransmitting(channelUUID, "simulator")
             callbacks.didActivateAudioSession(audioSession)
         }
@@ -325,6 +343,8 @@ final class SimulatorPTTSystemClient: PTTSystemClientProtocol {
     }
 
     func setActiveRemoteParticipant(name _: String?, channelUUID _: UUID) async throws {}
+
+    func setAccessoryButtonEventsEnabled(_ enabled: Bool, channelUUID _: UUID) async throws {}
 
     func setServiceStatus(_ status: PTServiceStatus, channelUUID _: UUID) async throws {}
 

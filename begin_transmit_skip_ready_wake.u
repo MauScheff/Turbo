@@ -1,0 +1,130 @@
+turbo.service.channels.internal.sendWakePushUnlessTargetAudioReady :
+  Database
+  -> ChannelId
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> '{Config, Exception, Http, Storage, Remote} ()
+turbo.service.channels.internal.sendWakePushUnlessTargetAudioReady
+  db
+  channelId
+  senderHandle
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt =
+  do
+    targetAudioReady =
+      turbo.store.receiverAudioReadiness.isReadyForCurrentSession
+        db
+        channelId
+        targetUserId
+        targetDeviceId
+        ()
+    devTraffic = isWhitelistedDevHandle (Some senderHandle) ()
+    if targetAudioReady then
+      _ =
+        turbo.store.devWakeEvents.appendRecent
+          db
+          senderUserId
+          channelId
+          senderDeviceId
+          senderHandle
+          targetUserId
+          targetDeviceId
+          startedAt
+          "skipped-target-ready"
+          "0"
+          None
+          ()
+      _ =
+        internal.send
+          "backend.wake.skipped_target_ready"
+          "backend"
+          "notice"
+          senderUserId
+          (Some senderHandle)
+          (Some senderDeviceId)
+          (Some channelId)
+          (Some targetUserId)
+          (Some targetDeviceId)
+          None
+          None
+          None
+          (Some "wake")
+          (Some "target-ready")
+          (Some "wake send skipped because the selected target already had receiver audio ready")
+          None
+          devTraffic
+          false
+          ()
+      ()
+    else
+      _ =
+        forkAt pool() do
+          toRemote do
+            turbo.service.channels.internal.sendWakePushIfPossible
+              db
+              channelId
+              senderHandle
+              senderUserId
+              senderDeviceId
+              targetUserId
+              targetDeviceId
+              startedAt
+              ()
+      ()
+
+turbo.service.channels.beginTransmit :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.channels.beginTransmit db = do
+  use Parser /
+  use Text ++
+  use object empty
+  channelIdText = route POST (s "v1" / s "channels" / Parser.text / s "begin-transmit")
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      currentHandle =
+        (User _ handleText _ _ _) = currentUser
+        handleText
+      fields = decodeJson (Decoder.object Decoder.text)
+      channelId = ChannelId.fromText channelIdText
+      isMember = memberships.exists db channelId currentUserId ()
+      if Boolean.not isMember then unauthorized.json (empty |> addText "error" "not a channel member")
+      else
+        match Map.get "deviceId" fields with
+          Some deviceIdText ->
+            resolvedTarget = resolveTransmitTarget db channelId currentUserId ()
+            match resolvedTarget with
+              Left err                             -> badRequest.json (empty |> addText "error" err)
+              Right (targetUserId, targetDeviceId) ->
+                result = runtime.beginTransmit db channelId currentUserId (DeviceId.fromText deviceIdText) targetUserId targetDeviceId ()
+                match result with
+                  Left err    -> badRequest.json (empty |> addText "error" err)
+                  Right state ->
+                    devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+                    (startedAt, expiresAt, senderDeviceId) =
+                      (TransmitState _ _ fromDeviceId _ _ startedAt expiresAt) = state
+                      (Instant.toText startedAt, Instant.toText expiresAt, fromDeviceId)
+                    _ =
+                      turbo.service.channels.internal.sendWakePushUnlessTargetAudioReady
+                        db
+                        channelId
+                        currentHandle
+                        currentUserId
+                        senderDeviceId
+                        targetUserId
+                        targetDeviceId
+                        startedAt
+                        ()
+                    _ = internal.send "backend.transmit.begin_granted" "backend" "notice" currentUserId (Some currentHandle) (Some senderDeviceId) (Some channelId) (Some targetUserId) (Some targetDeviceId) None None None (Some "begin-transmit") None (Some "backend transmit lease granted") (Some ("startedAt=" ++ startedAt ++ " expiresAt=" ++ expiresAt)) devTraffic false ()
+                    ok.json (empty |> addText "channelId" channelIdText |> addText "status" "transmitting" |> addText "startedAt" startedAt |> addText "expiresAt" expiresAt |> addText "targetUserId" (UserId.toText targetUserId) |> addText "targetDeviceId" (DeviceId.toText targetDeviceId))
+          None              -> badRequest.json (empty |> addText "error" "missing deviceId")

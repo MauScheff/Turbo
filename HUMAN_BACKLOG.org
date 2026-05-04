@@ -27,4 +27,6 @@
 * Event based analytics?
 * Background + Background and end session (should end other too)
 * Receiver end
-* UI Hold waitg for the beep then talk
+* UI/UX onboarding: Hold waitg for the beep then talk
+* Permissions for notifications, explained, early on, next next next next.w
+* Bluetooth

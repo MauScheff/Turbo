@@ -7,15 +7,27 @@ struct TurboHeaderView: View {
     let latestErrorText: String?
     let microphonePermissionStatus: String
     let needsMicrophonePermission: Bool
+    let notificationPermissionStatus: String
+    let needsNotificationPermission: Bool
+    let localNetworkPermissionStatus: String
+    let showsLocalNetworkPermissionControl: Bool
     let showsResolvedMicrophoneStatus: Bool
+    let showsDebugPermissionControls: Bool
     let showsAddContactButton: Bool
+    let showsAudioRoutePicker: Bool
     let onAddContact: () -> Void
     let onShowProfile: () -> Void
     let onRequestMicrophonePermission: () -> Void
+    let onRequestLocalNetworkPermission: () -> Void
+    let onRequestNotificationPermission: () -> Void
 
     private let navigationButtonWidth: CGFloat = 32
 
     var body: some View {
+        let trailingButtonCount = (showsAudioRoutePicker ? 1 : 0) + (showsAddContactButton ? 1 : 0)
+        let sideWidth = navigationButtonWidth * CGFloat(max(1, trailingButtonCount))
+            + 12 * CGFloat(max(0, trailingButtonCount - 1))
+
         VStack(spacing: 8) {
             ZStack {
                 Text(statusMessage)
@@ -23,7 +35,7 @@ struct TurboHeaderView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
-                    .padding(.horizontal, 48)
+                    .padding(.horizontal, sideWidth + 16)
 
                 HStack(spacing: 12) {
                     Button(action: onShowProfile) {
@@ -36,6 +48,12 @@ struct TurboHeaderView: View {
 
                     Spacer(minLength: 0)
 
+                    if showsAudioRoutePicker {
+                        AudioRoutePickerButton(style: .icon)
+                            .foregroundStyle(.primary)
+                            .frame(width: navigationButtonWidth, height: navigationButtonWidth)
+                    }
+
                     if showsAddContactButton {
                         Button(action: onAddContact) {
                             Image(systemName: "plus.circle")
@@ -44,9 +62,6 @@ struct TurboHeaderView: View {
                                 .accessibilityLabel("Add contact")
                         }
                         .frame(width: navigationButtonWidth, height: navigationButtonWidth)
-                    } else {
-                        Color.clear
-                            .frame(width: navigationButtonWidth, height: navigationButtonWidth)
                     }
                 }
             }
@@ -80,6 +95,36 @@ struct TurboHeaderView: View {
                 Text(microphonePermissionStatus)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+            }
+
+            if showsDebugPermissionControls {
+                VStack(spacing: 6) {
+                    if showsLocalNetworkPermissionControl {
+                        Button(action: onRequestLocalNetworkPermission) {
+                            Text(localNetworkPermissionStatus)
+                                .font(.caption2.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    } else {
+                        Text(localNetworkPermissionStatus)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if needsNotificationPermission {
+                        Button(action: onRequestNotificationPermission) {
+                            Text(notificationPermissionStatus)
+                                .font(.caption2.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    } else {
+                        Text(notificationPermissionStatus)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             if let latestErrorText {

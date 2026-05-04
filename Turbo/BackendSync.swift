@@ -25,6 +25,18 @@ struct BackendSyncState: Equatable {
         )
         channelStates = channelStates.filter { contactsWithLiveChannels.contains($0.key) }
         channelReadiness = channelReadiness.filter { contactsWithLiveChannels.contains($0.key) }
+
+        for (contactID, summary) in summaries {
+            guard summary.membership == .absent,
+                  let summaryChannelID = summary.channelId,
+                  let existingChannelState = channelStates[contactID],
+                  existingChannelState.channelId == summaryChannelID else {
+                continue
+            }
+
+            channelStates[contactID] = existingChannelState.settingMembership(.absent)
+            channelReadiness[contactID] = nil
+        }
     }
 
     mutating func clearContactSummaries() {

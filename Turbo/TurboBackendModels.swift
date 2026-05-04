@@ -992,6 +992,7 @@ nonisolated struct TurboDirectQuicOfferPayload: TurboDirectQuicSignalingPayload,
     let certificateFingerprint: String
     let candidates: [TurboDirectQuicCandidate]
     let roleIntent: TurboDirectQuicRoleIntent?
+    let debugBypass: Bool?
 
     init(
         protocolVersion: String = Self.expectedProtocolVersion,
@@ -1002,7 +1003,8 @@ nonisolated struct TurboDirectQuicOfferPayload: TurboDirectQuicSignalingPayload,
         quicAlpn: String,
         certificateFingerprint: String,
         candidates: [TurboDirectQuicCandidate],
-        roleIntent: TurboDirectQuicRoleIntent?
+        roleIntent: TurboDirectQuicRoleIntent?,
+        debugBypass: Bool? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.attemptId = attemptId
@@ -1013,6 +1015,7 @@ nonisolated struct TurboDirectQuicOfferPayload: TurboDirectQuicSignalingPayload,
         self.certificateFingerprint = certificateFingerprint
         self.candidates = candidates
         self.roleIntent = roleIntent
+        self.debugBypass = debugBypass
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1025,6 +1028,7 @@ nonisolated struct TurboDirectQuicOfferPayload: TurboDirectQuicSignalingPayload,
         case certificateFingerprint
         case candidates
         case roleIntent
+        case debugBypass
     }
 }
 

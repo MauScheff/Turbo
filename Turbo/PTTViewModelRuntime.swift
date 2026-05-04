@@ -257,6 +257,41 @@ final class TransportFaultRuntimeState {
     }
 }
 
+struct TransmitStartupTimingState {
+    private(set) var pressRequestedAt: Date?
+    private(set) var contactID: UUID?
+    private(set) var channelUUID: UUID?
+    private(set) var backendChannelID: String?
+    private(set) var source: String?
+
+    mutating func start(
+        contactID: UUID,
+        channelUUID: UUID?,
+        backendChannelID: String,
+        source: String,
+        at date: Date = Date()
+    ) {
+        pressRequestedAt = date
+        self.contactID = contactID
+        self.channelUUID = channelUUID
+        self.backendChannelID = backendChannelID
+        self.source = source
+    }
+
+    func elapsedMilliseconds(at date: Date = Date()) -> Int? {
+        guard let pressRequestedAt else { return nil }
+        return Int(date.timeIntervalSince(pressRequestedAt) * 1000)
+    }
+
+    mutating func reset() {
+        pressRequestedAt = nil
+        contactID = nil
+        channelUUID = nil
+        backendChannelID = nil
+        source = nil
+    }
+}
+
 struct TransmitRuntimeState {
     private(set) var executionState: TransmitExecutionSessionState = .initial
 
@@ -549,6 +584,7 @@ final class MediaRuntimeState {
     let directQuicUpgrade = DirectQuicUpgradeRuntimeState()
     var directQuicProbeController: DirectQuicProbeController?
     var directQuicPromotionTimeoutTask: Task<Void, Never>?
+    var directQuicAutoProbeTask: Task<Void, Never>?
     var sendAudioChunk: (@Sendable (String) async throws -> Void)?
     var startupState: MediaSessionStartupState = .idle
     var pendingInteractivePrewarmAfterAudioDeactivationContactID: UUID?
@@ -630,19 +666,28 @@ final class MediaRuntimeState {
         return now.timeIntervalSince(failure.occurredAt) < cooldown
     }
 
-    func reset(deactivateAudioSession: Bool = true) {
+    func reset(
+        deactivateAudioSession: Bool = true,
+        preserveDirectQuic: Bool = false
+    ) {
         interactivePrewarmRecoveryTask?.cancel()
         interactivePrewarmRecoveryTask = nil
-        directQuicPromotionTimeoutTask?.cancel()
-        directQuicPromotionTimeoutTask = nil
-        directQuicProbeController?.cancel(reason: "media-runtime-reset")
-        directQuicProbeController = nil
+        if !preserveDirectQuic {
+            directQuicPromotionTimeoutTask?.cancel()
+            directQuicPromotionTimeoutTask = nil
+            directQuicAutoProbeTask?.cancel()
+            directQuicAutoProbeTask = nil
+            directQuicProbeController?.cancel(reason: "media-runtime-reset")
+            directQuicProbeController = nil
+        }
         session?.close(deactivateAudioSession: deactivateAudioSession)
         session = nil
         contactID = nil
         connectionState = .idle
-        transportPathState = .relay
-        directQuicUpgrade.reset()
+        if !preserveDirectQuic {
+            transportPathState = .relay
+            directQuicUpgrade.reset()
+        }
         sendAudioChunk = nil
         startupState = .idle
     }
@@ -664,6 +709,11 @@ final class MediaRuntimeState {
     func replaceDirectQuicPromotionTimeoutTask(with task: Task<Void, Never>?) {
         directQuicPromotionTimeoutTask?.cancel()
         directQuicPromotionTimeoutTask = task
+    }
+
+    func replaceDirectQuicAutoProbeTask(with task: Task<Void, Never>?) {
+        directQuicAutoProbeTask?.cancel()
+        directQuicAutoProbeTask = task
     }
 
     func updateTransportPathState(_ state: MediaTransportPathState) {
@@ -755,8 +805,16 @@ struct BackendServices {
         try await client.authenticate()
     }
 
-    func registerDevice(label: String?, alertPushToken: String?) async throws -> TurboDeviceRegistrationResponse {
-        try await client.registerDevice(label: label, alertPushToken: alertPushToken)
+    func registerDevice(
+        label: String?,
+        alertPushToken: String?,
+        alertPushEnvironment: TurboAPNSEnvironment?
+    ) async throws -> TurboDeviceRegistrationResponse {
+        try await client.registerDevice(
+            label: label,
+            alertPushToken: alertPushToken,
+            alertPushEnvironment: alertPushEnvironment
+        )
     }
 
     func resetDevState() async throws -> TurboResetStateResponse {
@@ -875,8 +933,16 @@ struct BackendServices {
         try await client.cancelInvite(inviteId: inviteId)
     }
 
-    func uploadEphemeralToken(channelId: String, token: String) async throws -> TurboTokenResponse {
-        try await client.uploadEphemeralToken(channelId: channelId, token: token)
+    func uploadEphemeralToken(
+        channelId: String,
+        token: String,
+        apnsEnvironment: TurboAPNSEnvironment
+    ) async throws -> TurboTokenResponse {
+        try await client.uploadEphemeralToken(
+            channelId: channelId,
+            token: token,
+            apnsEnvironment: apnsEnvironment
+        )
     }
 
     func beginTransmit(channelId: String) async throws -> TurboBeginTransmitResponse {
@@ -938,5 +1004,5 @@ struct MediaServices {
     let markStartupSucceeded: () -> Void
     let markStartupFailed: (MediaSessionStartupContext, String) -> Void
     let replaceSendAudioChunk: ((@Sendable (String) async throws -> Void)?) -> Void
-    let reset: (Bool) -> Void
+    let reset: (Bool, Bool) -> Void
 }

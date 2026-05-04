@@ -126,6 +126,51 @@ extension PTTViewModel {
         }
     }
 
+    func syncPTTAccessoryButtonEvents(reason: String) {
+        guard let channelUUID = pttCoordinator.state.systemChannelUUID else {
+            lastReportedPTTAccessoryButtonEventsChannelUUID = nil
+            lastReportedPTTAccessoryButtonEventsReason = nil
+            return
+        }
+
+        guard lastReportedPTTAccessoryButtonEventsChannelUUID != channelUUID else {
+            return
+        }
+
+        lastReportedPTTAccessoryButtonEventsChannelUUID = channelUUID
+        lastReportedPTTAccessoryButtonEventsReason = reason
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await pttSystemClient.setAccessoryButtonEventsEnabled(true, channelUUID: channelUUID)
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Enabled PTT accessory button events",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "reason": reason,
+                    ]
+                )
+            } catch {
+                if lastReportedPTTAccessoryButtonEventsChannelUUID == channelUUID {
+                    lastReportedPTTAccessoryButtonEventsChannelUUID = nil
+                    lastReportedPTTAccessoryButtonEventsReason = nil
+                }
+                diagnostics.record(
+                    .pushToTalk,
+                    level: .error,
+                    message: "Failed to enable PTT accessory button events",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "reason": reason,
+                        "error": error.localizedDescription,
+                    ]
+                )
+            }
+        }
+    }
+
     private func performReconciledTeardown(for contactID: UUID) {
         if selectedContactId == contactID {
             clearRemoteAudioActivity(for: contactID)
@@ -512,6 +557,19 @@ extension PTTViewModel {
 
         if let channelError = error as? PTChannelError {
             return channelError.code.rawValue == 1
+        }
+
+        return false
+    }
+
+    func isRecoverablePTTTransmissionInProgress(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == PTChannelErrorDomain && nsError.code == 4 {
+            return true
+        }
+
+        if let channelError = error as? PTChannelError {
+            return channelError.code.rawValue == 4
         }
 
         return false

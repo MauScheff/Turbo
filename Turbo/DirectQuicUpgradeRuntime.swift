@@ -272,7 +272,7 @@ final class DirectQuicUpgradeRuntimeState {
             attempt.remoteCandidateCount = attempt.remoteCandidates.count
             attempt.lastUpdatedAt = now
             attemptByContactID[contactID] = attempt
-            return isNewAttempt ? .enteredPromoting(attempt) : .updatedPromoting(attempt)
+            return updatedTransition(for: attempt, isNewAttempt: isNewAttempt)
 
         case .answer(let payload):
             if !payload.accepted {
@@ -298,7 +298,7 @@ final class DirectQuicUpgradeRuntimeState {
             attempt.remoteCandidateCount = attempt.remoteCandidates.count
             attempt.lastUpdatedAt = now
             attemptByContactID[contactID] = attempt
-            return isNewAttempt ? .enteredPromoting(attempt) : .updatedPromoting(attempt)
+            return updatedTransition(for: attempt, isNewAttempt: isNewAttempt)
 
         case .candidate(let payload):
             var attempt = currentAttempt(
@@ -318,7 +318,7 @@ final class DirectQuicUpgradeRuntimeState {
             attempt.remoteEndOfCandidates = attempt.remoteEndOfCandidates || payload.endOfCandidates
             attempt.lastUpdatedAt = now
             attemptByContactID[contactID] = attempt
-            return .updatedPromoting(attempt)
+            return updatedTransition(for: attempt, isNewAttempt: false)
 
         case .hangup(let payload):
             let existingAttempt = attemptByContactID.removeValue(forKey: contactID)
@@ -401,6 +401,16 @@ final class DirectQuicUpgradeRuntimeState {
             nominatedPath: nil,
             lastHangupReason: nil
         )
+    }
+
+    private func updatedTransition(
+        for attempt: DirectQuicUpgradeAttempt,
+        isNewAttempt: Bool
+    ) -> DirectQuicUpgradeTransition {
+        if attempt.isDirectActive {
+            return .directActivated(attempt)
+        }
+        return isNewAttempt ? .enteredPromoting(attempt) : .updatedPromoting(attempt)
     }
 
     private func mergedRemoteCandidates(

@@ -126,6 +126,133 @@ extension PTTViewModel {
         mediaRuntime.replaceDirectQuicPromotionTimeoutTask(with: nil)
     }
 
+    func cancelDirectQuicAutoProbe() {
+        mediaRuntime.replaceDirectQuicAutoProbeTask(with: nil)
+    }
+
+    func shouldAllowDirectQuicDebugBypassForAutomaticProbe() -> Bool {
+        developerIdentityControlsEnabled && !backendAdvertisesDirectQuicUpgrade
+    }
+
+    func automaticDirectQuicProbeBlockReason(for contactID: UUID) -> String? {
+        if isDirectPathRelayOnlyForced {
+            return "relay-only-forced"
+        }
+        if !backendAdvertisesDirectQuicUpgrade,
+           !shouldAllowDirectQuicDebugBypassForAutomaticProbe() {
+            return "backend-capability-disabled"
+        }
+        guard backendServices != nil else {
+            return "backend-unavailable"
+        }
+        guard selectedContactId == contactID else {
+            return "not-selected-contact"
+        }
+        guard let contact = contacts.first(where: { $0.id == contactID }) else {
+            return "contact-missing"
+        }
+        guard contact.backendChannelId != nil,
+              contact.remoteUserId != nil else {
+            return "channel-metadata-missing"
+        }
+        guard mediaRuntime.directQuicUpgrade.attempt(for: contactID) == nil else {
+            return "attempt-active"
+        }
+        guard mediaRuntime.directQuicUpgrade.retryBackoffState(for: contactID) == nil else {
+            return "retry-backoff"
+        }
+        guard directQuicPeerDeviceID(for: contactID) != nil else {
+            return "peer-device-missing"
+        }
+        guard systemSessionMatches(contactID),
+              isJoined,
+              activeChannelId == contactID else {
+            return "local-session-not-aligned"
+        }
+        guard let channel = selectedChannelSnapshot(for: contactID) else {
+            return "channel-snapshot-missing"
+        }
+        guard case .both(let peerDeviceConnected) = channel.membership,
+              peerDeviceConnected else {
+            return "peer-device-not-connected"
+        }
+        guard channel.canTransmit,
+              channel.readinessStatus == .ready else {
+            return "channel-not-ready"
+        }
+        return nil
+    }
+
+    func shouldRequestAutomaticDirectQuicProbe(for contactID: UUID) -> Bool {
+        automaticDirectQuicProbeBlockReason(for: contactID) == nil
+    }
+
+    func maybeStartAutomaticDirectQuicProbe(
+        for contactID: UUID,
+        reason: String
+    ) async {
+        if let blockReason = automaticDirectQuicProbeBlockReason(for: contactID) {
+            diagnostics.record(
+                .media,
+                message: "Automatic Direct QUIC probe skipped",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "blockReason": blockReason,
+                    "debugBypass": String(shouldAllowDirectQuicDebugBypassForAutomaticProbe()),
+                ]
+            )
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Automatic Direct QUIC probe requested",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "reason": reason,
+                "debugBypass": String(shouldAllowDirectQuicDebugBypassForAutomaticProbe()),
+            ]
+        )
+        await maybeStartDirectQuicProbe(
+            for: contactID,
+            allowDebugBypassWithoutBackendAdvertisement: shouldAllowDirectQuicDebugBypassForAutomaticProbe()
+        )
+    }
+
+    func scheduleAutomaticDirectQuicProbe(
+        for contactID: UUID,
+        reason: String
+    ) {
+        let retryRemainingMilliseconds = mediaRuntime.directQuicUpgrade
+            .retryBackoffRemaining(for: contactID)
+            .map { max(Int($0 * 1_000), 0) } ?? 0
+        let delayMilliseconds = max(retryRemainingMilliseconds, 250)
+
+        mediaRuntime.replaceDirectQuicAutoProbeTask(with: Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: UInt64(delayMilliseconds) * 1_000_000)
+            guard !Task.isCancelled else { return }
+            await self.maybeStartAutomaticDirectQuicProbe(
+                for: contactID,
+                reason: "\(reason)-scheduled"
+            )
+            await MainActor.run {
+                self.mediaRuntime.directQuicAutoProbeTask = nil
+            }
+        })
+
+        diagnostics.record(
+            .media,
+            message: "Scheduled automatic Direct QUIC reprobe",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "reason": reason,
+                "delayMilliseconds": "\(delayMilliseconds)",
+            ]
+        )
+    }
+
     func importDirectQuicIdentityForDebug(
         from fileURL: URL,
         password: String
@@ -528,6 +655,7 @@ extension PTTViewModel {
             ]
         )
         cancelDirectQuicPromotionTimeout()
+        cancelDirectQuicAutoProbe()
         applyDirectQuicUpgradeTransition(transition, for: contactID)
         if let activeTarget = transmitProjection.activeTarget,
            activeTarget.contactID == contactID {
@@ -606,6 +734,10 @@ extension PTTViewModel {
            activeTarget.contactID == contactID {
             configureOutgoingAudioRoute(target: activeTarget)
         }
+        scheduleAutomaticDirectQuicProbe(
+            for: contactID,
+            reason: "path-lost"
+        )
     }
 
     func sendDirectQuicHangup(
@@ -863,7 +995,6 @@ extension PTTViewModel {
                 ]
             )
         }
-        guard mediaConnectionState == .connected else { return }
         guard mediaRuntime.directQuicUpgrade.attempt(for: contactID) == nil else { return }
         if let retryBackoff = mediaRuntime.directQuicUpgrade.retryBackoffState(for: contactID),
            let retryRemaining = mediaRuntime.directQuicUpgrade.retryBackoffRemaining(for: contactID) {
@@ -923,7 +1054,9 @@ extension PTTViewModel {
                 quicAlpn: preparedOffer.quicAlpn,
                 certificateFingerprint: preparedOffer.certificateFingerprint,
                 candidates: preparedOffer.candidates,
-                roleIntent: .listener
+                roleIntent: .listener,
+                debugBypass: allowDebugBypassWithoutBackendAdvertisement
+                    && !backendAdvertisesDirectQuicUpgrade
             )
             try await backend.waitForWebSocketConnection()
             let envelope = try TurboSignalEnvelope.directQuicOffer(

@@ -40,12 +40,17 @@ extension PTTViewModel {
         )
     }
 
-    func openActiveIncomingTalkRequest() {
+    func acceptActiveIncomingTalkRequest() {
         guard let activeIncomingTalkRequest,
               let contact = contacts.first(where: { $0.id == activeIncomingTalkRequest.contactID }) else {
             dismissIncomingTalkRequestSurface()
             return
         }
         selectContact(contact)
+        requestBackendJoin(for: contact)
+    }
+
+    func openActiveIncomingTalkRequest() {
+        acceptActiveIncomingTalkRequest()
     }
 }

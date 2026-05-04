@@ -51,6 +51,32 @@ extension PTTViewModel {
         let resolvedPhase = phase
             ?? receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.timeoutPhase
             ?? .drainingAudio
+        if shouldDeferRemoteAudioSilenceTimeoutForPendingPlayback(for: contactID, phase: resolvedPhase) {
+            diagnostics.record(
+                .media,
+                message: "Deferred remote audio silence timeout while playback is still draining",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "phase": resolvedPhase.rawValue,
+                ]
+            )
+            runReceiveExecutionEffect(.scheduleRemoteSilenceTimeout(contactID: contactID, phase: resolvedPhase))
+            return
+        }
+        if shouldDeferRemoteAudioSilenceTimeout(for: contactID, phase: resolvedPhase) {
+            diagnostics.record(
+                .media,
+                message: "Deferred remote audio silence timeout while peer transmit is authoritative",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "phase": resolvedPhase.rawValue,
+                    "backendChannelStatus": selectedChannelSnapshot(for: contactID)?.status?.rawValue ?? "none",
+                    "remoteActivityActive": String(remoteTransmittingContactIDs.contains(contactID)),
+                ]
+            )
+            runReceiveExecutionEffect(.scheduleRemoteSilenceTimeout(contactID: contactID, phase: resolvedPhase))
+            return
+        }
         receiveExecutionRuntime.replaceRemoteAudioSilenceTask(for: contactID, with: nil)
         receiveExecutionCoordinator.send(.silenceTimeoutElapsed(contactID: contactID))
         diagnostics.record(
@@ -91,6 +117,26 @@ extension PTTViewModel {
             updateStatusForSelectedContact()
             captureDiagnosticsState("remote-audio:cleared")
         }
+    }
+
+    private func shouldDeferRemoteAudioSilenceTimeoutForPendingPlayback(
+        for contactID: UUID,
+        phase: RemoteReceiveTimeoutPhase
+    ) -> Bool {
+        guard phase == .drainingAudio else { return false }
+        guard mediaSessionContactID == contactID else { return false }
+        return mediaServices.session()?.hasPendingPlayback() == true
+    }
+
+    private func shouldDeferRemoteAudioSilenceTimeout(
+        for contactID: UUID,
+        phase: RemoteReceiveTimeoutPhase
+    ) -> Bool {
+        guard phase == .drainingAudio else { return false }
+        guard remoteTransmittingContactIDs.contains(contactID) else { return false }
+        guard let channelSnapshot = selectedChannelSnapshot(for: contactID) else { return false }
+        return channelSnapshot.status == .receiving
+            || channelSnapshot.readinessStatus?.isPeerTransmitting == true
     }
 
     func shouldResumeLocalInteractivePrewarmForRemoteReady(
@@ -174,7 +220,9 @@ extension PTTViewModel {
                 "reason": readinessSignalPayload,
             ]
         )
-        closeMediaSession()
+        closeMediaSession(
+            preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
+        )
         updateStatusForSelectedContact()
     }
 
@@ -320,7 +368,6 @@ extension PTTViewModel {
     }
 
     private func shouldTreatIncomingSignalAsWakeCandidate(for contactID: UUID) -> Bool {
-        guard currentApplicationState() != .active else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         guard !pttWakeRuntime.shouldSuppressProvisionalWakeCandidate(for: contactID) else { return false }
         guard receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.hasReceivedAudioChunk != true else {
@@ -328,6 +375,10 @@ extension PTTViewModel {
         }
         // Once the system-owned PTT audio session is active, later signal-path
         // chunks belong to the current receive flow and must not rearm wake.
+        // Foreground Direct QUIC can beat the websocket transmit-start and the
+        // system receive activation; buffer those first chunks behind the same
+        // activation boundary so speech is not played into a route Apple is
+        // about to replace.
         guard !isPTTAudioSessionActive else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
     }
@@ -475,7 +526,9 @@ extension PTTViewModel {
 
         guard mediaSessionContactID == contactID, !isTransmitting else { return }
 
-        closeMediaSession()
+        closeMediaSession(
+            preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
+        )
         if backendStatusMessage.hasPrefix("Media ") {
             backendStatusMessage = "Connected"
         }
@@ -559,7 +612,9 @@ extension PTTViewModel {
             && !isTransmitting
 
         if mediaSessionContactID == contactID && !isTransmitting {
-            closeMediaSession()
+            closeMediaSession(
+                preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
+            )
             diagnostics.record(
                 .media,
                 message: "Closed receive media session after channel-refresh transmit stop recovery",
@@ -650,15 +705,26 @@ extension PTTViewModel {
             && !incoming.membership.hasPeerMembership
             && !incoming.membership.peerDeviceConnected
 
-        let transientStatuses = [
-            ConversationState.idle.rawValue,
-            "connecting",
-            ConversationState.waitingForPeer.rawValue,
-        ]
+        let incomingLooksTransient =
+            incoming.status == "connecting"
+            || incoming.status == ConversationState.waitingForPeer.rawValue
+            || (
+                incoming.status == ConversationState.idle.rawValue
+                && (
+                    existing.conversationStatus == .receiving
+                    || remoteTransmittingContactIDs.contains(contactID)
+                )
+            )
 
-        return existingSessionReady
-            && incomingLostMembership
-            && transientStatuses.contains(incoming.status)
+        return (
+            existingSessionReady
+                && incomingLostMembership
+                && incomingLooksTransient
+        ) || (
+                backendRuntime.signalingJoinRecoveryTask != nil
+                && existingSessionReady
+                && incomingLooksTransient
+            )
     }
 
     func effectiveChannelStatePreservingLiveMembership(
@@ -863,23 +929,49 @@ extension PTTViewModel {
         _ envelope: TurboSignalEnvelope,
         contactID: UUID
     ) {
-        guard effectiveDirectQuicUpgradeEnabled else {
-            diagnostics.record(
-                .websocket,
-                message: "Ignored direct QUIC signal while upgrade disabled",
-                metadata: [
-                    "type": envelope.type.rawValue,
-                    "channelId": envelope.channelId,
-                    "contactId": contactID.uuidString,
-                    "backendAdvertisesDirectQuicUpgrade": String(backendAdvertisesDirectQuicUpgrade),
-                    "localRelayOnlyOverride": String(isDirectPathRelayOnlyForced),
-                ]
-            )
-            return
-        }
-
         do {
             let signal = try envelope.decodeDirectQuicSignalPayload()
+            guard shouldAcceptIncomingDirectQuicSignal(
+                signal,
+                envelope: envelope,
+                contactID: contactID
+            ) else {
+                let debugBypass: String = {
+                    if case .offer(let payload) = signal {
+                        return String(payload.debugBypass == true)
+                    }
+                    return "false"
+                }()
+                diagnostics.record(
+                    .websocket,
+                    message: "Ignored direct QUIC signal while upgrade disabled",
+                    metadata: [
+                        "type": envelope.type.rawValue,
+                        "channelId": envelope.channelId,
+                        "contactId": contactID.uuidString,
+                        "attemptId": signal.attemptId,
+                        "backendAdvertisesDirectQuicUpgrade": String(backendAdvertisesDirectQuicUpgrade),
+                        "localRelayOnlyOverride": String(isDirectPathRelayOnlyForced),
+                        "debugBypass": debugBypass,
+                    ]
+                )
+                return
+            }
+
+            if !effectiveDirectQuicUpgradeEnabled {
+                diagnostics.record(
+                    .websocket,
+                    message: "Accepted direct QUIC signal through debug bypass",
+                    metadata: [
+                        "type": envelope.type.rawValue,
+                        "channelId": envelope.channelId,
+                        "contactId": contactID.uuidString,
+                        "attemptId": signal.attemptId,
+                        "backendAdvertisesDirectQuicUpgrade": String(backendAdvertisesDirectQuicUpgrade),
+                    ]
+                )
+            }
+
             let transition = mediaRuntime.directQuicUpgrade.observeIncomingSignal(
                 contactID: contactID,
                 channelID: envelope.channelId,
@@ -902,6 +994,7 @@ extension PTTViewModel {
                     metadata["candidateCount"] = "\(payload.candidates.count)"
                     metadata["quicAlpn"] = payload.quicAlpn
                     metadata["roleIntent"] = payload.roleIntent?.rawValue ?? "none"
+                    metadata["debugBypass"] = String(payload.debugBypass == true)
                     return "Direct QUIC offer received"
                 case .answer(let payload):
                     metadata["candidateCount"] = "\(payload.candidates.count)"
@@ -943,6 +1036,30 @@ extension PTTViewModel {
                 ]
             )
         }
+    }
+
+    func shouldAcceptIncomingDirectQuicSignal(
+        _ signal: TurboDirectQuicSignalPayload,
+        envelope: TurboSignalEnvelope,
+        contactID: UUID
+    ) -> Bool {
+        if effectiveDirectQuicUpgradeEnabled {
+            return true
+        }
+        guard !isDirectPathRelayOnlyForced else {
+            return false
+        }
+
+        if case .offer(let payload) = signal,
+           payload.debugBypass == true,
+           envelope.toDeviceId == backendServices?.deviceID {
+            return true
+        }
+
+        guard let existingAttempt = mediaRuntime.directQuicUpgrade.attempt(for: contactID) else {
+            return false
+        }
+        return existingAttempt.attemptId == signal.attemptId
     }
 
     func handleIncomingAudioPayload(
@@ -1270,15 +1387,21 @@ extension PTTViewModel {
                     if let channelId = summary.channelId {
                         contact.backendChannelId = channelId
                         contact.channelId = ContactDirectory.stableChannelUUID(for: channelId)
+                    }
                 }
             }
-        }
-        clearStaleTrackedChannelReferencesMissingFromSummaries(excluding: nextSummaries)
-        await refreshTrackedContactPresenceFallback(excluding: nextSummaries)
-        let updates = nextSummaries.map { BackendContactSummaryUpdate(contactID: $0.key, summary: $0.value) }
-        backendSyncCoordinator.send(.contactSummariesUpdated(updates))
+            clearStaleTrackedChannelReferencesMissingFromSummaries(excluding: nextSummaries)
+            await refreshTrackedContactPresenceFallback(excluding: nextSummaries)
+            let updates = nextSummaries.map { BackendContactSummaryUpdate(contactID: $0.key, summary: $0.value) }
+            backendSyncCoordinator.send(.contactSummariesUpdated(updates))
             pruneContactsToAuthoritativeState()
-            _ = await resolveRestoredSystemSessionIfPossible(trigger: "contact-summaries")
+            if await resolveRestoredSystemSessionIfPossible(trigger: "contact-summaries") == nil {
+                clearUnresolvedRestoredSystemSessionIfNeeded(trigger: "contact-summaries")
+            }
+            reconcileContactSelectionIfNeeded(
+                reason: "contact-summaries",
+                allowSelectingFallbackContact: currentApplicationState() == .active
+            )
             updateStatusForSelectedContact()
             captureDiagnosticsState("backend-sync:contact-summaries")
             await reconcileSelectedSessionIfNeeded()
@@ -1420,6 +1543,18 @@ extension PTTViewModel {
             captureDiagnosticsState("backend-sync:channel-state")
             await syncLocalReceiverAudioReadinessSignal(for: contactID, reason: "channel-refresh")
             await reconcileSelectedSessionIfNeeded()
+            if selectedContactId == contactID {
+                await prewarmForegroundTalkPathIfNeeded(
+                    for: contactID,
+                    reason: "channel-ready"
+                )
+                if shouldRequestAutomaticDirectQuicProbe(for: contactID) {
+                    await maybeStartAutomaticDirectQuicProbe(
+                        for: contactID,
+                        reason: "channel-ready"
+                    )
+                }
+            }
         } catch {
             guard !isExpectedBackendSyncCancellation(error) else { return }
             if await recoverBackendControlPlaneAfterSyncFailureIfNeeded(
@@ -1490,6 +1625,10 @@ extension PTTViewModel {
             syncTalkRequestNotificationBadge()
             reconcileTalkRequestSurface()
             pruneContactsToAuthoritativeState()
+            reconcileContactSelectionIfNeeded(
+                reason: "invite-sync",
+                allowSelectingFallbackContact: currentApplicationState() == .active
+            )
             updateStatusForSelectedContact()
             captureDiagnosticsState("backend-sync:invites")
             await reconcileSelectedSessionIfNeeded()

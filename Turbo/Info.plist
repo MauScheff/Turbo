@@ -24,12 +24,44 @@
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>BeepBeep uses the microphone to send push-to-talk audio to the connected contact.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>BeepBeep uses the local network to test direct peer-to-peer push-to-talk connections.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_turbo-preflight._tcp</string>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>BeepBeep uses the camera to scan QR codes for adding contacts.</string>
 	<key>TurboBackendBaseURL</key>
 	<string>https://beepbeep.to</string>
 	<key>TurboDevUserHandle</key>
 	<string>@turbo-ios</string>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>PKCS #12 identity</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.rsa.pkcs-12</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>p12</string>
+					<string>pfx</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/pkcs12</string>
+					<string>application/x-pkcs12</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

@@ -7,6 +7,34 @@ extension PTTViewModel {
         incomingInviteByContactID.count
     }
 
+    var alertNotificationAuthorizationStatusText: String {
+        switch notificationAuthorizationStatus {
+        case .notDetermined:
+            return "Push notifications not requested"
+        case .denied:
+            return "Push notifications denied"
+        case .authorized:
+            return "Push notifications enabled"
+        case .provisional:
+            return "Push notifications provisional"
+        case .ephemeral:
+            return "Push notifications ephemeral"
+        @unknown default:
+            return "Push notifications unknown"
+        }
+    }
+
+    var needsAlertNotificationPermission: Bool {
+        switch notificationAuthorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return false
+        case .notDetermined, .denied:
+            return true
+        @unknown default:
+            return true
+        }
+    }
+
     func configureAlertNotificationsIfNeeded() async {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
@@ -54,6 +82,21 @@ extension PTTViewModel {
         }
     }
 
+    func requestAlertNotificationPermissionPreflight() async {
+        await configureAlertNotificationsIfNeeded()
+        captureDiagnosticsState("alert-notification-permission")
+    }
+
+    func requestLocalNetworkPermissionPreflight() async {
+        await localNetworkPermissionPreflight.run(
+            diagnostics: diagnostics,
+            stateDidChange: { [weak self] status in
+                self?.localNetworkPreflightStatus = status
+            }
+        )
+        captureDiagnosticsState("local-network-permission")
+    }
+
     func handleReceivedAlertPushToken(_ token: Data) {
         let tokenHex = token.map { String(format: "%02x", $0) }.joined()
         alertPushTokenHex = tokenHex
@@ -94,6 +137,7 @@ extension PTTViewModel {
         )
         await refreshInvites()
         guard let handle = talkRequestNotificationHandle(from: userInfo) else { return }
+        selectContactMatchingNotificationHandle(handle, reason: "notification-open")
         if backendServices == nil {
             pendingTalkRequestNotificationHandle = handle
             diagnostics.record(
@@ -109,6 +153,7 @@ extension PTTViewModel {
     func openPendingTalkRequestNotificationIfNeeded() async {
         guard let handle = pendingTalkRequestNotificationHandle else { return }
         pendingTalkRequestNotificationHandle = nil
+        selectContactMatchingNotificationHandle(handle, reason: "pending-notification-open")
         await openContact(reference: handle)
     }
 
@@ -117,12 +162,18 @@ extension PTTViewModel {
         do {
             _ = try await backend.registerDevice(
                 label: UIDevice.current.name,
-                alertPushToken: alertPushTokenHex.isEmpty ? nil : alertPushTokenHex
+                alertPushToken: alertPushTokenHex.isEmpty ? nil : alertPushTokenHex,
+                alertPushEnvironment: alertPushTokenHex.isEmpty
+                    ? nil
+                    : TurboAPNSEnvironmentResolver.current()
             )
             diagnostics.record(
                 .backend,
                 message: "Refreshed device registration with alert push token",
-                metadata: ["tokenPrefix": String(alertPushTokenHex.prefix(8))]
+                metadata: [
+                    "tokenPrefix": String(alertPushTokenHex.prefix(8)),
+                    "apnsEnvironment": TurboAPNSEnvironmentResolver.current().rawValue,
+                ]
             )
         } catch {
             diagnostics.record(

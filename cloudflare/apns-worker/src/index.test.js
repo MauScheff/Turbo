@@ -98,13 +98,56 @@ test("sendApns reuses provider token across sends", async () => {
       metadata: { wakeAttemptId: "wake-1" },
     };
 
-    await __test.sendApns(body, env);
-    await __test.sendApns(body, env);
+    const firstResult = await __test.sendApns(body, env);
+    const secondResult = await __test.sendApns(body, env);
 
     assert.equal(importCount, 1);
     assert.equal(signCount, 1);
     assert.equal(authorizations.length, 2);
     assert.equal(authorizations[0], authorizations[1]);
+    assert.equal(firstResult.resolvedSandbox, true);
+    assert.equal(firstResult.resolvedHost, "api.sandbox.push.apple.com");
+    assert.equal(secondResult.resolvedSandbox, true);
+  } finally {
+    __test.resetCachesForTests();
+    Date.now = originalDateNow;
+    globalThis.fetch = originalFetch;
+    globalThis.crypto.subtle.importKey = originalImportKey;
+    globalThis.crypto.subtle.sign = originalSign;
+  }
+});
+
+test("sendApns honors explicit production environment", async () => {
+  const originalDateNow = Date.now;
+  const originalFetch = globalThis.fetch;
+  const originalImportKey = globalThis.crypto.subtle.importKey;
+  const originalSign = globalThis.crypto.subtle.sign;
+
+  let requestedUrl = "";
+
+  Date.now = () => 1_700_000_000_000;
+  globalThis.crypto.subtle.importKey = async () => ({ id: "key" });
+  globalThis.crypto.subtle.sign = async () => new Uint8Array(64).fill(1).buffer;
+  globalThis.fetch = async (url) => {
+    requestedUrl = String(url);
+    return new Response("", { status: 200 });
+  };
+
+  __test.resetCachesForTests();
+
+  try {
+    const result = await __test.sendApns({
+      token: "production-token",
+      payload: { aps: {} },
+      pushType: "pushtotalk",
+      bundleId: "com.rounded.Turbo",
+      topicSuffix: ".voip-ptt",
+      sandbox: false,
+    }, env);
+
+    assert.equal(result.resolvedSandbox, false);
+    assert.equal(result.resolvedHost, "api.push.apple.com");
+    assert.equal(requestedUrl, "https://api.push.apple.com/3/device/production-token");
   } finally {
     __test.resetCachesForTests();
     Date.now = originalDateNow;

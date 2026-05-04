@@ -8,7 +8,7 @@ struct ContactStatusPillModel {
 struct TurboIncomingTalkRequestBanner: View {
     let request: IncomingTalkRequestSurface
     let onDismiss: () -> Void
-    let onOpen: () -> Void
+    let onAccept: () -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -35,7 +35,7 @@ struct TurboIncomingTalkRequestBanner: View {
             Button("Not now", action: onDismiss)
                 .buttonStyle(.bordered)
 
-            Button("Open", action: onOpen)
+            Button("Accept", action: onAccept)
                 .buttonStyle(.borderedProminent)
         }
         .padding(14)
@@ -305,11 +305,11 @@ struct TurboTalkControlsView: View {
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity, minHeight: 72)
                             .background(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                Capsule(style: .continuous)
                                     .fill(primaryActionTint(displayedPrimaryAction.style))
                                     .opacity(displayedPrimaryAction.isEnabled ? 1 : 0.45)
                             )
-                            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .contentShape(Capsule(style: .continuous))
                             .gesture(
                                 DragGesture(minimumDistance: 0)
                                     .onChanged { _ in
@@ -335,18 +335,6 @@ struct TurboTalkControlsView: View {
                         .disabled(!primaryAction.isEnabled)
                     }
 
-                    if isSelectedChannelJoined {
-                        HStack(spacing: 12) {
-                            Text("Audio Route")
-                                .font(.body.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            AudioRoutePickerButton()
-                                .frame(width: 96, height: 36)
-                                .buttonStyle(.bordered)
-                        }
-                        .padding(.horizontal, 4)
-                    }
                 }
             }
         }

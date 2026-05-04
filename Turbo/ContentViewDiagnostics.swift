@@ -8,13 +8,20 @@ struct TurboDiagnosticsView: View {
     let directQuic: DirectQuicDiagnosticsSummary?
     let microphonePermissionStatus: String
     let needsMicrophonePermission: Bool
+    let notificationPermissionStatus: String
+    let needsNotificationPermission: Bool
+    let localNetworkPermissionStatus: String
     let logFilePath: String?
     let diagnosticsTranscript: String
     let entries: [DiagnosticsEntry]
     let uploadStatus: String?
     let isRequestingMicrophonePermission: Bool
+    let isRequestingLocalNetworkPermission: Bool
+    let isRequestingNotificationPermission: Bool
     let isRunningDirectQuicDebugAction: Bool
     let onRequestMicrophonePermission: () -> Void
+    let onRequestLocalNetworkPermission: () -> Void
+    let onRequestNotificationPermission: () -> Void
     let onImportDirectQuicIdentity: () -> Void
     let onUseInstalledDirectQuicIdentity: () -> Void
     let onSetRelayOnlyForced: (Bool) -> Void
@@ -102,6 +109,22 @@ struct TurboDiagnosticsView: View {
                         onRequestMicrophonePermission()
                     }
                     .disabled(isRequestingMicrophonePermission)
+                }
+            }
+
+            Section("Permission preflight") {
+                diagnosticsRow("Local network", localNetworkPermissionStatus)
+                Button(isRequestingLocalNetworkPermission ? "Checking…" : "Enable local network") {
+                    onRequestLocalNetworkPermission()
+                }
+                .disabled(isRequestingLocalNetworkPermission)
+
+                diagnosticsRow("Push notifications", notificationPermissionStatus)
+                if needsNotificationPermission {
+                    Button(isRequestingNotificationPermission ? "Requesting…" : "Enable push notifications") {
+                        onRequestNotificationPermission()
+                    }
+                    .disabled(isRequestingNotificationPermission)
                 }
             }
 
@@ -419,17 +442,24 @@ struct TurboDiagnosticsSheet: View {
     let directQuic: DirectQuicDiagnosticsSummary?
     let microphonePermissionStatus: String
     let needsMicrophonePermission: Bool
+    let notificationPermissionStatus: String
+    let needsNotificationPermission: Bool
+    let localNetworkPermissionStatus: String
     let logFilePath: String?
     let diagnosticsTranscript: String
     let entries: [DiagnosticsEntry]
     let uploadStatus: String?
     let isUploading: Bool
     let isRequestingMicrophonePermission: Bool
+    let isRequestingLocalNetworkPermission: Bool
+    let isRequestingNotificationPermission: Bool
     let isRunningDirectQuicDebugAction: Bool
     let onClose: () -> Void
     let onUpload: () -> Void
     let onClear: () -> Void
     let onRequestMicrophonePermission: () -> Void
+    let onRequestLocalNetworkPermission: () -> Void
+    let onRequestNotificationPermission: () -> Void
     let onImportDirectQuicIdentity: (URL, String) -> Void
     let onUseInstalledDirectQuicIdentity: () -> Void
     let onSetRelayOnlyForced: (Bool) -> Void
@@ -450,13 +480,20 @@ struct TurboDiagnosticsSheet: View {
                 directQuic: directQuic,
                 microphonePermissionStatus: microphonePermissionStatus,
                 needsMicrophonePermission: needsMicrophonePermission,
+                notificationPermissionStatus: notificationPermissionStatus,
+                needsNotificationPermission: needsNotificationPermission,
+                localNetworkPermissionStatus: localNetworkPermissionStatus,
                 logFilePath: logFilePath,
                 diagnosticsTranscript: diagnosticsTranscript,
                 entries: entries,
                 uploadStatus: uploadStatus,
                 isRequestingMicrophonePermission: isRequestingMicrophonePermission,
+                isRequestingLocalNetworkPermission: isRequestingLocalNetworkPermission,
+                isRequestingNotificationPermission: isRequestingNotificationPermission,
                 isRunningDirectQuicDebugAction: isRunningDirectQuicDebugAction,
                 onRequestMicrophonePermission: onRequestMicrophonePermission,
+                onRequestLocalNetworkPermission: onRequestLocalNetworkPermission,
+                onRequestNotificationPermission: onRequestNotificationPermission,
                 onImportDirectQuicIdentity: {
                     isShowingDirectQuicIdentityImporter = true
                 },

@@ -28,6 +28,12 @@ struct MediaSessionAudioConfiguration: Equatable {
 }
 
 enum MediaSessionAudioPolicy {
+    static let routeCapableOptions: AVAudioSession.CategoryOptions = [
+        .defaultToSpeaker,
+        .allowBluetoothHFP,
+        .allowBluetoothA2DP,
+    ]
+
     static func configuration(
         activationMode: MediaSessionActivationMode,
         startupMode: MediaSessionStartupMode
@@ -42,7 +48,7 @@ enum MediaSessionAudioPolicy {
             return MediaSessionAudioConfiguration(
                 category: .playAndRecord,
                 mode: .default,
-                options: [.defaultToSpeaker, .allowBluetoothHFP],
+                options: routeCapableOptions,
                 shouldConfigureSession: shouldConfigureSession,
                 shouldActivateSession: shouldActivateSession
             )
@@ -50,7 +56,7 @@ enum MediaSessionAudioPolicy {
             return MediaSessionAudioConfiguration(
                 category: .playAndRecord,
                 mode: .default,
-                options: [.defaultToSpeaker, .allowBluetoothHFP],
+                options: routeCapableOptions,
                 shouldConfigureSession: shouldConfigureSession,
                 shouldActivateSession: shouldActivateSession
             )
@@ -74,6 +80,8 @@ protocol MediaSession: AnyObject {
     func startSendingAudio() async throws
     func stopSendingAudio() async throws
     func receiveRemoteAudioChunk(_ payload: String) async
+    func audioRouteDidChange() async
+    func hasPendingPlayback() -> Bool
     func close(deactivateAudioSession: Bool)
 }
 
@@ -132,6 +140,10 @@ final class StubRelayMediaSession: MediaSession {
     func stopSendingAudio() async throws {}
 
     func receiveRemoteAudioChunk(_ payload: String) async {}
+
+    func audioRouteDidChange() async {}
+
+    func hasPendingPlayback() -> Bool { false }
 
     func close(deactivateAudioSession _: Bool) {
         isStarted = false

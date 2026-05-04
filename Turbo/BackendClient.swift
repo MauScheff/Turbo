@@ -90,14 +90,19 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         try await request(path: "/v1/telemetry/events", method: "POST", body: payload)
     }
 
-    func registerDevice(label: String?, alertPushToken: String?) async throws -> TurboDeviceRegistrationResponse {
+    func registerDevice(
+        label: String?,
+        alertPushToken: String?,
+        alertPushEnvironment: TurboAPNSEnvironment?
+    ) async throws -> TurboDeviceRegistrationResponse {
         try await request(
             path: "/v1/devices/register",
             method: "POST",
             body: TurboRegisterDeviceRequest(
                 deviceId: config.deviceID,
                 deviceLabel: label,
-                alertPushToken: alertPushToken
+                alertPushToken: alertPushToken,
+                alertPushEnvironment: alertPushEnvironment?.rawValue
             )
         )
     }
@@ -234,11 +239,19 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         try await request(path: "/v1/invites/\(inviteId)/cancel", method: "POST")
     }
 
-    func uploadEphemeralToken(channelId: String, token: String) async throws -> TurboTokenResponse {
+    func uploadEphemeralToken(
+        channelId: String,
+        token: String,
+        apnsEnvironment: TurboAPNSEnvironment
+    ) async throws -> TurboTokenResponse {
         try await request(
             path: "/v1/channels/\(channelId)/ephemeral-token",
             method: "POST",
-            body: TurboEphemeralTokenRequest(deviceId: config.deviceID, token: token)
+            body: TurboEphemeralTokenRequest(
+                deviceId: config.deviceID,
+                token: token,
+                apnsEnvironment: apnsEnvironment.rawValue
+            )
         )
     }
 
@@ -548,6 +561,7 @@ private struct TurboRegisterDeviceRequest: Encodable {
     let deviceId: String
     let deviceLabel: String?
     let alertPushToken: String?
+    let alertPushEnvironment: String?
 }
 
 private struct TurboDirectChannelRequest: Encodable {
@@ -582,4 +596,5 @@ private struct TurboChannelDeviceRequest: Encodable {
 private struct TurboEphemeralTokenRequest: Encodable {
     let deviceId: String
     let token: String
+    let apnsEnvironment: String
 }
