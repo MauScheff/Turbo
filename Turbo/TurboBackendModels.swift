@@ -857,6 +857,9 @@ enum TurboDirectPathDebugOverride {
     static let storageKey = "TurboDebugForceRelayOnly"
     static let launchArgument = "-TurboDebugForceRelayOnly"
     static let environmentKey = "TURBO_DEBUG_FORCE_RELAY_ONLY"
+    static let autoUpgradeDisabledStorageKey = "TurboDebugDisableDirectQuicAutoUpgrade"
+    static let autoUpgradeDisabledLaunchArgument = "-TurboDebugDisableDirectQuicAutoUpgrade"
+    static let autoUpgradeDisabledEnvironmentKey = "TURBO_DEBUG_DISABLE_DIRECT_QUIC_AUTO_UPGRADE"
 
     static func isRelayOnlyForced(
         processInfo: ProcessInfo = .processInfo,
@@ -892,7 +895,45 @@ enum TurboDirectPathDebugOverride {
         defaults.set(isForced, forKey: storageKey)
     }
 
+    static func isAutoUpgradeDisabled(
+        processInfo: ProcessInfo = .processInfo,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        isAutoUpgradeDisabled(
+            arguments: processInfo.arguments,
+            environment: processInfo.environment,
+            defaults: defaults
+        )
+    }
+
+    static func isAutoUpgradeDisabled(
+        arguments: [String],
+        environment: [String: String],
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        if let launchArgumentValue = launchArgumentValue(autoUpgradeDisabledLaunchArgument, in: arguments),
+           let parsed = parseBoolean(launchArgumentValue) {
+            return parsed
+        }
+        if arguments.contains(autoUpgradeDisabledLaunchArgument) {
+            return true
+        }
+        if let environmentValue = environment[autoUpgradeDisabledEnvironmentKey],
+           let parsed = parseBoolean(environmentValue) {
+            return parsed
+        }
+        return defaults.bool(forKey: autoUpgradeDisabledStorageKey)
+    }
+
+    static func setAutoUpgradeDisabled(_ isDisabled: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(isDisabled, forKey: autoUpgradeDisabledStorageKey)
+    }
+
     private static func launchArgumentValue(_ arguments: [String]) -> String? {
+        launchArgumentValue(launchArgument, in: arguments)
+    }
+
+    private static func launchArgumentValue(_ launchArgument: String, in arguments: [String]) -> String? {
         guard let index = arguments.firstIndex(of: launchArgument),
               arguments.indices.contains(index + 1) else {
             return nil

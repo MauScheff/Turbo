@@ -171,14 +171,36 @@ enum WakeReceiveState: Equatable {
               context.channelUUID == channelUUID else {
             return self
         }
-        return .awaitingSystemActivation(
-            WakeReceiveContext(
-                contactID: context.contactID,
-                channelUUID: context.channelUUID,
-                payload: payload
-            ),
-            bufferedAudioChunks: bufferedAudioChunks
+        let confirmedContext = WakeReceiveContext(
+            contactID: context.contactID,
+            channelUUID: context.channelUUID,
+            payload: payload
         )
+
+        switch self {
+        case .signalBuffered, .awaitingSystemActivation:
+            return .awaitingSystemActivation(
+                confirmedContext,
+                bufferedAudioChunks: bufferedAudioChunks
+            )
+        case .systemActivationTimedOutWaitingForForeground:
+            return .systemActivationTimedOutWaitingForForeground(
+                confirmedContext,
+                bufferedAudioChunks: bufferedAudioChunks
+            )
+        case .appManagedFallback:
+            return .appManagedFallback(
+                confirmedContext,
+                bufferedAudioChunks: bufferedAudioChunks
+            )
+        case .systemActivated:
+            return .systemActivated(
+                confirmedContext,
+                bufferedAudioChunks: bufferedAudioChunks
+            )
+        case .idle, .systemActivationInterruptedByTransmitEnd:
+            return self
+        }
     }
 
     func markingAudioSessionActivated(channelUUID: UUID) -> WakeReceiveState {

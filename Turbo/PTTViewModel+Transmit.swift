@@ -1484,6 +1484,10 @@ extension PTTViewModel {
             reason: "before-system-transmit-handoff",
             timeoutNanoseconds: remoteParticipantClearBeforeTransmitTimeoutNanoseconds
         )
+        await sendDirectQuicReceiverTransmitPrepareIfPossible(
+            for: request.contactID,
+            reason: "system-transmit-handoff"
+        )
 
         if shouldClosePrewarmedMediaBeforeSystemTransmit(for: request.contactID) {
             diagnostics.record(

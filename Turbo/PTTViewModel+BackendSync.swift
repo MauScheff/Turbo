@@ -424,13 +424,19 @@ extension PTTViewModel {
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
     }
 
+    private func shouldTreatIncomingControlSignalAsWakeCandidate(for contactID: UUID) -> Bool {
+        guard let channelUUID = channelUUID(for: contactID) else { return false }
+        guard !isPTTAudioSessionActive else { return false }
+        return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
+    }
+
     func shouldSetSystemRemoteParticipantFromSignalPath(
         for contactID: UUID,
         applicationState: UIApplication.State
     ) -> Bool {
-        guard applicationState == .active else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID
+            && !pttCoordinator.state.isTransmitting
     }
 
     func shouldClearSystemRemoteParticipantFromSignalPath(for contactID: UUID) -> Bool {
@@ -1198,13 +1204,16 @@ extension PTTViewModel {
         contactID: UUID
     ) async {
         let applicationState = currentApplicationState()
+        let alreadyHasPendingWake = pttWakeRuntime.hasPendingWake(for: contactID)
+        let shouldArmAudioWakeCandidate = shouldTreatIncomingSignalAsWakeCandidate(for: contactID)
         let shouldRepairRemoteParticipant =
             !remoteTransmittingContactIDs.contains(contactID)
+            && (alreadyHasPendingWake || shouldArmAudioWakeCandidate)
             && shouldSetSystemRemoteParticipantFromSignalPath(
                 for: contactID,
                 applicationState: applicationState
             )
-        if shouldTreatIncomingSignalAsWakeCandidate(for: contactID) {
+        if shouldArmAudioWakeCandidate {
             ensurePendingWakeCandidate(
                 for: contactID,
                 channelId: channelID,
@@ -1283,7 +1292,7 @@ extension PTTViewModel {
         switch envelope.type {
         case .transmitStart where envelope.payload == "ptt-prepare":
             pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
-            if shouldTreatIncomingSignalAsWakeCandidate(for: contactID) {
+            if shouldTreatIncomingControlSignalAsWakeCandidate(for: contactID) {
                 ensurePendingWakeCandidate(
                     for: contactID,
                     channelId: envelope.channelId,
@@ -1332,8 +1341,9 @@ extension PTTViewModel {
                 && shouldDeferReceiveTeardownUntilRemoteAudioDrain(for: contactID)
             if envelope.type == .transmitStart {
                 pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
+                let shouldArmWakeCandidate = shouldTreatIncomingControlSignalAsWakeCandidate(for: contactID)
                 markRemoteAudioActivity(for: contactID, source: .transmitStartSignal)
-                if shouldTreatIncomingSignalAsWakeCandidate(for: contactID) {
+                if shouldArmWakeCandidate {
                     ensurePendingWakeCandidate(
                         for: contactID,
                         channelId: envelope.channelId,
@@ -1510,6 +1520,64 @@ extension PTTViewModel {
             }
         case .offer, .answer, .iceCandidate, .hangup:
             handleIncomingDirectQuicControlSignal(envelope, contactID: contactID)
+        }
+    }
+
+    func handleIncomingDirectQuicTransmitPrepare(
+        _ payload: DirectQuicReceiverPrewarmPayload,
+        contactID: UUID,
+        attemptID: String
+    ) async {
+        pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
+        let senderUserID =
+            contacts.first(where: { $0.id == contactID })?.remoteUserId
+            ?? ""
+        if shouldTreatIncomingControlSignalAsWakeCandidate(for: contactID) {
+            ensurePendingWakeCandidate(
+                for: contactID,
+                channelId: payload.channelId,
+                senderUserId: senderUserID,
+                senderDeviceId: payload.fromDeviceId
+            )
+        }
+        markRemoteAudioActivity(for: contactID, source: .transmitStartSignal)
+        recordWakeReceiveTiming(
+            stage: "direct-quic-transmit-prepare-observed",
+            contactID: contactID,
+            channelID: payload.channelId,
+            subsystem: .media,
+            metadata: [
+                "attemptId": attemptID,
+                "fromDeviceId": payload.fromDeviceId,
+                "requestId": payload.requestId,
+                "reason": payload.reason,
+            ],
+            ifAbsent: true
+        )
+        diagnostics.record(
+            .media,
+            message: "Direct QUIC receiver transmit prepare received",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": payload.channelId,
+                "attemptId": attemptID,
+                "requestId": payload.requestId,
+                "reason": payload.reason,
+            ]
+        )
+        if shouldSetSystemRemoteParticipantFromSignalPath(
+            for: contactID,
+            applicationState: currentApplicationState()
+        ) {
+            await updateSystemRemoteParticipant(
+                for: contactID,
+                isActive: true,
+                reason: "direct-quic-remote-prepare"
+            )
+        }
+        if selectedContactId == contactID {
+            updateStatusForSelectedContact()
+            captureDiagnosticsState("direct-quic:transmit-prepare")
         }
     }
 

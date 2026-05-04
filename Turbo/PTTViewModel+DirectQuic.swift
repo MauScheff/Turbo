@@ -206,6 +206,9 @@ extension PTTViewModel {
         if isDirectPathRelayOnlyForced {
             return "relay-only-forced"
         }
+        if isDirectQuicAutoUpgradeDisabledForDebug {
+            return "auto-upgrade-disabled"
+        }
         if !backendAdvertisesDirectQuicUpgrade,
            !shouldAllowDirectQuicDebugBypassForAutomaticProbe() {
             return "backend-capability-disabled"
@@ -298,6 +301,19 @@ extension PTTViewModel {
         for contactID: UUID,
         reason: String
     ) {
+        if isDirectQuicAutoUpgradeDisabledForDebug {
+            diagnostics.record(
+                .media,
+                message: "Automatic Direct QUIC reprobe not scheduled",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "blockReason": "auto-upgrade-disabled",
+                ]
+            )
+            return
+        }
+
         let retryRemainingMilliseconds = mediaRuntime.directQuicUpgrade
             .retryBackoffRemaining(for: contactID)
             .map { max(Int($0 * 1_000), 0) } ?? 0
@@ -434,6 +450,30 @@ extension PTTViewModel {
             ? "Direct path upgrade disabled for debugging"
             : "Direct path upgrade enabled"
         captureDiagnosticsState("direct-quic:debug-relay-only")
+    }
+
+    func setDirectQuicAutoUpgradeDisabledForDebug(_ isDisabled: Bool) async {
+        let previousValue = isDirectQuicAutoUpgradeDisabledForDebug
+        TurboDirectPathDebugOverride.setAutoUpgradeDisabled(isDisabled)
+
+        diagnostics.record(
+            .media,
+            message: "Direct QUIC auto-upgrade override updated from diagnostics",
+            metadata: [
+                "selectedContact": selectedContact?.handle ?? "none",
+                "previousValue": String(previousValue),
+                "newValue": String(isDisabled),
+            ]
+        )
+
+        if isDisabled {
+            cancelDirectQuicAutoProbe()
+        }
+
+        statusMessage = isDisabled
+            ? "Direct path auto-upgrade disabled"
+            : "Direct path auto-upgrade enabled"
+        captureDiagnosticsState("direct-quic:debug-auto-upgrade")
     }
 
     func forceSelectedDirectQuicProbeForDebug() async {
@@ -791,7 +831,8 @@ extension PTTViewModel {
     @discardableResult
     func sendDirectQuicReceiverPrewarmRequest(
         for contactID: UUID,
-        reason: String
+        reason: String,
+        requestID: String? = nil
     ) async -> Bool {
         guard let backend = backendServices,
               let contact = contacts.first(where: { $0.id == contactID }),
@@ -802,7 +843,7 @@ extension PTTViewModel {
             return false
         }
 
-        let requestID = mediaRuntime.receiverPrewarmRequestID(for: contactID)
+        let requestID = requestID ?? mediaRuntime.receiverPrewarmRequestID(for: contactID)
         let payload = DirectQuicReceiverPrewarmPayload(
             requestId: requestID,
             channelId: channelID,
@@ -841,6 +882,24 @@ extension PTTViewModel {
         }
     }
 
+    @discardableResult
+    func sendDirectQuicReceiverTransmitPrepareIfPossible(
+        for contactID: UUID,
+        reason: String
+    ) async -> Bool {
+        let requestID = UUID().uuidString.lowercased()
+        let transmitPrepareReason = "transmit-\(reason)"
+        let sent = await sendDirectQuicReceiverPrewarmRequest(
+            for: contactID,
+            reason: transmitPrepareReason,
+            requestID: requestID
+        )
+        if sent {
+            await sendDirectQuicWarmPingIfPossible(for: contactID, reason: transmitPrepareReason)
+        }
+        return sent
+    }
+
     func handleIncomingDirectQuicReceiverPrewarmRequest(
         _ payload: DirectQuicReceiverPrewarmPayload,
         contactID: UUID,
@@ -861,7 +920,13 @@ extension PTTViewModel {
             ]
         )
 
-        if isFirstDelivery {
+        if isFirstDelivery, payload.reason.hasPrefix("transmit-") {
+            await handleIncomingDirectQuicTransmitPrepare(
+                payload,
+                contactID: contactID,
+                attemptID: attemptID
+            )
+        } else if isFirstDelivery {
             await prewarmLocalMediaIfNeeded(for: contactID)
             await syncLocalReceiverAudioReadinessSignal(
                 for: contactID,

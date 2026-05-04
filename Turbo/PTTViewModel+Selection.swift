@@ -435,6 +435,19 @@ extension PTTViewModel {
         return contacts.first(where: { $0.id == activeConversationContactID })
     }
 
+    var transportPathBadgeState: MediaTransportPathState? {
+        guard let contactID = activeConversationContactID ?? mediaSessionContactID else {
+            return nil
+        }
+
+        let phase = selectedPeerProjection(for: contactID).selectedPeerState.phase
+        guard phase.showsTransportPathBadge else {
+            return nil
+        }
+
+        return mediaTransportPathState
+    }
+
     private var listEligibleContacts: [Contact] {
         contacts.filter { contact in
             contact.handle != currentDevUserHandle

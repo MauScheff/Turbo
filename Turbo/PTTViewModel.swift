@@ -524,6 +524,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         TurboDirectPathDebugOverride.isRelayOnlyForced()
     }
 
+    var isDirectQuicAutoUpgradeDisabledForDebug: Bool {
+        TurboDirectPathDebugOverride.isAutoUpgradeDisabled()
+    }
+
     var backendAdvertisesDirectQuicUpgrade: Bool {
         backendServices?.supportsDirectQuicUpgrade == true
     }
@@ -568,6 +572,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             identityStatus: identityStatus.diagnosticsText,
             installedIdentityCount: installedIdentityCount,
             relayOnlyOverride: isDirectPathRelayOnlyForced,
+            autoUpgradeDisabled: isDirectQuicAutoUpgradeDisabledForDebug,
             backendAdvertisesUpgrade: backendAdvertisesDirectQuicUpgrade,
             effectiveUpgradeEnabled: effectiveDirectQuicUpgradeEnabled,
             transportPathState: mediaTransportPathState,
@@ -980,6 +985,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "remoteWakeCapabilityKind": selectedSession.remoteWakeCapabilityKind ?? "unavailable",
             "backendCanTransmit": selectedSession.backendCanTransmit.map(String.init(describing:)) ?? "none",
             "directQuicRelayOnlyOverride": String(directQuic.relayOnlyOverride),
+            "directQuicAutoUpgradeDisabled": String(directQuic.autoUpgradeDisabled),
             "directQuicBackendAdvertised": String(directQuic.backendAdvertisesUpgrade),
             "directQuicEnabled": String(directQuic.effectiveUpgradeEnabled),
             "directQuicRole": directQuic.role ?? "none",

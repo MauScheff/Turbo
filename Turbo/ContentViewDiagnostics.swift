@@ -25,6 +25,7 @@ struct TurboDiagnosticsView: View {
     let onImportDirectQuicIdentity: () -> Void
     let onUseInstalledDirectQuicIdentity: () -> Void
     let onSetRelayOnlyForced: (Bool) -> Void
+    let onSetDirectQuicAutoUpgradeDisabled: (Bool) -> Void
     let onForceDirectQuicProbe: () -> Void
     let onClearDirectQuicRetryBackoff: () -> Void
     let onCancelDirectQuicAttempt: () -> Void
@@ -137,6 +138,7 @@ struct TurboDiagnosticsView: View {
                     diagnosticsRow("Installed identities", "\(directQuic.installedIdentityCount)")
                     diagnosticsRow("Path state", directQuic.transportPathState.label)
                     diagnosticsRow("Relay-only override", directQuic.relayOnlyOverride ? "on" : "off")
+                    diagnosticsRow("Auto-upgrade", directQuic.autoUpgradeDisabled ? "off" : "on")
                     diagnosticsRow("Backend advertised", directQuic.backendAdvertisesUpgrade ? "yes" : "no")
                     diagnosticsRow("Effective upgrade", directQuic.effectiveUpgradeEnabled ? "yes" : "no")
                     diagnosticsRow("Probe controller", directQuic.probeControllerReady ? "ready" : "idle")
@@ -168,6 +170,18 @@ struct TurboDiagnosticsView: View {
                             set: onSetRelayOnlyForced
                         )
                     )
+                    .disabled(isRunningDirectQuicDebugAction)
+
+                    Button {
+                        onSetDirectQuicAutoUpgradeDisabled(!directQuic.autoUpgradeDisabled)
+                    } label: {
+                        Label(
+                            directQuic.autoUpgradeDisabled
+                                ? "Enable auto-upgrade"
+                                : "Disable auto-upgrade",
+                            systemImage: directQuic.autoUpgradeDisabled ? "bolt.fill" : "bolt.slash"
+                        )
+                    }
                     .disabled(isRunningDirectQuicDebugAction)
 
                     Button(isRunningDirectQuicDebugAction ? "Running…" : "Import PKCS#12 identity") {
@@ -463,6 +477,7 @@ struct TurboDiagnosticsSheet: View {
     let onImportDirectQuicIdentity: (URL, String) -> Void
     let onUseInstalledDirectQuicIdentity: () -> Void
     let onSetRelayOnlyForced: (Bool) -> Void
+    let onSetDirectQuicAutoUpgradeDisabled: (Bool) -> Void
     let onForceDirectQuicProbe: () -> Void
     let onClearDirectQuicRetryBackoff: () -> Void
     let onCancelDirectQuicAttempt: () -> Void
@@ -499,6 +514,7 @@ struct TurboDiagnosticsSheet: View {
                 },
                 onUseInstalledDirectQuicIdentity: onUseInstalledDirectQuicIdentity,
                 onSetRelayOnlyForced: onSetRelayOnlyForced,
+                onSetDirectQuicAutoUpgradeDisabled: onSetDirectQuicAutoUpgradeDisabled,
                 onForceDirectQuicProbe: onForceDirectQuicProbe,
                 onClearDirectQuicRetryBackoff: onClearDirectQuicRetryBackoff,
                 onCancelDirectQuicAttempt: onCancelDirectQuicAttempt

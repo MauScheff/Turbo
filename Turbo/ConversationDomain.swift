@@ -505,6 +505,16 @@ enum SelectedPeerPhase: Equatable {
     case receiving
     case blockedByOtherSession
     case systemMismatch
+
+    var showsTransportPathBadge: Bool {
+        switch self {
+        case .ready, .startingTransmit, .transmitting, .receiving:
+            return true
+        case .idle, .requested, .incomingRequest, .peerReady, .wakeReady, .waitingForPeer,
+             .localJoinFailed, .blockedByOtherSession, .systemMismatch:
+            return false
+        }
+    }
 }
 
 enum SelectedPeerWaitingReason: Equatable {

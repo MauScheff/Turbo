@@ -2,7 +2,7 @@ import SwiftUI
 
 struct TurboHeaderView: View {
     let statusMessage: String
-    let transportPathState: MediaTransportPathState
+    let transportPathState: MediaTransportPathState?
     let transportPathTint: Color
     let latestErrorText: String?
     let microphonePermissionStatus: String
@@ -68,20 +68,22 @@ struct TurboHeaderView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 6)
 
-            HStack(spacing: 5) {
-                if transportPathState.showsSecureIcon {
-                    Image(systemName: "lock.fill")
+            if let transportPathState {
+                HStack(spacing: 5) {
+                    if transportPathState.showsSecureIcon {
+                        Image(systemName: "lock.fill")
+                            .font(.caption2.weight(.semibold))
+                    }
+
+                    Text(transportPathState.label)
                         .font(.caption2.weight(.semibold))
                 }
-
-                Text(transportPathState.label)
-                    .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(transportPathTint.opacity(0.14))
+                .foregroundStyle(transportPathTint)
+                .clipShape(Capsule())
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(transportPathTint.opacity(0.14))
-            .foregroundStyle(transportPathTint)
-            .clipShape(Capsule())
 
             if needsMicrophonePermission {
                 Button(action: onRequestMicrophonePermission) {

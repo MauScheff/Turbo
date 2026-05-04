@@ -208,6 +208,7 @@ struct ContentView: View {
                 onImportDirectQuicIdentity: importDirectQuicIdentityFromDiagnostics,
                 onUseInstalledDirectQuicIdentity: useInstalledDirectQuicIdentityFromDiagnostics,
                 onSetRelayOnlyForced: setDirectPathRelayOnlyForced,
+                onSetDirectQuicAutoUpgradeDisabled: setDirectQuicAutoUpgradeDisabled,
                 onForceDirectQuicProbe: forceDirectQuicProbeFromDiagnostics,
                 onClearDirectQuicRetryBackoff: clearDirectQuicRetryBackoffFromDiagnostics,
                 onCancelDirectQuicAttempt: cancelDirectQuicAttemptFromDiagnostics
@@ -223,11 +224,15 @@ struct ContentView: View {
     }
 
     private var mainView: some View {
-        VStack(spacing: 16) {
+        let transportPathBadgeState = viewModel.transportPathBadgeState
+
+        return VStack(spacing: 16) {
             TurboHeaderView(
                 statusMessage: viewModel.statusMessage,
-                transportPathState: viewModel.mediaTransportPathState,
-                transportPathTint: transportPathTint,
+                transportPathState: transportPathBadgeState,
+                transportPathTint: transportPathTint(
+                    for: transportPathBadgeState ?? viewModel.mediaTransportPathState
+                ),
                 latestErrorText: latestDiagnosticsErrorText,
                 microphonePermissionStatus: viewModel.microphonePermissionStatusText,
                 needsMicrophonePermission: viewModel.needsMicrophonePermission,
@@ -289,8 +294,8 @@ struct ContentView: View {
         .padding(.bottom, 2)
     }
 
-    private var transportPathTint: Color {
-        switch viewModel.mediaTransportPathState {
+    private func transportPathTint(for state: MediaTransportPathState) -> Color {
+        switch state {
         case .relay:
             return .orange
         case .promoting:
@@ -567,6 +572,16 @@ struct ContentView: View {
         isRunningDirectQuicDebugAction = true
         Task {
             await viewModel.setDirectPathRelayOnlyForcedForDebug(isForced)
+            await MainActor.run {
+                isRunningDirectQuicDebugAction = false
+            }
+        }
+    }
+
+    private func setDirectQuicAutoUpgradeDisabled(_ isDisabled: Bool) {
+        isRunningDirectQuicDebugAction = true
+        Task {
+            await viewModel.setDirectQuicAutoUpgradeDisabledForDebug(isDisabled)
             await MainActor.run {
                 isRunningDirectQuicDebugAction = false
             }
