@@ -15379,7 +15379,7 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func directQuicTransmitPrepareInForegroundDoesNotArmTalkingStateBeforeAudio() async throws {
+    @Test func directQuicTransmitPrepareInForegroundArmsSystemReceiveWithoutTalkingStateBeforeAudio() async throws {
         let pttClient = RecordingPTTSystemClient()
         let viewModel = PTTViewModel(pttSystemClient: pttClient)
         let contactID = UUID()
@@ -15416,15 +15416,24 @@ struct TurboTests {
         )
         try await Task.sleep(nanoseconds: 100_000_000)
 
-        #expect(viewModel.pttWakeRuntime.pendingIncomingPush == nil)
+        #expect(viewModel.pttWakeRuntime.pendingIncomingPush?.contactID == contactID)
+        #expect(viewModel.pttWakeRuntime.incomingWakeActivationState(for: contactID) == .signalBuffered)
         #expect(viewModel.remoteTransmittingContactIDs.contains(contactID) == false)
-        #expect(pttClient.activeRemoteParticipantUpdates.isEmpty)
-        #expect(viewModel.selectedPeerState(for: contactID).statusMessage != "Blake is talking")
+        #expect(pttClient.activeRemoteParticipantUpdates.last?.name == "Blake")
+        #expect(pttClient.activeRemoteParticipantUpdates.last?.channelUUID == channelUUID)
+        #expect(viewModel.selectedPeerState(for: contactID).statusMessage == "Waiting for system audio activation...")
         #expect(
             viewModel.diagnosticsTranscript.contains(
                 "Direct QUIC receiver transmit prepare received"
             )
         )
+
+        await viewModel.handleActivatedAudioSession(.sharedInstance())
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(viewModel.pttWakeRuntime.incomingWakeActivationState(for: contactID) == .systemActivated)
+        #expect(viewModel.remoteTransmittingContactIDs.contains(contactID) == false)
+        #expect(viewModel.selectedPeerState(for: contactID).statusMessage != "Blake is talking")
     }
 
     @MainActor

@@ -1746,14 +1746,14 @@ extension PTTViewModel {
             contacts.first(where: { $0.id == contactID })?.remoteUserId
             ?? ""
         let applicationState = currentApplicationState()
-        let shouldArmSystemWake = applicationState != .active
-            && shouldTreatIncomingControlSignalAsWakeCandidate(for: contactID)
-        if shouldArmSystemWake {
+        let shouldArmWakeCandidate = shouldTreatIncomingControlSignalAsWakeCandidate(for: contactID)
+        if shouldArmWakeCandidate {
             ensurePendingWakeCandidate(
                 for: contactID,
                 channelId: payload.channelId,
                 senderUserId: senderUserID,
-                senderDeviceId: payload.fromDeviceId
+                senderDeviceId: payload.fromDeviceId,
+                scheduleFallback: applicationState != .active
             )
         }
         recordWakeReceiveTiming(
@@ -1767,7 +1767,7 @@ extension PTTViewModel {
                 "requestId": payload.requestId,
                 "reason": payload.reason,
                 "applicationState": String(describing: applicationState),
-                "armedSystemWake": String(shouldArmSystemWake),
+                "armedWakeCandidate": String(shouldArmWakeCandidate),
             ],
             ifAbsent: true
         )
@@ -1781,7 +1781,7 @@ extension PTTViewModel {
                 "requestId": payload.requestId,
                 "reason": payload.reason,
                 "applicationState": String(describing: applicationState),
-                "armedSystemWake": String(shouldArmSystemWake),
+                "armedWakeCandidate": String(shouldArmWakeCandidate),
             ]
         )
         if applicationState == .active {
@@ -1791,7 +1791,7 @@ extension PTTViewModel {
                 reason: "direct-quic-transmit-prepare"
             )
         }
-        if applicationState != .active, shouldSetSystemRemoteParticipantFromSignalPath(
+        if shouldArmWakeCandidate, shouldSetSystemRemoteParticipantFromSignalPath(
             for: contactID,
             applicationState: applicationState
         ) {
