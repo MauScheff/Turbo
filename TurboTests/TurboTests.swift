@@ -13407,6 +13407,55 @@ struct TurboTests {
         #expect(messages.contains("Delivered outbound audio transport payload"))
     }
 
+    @Test func audioChunkSenderReportsRecoveryAfterTransientTransportFailure() async {
+        enum TransientSendError: LocalizedError {
+            case unavailable
+
+            var errorDescription: String? {
+                "transient transport unavailable"
+            }
+        }
+
+        actor Recorder {
+            var failures: [String] = []
+            var recoveries = 0
+            var payloads: [String] = []
+
+            func appendFailure(_ message: String) {
+                failures.append(message)
+            }
+
+            func recordRecovery() {
+                recoveries += 1
+            }
+
+            func appendPayload(_ payload: String) {
+                payloads.append(payload)
+            }
+        }
+
+        let recorder = Recorder()
+        let sender = AudioChunkSender(
+            sendChunk: { _ in throw TransientSendError.unavailable },
+            reportFailure: { message in
+                await recorder.appendFailure(message)
+            },
+            reportRecovery: {
+                await recorder.recordRecovery()
+            }
+        )
+
+        await sender.enqueue("chunk-fails")
+        await sender.updateSendChunk { payload in
+            await recorder.appendPayload(payload)
+        }
+        await sender.enqueue("chunk-recovers")
+
+        #expect(await recorder.failures.contains("audio send failed: transient transport unavailable"))
+        #expect(await recorder.recoveries == 1)
+        #expect(await recorder.payloads.flatMap(AudioChunkPayloadCodec.decode) == ["chunk-recovers"])
+    }
+
     @Test func audioChunkSenderDropsOldestQueuedPayloadsUnderBackpressure() async {
         actor Gate {
             var isOpen = false
@@ -18095,6 +18144,63 @@ struct TurboTests {
         #expect(events.contains("background-task-end"))
         #expect(events.firstIndex(of: "background-task-begin:background-presence")! < events.firstIndex(of: "background-finish")!)
         #expect(events.firstIndex(of: "background-task-end")! > events.firstIndex(of: "background-finish")!)
+    }
+
+    @MainActor
+    @Test func backgroundTransitionPreservesWebSocketDuringLiveTransmit() async {
+        let viewModel = PTTViewModel()
+        let probe = BackgroundTransitionProbe()
+        let contactID = UUID()
+        let channelUUID = UUID()
+
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Kai",
+                handle: "@kai",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-kai",
+                remoteUserId: "user-kai"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.pttCoordinator.send(
+            .didBeginTransmitting(channelUUID: channelUUID, source: "test")
+        )
+        viewModel.syncPTTState()
+
+        viewModel.backgroundWebSocketSuspendHandler = {
+            probe.recordSuspend()
+        }
+        viewModel.beginBackgroundActivity = { name, _ in
+            probe.recordBackgroundTaskBegin(name)
+            return UIBackgroundTaskIdentifier(rawValue: 1)
+        }
+        viewModel.endBackgroundActivity = { _ in
+            probe.recordBackgroundTaskEnd()
+        }
+        viewModel.backgroundSessionPresenceHandler = {
+            probe.recordBackgroundStart()
+            probe.recordBackgroundFinish()
+        }
+        viewModel.backgroundOfflinePresenceHandler = {
+            probe.recordOfflineStart()
+        }
+
+        await viewModel.handleApplicationDidEnterBackground()
+
+        #expect(probe.suspendCount == 0)
+        #expect(probe.backgroundStarted)
+        #expect(probe.offlineStarted == false)
+        #expect(probe.backgroundTaskStarted)
+        #expect(probe.backgroundTaskEnded)
+        #expect(viewModel.diagnosticsTranscript.contains("Preserving WebSocket during live background PTT flow"))
     }
 
     @MainActor

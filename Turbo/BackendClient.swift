@@ -515,7 +515,14 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             self.receiveTask = nil
             self.webSocketTask = nil
             self.setWebSocketConnectionState(.idle)
-            if closeCode != .normalClosure {
+            if self.shouldMaintainWebSocket {
+                let reason =
+                    closeCode == .normalClosure
+                    ? "WebSocket disconnected: closed normally"
+                    : "WebSocket disconnected: closed with code \(closeCode.rawValue)"
+                self.onServerNotice?(reason)
+                self.scheduleReconnect(reason: reason)
+            } else if closeCode != .normalClosure {
                 let reason = "WebSocket disconnected: closed with code \(closeCode.rawValue)"
                 self.onServerNotice?(reason)
                 self.scheduleReconnect(reason: reason)

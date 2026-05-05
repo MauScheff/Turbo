@@ -304,6 +304,24 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             || pttWakeRuntime.pendingIncomingPush != nil
     }
 
+    func shouldPreserveBackgroundWebSocketForLivePTT(
+        applicationState: UIApplication.State? = nil
+    ) -> Bool {
+        let state = applicationState ?? currentApplicationState()
+        guard state != .active else { return true }
+
+        if hasPendingBeginOrActiveTransmit
+            || isTransmitting
+            || transmitCoordinator.state.isPressingTalk
+            || pttCoordinator.state.isTransmitting
+            || pttWakeRuntime.pendingIncomingPush != nil {
+            return true
+        }
+
+        guard let contactID = mediaSessionContactID else { return false }
+        return hasActiveBackgroundPTTFlowOwningDirectQuic(for: contactID)
+    }
+
     func syncPTTState() {
         let previousActiveChannelID = activeChannelId
         activeChannelId = pttCoordinator.state.activeContactID
@@ -1273,8 +1291,23 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     func handleApplicationDidEnterBackground() async {
         let shouldPreserveJoinedSession =
             shouldMaintainBackgroundControlPlane(applicationState: .background)
+        let shouldPreserveLiveWebSocket =
+            shouldPreserveBackgroundWebSocketForLivePTT(applicationState: .background)
 
-        if let backgroundWebSocketSuspendHandler {
+        if shouldPreserveLiveWebSocket {
+            diagnostics.record(
+                .websocket,
+                message: "Preserving WebSocket during live background PTT flow",
+                metadata: [
+                    "hasPendingBeginOrActiveTransmit": String(hasPendingBeginOrActiveTransmit),
+                    "hasActiveTransmitOrMediaSession": String(hasActiveTransmitOrMediaSession),
+                    "isTransmitting": String(isTransmitting),
+                    "systemIsTransmitting": String(pttCoordinator.state.isTransmitting),
+                    "pendingWake": String(pttWakeRuntime.pendingIncomingPush != nil),
+                ]
+            )
+            backendServices?.resumeWebSocket()
+        } else if let backgroundWebSocketSuspendHandler {
             backgroundWebSocketSuspendHandler()
         } else {
             backendServices?.suspendWebSocket()

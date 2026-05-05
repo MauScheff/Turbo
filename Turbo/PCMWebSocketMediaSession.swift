@@ -11,6 +11,7 @@ enum PlaybackBufferReceivePlan: Equatable {
 actor AudioChunkSender {
     private var sendChunk: (@Sendable (String) async throws -> Void)?
     private let reportFailure: @Sendable (String) async -> Void
+    private let reportRecovery: (@Sendable () async -> Void)?
     private let reportEvent: (@Sendable (String, [String: String]) async -> Void)?
     // Keep sender-side live audio bounded; receiver-side wake buffering happens
     // after transport delivery, so stale outbound chunks are worse than drops.
@@ -26,10 +27,12 @@ actor AudioChunkSender {
     private var outboundTransportDispatchReportBudget = 64
     private var outboundTransportSuccessReportBudget = 64
     private var outboundTransportDropReportBudget = 16
+    private var transportFailureReported = false
 
     init(
         sendChunk: (@Sendable (String) async throws -> Void)?,
         reportFailure: @escaping @Sendable (String) async -> Void,
+        reportRecovery: (@Sendable () async -> Void)? = nil,
         reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil,
         maximumPendingPayloads: Int = 16,
         maximumPayloadsPerMessage: Int = 4,
@@ -39,6 +42,7 @@ actor AudioChunkSender {
     ) {
         self.sendChunk = sendChunk
         self.reportFailure = reportFailure
+        self.reportRecovery = reportRecovery
         self.reportEvent = reportEvent
         self.maximumPendingPayloads = maximumPendingPayloads
         self.maximumPayloadsPerMessage = maximumPayloadsPerMessage
@@ -70,6 +74,7 @@ actor AudioChunkSender {
         pendingPayloads.removeAll(keepingCapacity: false)
         isDraining = false
         flushPendingImmediately = false
+        transportFailureReported = false
         resetReportingBudgets()
     }
 
@@ -90,6 +95,7 @@ actor AudioChunkSender {
         while !pendingPayloads.isEmpty {
             let payload = await nextTransportPayload()
             guard let sendChunk = await waitForTransportIfNeeded() else {
+                transportFailureReported = true
                 await reportFailure("audio send failed: websocket transport is not configured")
                 pendingPayloads.removeAll(keepingCapacity: false)
                 break
@@ -100,11 +106,13 @@ actor AudioChunkSender {
                     pendingPayloadCount: pendingPayloads.count
                 )
                 try await sendChunk(payload)
+                await reportRecoveryIfNeeded()
                 reportTransportSendSucceededIfNeeded(
                     payload: payload,
                     pendingPayloadCount: pendingPayloads.count
                 )
             } catch {
+                transportFailureReported = true
                 await reportFailure("audio send failed: \(error.localizedDescription)")
                 pendingPayloads.removeAll(keepingCapacity: false)
                 break
@@ -123,6 +131,12 @@ actor AudioChunkSender {
             flushPendingImmediately = false
         }
         return AudioChunkPayloadCodec.encode(batch)
+    }
+
+    private func reportRecoveryIfNeeded() async {
+        guard transportFailureReported else { return }
+        transportFailureReported = false
+        await reportRecovery?()
     }
 
     private func waitForBatchCollectionIfNeeded() async {
@@ -444,6 +458,20 @@ final class PCMWebSocketMediaSession: MediaSession {
                 guard let self else { return }
                 await MainActor.run {
                     self.state = .failed(message)
+                }
+            },
+            reportRecovery: { [weak self] in
+                guard let self else { return }
+                let didRecover = await MainActor.run { () -> Bool in
+                    guard case .failed = self.state else { return false }
+                    self.state = .connected
+                    return true
+                }
+                if didRecover {
+                    await self.report(
+                        "Recovered audio transport after successful send",
+                        metadata: [:]
+                    )
                 }
             },
             reportEvent: { [weak self] (message: String, metadata: [String: String]) in
