@@ -1407,7 +1407,8 @@ extension PTTViewModel {
             channelID: attempt.channelID,
             fromUserID: remoteUserID,
             fromDeviceID: fromDeviceID,
-            contactID: contactID
+            contactID: contactID,
+            incomingAudioTransport: .directQuic
         )
     }
 

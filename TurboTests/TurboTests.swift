@@ -8242,7 +8242,7 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func appleGatedSystemTransmitClosesPrewarmedDirectMediaBeforeAppleAudioActivation() {
+    @Test func appleGatedSystemTransmitClosesPrewarmedAudioWhilePreservingDirectPathBeforeAppleAudioActivation() {
         let previousPolicy = UserDefaults.standard.string(
             forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
         )
@@ -8284,6 +8284,7 @@ struct TurboTests {
         #expect(viewModel.shouldUseDirectQuicTransport(for: contactID))
         #expect(viewModel.shouldBridgePrewarmedDirectMediaDuringSystemTransmit(for: contactID))
         #expect(viewModel.shouldClosePrewarmedMediaBeforeSystemTransmit(for: contactID))
+        #expect(viewModel.shouldDeactivatePrewarmedAudioSessionBeforeSystemTransmit(for: contactID))
     }
 
     @MainActor
@@ -8415,7 +8416,7 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func appleGatedPrewarmedDirectQuicSystemTransmitDefersCaptureBeforeAppleAudioActivation() async {
+    @Test func appleGatedForegroundPrewarmedDirectQuicSystemTransmitDefersCaptureBeforeAppleAudioActivation() async {
         let previousPolicy = UserDefaults.standard.string(
             forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
         )
@@ -9205,7 +9206,7 @@ struct TurboTests {
         #expect(viewModel.transmitCoordinator.state.activeTarget?.deviceID == "peer-device")
         #expect(viewModel.directQuicBackendLeaseBypassedContactIDs.contains(contactID))
         #expect(mediaSession.startSendingAudioCallCount == 0)
-        #expect(mediaSession.closedDeactivateAudioSessionFlags == [false])
+        #expect(mediaSession.closedDeactivateAudioSessionFlags == [true])
         #expect(
             viewModel.transmitStartupTiming.elapsedMilliseconds(
                 for: "prewarmed-media-closed"
@@ -9239,7 +9240,7 @@ struct TurboTests {
         #expect(
             viewModel.transmitStartupTiming.elapsedMilliseconds(
                 for: "early-audio-capture-deferred-until-system-activation"
-            ) == nil
+            ) != nil
         )
         #expect(
             viewModel.transmitStartupTiming.elapsedMilliseconds(
@@ -9255,12 +9256,6 @@ struct TurboTests {
         viewModel.handleDidActivateAudioSession(.sharedInstance())
         try await Task.sleep(nanoseconds: 150_000_000)
 
-        #expect(mediaSession.startSendingAudioCallCount == 0)
-        #expect(
-            viewModel.transmitStartupTiming.elapsedMilliseconds(
-                for: "early-audio-capture-start-completed"
-            ) == nil
-        )
         #expect(
             viewModel.transmitStartupTiming.elapsedMilliseconds(
                 for: "audio-capture-start-completed"
@@ -9477,7 +9472,7 @@ struct TurboTests {
 
         #expect(pttClient.beginTransmitRequests == [channelUUID])
         #expect(pttClient.stopTransmitRequests.contains(channelUUID))
-        #expect(mediaSession.closedDeactivateAudioSessionFlags == [false])
+        #expect(mediaSession.closedDeactivateAudioSessionFlags == [true])
         #expect(mediaSession.startSendingAudioCallCount == 0)
         #expect(mediaSession.abortSendingAudioCallCount == 0)
         #expect(
@@ -9488,7 +9483,7 @@ struct TurboTests {
         #expect(
             viewModel.transmitStartupTiming.elapsedMilliseconds(
                 for: "early-audio-capture-deferred-until-system-activation"
-            ) == nil
+            ) != nil
         )
         #expect(
             viewModel.transmitStartupTiming.elapsedMilliseconds(
@@ -13176,6 +13171,37 @@ struct TurboTests {
         )
     }
 
+    @Test func systemActivatedPlaybackOnlyPrimesPlaybackNodeOnce() {
+        #expect(
+            PCMWebSocketMediaSession.shouldPrimeSystemActivatedPlaybackNode(
+                activationMode: .systemActivated,
+                startupMode: .playbackOnly,
+                playbackAlreadyReady: false
+            )
+        )
+        #expect(
+            !PCMWebSocketMediaSession.shouldPrimeSystemActivatedPlaybackNode(
+                activationMode: .appManaged,
+                startupMode: .playbackOnly,
+                playbackAlreadyReady: false
+            )
+        )
+        #expect(
+            !PCMWebSocketMediaSession.shouldPrimeSystemActivatedPlaybackNode(
+                activationMode: .systemActivated,
+                startupMode: .interactive,
+                playbackAlreadyReady: false
+            )
+        )
+        #expect(
+            !PCMWebSocketMediaSession.shouldPrimeSystemActivatedPlaybackNode(
+                activationMode: .systemActivated,
+                startupMode: .playbackOnly,
+                playbackAlreadyReady: true
+            )
+        )
+    }
+
     @Test func pcmLevelMetricsDetectsSilentAndNonSilentInt16Buffers() throws {
         let format = try #require(
             AVAudioFormat(
@@ -13996,6 +14022,97 @@ struct TurboTests {
         #expect(
             viewModel.diagnosticsTranscript.contains(
                 "Flushing buffered wake audio after PTT activation"
+            )
+        )
+    }
+
+    @MainActor
+    @Test func appleGatedForegroundDirectQuicAudioUsesAppManagedPlaybackBeforePTTActivation() async throws {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.appleGated)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.applicationStateOverride = .active
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "test"
+            )
+        )
+        viewModel.syncPTTState()
+        viewModel.isPTTAudioSessionActive = false
+        let mediaSession = RecordingMediaSession()
+        mediaSession.delegate = viewModel
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-123",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        if let direct = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        ) {
+            viewModel.applyDirectQuicUpgradeTransition(direct, for: contactID)
+        }
+
+        await viewModel.handleIncomingDirectQuicReceiverPrewarmRequest(
+            DirectQuicReceiverPrewarmPayload(
+                requestId: UUID().uuidString.lowercased(),
+                channelId: "channel-123",
+                fromDeviceId: "peer-device",
+                reason: "transmit-system-handoff",
+                directQuicAttemptId: "attempt-1"
+            ),
+            contactID: contactID,
+            attemptID: "attempt-1"
+        )
+        await viewModel.handleIncomingDirectQuicAudioPayload(
+            "AQI=",
+            contactID: contactID,
+            attemptID: "attempt-1"
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(viewModel.pttWakeRuntime.pendingIncomingPush?.activationState == .appManagedFallback)
+        #expect(viewModel.pttWakeRuntime.pendingIncomingPush?.bufferedAudioChunks == [])
+        #expect(mediaSession.receivedRemoteAudioChunks == ["AQI="])
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Using app-managed wake playback for foreground audio"
             )
         )
     }
@@ -15434,6 +15551,68 @@ struct TurboTests {
         #expect(viewModel.pttWakeRuntime.incomingWakeActivationState(for: contactID) == .systemActivated)
         #expect(viewModel.remoteTransmittingContactIDs.contains(contactID) == false)
         #expect(viewModel.selectedPeerState(for: contactID).statusMessage != "Blake is talking")
+    }
+
+    @MainActor
+    @Test func systemActivatedDirectQuicAudioDoesNotReassertActiveRemoteParticipantOnFirstChunk() async throws {
+        let pttClient = RecordingPTTSystemClient()
+        let mediaSession = RecordingMediaSession()
+        let viewModel = PTTViewModel(pttSystemClient: pttClient)
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.applicationStateOverride = .active
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        viewModel.mediaRuntime.updateConnectionState(.connected)
+
+        await viewModel.handleIncomingDirectQuicReceiverPrewarmRequest(
+            DirectQuicReceiverPrewarmPayload(
+                requestId: UUID().uuidString.lowercased(),
+                channelId: "channel-123",
+                fromDeviceId: "peer-device",
+                reason: "transmit-system-handoff",
+                directQuicAttemptId: "attempt-1"
+            ),
+            contactID: contactID,
+            attemptID: "attempt-1"
+        )
+        viewModel.pttWakeRuntime.markAudioSessionActivated(for: channelUUID)
+        viewModel.isPTTAudioSessionActive = true
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(pttClient.activeRemoteParticipantUpdates.count == 1)
+
+        viewModel.handleIncomingSignal(
+            TurboSignalEnvelope(
+                type: .audioChunk,
+                channelId: "channel-123",
+                fromUserId: "peer-user",
+                fromDeviceId: "peer-device",
+                toUserId: "self-user",
+                toDeviceId: "self-device",
+                payload: "AQI="
+            )
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(pttClient.activeRemoteParticipantUpdates.count == 1)
+        #expect(mediaSession.receivedRemoteAudioChunks == ["AQI="])
     }
 
     @MainActor

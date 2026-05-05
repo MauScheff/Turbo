@@ -467,6 +467,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     private var pendingRemoteAudioChunks: [Data] = []
     private var scheduledPlaybackBufferCount = 0
     private var playbackStartTask: Task<Void, Never>?
+    private var playbackNodeStartupReassertionTask: Task<Void, Never>?
     private var startTask: Task<Void, Error>?
     private let maximumPendingPlaybackBuffers = 24
     private let maximumPendingRemoteAudioChunks = 24
@@ -563,6 +564,11 @@ final class PCMWebSocketMediaSession: MediaSession {
         )
         try preparePlaybackPathIfNeeded()
         try startPlaybackEngineIfNeeded()
+        primeSystemActivatedPlaybackNodeIfNeeded(
+            activationMode: activationMode,
+            startupMode: startupMode,
+            playbackAlreadyReady: playbackAlreadyReady
+        )
         isPlaybackReady = true
         try drainPendingRemoteAudioChunksIfReady()
 
@@ -722,6 +728,8 @@ final class PCMWebSocketMediaSession: MediaSession {
         startTask = nil
         playbackStartTask?.cancel()
         playbackStartTask = nil
+        playbackNodeStartupReassertionTask?.cancel()
+        playbackNodeStartupReassertionTask = nil
         pendingPlaybackBuffers.removeAll(keepingCapacity: false)
         pendingRemoteAudioChunks.removeAll(keepingCapacity: false)
         scheduledPlaybackBufferCount = 0
@@ -1135,6 +1143,8 @@ final class PCMWebSocketMediaSession: MediaSession {
         playerNode.scheduleBuffer(playbackBuffer) { [weak self] in
             self?.markScheduledPlaybackBufferCompleted()
         }
+        playerNode.prepare(withFrameCount: max(playbackBuffer.frameLength, 512))
+        schedulePlaybackNodeStartupReassertion(reason: "playback-buffer-scheduled")
         var metadata = [
             "frameLength": String(playbackBuffer.frameLength),
             "sampleRate": String(playbackBuffer.format.sampleRate),
@@ -1170,10 +1180,34 @@ final class PCMWebSocketMediaSession: MediaSession {
         return .scheduleAndStartNode
     }
 
-    private func startPlaybackNode() {
+    static func shouldPrimeSystemActivatedPlaybackNode(
+        activationMode: MediaSessionActivationMode,
+        startupMode: MediaSessionStartupMode,
+        playbackAlreadyReady: Bool
+    ) -> Bool {
+        activationMode == .systemActivated
+            && startupMode == .playbackOnly
+            && !playbackAlreadyReady
+    }
+
+    private func primeSystemActivatedPlaybackNodeIfNeeded(
+        activationMode: MediaSessionActivationMode,
+        startupMode: MediaSessionStartupMode,
+        playbackAlreadyReady: Bool
+    ) {
+        guard Self.shouldPrimeSystemActivatedPlaybackNode(
+            activationMode: activationMode,
+            startupMode: startupMode,
+            playbackAlreadyReady: playbackAlreadyReady
+        ) else { return }
+        startPlaybackNode(reason: "system-activated-playback-prime")
+        schedulePlaybackNodeStartupReassertion(reason: "system-activated-playback-prime")
+    }
+
+    private func startPlaybackNode(reason: String = "playback-buffer-scheduled") {
         playerNode.play()
         Task {
-            await report("Playback node started", metadata: [:])
+            await report("Playback node started", metadata: ["reason": reason])
         }
     }
 
@@ -1222,6 +1256,8 @@ final class PCMWebSocketMediaSession: MediaSession {
     private func resetPlaybackForTransmit() {
         playbackStartTask?.cancel()
         playbackStartTask = nil
+        playbackNodeStartupReassertionTask?.cancel()
+        playbackNodeStartupReassertionTask = nil
         pendingPlaybackBuffers.removeAll(keepingCapacity: false)
         playerNode.stop()
         playerNode.reset()
@@ -1296,12 +1332,21 @@ final class PCMWebSocketMediaSession: MediaSession {
     }
 
     private func reassertPlaybackNodeAfterRouteChangeIfNeeded() {
-        guard shouldReassertPlaybackNodeAfterRouteChange() else { return }
+        reassertPlaybackNodeIfNeeded(
+            reason: "audio-route-change",
+            message: "Playback node reasserted after audio route change"
+        )
+    }
+
+    private func reassertPlaybackNodeIfNeeded(reason: String, message: String) {
+        guard shouldReassertPlaybackNode() else { return }
         playerNode.play()
+        drainPendingPlaybackBuffers()
         Task {
             await report(
-                "Playback node reasserted after audio route change",
+                message,
                 metadata: [
+                    "reason": reason,
                     "pendingBufferCount": String(pendingPlaybackBufferCount()),
                     "scheduledBufferCount": String(scheduledPlaybackBufferCountSnapshot()),
                 ]
@@ -1309,7 +1354,7 @@ final class PCMWebSocketMediaSession: MediaSession {
         }
     }
 
-    private func shouldReassertPlaybackNodeAfterRouteChange() -> Bool {
+    private func shouldReassertPlaybackNode() -> Bool {
         playerNode.isPlaying
             || pendingPlaybackBufferCount() > 0
             || scheduledPlaybackBufferCountSnapshot() > 0
@@ -1319,6 +1364,20 @@ final class PCMWebSocketMediaSession: MediaSession {
         stateLock.lock()
         defer { stateLock.unlock() }
         return scheduledPlaybackBufferCount
+    }
+
+    private func schedulePlaybackNodeStartupReassertion(reason: String) {
+        guard playbackNodeStartupReassertionTask == nil else { return }
+        playbackNodeStartupReassertionTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.playbackNodeStartupReassertionTask = nil }
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard !Task.isCancelled else { return }
+            self.reassertPlaybackNodeIfNeeded(
+                reason: reason,
+                message: "Playback node startup reasserted"
+            )
+        }
     }
 
     private func requestPlaybackStartWhenReady() {

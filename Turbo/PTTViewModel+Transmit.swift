@@ -263,6 +263,12 @@ extension PTTViewModel {
             stage = "first-playback-buffer-scheduled"
         case "Playback engine started":
             stage = "playback-engine-started"
+        case "Playback node started":
+            stage = metadata["reason"] == "system-activated-playback-prime"
+                ? "playback-node-primed"
+                : "playback-node-started"
+        case "Playback node startup reasserted":
+            stage = "playback-node-startup-reasserted"
         default:
             stage = nil
         }
@@ -301,6 +307,10 @@ extension PTTViewModel {
             "system-audio-activation-observed",
             "media-session-start-requested",
             "media-session-start-completed",
+            "playback-engine-started",
+            "playback-node-primed",
+            "playback-node-started",
+            "playback-node-startup-reasserted",
             "buffered-audio-flush-started",
             "first-playback-buffer-scheduled",
             "buffered-audio-flush-completed",
@@ -794,6 +804,11 @@ extension PTTViewModel {
         }
     }
 
+    func shouldDeactivatePrewarmedAudioSessionBeforeSystemTransmit(for contactID: UUID) -> Bool {
+        directQuicTransmitStartupPolicy == .appleGated
+            && shouldBridgePrewarmedDirectMediaDuringSystemTransmit(for: contactID)
+    }
+
     func shouldBridgePrewarmedDirectMediaDuringSystemTransmit(
         for contactID: UUID,
         applicationState: UIApplication.State? = nil
@@ -817,6 +832,16 @@ extension PTTViewModel {
             for: contactID,
             applicationState: applicationState
         )
+    }
+
+    func shouldUseForegroundDirectQuicControlPath(
+        for contactID: UUID,
+        applicationState: UIApplication.State? = nil
+    ) -> Bool {
+        let applicationState = applicationState ?? currentApplicationState()
+        guard applicationState == .active else { return false }
+        guard isJoined, activeChannelId == contactID else { return false }
+        return shouldUseDirectQuicTransport(for: contactID)
     }
 
     func shouldUseSpeculativeForegroundWarmDirectTransmit(
@@ -1244,7 +1269,7 @@ extension PTTViewModel {
         reason: String
     ) {
         guard let request else { return }
-        guard shouldUseForegroundWarmDirectTransmit(for: request.contactID) else { return }
+        guard shouldUseForegroundDirectQuicControlPath(for: request.contactID) else { return }
         guard let backend = backendServices, backend.supportsWebSocket, backend.isWebSocketConnected else {
             return
         }
@@ -1287,7 +1312,7 @@ extension PTTViewModel {
         reason: String
     ) {
         guard isBackendLeaseBypassedTransmitTarget(target) else { return }
-        guard shouldUseForegroundWarmDirectTransmit(for: target.contactID) else { return }
+        guard shouldUseForegroundDirectQuicControlPath(for: target.contactID) else { return }
         guard let backend = backendServices, backend.supportsWebSocket, backend.isWebSocketConnected else {
             return
         }
@@ -1894,6 +1919,8 @@ extension PTTViewModel {
                 reason: "foreground-warm-direct-transmit"
             )
         } else if shouldClosePrewarmedMediaBeforeSystemTransmit(for: request.contactID) {
+            let deactivateAudioSession =
+                shouldDeactivatePrewarmedAudioSessionBeforeSystemTransmit(for: request.contactID)
             diagnostics.record(
                 .media,
                 message: "Closing app-managed media session before system transmit handoff",
@@ -1901,13 +1928,13 @@ extension PTTViewModel {
                     "contactId": request.contactID.uuidString,
                     "channelUUID": channelUUID.uuidString,
                     "mediaState": String(describing: mediaConnectionState),
-                    "deactivateAudioSession": "false",
+                    "deactivateAudioSession": String(deactivateAudioSession),
                     "preserveDirectQuic": String(shouldUseDirectQuicTransport(for: request.contactID)),
                     "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
                 ]
             )
             closeMediaSession(
-                deactivateAudioSession: false,
+                deactivateAudioSession: deactivateAudioSession,
                 preserveDirectQuic: shouldUseDirectQuicTransport(for: request.contactID)
             )
             recordTransmitStartupTiming(
@@ -1928,6 +1955,16 @@ extension PTTViewModel {
                     "contactId": request.contactID.uuidString,
                     "channelUUID": channelUUID.uuidString,
                     "mediaState": String(describing: mediaConnectionState),
+                ]
+            )
+            recordTransmitStartupTiming(
+                stage: "prewarmed-media-preserved",
+                contactID: request.contactID,
+                channelUUID: channelUUID,
+                channelID: request.backendChannelID,
+                metadata: [
+                    "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
+                    "bridge": "prewarmed-direct",
                 ]
             )
             configureProvisionalDirectQuicOutgoingAudioRouteIfPossible(
@@ -2292,22 +2329,13 @@ extension PTTViewModel {
         guard transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-requested") == nil else {
             return false
         }
-        guard directQuicTransmitStartupPolicy != .appleGated || isPTTAudioSessionActive else {
-            diagnostics.record(
-                .media,
-                message: "Deferring warm Direct QUIC capture until Apple audio activation",
-                metadata: [
-                    "contactId": request.contactID.uuidString,
-                    "channelId": request.backendChannelID,
-                    "channelUUID": request.channelUUID?.uuidString ?? "none",
-                    "targetDeviceId": target.deviceID,
-                    "trigger": trigger,
-                    "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
-                ]
-            )
-            recordFirstTransmitStartupTimingStageIfAbsent(
-                "early-audio-capture-deferred-until-system-activation",
-                metadata: ["trigger": trigger, "bridge": "prewarmed-direct"]
+        guard directQuicTransmitStartupPolicy != .appleGated
+                || isPTTAudioSessionActive else {
+            recordAppleGatedWarmDirectCaptureDeferred(
+                request: request,
+                target: target,
+                trigger: trigger,
+                reason: "waiting-for-apple-audio-session"
             )
             return false
         }
@@ -2321,6 +2349,8 @@ extension PTTViewModel {
                 "channelId": request.backendChannelID,
                 "targetDeviceId": target.deviceID,
                 "trigger": trigger,
+                "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
+                "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
             ]
         )
         do {
@@ -2359,6 +2389,37 @@ extension PTTViewModel {
         }
     }
 
+    func recordAppleGatedWarmDirectCaptureDeferred(
+        request: TransmitRequestContext,
+        target: TransmitTarget,
+        trigger: String,
+        reason: String
+    ) {
+        diagnostics.record(
+            .media,
+            message: "Deferring warm Direct QUIC capture until Apple audio activation",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "channelId": request.backendChannelID,
+                "channelUUID": request.channelUUID?.uuidString ?? "none",
+                "targetDeviceId": target.deviceID,
+                "trigger": trigger,
+                "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
+                "applicationState": String(describing: currentApplicationState()),
+                "mediaState": String(describing: mediaConnectionState),
+                "reason": reason,
+            ]
+        )
+        recordFirstTransmitStartupTimingStageIfAbsent(
+            "early-audio-capture-deferred-until-system-activation",
+            metadata: [
+                "trigger": trigger,
+                "bridge": "prewarmed-direct",
+                "reason": reason,
+            ]
+        )
+    }
+
     func startAppleBeganWarmDirectQuicCaptureIfPossible(
         channelUUID: UUID,
         source: String
@@ -2367,13 +2428,27 @@ extension PTTViewModel {
         guard let target = activeTransmitTarget(for: channelUUID) else { return }
         guard isBackendLeaseBypassedTransmitTarget(target) else { return }
         guard let request = directQuicBackendLeaseBypassedRequest(for: target.contactID) else { return }
-        guard shouldUseForegroundWarmDirectTransmit(for: target.contactID) else { return }
+        guard shouldUseForegroundDirectQuicControlPath(for: target.contactID) else { return }
 
         guard isPTTAudioSessionActive else {
-            _ = await startPrewarmedDirectSystemTransmitBridgeIfPossible(
+            guard shouldBridgePrewarmedDirectMediaDuringSystemTransmit(for: target.contactID) else {
+                recordAppleGatedWarmDirectCaptureDeferred(
+                    request: request,
+                    target: target,
+                    trigger: "system-transmit-began",
+                    reason: "prewarmed-audio-session-closed-before-apple-activation"
+                )
+                return
+            }
+            let didStart = await startPrewarmedDirectSystemTransmitBridgeIfPossible(
                 request: request,
                 target: target,
                 trigger: "system-transmit-began"
+            )
+            guard didStart else { return }
+            await sendDirectQuicLeaseBypassedTransmitStartSignalIfPossible(
+                target: target,
+                channelUUID: channelUUID
             )
             return
         }

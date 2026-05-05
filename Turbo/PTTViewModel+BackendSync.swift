@@ -8,6 +8,11 @@
 import Foundation
 import UIKit
 
+enum IncomingAudioPayloadTransport: Equatable {
+    case relayWebSocket
+    case directQuic
+}
+
 private enum PendingPlaybackDrainDecision {
     case notPending
     case deferTimeout(elapsedNanoseconds: UInt64)
@@ -461,12 +466,14 @@ extension PTTViewModel {
 
     private func shouldUseForegroundAppManagedWakePlayback(
         for contactID: UUID,
-        applicationState: UIApplication.State
+        applicationState: UIApplication.State,
+        incomingAudioTransport: IncomingAudioPayloadTransport
     ) -> Bool {
         guard pttWakeRuntime.shouldBufferAudioChunk(for: contactID) else { return false }
         return prefersForegroundAppManagedReceivePlayback(
             for: contactID,
-            applicationState: applicationState
+            applicationState: applicationState,
+            incomingAudioTransport: incomingAudioTransport
         )
     }
 
@@ -506,6 +513,16 @@ extension PTTViewModel {
             && !pttCoordinator.state.isTransmitting
     }
 
+    func shouldSuppressForegroundDirectQuicRemoteParticipant(
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState == .active else { return false }
+        guard directQuicTransmitStartupPolicy == .appleGated else { return false }
+        guard isJoined, activeChannelId == contactID else { return false }
+        return shouldUseDirectQuicTransport(for: contactID)
+    }
+
     func shouldClearSystemRemoteParticipantFromSignalPath(for contactID: UUID) -> Bool {
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         guard pttCoordinator.state.systemChannelUUID == channelUUID else { return false }
@@ -521,11 +538,20 @@ extension PTTViewModel {
 
     func prefersForegroundAppManagedReceivePlayback(
         for contactID: UUID,
-        applicationState: UIApplication.State
+        applicationState: UIApplication.State,
+        incomingAudioTransport: IncomingAudioPayloadTransport? = nil
     ) -> Bool {
-        guard directQuicTransmitStartupPolicy == .speculativeForeground else { return false }
         guard applicationState == .active else { return false }
         guard isJoined, activeChannelId == contactID else { return false }
+        let isSpeculativePolicy = directQuicTransmitStartupPolicy == .speculativeForeground
+        let isAppleGatedForegroundDirectAudio =
+            directQuicTransmitStartupPolicy == .appleGated
+            && incomingAudioTransport == .directQuic
+        let isAlreadyAppManagedFallback =
+            pttWakeRuntime.incomingWakeActivationState(for: contactID) == .appManagedFallback
+        guard isSpeculativePolicy || isAppleGatedForegroundDirectAudio || isAlreadyAppManagedFallback else {
+            return false
+        }
         return systemSessionMatches(contactID)
     }
 
@@ -538,11 +564,13 @@ extension PTTViewModel {
 
     func shouldUseSystemActivatedReceivePlayback(
         for contactID: UUID,
-        applicationState: UIApplication.State
+        applicationState: UIApplication.State,
+        incomingAudioTransport: IncomingAudioPayloadTransport? = nil
     ) -> Bool {
         guard !prefersForegroundAppManagedReceivePlayback(
             for: contactID,
-            applicationState: applicationState
+            applicationState: applicationState,
+            incomingAudioTransport: incomingAudioTransport
         ) else { return false }
         guard remoteTransmittingContactIDs.contains(contactID) else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
@@ -1338,7 +1366,8 @@ extension PTTViewModel {
         channelID: String,
         fromUserID: String,
         fromDeviceID: String,
-        contactID: UUID
+        contactID: UUID,
+        incomingAudioTransport: IncomingAudioPayloadTransport = .relayWebSocket
     ) async {
         let applicationState = currentApplicationState()
         let alreadyHasPendingWake = pttWakeRuntime.hasPendingWake(for: contactID)
@@ -1351,8 +1380,15 @@ extension PTTViewModel {
         let shouldArmAudioWakeCandidate =
             shouldTreatIncomingSignalAsWakeCandidate(for: contactID)
             || shouldArmDeferredBackgroundAudioWakeCandidate
+        let wakeIsAlreadySystemActivated =
+            pttWakeRuntime.incomingWakeActivationState(for: contactID) == .systemActivated
         let shouldRepairRemoteParticipant =
-            (!remoteTransmittingContactIDs.contains(contactID) || shouldArmDeferredBackgroundAudioWakeCandidate)
+            !wakeIsAlreadySystemActivated
+            && !shouldSuppressForegroundDirectQuicRemoteParticipant(
+                for: contactID,
+                applicationState: applicationState
+            )
+            && (!remoteTransmittingContactIDs.contains(contactID) || shouldArmDeferredBackgroundAudioWakeCandidate)
             && (alreadyHasPendingWake || shouldArmAudioWakeCandidate)
             && shouldSetSystemRemoteParticipantFromSignalPath(
                 for: contactID,
@@ -1373,6 +1409,7 @@ extension PTTViewModel {
             metadata: [
                 "fromDeviceId": fromDeviceID,
                 "fromUserId": fromUserID,
+                "transport": String(describing: incomingAudioTransport),
             ],
             ifAbsent: true
         )
@@ -1385,7 +1422,8 @@ extension PTTViewModel {
         }
         if shouldUseForegroundAppManagedWakePlayback(
             for: contactID,
-            applicationState: applicationState
+            applicationState: applicationState,
+            incomingAudioTransport: incomingAudioTransport
         ) {
             startForegroundAppManagedWakePlayback(
                 for: contactID,
@@ -1449,7 +1487,11 @@ extension PTTViewModel {
             return
         }
         let receiveActivationMode: MediaSessionActivationMode =
-            shouldUseSystemActivatedReceivePlayback(for: contactID) ? .systemActivated : .appManaged
+            shouldUseSystemActivatedReceivePlayback(
+                for: contactID,
+                applicationState: applicationState,
+                incomingAudioTransport: incomingAudioTransport
+            ) ? .systemActivated : .appManaged
         await ensureMediaSession(
             for: contactID,
             activationMode: receiveActivationMode,
@@ -1538,7 +1580,11 @@ extension PTTViewModel {
                 if shouldSetSystemRemoteParticipantFromSignalPath(
                     for: contactID,
                     applicationState: currentApplicationState()
-                ) {
+                ),
+                   !shouldSuppressForegroundDirectQuicRemoteParticipant(
+                    for: contactID,
+                    applicationState: currentApplicationState()
+                   ) {
                     await updateSystemRemoteParticipant(
                         for: contactID,
                         isActive: true,
@@ -1628,6 +1674,10 @@ extension PTTViewModel {
                 let shouldSetRemoteParticipant =
                     envelope.type == .transmitStart
                     && shouldSetSystemRemoteParticipantFromSignalPath(
+                        for: contactID,
+                        applicationState: currentApplicationState()
+                    )
+                    && !shouldSuppressForegroundDirectQuicRemoteParticipant(
                         for: contactID,
                         applicationState: currentApplicationState()
                     )
@@ -1791,10 +1841,15 @@ extension PTTViewModel {
                 reason: "direct-quic-transmit-prepare"
             )
         }
-        if shouldArmWakeCandidate, shouldSetSystemRemoteParticipantFromSignalPath(
+        if shouldArmWakeCandidate,
+           shouldSetSystemRemoteParticipantFromSignalPath(
             for: contactID,
             applicationState: applicationState
-        ) {
+           ),
+           !shouldSuppressForegroundDirectQuicRemoteParticipant(
+            for: contactID,
+            applicationState: applicationState
+           ) {
             await updateSystemRemoteParticipant(
                 for: contactID,
                 isActive: true,
