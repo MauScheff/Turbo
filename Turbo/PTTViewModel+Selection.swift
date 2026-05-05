@@ -37,6 +37,13 @@ extension PTTViewModel {
         )
     }
 
+    func localRelayTransportReadyForTransmit(for contactID: UUID) -> Bool {
+        guard !shouldUseDirectQuicTransport(for: contactID) else { return true }
+        guard let backend = backendServices else { return usesLocalHTTPBackend }
+        guard backend.supportsWebSocket else { return true }
+        return backend.isWebSocketConnected
+    }
+
     var contactSummaryByContactID: [UUID: TurboContactSummaryResponse] {
         backendSyncCoordinator.state.syncState.contactSummaries
     }
@@ -97,6 +104,7 @@ extension PTTViewModel {
             localJoinFailure: pttCoordinator.state.lastJoinFailure,
             mediaState: mediaConnectionState,
             localMediaWarmupState: localMediaWarmupState(for: contact.id),
+            localRelayTransportReady: localRelayTransportReadyForTransmit(for: contact.id),
             directMediaPathActive: shouldUseDirectQuicTransport(for: contact.id),
             incomingWakeActivationState: pttWakeRuntime.incomingWakeActivationState(for: contact.id),
             hadConnectedSessionContinuity: selectedContactId == contact.id
@@ -170,6 +178,7 @@ extension PTTViewModel {
                     systemSessionState: systemSessionState,
                     systemSessionMatchesContact: systemSessionMatches(contact.id),
                     mediaState: mediaConnectionState,
+                    localRelayTransportReady: localRelayTransportReadyForTransmit(for: contact.id),
                     directMediaPathActive: shouldUseDirectQuicTransport(for: contact.id),
                     incomingWakeActivationState:
                         pttWakeRuntime.incomingWakeActivationState(for: contact.id),

@@ -21,7 +21,10 @@ extension PTTViewModel {
             return nil
         }
 
-        let isReady = desiredLocalReceiverAudioReadiness(for: contactID)
+        let isBackgroundMediaClosure = reason == "app-background-media-closed"
+        let isReady = isBackgroundMediaClosure
+            ? false
+            : desiredLocalReceiverAudioReadiness(for: contactID)
         let effectiveReason: String = {
             guard !isReady else { return reason }
             let appState = currentApplicationState()

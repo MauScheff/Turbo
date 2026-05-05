@@ -2,6 +2,8 @@
 
 This directory is the operational memory for the repo.
 
+For changelog-style design notes, rejected approaches, and durable debugging lessons, use [`journal/`](/Users/mau/Development/Turbo/journal). Handoffs are for resuming active work; journal entries are for preserving why a design or debugging conclusion matters.
+
 Each handoff is a timestamped markdown file that records:
 
 - where the repo currently is

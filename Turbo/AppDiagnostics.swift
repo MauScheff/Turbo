@@ -756,11 +756,37 @@ final class DiagnosticsStore {
         }
 
         let reconciliationAction = fields["selectedPeerReconciliationAction"] ?? "none"
+        let pendingAction = fields["pendingAction"] ?? "none"
         let signalingJoinRecoveryActive =
             snapshotBool(fields, key: "backendSignalingJoinRecoveryActive") == true
         let disconnectingTeardownInFlight =
             phaseDetail.contains("disconnecting")
-            || (fields["pendingAction"] ?? "none").contains("reconciledTeardown(")
+            || pendingAction.contains("reconciledTeardown(")
+
+        if phase == "waitingForPeer",
+           phaseDetail.contains("disconnecting"),
+           pendingAction.contains("reconciledTeardown("),
+           isJoined == false,
+           systemSession == "none",
+           backendSelfJoined == false,
+           backendPeerJoined == false {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.reconciled_teardown_without_local_session",
+                    scope: .local,
+                    message: "selected peer is disconnecting for reconciled teardown after local and backend sessions are already absent",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "pendingAction": pendingAction,
+                        "isJoined": fields["isJoined"] ?? "none",
+                        "systemSession": systemSession,
+                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
+                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
+                    ]
+                )
+            )
+        }
 
         if phase == "waitingForPeer",
            isJoined == true,

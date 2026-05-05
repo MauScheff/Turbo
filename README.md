@@ -19,6 +19,7 @@ The app side currently proves out Apple's PushToTalk framework integration. The 
 - `STATE_MACHINE_TESTING.md`: canonical scenario-driven state-machine testing workflow.
 - `INVARIANTS.md`: invariant rule catalog and diagnostics-backed regression guidance.
 - `PRODUCTION_TELEMETRY.md`: production telemetry architecture, deployment, alerting, and query workflow.
+- `journal/`: timestamped engineering notes for design lessons, debugging conclusions, and changelog-style session records.
 - `.agents/`: supporting Unison language and workflow notes.
 
 ## Docs ownership
@@ -53,6 +54,10 @@ Use these docs as the primary authority for their respective concerns:
   - handoff conventions and how to use the timestamped handoff log
 - `handoffs/*.md`
   - timestamped project state and session memory
+- `journal/README.md`
+  - journal conventions and how to write concise design/debugging records
+- `journal/*.md`
+  - timestamped engineering journal entries; use these for lessons learned, ownership boundaries, and changelog-style notes
 
 ## Current app status
 
@@ -127,6 +132,7 @@ Read this core set first:
 1. Read `AGENTS.md`.
 2. Read `handoffs/README.md`.
 3. Read the latest file in `handoffs/` if you need the current project state.
+4. Search `journal/` when a bug looks recurring or when you need the design reasoning behind a recent change.
 
 Then load only the docs needed for the task:
 
@@ -164,6 +170,8 @@ This means distributed control-plane bugs should now be debugged in this order:
 3. only move to physical devices for Apple-specific behavior
 
 Treat [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md) as the canonical statement of that loop.
+
+Use [`journal/`](/Users/mau/Development/Turbo/journal) to preserve concise but dense notes when a session produces an architectural lesson, a rejected approach, or a debugging result worth carrying forward. Use [`handoffs/`](/Users/mau/Development/Turbo/handoffs) when the main purpose is resuming active work.
 
 ### Current known blocker
 

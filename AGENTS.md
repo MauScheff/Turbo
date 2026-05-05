@@ -11,6 +11,7 @@ Detailed guidance lives in:
 - [`SWIFT_DEBUGGING.md`](/Users/mau/Development/Turbo/SWIFT_DEBUGGING.md): simulator/device/PTT/audio debugging loops
 - [`BACKEND.md`](/Users/mau/Development/Turbo/BACKEND.md): backend/control-plane/storage/query guidance
 - [`PRODUCT_BRIEF.md`](/Users/mau/Development/Turbo/PRODUCT_BRIEF.md): product framing, positioning, and audience-facing narrative
+- [`journal/README.md`](/Users/mau/Development/Turbo/journal/README.md): engineering journal conventions for dense design/debugging notes
 
 # Core Rules
 
@@ -217,3 +218,4 @@ Use [`handoffs/README.md`](/Users/mau/Development/Turbo/handoffs/README.md) and 
 - Prefer the automated simulator scenario/test loop to prove behavior whenever a physical device is not required.
 - Prefer simulator scenario and probe loops before physical-device debugging when the bug is not obviously Apple/PTT/audio-specific.
 - If asked to write a handoff, create a new timestamped file in [`handoffs/`](/Users/mau/Development/Turbo/handoffs) using [`handoffs/TEMPLATE.md`](/Users/mau/Development/Turbo/handoffs/TEMPLATE.md) instead of overwriting an existing handoff.
+- If asked to write a journal entry, create a new timestamped file in [`journal/`](/Users/mau/Development/Turbo/journal) using [`journal/TEMPLATE.md`](/Users/mau/Development/Turbo/journal/TEMPLATE.md) instead of overwriting an existing journal entry.

@@ -346,6 +346,12 @@ extension PTTViewModel {
     }
 
     private func performReconciledTeardown(for contactID: UUID) {
+        let backendChannelID = contacts.first { $0.id == contactID }?.backendChannelId
+        scheduleDisconnectRecovery(
+            contactID: contactID,
+            channelUUID: pttCoordinator.state.systemChannelUUID ?? channelUUID(for: contactID),
+            backendChannelID: backendChannelID
+        )
         if selectedContactId == contactID {
             clearRemoteAudioActivity(for: contactID)
         }
@@ -380,6 +386,8 @@ extension PTTViewModel {
             pttCoordinator.reset()
             syncPTTState()
             resetTransmitSession(closeMediaSession: false)
+            sessionCoordinator.clearLeaveAction(for: contactID)
+            replaceDisconnectRecoveryTask(with: nil)
             updateStatusForSelectedContact()
             captureDiagnosticsState("session-teardown:local-reset")
             return
@@ -460,13 +468,21 @@ extension PTTViewModel {
     }
 
     func performDisconnect() {
-        sessionCoordinator.markExplicitLeave(contactID: selectedContactId)
-        if let selectedContactId {
-            clearRemoteAudioActivity(for: selectedContactId)
+        let disconnectContactID = selectedContactId
+        let disconnectChannelUUID = activeChannelId.flatMap { channelUUID(for: $0) }
+        let disconnectBackendChannelID = selectedContact?.backendChannelId
+        sessionCoordinator.markExplicitLeave(contactID: disconnectContactID)
+        scheduleDisconnectRecovery(
+            contactID: disconnectContactID,
+            channelUUID: disconnectChannelUUID,
+            backendChannelID: disconnectBackendChannelID
+        )
+        if let disconnectContactID {
+            clearRemoteAudioActivity(for: disconnectContactID)
         }
         resetTransmitRuntimeOnly()
         closeMediaSession()
-        diagnostics.record(.channel, message: "Disconnect requested", metadata: ["selectedContactId": selectedContactId?.uuidString ?? "none"])
+        diagnostics.record(.channel, message: "Disconnect requested", metadata: ["selectedContactId": disconnectContactID?.uuidString ?? "none"])
         captureDiagnosticsState("session-disconnect:start")
         if usesLocalHTTPBackend {
             Task {
@@ -478,7 +494,8 @@ extension PTTViewModel {
                 pttCoordinator.reset()
                 syncPTTState()
                 resetTransmitSession(closeMediaSession: false)
-                sessionCoordinator.clearLeaveAction(for: selectedContactId)
+                sessionCoordinator.clearLeaveAction(for: disconnectContactID)
+                replaceDisconnectRecoveryTask(with: nil)
                 updateStatusForSelectedContact()
                 statusMessage = "Disconnected"
                 captureDiagnosticsState("session-disconnect:local-finished")
@@ -490,7 +507,9 @@ extension PTTViewModel {
               let channelUUID = channelUUID(for: activeChannelId) else {
             statusMessage = "Disconnected"
             isJoined = false
-            sessionCoordinator.clearLeaveAction(for: selectedContactId)
+            sessionCoordinator.clearLeaveAction(for: disconnectContactID)
+            replaceDisconnectRecoveryTask(with: nil)
+            captureDiagnosticsState("session-disconnect:no-active-channel")
             return
         }
 
@@ -500,6 +519,64 @@ extension PTTViewModel {
         try? pttSystemClient.leaveChannel(channelUUID: channelUUID)
         statusMessage = "Disconnecting..."
         captureDiagnosticsState("session-disconnect:ptt-leave-requested")
+    }
+
+    private func scheduleDisconnectRecovery(
+        contactID: UUID?,
+        channelUUID: UUID?,
+        backendChannelID: String?
+    ) {
+        guard let contactID else { return }
+        let delayNanoseconds = disconnectRecoveryDelayNanoseconds
+        replaceDisconnectRecoveryTask(with: Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard let self, !Task.isCancelled else { return }
+            guard self.sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) else { return }
+
+            let selectedState = self.selectedPeerState(for: contactID)
+            self.diagnostics.recordInvariantViolation(
+                invariantID: "selected.disconnecting_timeout",
+                scope: .local,
+                message: "selected peer remained disconnecting after pending leave timeout",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "selectedPeerPhase": String(describing: selectedState.phase),
+                    "selectedPeerPhaseDetail": String(describing: selectedState.detail),
+                    "pendingAction": String(describing: self.sessionCoordinator.pendingAction),
+                    "systemSession": String(describing: self.systemSessionState),
+                    "backendChannelId": backendChannelID ?? "none",
+                ]
+            )
+            self.diagnostics.record(
+                .state,
+                message: "Recovering stuck disconnect",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelUUID": channelUUID?.uuidString ?? "none",
+                    "backendChannelId": backendChannelID ?? "none",
+                ]
+            )
+
+            if let retryChannelUUID = channelUUID ?? self.channelUUID(for: contactID) {
+                try? self.pttSystemClient.leaveChannel(channelUUID: retryChannelUUID)
+            }
+            self.tearDownTransmitRuntime(resetCoordinator: true)
+            self.closeMediaSession()
+            self.pttCoordinator.reset()
+            self.syncPTTState()
+            self.sessionCoordinator.clearLeaveAction(for: contactID)
+            self.backendSyncCoordinator.send(.channelStateCleared(contactID: contactID))
+            self.updateStatusForSelectedContact()
+            self.captureDiagnosticsState("session-disconnect:self-healed")
+
+            if let backendChannelID {
+                let request = BackendLeaveRequest(contactID: contactID, backendChannelID: backendChannelID)
+                await self.backendCommandCoordinator.handle(.leaveRequested(request))
+            } else {
+                await self.refreshChannelState(for: contactID)
+                await self.refreshContactSummaries()
+            }
+        })
     }
 
     func performConnect(to contact: Contact, intent: BackendJoinIntent) {

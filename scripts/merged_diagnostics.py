@@ -427,6 +427,30 @@ def analyze_report(report: Report) -> list[InvariantViolation]:
     backend_channel_status = snapshot.get("backendChannelStatus", "none")
     backend_readiness = snapshot.get("backendReadiness", "none")
     remote_wake_capability_kind = snapshot.get("remoteWakeCapabilityKind", "unavailable")
+    phase_detail = snapshot.get("selectedPeerPhaseDetail", "none")
+    pending_action = snapshot.get("pendingAction", "none")
+
+    if (
+        phase == "waitingForPeer"
+        and "disconnecting" in phase_detail
+        and "reconciledTeardown(" in pending_action
+        and is_joined is False
+        and system_session == "none"
+        and backend_self_joined is False
+        and backend_peer_joined is False
+    ):
+        violations.append(
+            build_violation(
+                subject=report.handle,
+                invariant_id="selected.reconciled_teardown_without_local_session",
+                scope="local",
+                message=(
+                    "selected peer is disconnecting for reconciled teardown after local and "
+                    f"backend sessions are already absent pendingAction={pending_action} "
+                    f"backendChannelStatus={backend_channel_status}"
+                ),
+            )
+        )
 
     if backend_self_joined and backend_peer_joined and backend_peer_device:
         if phase in {"idle", "requested", "incomingRequest"}:

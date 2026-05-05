@@ -386,24 +386,43 @@ extension PTTViewModel {
         captureDiagnosticsState("ptt-callback:incoming-push")
 
         if shouldArmWakeFlowForIncomingPush {
-            if let backendServices,
-               backendServices.supportsWebSocket {
-                resumeWebSocketForIncomingPTTPushIfNeeded(
-                    backendServices: backendServices,
-                    contactID: contactID,
-                    channelUUID: channelUUID,
-                    payload: payload
+            switch payload.event {
+            case .transmitStart:
+                if let backendServices,
+                   backendServices.supportsWebSocket {
+                    resumeWebSocketForIncomingPTTPushIfNeeded(
+                        backendServices: backendServices,
+                        contactID: contactID,
+                        channelUUID: channelUUID,
+                        payload: payload
+                    )
+                }
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Deferring incoming-push backend sync until PTT audio activation",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                        "event": payload.event.rawValue,
+                    ]
                 )
+            case .leaveChannel:
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Synchronizing backend state for incoming PTT leave push",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                        "event": payload.event.rawValue,
+                    ]
+                )
+                Task { [weak self] in
+                    await self?.refreshChannelState(for: contactID)
+                    await self?.refreshContactSummaries()
+                    await self?.reconcileSelectedSessionIfNeeded()
+                    self?.captureDiagnosticsState("ptt-callback:incoming-leave-push-sync")
+                }
             }
-            diagnostics.record(
-                .pushToTalk,
-                message: "Deferring incoming-push backend sync until PTT audio activation",
-                metadata: [
-                    "contactId": contactID.uuidString,
-                    "channelUUID": channelUUID.uuidString,
-                    "event": payload.event.rawValue,
-                ]
-            )
         }
     }
 
@@ -539,6 +558,10 @@ extension PTTViewModel {
             if let contactID,
                sessionCoordinator.pendingAction.pendingTeardownContactID == contactID {
                 sessionCoordinator.clearLeaveAction(for: contactID)
+            }
+            if let contactID,
+               !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
+                replaceDisconnectRecoveryTask(with: nil)
             }
             syncPTTState()
             lastReportedPTTServiceStatus = nil
@@ -956,6 +979,7 @@ extension PTTViewModel {
 
     func handleDidActivateAudioSession(_ audioSession: AVAudioSession) {
         isPTTAudioSessionActive = true
+        transmitTaskRuntime.cancelCaptureReassertionTask()
         diagnostics.record(
             .pushToTalk,
             message: "PTT audio session activated",

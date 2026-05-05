@@ -37,6 +37,7 @@ struct SelectedPeerSessionState: Equatable {
     var localJoinFailure: PTTJoinFailure?
     var channel: ChannelReadinessSnapshot?
     var mediaState: MediaConnectionState = .idle
+    var localRelayTransportReady = true
     var directMediaPathActive = false
     var incomingWakeActivationState: IncomingWakeActivationState?
     var hadConnectedSessionContinuity = false
@@ -64,6 +65,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
     let systemSessionState: SystemPTTSessionState
     let systemSessionMatchesContact: Bool
     let mediaState: MediaConnectionState
+    let localRelayTransportReady: Bool
     let directMediaPathActive: Bool
     let incomingWakeActivationState: IncomingWakeActivationState?
     let localJoinFailure: PTTJoinFailure?
@@ -147,6 +149,7 @@ enum SelectedPeerReducer {
             nextState.systemSessionState = snapshot.systemSessionState
             nextState.systemSessionMatchesContact = snapshot.systemSessionMatchesContact
             nextState.mediaState = snapshot.mediaState
+            nextState.localRelayTransportReady = snapshot.localRelayTransportReady
             nextState.directMediaPathActive = snapshot.directMediaPathActive
             nextState.incomingWakeActivationState = snapshot.incomingWakeActivationState
         case .selectedContactChanged(let selection):
@@ -299,6 +302,7 @@ enum SelectedPeerReducer {
                     return .failed
                 }
             }(),
+            localRelayTransportReady: state.localRelayTransportReady,
             directMediaPathActive: state.directMediaPathActive,
             incomingWakeActivationState: state.incomingWakeActivationState,
             hadConnectedSessionContinuity: hadConnectedSessionContinuity,
@@ -415,6 +419,7 @@ enum SelectedPeerReducer {
         guard state.hadConnectedSessionContinuity,
               projection.durableSession == .connected,
               projection.connectedExecution == nil,
+              (state.directMediaPathActive || state.localRelayTransportReady),
               state.channel?.membership == .selfOnly,
               case .wakeCapable = state.channel?.remoteWakeCapability,
               case .waitingForPeer(reason: .backendSessionTransition) = projection.selectedPeerState.detail else {

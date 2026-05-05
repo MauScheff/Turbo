@@ -331,5 +331,6 @@ Current first-pass IDs in the repo:
 - `selected.local_join_failure_present`
 - `selected.online_contact_projected_offline`
 - `pair.backend_ready_ui_not_live`
+- `transmit.stale_startup_side_effect`
 
 Add new IDs here when you add new rules so the catalog remains discoverable.

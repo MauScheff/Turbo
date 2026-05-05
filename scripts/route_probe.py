@@ -8,6 +8,7 @@ import os
 import ssl
 import subprocess
 import sys
+import time
 import urllib.parse
 import uuid
 from dataclasses import asdict, dataclass
@@ -30,6 +31,7 @@ class CheckResult:
     name: str
     ok: bool
     detail: str
+    durationMs: int
     payload: Any | None = None
 
 
@@ -477,22 +479,28 @@ async def connected_websocket_pair(
 
 
 def run_check(results: list[CheckResult], name: str, fn) -> Any:
+    started = time.perf_counter()
     try:
         payload = fn()
-        results.append(CheckResult(name=name, ok=True, detail="ok", payload=payload))
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        results.append(CheckResult(name=name, ok=True, detail="ok", durationMs=duration_ms, payload=payload))
         return payload
     except Exception as exc:
-        results.append(CheckResult(name=name, ok=False, detail=str(exc)))
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        results.append(CheckResult(name=name, ok=False, detail=str(exc), durationMs=duration_ms))
         raise
 
 
 async def run_async_check(results: list[CheckResult], name: str, fn) -> Any:
+    started = time.perf_counter()
     try:
         payload = await fn()
-        results.append(CheckResult(name=name, ok=True, detail="ok", payload=payload))
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        results.append(CheckResult(name=name, ok=True, detail="ok", durationMs=duration_ms, payload=payload))
         return payload
     except Exception as exc:
-        results.append(CheckResult(name=name, ok=False, detail=str(exc)))
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        results.append(CheckResult(name=name, ok=False, detail=str(exc), durationMs=duration_ms))
         raise
 
 
@@ -592,6 +600,7 @@ async def main() -> int:
                         name="internal-wake-jobs:empty",
                         ok=True,
                         detail=f"skipped legacy wake-jobs check: {exc}",
+                        durationMs=0,
                     )
                 )
         run_check(
@@ -1220,6 +1229,7 @@ async def main() -> int:
                     name="websocket-register",
                     ok=True,
                     detail="both websocket endpoints acknowledged the expected device id and stayed connected for readiness checks",
+                    durationMs=0,
                     payload={"callerAck": websocket_pair["callerAck"], "calleeAck": websocket_pair["calleeAck"]},
                 )
             )

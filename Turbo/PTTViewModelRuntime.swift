@@ -596,6 +596,12 @@ struct TransmitProjection: Equatable {
     }
 }
 
+enum IncomingRelayAudioDiagnosticDisposition: Equatable {
+    case detailed
+    case suppressedNotice
+    case suppressed
+}
+
 final class MediaRuntimeState {
     var session: MediaSession?
     var contactID: UUID?
@@ -613,6 +619,8 @@ final class MediaRuntimeState {
     private var handledReceiverPrewarmRequestIDs: Set<String> = []
     private(set) var receiverPrewarmAckRequestIDByContactID: [UUID: String] = [:]
     private(set) var directQuicWarmPongIDByContactID: [UUID: String] = [:]
+    private var incomingRelayAudioDetailedReportsRemainingByContactID: [UUID: Int] = [:]
+    private var incomingRelayAudioSuppressionReportedContactIDs: Set<UUID> = []
 
     var hasSession: Bool {
         session != nil
@@ -716,8 +724,36 @@ final class MediaRuntimeState {
         handledReceiverPrewarmRequestIDs = []
         receiverPrewarmAckRequestIDByContactID = [:]
         directQuicWarmPongIDByContactID = [:]
+        incomingRelayAudioDetailedReportsRemainingByContactID = [:]
+        incomingRelayAudioSuppressionReportedContactIDs = []
         sendAudioChunk = nil
         startupState = .idle
+    }
+
+    func resetIncomingRelayAudioDiagnostics(
+        for contactID: UUID,
+        detailedReportLimit: Int = 3
+    ) {
+        incomingRelayAudioDetailedReportsRemainingByContactID[contactID] = max(0, detailedReportLimit)
+        incomingRelayAudioSuppressionReportedContactIDs.remove(contactID)
+    }
+
+    func consumeIncomingRelayAudioDiagnosticDisposition(
+        for contactID: UUID,
+        detailedReportLimit: Int = 3
+    ) -> IncomingRelayAudioDiagnosticDisposition {
+        let currentRemaining =
+            incomingRelayAudioDetailedReportsRemainingByContactID[contactID]
+            ?? max(0, detailedReportLimit)
+        if currentRemaining > 0 {
+            incomingRelayAudioDetailedReportsRemainingByContactID[contactID] = currentRemaining - 1
+            return .detailed
+        }
+
+        if incomingRelayAudioSuppressionReportedContactIDs.insert(contactID).inserted {
+            return .suppressedNotice
+        }
+        return .suppressed
     }
 
     func requestInteractivePrewarmAfterAudioDeactivation(for contactID: UUID) {

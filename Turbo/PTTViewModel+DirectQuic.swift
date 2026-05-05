@@ -31,6 +31,131 @@ extension PTTViewModel {
         return mediaRuntime.directQuicUpgrade.attempt(for: contactID)?.isDirectActive == true
     }
 
+    func hasActiveBackgroundPTTFlowOwningDirectQuic(for contactID: UUID) -> Bool {
+        if isTransmitting || transmitCoordinator.state.isPressingTalk || pttCoordinator.state.isTransmitting {
+            return true
+        }
+        if isPTTAudioSessionActive {
+            return true
+        }
+        if pttWakeRuntime.pendingIncomingPush?.contactID == contactID {
+            return true
+        }
+        if pttWakeRuntime.incomingWakeActivationState(for: contactID) != nil {
+            return true
+        }
+        if remoteTransmittingContactIDs.contains(contactID) {
+            return true
+        }
+        return false
+    }
+
+    func shouldRetireIdleDirectQuicForBackgroundTransition(
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState != .active else { return false }
+        guard shouldUseDirectQuicTransport(for: contactID) else { return false }
+        return !hasActiveBackgroundPTTFlowOwningDirectQuic(for: contactID)
+    }
+
+    @discardableResult
+    func retireDirectQuicPath(
+        for contactID: UUID,
+        reason: String,
+        sendHangup: Bool,
+        configureActiveRoute: Bool
+    ) async -> Bool {
+        retireDirectQuicPathImmediately(
+            for: contactID,
+            reason: reason,
+            sendHangup: sendHangup,
+            configureActiveRoute: configureActiveRoute
+        )
+    }
+
+    @discardableResult
+    func retireDirectQuicPathImmediately(
+        for contactID: UUID,
+        reason: String,
+        sendHangup: Bool,
+        configureActiveRoute: Bool
+    ) -> Bool {
+        guard let attempt = directQuicAttempt(for: contactID) else {
+            return false
+        }
+        let controller = mediaRuntime.directQuicProbeController
+
+        diagnostics.record(
+            .media,
+            message: "Retiring Direct QUIC media path",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": attempt.channelID,
+                "attemptId": attempt.attemptId,
+                "reason": reason,
+                "wasDirectActive": String(attempt.isDirectActive),
+            ]
+        )
+
+        let didBeginPathClosing = sendHangup && beginDirectQuicPathClosingIfPossible(
+            for: contactID,
+            attempt: attempt,
+            reason: reason,
+            controller: controller
+        )
+
+        cancelDirectQuicPromotionTimeout()
+        let fallback = mediaRuntime.directQuicUpgrade.clearAttempt(
+            for: contactID,
+            fallbackReason: reason
+        )
+        applyDirectQuicUpgradeTransition(fallback, for: contactID)
+        if !didBeginPathClosing {
+            controller?.cancel(reason: reason)
+        }
+        mediaRuntime.directQuicProbeController = nil
+
+        if configureActiveRoute,
+           let activeTarget = transmitProjection.activeTarget,
+           activeTarget.contactID == contactID {
+            configureOutgoingAudioRoute(target: activeTarget)
+        }
+
+        if sendHangup {
+            Task { @MainActor [weak self] in
+                await self?.sendDirectQuicHangup(
+                    for: contactID,
+                    attempt: attempt,
+                    reason: reason
+                )
+            }
+        }
+
+        return true
+    }
+
+    @discardableResult
+    func retireIdleDirectQuicForBackgroundTransitionIfNeeded(
+        for contactID: UUID,
+        reason: String,
+        applicationState: UIApplication.State
+    ) async -> Bool {
+        guard shouldRetireIdleDirectQuicForBackgroundTransition(
+            for: contactID,
+            applicationState: applicationState
+        ) else {
+            return false
+        }
+
+        return await retireDirectQuicPath(
+            for: contactID,
+            reason: reason,
+            sendHangup: true,
+            configureActiveRoute: false
+        )
+    }
+
     func directQuicAttempt(
         for contactID: UUID,
         matching attemptID: String? = nil
@@ -212,6 +337,10 @@ extension PTTViewModel {
         if !backendAdvertisesDirectQuicUpgrade,
            !shouldAllowDirectQuicDebugBypassForAutomaticProbe() {
             return "backend-capability-disabled"
+        }
+        if currentApplicationState() != .active,
+           !hasActiveBackgroundPTTFlowOwningDirectQuic(for: contactID) {
+            return "background-idle"
         }
         guard let backend = backendServices else {
             return "backend-unavailable"
@@ -736,6 +865,16 @@ extension PTTViewModel {
                         )
                     }
                 },
+                onPathClosing: { [weak self] payload in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        await self.handleIncomingDirectQuicPathClosing(
+                            payload,
+                            contactID: contactID,
+                            attemptID: attemptID
+                        )
+                    }
+                },
                 onWarmPong: { [weak self] pingID in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
@@ -883,6 +1022,36 @@ extension PTTViewModel {
     }
 
     @discardableResult
+    func beginDirectQuicPathClosingIfPossible(
+        for contactID: UUID,
+        attempt: DirectQuicUpgradeAttempt,
+        reason: String,
+        controller: DirectQuicProbeController?
+    ) -> Bool {
+        guard attempt.isDirectActive,
+              let controller else {
+            return false
+        }
+
+        let payload = DirectQuicPathClosingPayload(
+            attemptId: attempt.attemptId,
+            reason: reason
+        )
+
+        controller.beginIntentionalPathClose(
+            payload,
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": attempt.channelID,
+                "attemptId": attempt.attemptId,
+                "reason": reason,
+            ],
+            cancelReason: reason
+        )
+        return true
+    }
+
+    @discardableResult
     func sendDirectQuicReceiverTransmitPrepareIfPossible(
         for contactID: UUID,
         reason: String
@@ -991,6 +1160,42 @@ extension PTTViewModel {
             ]
         )
         updateStatusForSelectedContact()
+    }
+
+    func handleIncomingDirectQuicPathClosing(
+        _ payload: DirectQuicPathClosingPayload,
+        contactID: UUID,
+        attemptID: String
+    ) async {
+        guard payload.attemptId == attemptID else {
+            diagnostics.record(
+                .media,
+                message: "Ignored Direct QUIC path closing for stale attempt",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "expectedAttemptId": attemptID,
+                    "receivedAttemptId": payload.attemptId,
+                    "reason": payload.reason,
+                ]
+            )
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Direct QUIC path closing received",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "attemptId": payload.attemptId,
+                "reason": payload.reason,
+            ]
+        )
+        await retireDirectQuicPath(
+            for: contactID,
+            reason: payload.reason,
+            sendHangup: false,
+            configureActiveRoute: true
+        )
     }
 
     func sendDirectQuicWarmPingIfPossible(

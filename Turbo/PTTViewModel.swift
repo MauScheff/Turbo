@@ -113,6 +113,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var mediaRuntime = MediaRuntimeState()
     var isPTTAudioSessionActive: Bool = false
     var backendBootstrapRetryDelayNanoseconds: UInt64 = 2_000_000_000
+    var disconnectRecoveryDelayNanoseconds: UInt64 = 5_000_000_000
     var remoteAudioInitialChunkTimeoutNanoseconds: UInt64 = 5_000_000_000
     var remoteAudioSilenceTimeoutNanoseconds: UInt64 = 1_500_000_000
     var remoteAudioPendingPlaybackDrainMaxNanoseconds: UInt64 = 5_000_000_000
@@ -130,6 +131,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var lastReportedPTTDescriptorReason: String?
     var systemTransmitBeginRecoveryAttemptsByChannelUUID: [UUID: Int] = [:]
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
+    var disconnectRecoveryTask: Task<Void, Never>?
     var automaticDiagnosticsPublishEnabled: Bool = true
     var conversationShortcutPolicy: ConversationShortcutPolicy = .load()
     var microphonePermission: AVAudioApplication.recordPermission = AVAudioApplication.shared.recordPermission
@@ -1066,6 +1068,11 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         diagnosticsAutoPublishTask = nil
     }
 
+    func replaceDisconnectRecoveryTask(with task: Task<Void, Never>?) {
+        disconnectRecoveryTask?.cancel()
+        disconnectRecoveryTask = task
+    }
+
     var selectedChannelState: TurboChannelStateResponse? {
         guard let selectedContactId else { return nil }
         return channelStateByContactID[selectedContactId]
@@ -1306,8 +1313,16 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             message: "Application will resign active",
             metadata: [:]
         )
+        retireIdleDirectQuicForBackgroundTransitionImmediately(
+            reason: "application-will-resign-active",
+            applicationState: .inactive
+        )
         Task { @MainActor [weak self] in
             guard let self else { return }
+            await self.reconcileIdleTransportForBackgroundTransition(
+                reason: "application-will-resign-active",
+                applicationState: .inactive
+            )
             await self.suspendForegroundMediaForBackgroundTransition(
                 reason: "application-will-resign-active",
                 applicationState: .inactive
@@ -1322,8 +1337,16 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             message: "Application entered background",
             metadata: [:]
         )
+        retireIdleDirectQuicForBackgroundTransitionImmediately(
+            reason: "application-did-enter-background",
+            applicationState: .background
+        )
         Task { @MainActor [weak self] in
             guard let self else { return }
+            await self.reconcileIdleTransportForBackgroundTransition(
+                reason: "application-did-enter-background",
+                applicationState: .background
+            )
             await self.suspendForegroundMediaForBackgroundTransition(
                 reason: "application-did-enter-background",
                 applicationState: .background

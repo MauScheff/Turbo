@@ -525,6 +525,7 @@ enum SelectedPeerWaitingReason: Equatable {
     case localAudioPrewarm
     case systemWakeActivation
     case wakePlaybackDeferredUntilForeground
+    case localTransportWarmup
     case remoteAudioPrewarm
     case remoteWakeUnavailable
     case backendSessionTransition
@@ -941,6 +942,7 @@ struct ConversationDerivationContext: Equatable {
     let localJoinFailure: PTTJoinFailure?
     let mediaState: MediaConnectionState
     let localMediaWarmupState: LocalMediaWarmupState
+    let localRelayTransportReady: Bool
     let directMediaPathActive: Bool
     let incomingWakeActivationState: IncomingWakeActivationState?
     let hadConnectedSessionContinuity: Bool
@@ -970,6 +972,7 @@ struct ConversationDerivationContext: Equatable {
         localJoinFailure: PTTJoinFailure?,
         mediaState: MediaConnectionState = .idle,
         localMediaWarmupState: LocalMediaWarmupState = .cold,
+        localRelayTransportReady: Bool = true,
         directMediaPathActive: Bool = false,
         incomingWakeActivationState: IncomingWakeActivationState? = nil,
         hadConnectedSessionContinuity: Bool = false,
@@ -1000,6 +1003,7 @@ struct ConversationDerivationContext: Equatable {
         self.localJoinFailure = localJoinFailure
         self.mediaState = mediaState
         self.localMediaWarmupState = localMediaWarmupState
+        self.localRelayTransportReady = localRelayTransportReady
         self.directMediaPathActive = directMediaPathActive
         self.incomingWakeActivationState = incomingWakeActivationState
         self.hadConnectedSessionContinuity = hadConnectedSessionContinuity
@@ -1628,6 +1632,14 @@ enum ConversationStateMachine {
                     style: .muted
                 )
             }
+            if case .waitingForPeer(reason: .localTransportWarmup) = selectedPeerState.detail {
+                return ConversationPrimaryAction(
+                    kind: .holdToTalk,
+                    label: "Hold To Talk",
+                    isEnabled: false,
+                    style: .muted
+                )
+            }
             if case .waitingForPeer(reason: .releaseRequiredAfterInterruptedTransmit) = selectedPeerState.detail {
                 return ConversationPrimaryAction(
                     kind: .holdToTalk,
@@ -1936,12 +1948,19 @@ private extension ConversationDerivationContext {
         }
 
         if shouldPreferWakeReadyDespiteStalePeerConnectivity {
+            guard directMediaPathActive || localRelayTransportReady else {
+                return .waiting(reason: .localTransportWarmup, statusMessage: "Connecting...")
+            }
             return .wakeReady
         }
 
         let authoritativeBackendReady = backendReadyAuthoritativelySatisfiesRemoteAudio
 
         if sessionTransmitReady && canTransmit {
+            guard directMediaPathActive || localRelayTransportReady else {
+                return .waiting(reason: .localTransportWarmup, statusMessage: "Connecting...")
+            }
+
             if directMediaPathActive {
                 return .ready
             }
@@ -2087,8 +2106,10 @@ private extension ConversationDerivationContext {
             return false
         }
         let localMediaReadyForTransmit = localMediaWarmupState == .ready || directMediaPathActive
+        let localTransportReadyForTransmit = directMediaPathActive || localRelayTransportReady
         return canTransmit
             && localMediaReadyForTransmit
+            && localTransportReadyForTransmit
             && remoteAudioReadyForTransmit
     }
 

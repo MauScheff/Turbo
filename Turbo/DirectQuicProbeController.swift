@@ -443,6 +443,7 @@ nonisolated enum DirectQuicWireMessageKind: String, Codable, Equatable {
     case consentAck = "consent-ack"
     case receiverPrewarmRequest = "receiver-prewarm-request"
     case receiverPrewarmAck = "receiver-prewarm-ack"
+    case pathClosing = "path-closing"
     case warmPing = "warm-ping"
     case warmPong = "warm-pong"
     case audioChunk = "audio-chunk"
@@ -473,6 +474,28 @@ nonisolated enum DirectQuicReceiverPrewarmPayloadCodec {
     }
 }
 
+nonisolated struct DirectQuicPathClosingPayload: Codable, Equatable, Sendable {
+    let attemptId: String
+    let reason: String
+}
+
+nonisolated enum DirectQuicPathClosingPayloadCodec {
+    static func encode(_ payload: DirectQuicPathClosingPayload) throws -> String {
+        let data = try JSONEncoder().encode(payload)
+        guard let encoded = String(data: data, encoding: .utf8) else {
+            throw DirectQuicProbeError.proofFailed("path closing payload encoding failed")
+        }
+        return encoded
+    }
+
+    static func decode(_ payload: String?) throws -> DirectQuicPathClosingPayload {
+        guard let payload, let data = payload.data(using: .utf8) else {
+            throw DirectQuicProbeError.proofFailed("path closing payload missing")
+        }
+        return try JSONDecoder().decode(DirectQuicPathClosingPayload.self, from: data)
+    }
+}
+
 nonisolated struct DirectQuicWireMessage: Codable, Equatable {
     let kind: DirectQuicWireMessageKind
     let payload: String?
@@ -498,6 +521,13 @@ nonisolated struct DirectQuicWireMessage: Codable, Equatable {
         DirectQuicWireMessage(
             kind: .receiverPrewarmAck,
             payload: try DirectQuicReceiverPrewarmPayloadCodec.encode(payload)
+        )
+    }
+
+    static func pathClosing(_ payload: DirectQuicPathClosingPayload) throws -> DirectQuicWireMessage {
+        DirectQuicWireMessage(
+            kind: .pathClosing,
+            payload: try DirectQuicPathClosingPayloadCodec.encode(payload)
         )
     }
 
@@ -635,6 +665,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
     private var onIncomingAudioPayload: (@Sendable (String) async -> Void)?
     private var onReceiverPrewarmRequest: (@Sendable (DirectQuicReceiverPrewarmPayload) async -> Void)?
     private var onReceiverPrewarmAck: (@Sendable (DirectQuicReceiverPrewarmPayload) async -> Void)?
+    private var onPathClosing: (@Sendable (DirectQuicPathClosingPayload) async -> Void)?
     private var onWarmPong: (@Sendable (String?) async -> Void)?
     private var onPathLost: (@Sendable (String) async -> Void)?
     private var suppressPathLostCallback = false
@@ -832,6 +863,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         onIncomingAudioPayload: @escaping @Sendable (String) async -> Void,
         onReceiverPrewarmRequest: (@Sendable (DirectQuicReceiverPrewarmPayload) async -> Void)? = nil,
         onReceiverPrewarmAck: (@Sendable (DirectQuicReceiverPrewarmPayload) async -> Void)? = nil,
+        onPathClosing: (@Sendable (DirectQuicPathClosingPayload) async -> Void)? = nil,
         onWarmPong: (@Sendable (String?) async -> Void)? = nil,
         onPathLost: @escaping @Sendable (String) async -> Void
     ) async throws {
@@ -845,6 +877,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
             self.onIncomingAudioPayload = onIncomingAudioPayload
             self.onReceiverPrewarmRequest = onReceiverPrewarmRequest
             self.onReceiverPrewarmAck = onReceiverPrewarmAck
+            self.onPathClosing = onPathClosing
             self.onWarmPong = onWarmPong
             self.onPathLost = onPathLost
             activeMediaConnection = connection
@@ -881,6 +914,37 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         try await send(message: .receiverPrewarmAck(payload), on: connection)
     }
 
+    func sendPathClosing(_ payload: DirectQuicPathClosingPayload) async throws {
+        let connection = try activeControlConnection()
+        try await send(message: .pathClosing(payload), on: connection)
+    }
+
+    func beginIntentionalPathClose(
+        _ payload: DirectQuicPathClosingPayload,
+        metadata: [String: String],
+        cancelReason: String
+    ) {
+        suppressPathLostForIntentionalClose()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.sendPathClosing(payload)
+                await self.report(
+                    "Direct QUIC path closing sent",
+                    metadata: metadata
+                )
+            } catch {
+                var failureMetadata = metadata
+                failureMetadata["error"] = error.localizedDescription
+                await self.report(
+                    "Direct QUIC path closing send failed",
+                    metadata: failureMetadata
+                )
+            }
+            self.cancel(reason: cancelReason)
+        }
+    }
+
     func sendWarmPing(id: String) async throws {
         let connection = try activeControlConnection()
         try await send(message: .warmPing(id), on: connection)
@@ -910,6 +974,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
             onIncomingAudioPayload = nil
             onReceiverPrewarmRequest = nil
             onReceiverPrewarmAck = nil
+            onPathClosing = nil
             onWarmPong = nil
             onPathLost = nil
             activeMediaConnection = nil
@@ -936,6 +1001,18 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         Task {
             await report("Cancelled direct QUIC probe resources", metadata: ["reason": reason])
         }
+    }
+
+    private func suppressPathLostForIntentionalClose() {
+        let consentTask = withLockedState { () -> Task<Void, Never>? in
+            suppressPathLostCallback = true
+            outstandingConsentID = nil
+            outstandingConsentSentAt = nil
+            let task = self.consentTask
+            self.consentTask = nil
+            return task
+        }
+        consentTask?.cancel()
     }
 
     func verifyConnectedPeerCertificateFingerprint(
@@ -1611,6 +1688,29 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
                                 Task {
                                     await self.report(
                                         "Direct QUIC receiver prewarm ack decode failed",
+                                        metadata: ["error": error.localizedDescription]
+                                    )
+                                }
+                            }
+                        case .pathClosing:
+                            do {
+                                let payload = try DirectQuicPathClosingPayloadCodec.decode(decodedMessage.payload)
+                                let onPathClosing = self.withLockedState {
+                                    self.suppressPathLostCallback = true
+                                    self.outstandingConsentID = nil
+                                    self.outstandingConsentSentAt = nil
+                                    let task = self.consentTask
+                                    self.consentTask = nil
+                                    task?.cancel()
+                                    return self.onPathClosing
+                                }
+                                Task {
+                                    await onPathClosing?(payload)
+                                }
+                            } catch {
+                                Task {
+                                    await self.report(
+                                        "Direct QUIC path closing decode failed",
                                         metadata: ["error": error.localizedDescription]
                                     )
                                 }

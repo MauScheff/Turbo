@@ -135,6 +135,7 @@ final class TransmitTaskRuntimeState {
     private(set) var renewalTask: Task<Void, Never>?
     private(set) var renewalTaskID: Int?
     private(set) var renewalTarget: TransmitTarget?
+    private(set) var captureReassertionTask: Task<Void, Never>?
 
     var renewalChannelID: String? {
         renewalTarget?.channelID
@@ -168,9 +169,20 @@ final class TransmitTaskRuntimeState {
         renewalTarget = nil
     }
 
+    func replaceCaptureReassertionTask(with task: Task<Void, Never>?) {
+        captureReassertionTask?.cancel()
+        captureReassertionTask = task
+    }
+
+    func cancelCaptureReassertionTask() {
+        captureReassertionTask?.cancel()
+        captureReassertionTask = nil
+    }
+
     func reset() {
         cancelBeginTask()
         cancelRenewalTask()
+        cancelCaptureReassertionTask()
     }
 }
 
