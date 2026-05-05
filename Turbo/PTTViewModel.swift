@@ -130,6 +130,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var lastReportedPTTDescriptorChannelUUID: UUID?
     var lastReportedPTTDescriptorReason: String?
     var systemTransmitBeginRecoveryAttemptsByChannelUUID: [UUID: Int] = [:]
+    var directQuicBackendLeaseBypassedContactIDs: Set<UUID> = []
+    var directQuicBackendLeaseBypassedRequestsByContactID: [UUID: TransmitRequestContext] = [:]
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
     var disconnectRecoveryTask: Task<Void, Never>?
     var automaticDiagnosticsPublishEnabled: Bool = true
@@ -139,6 +141,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var localNetworkPreflightStatus: LocalNetworkPreflightStatus = .loadStored()
     var audioOutputPreference: AudioOutputPreference = .loadStored()
     var pendingTalkRequestNotificationHandle: String?
+    var directQuicProvisioningStatus: String = "not-started"
+    var directQuicRegisteredFingerprint: String?
     @ObservationIgnored
     let localNetworkPermissionPreflight = LocalNetworkPermissionPreflight()
     var applicationStateOverride: UIApplication.State?
@@ -484,6 +488,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     func tearDownTransmitRuntime(resetCoordinator: Bool) {
         transmitTaskCoordinator.send(.reset)
         transmitRuntime.reset()
+        directQuicBackendLeaseBypassedContactIDs.removeAll()
+        directQuicBackendLeaseBypassedRequestsByContactID.removeAll()
         if resetCoordinator {
             transmitCoordinator.reset()
             syncTransmitState()
@@ -516,6 +522,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         guard let client = runtime.client else { return nil }
         return BackendServices(
             client: client,
+            criticalHTTPClient: client.criticalHTTPClient,
             currentUserID: runtime.currentUserID,
             mode: runtime.mode,
             telemetryEnabled: runtime.telemetryEnabled
@@ -528,6 +535,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     var isDirectQuicAutoUpgradeDisabledForDebug: Bool {
         TurboDirectPathDebugOverride.isAutoUpgradeDisabled()
+    }
+
+    var directQuicTransmitStartupPolicy: DirectQuicTransmitStartupPolicy {
+        TurboDirectPathDebugOverride.transmitStartupPolicy()
     }
 
     var backendAdvertisesDirectQuicUpgrade: Bool {
@@ -572,9 +583,13 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             },
             identityLabel: identityStatus.resolvedLabel,
             identityStatus: identityStatus.diagnosticsText,
+            identitySource: identityStatus.source.rawValue,
+            fingerprint: identityStatus.fingerprint,
+            provisioningStatus: directQuicProvisioningStatus,
             installedIdentityCount: installedIdentityCount,
             relayOnlyOverride: isDirectPathRelayOnlyForced,
             autoUpgradeDisabled: isDirectQuicAutoUpgradeDisabledForDebug,
+            transmitStartupPolicy: directQuicTransmitStartupPolicy,
             backendAdvertisesUpgrade: backendAdvertisesDirectQuicUpgrade,
             effectiveUpgradeEnabled: effectiveDirectQuicUpgradeEnabled,
             transportPathState: mediaTransportPathState,
@@ -993,6 +1008,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "directQuicRole": directQuic.role ?? "none",
             "directQuicIdentityLabel": directQuic.identityLabel ?? "none",
             "directQuicIdentityStatus": directQuic.identityStatus,
+            "directQuicIdentitySource": directQuic.identitySource,
+            "directQuicProvisioningStatus": directQuic.provisioningStatus,
+            "directQuicFingerprint": directQuic.fingerprint ?? "none",
             "directQuicInstalledIdentityCount": String(directQuic.installedIdentityCount),
             "directQuicTransportPath": directQuic.transportPathState.rawValue,
             "directQuicLocalDeviceId": directQuic.localDeviceID ?? "none",

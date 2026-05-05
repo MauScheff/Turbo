@@ -50,6 +50,7 @@ struct TransmitTaskSessionState: Equatable {
 
 enum TransmitTaskEvent: Equatable {
     case reset
+    case cancelBegin
     case beginRequested(TransmitRequestContext)
     case beginFinished(id: Int)
     case renewalRequested(TransmitTarget)
@@ -86,6 +87,11 @@ enum TransmitTaskReducer {
                 effects.append(.cancelRenewal)
             }
             nextState = TransmitTaskSessionState()
+
+        case .cancelBegin:
+            guard nextState.begin.request != nil else { break }
+            nextState.begin = .idle
+            effects.append(.cancelBegin)
 
         case .beginRequested(let request):
             if nextState.begin.request == request {

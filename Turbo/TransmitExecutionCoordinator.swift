@@ -190,7 +190,6 @@ enum TransmitExecutionReducer {
             nextState.pressState = .idle
 
         case .reconcileIdleState:
-            nextState.stopIntent = .none
             nextState.systemTransmitState = .idle
             nextState.systemTransmitActivationState = .idle
             nextState.initialOutboundAudioSendGateState = .idle

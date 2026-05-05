@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var isShowingProfileSheet: Bool = false
     @State private var isShowingDevIdentitySheet: Bool = false
     @State private var isShowingDiagnostics: Bool = false
+    @State private var isShowingCallPrototype: Bool = false
     @State private var contactDetailsContactID: UUID?
     @State private var draftDevUserHandle: String = ""
     @State private var draftPeerHandle: String = ""
@@ -132,6 +133,10 @@ struct ContentView: View {
                     isShowingProfileSheet = false
                     isShowingDiagnostics = true
                 },
+                onShowCallPrototype: {
+                    isShowingProfileSheet = false
+                    isShowingCallPrototype = true
+                },
                 onRunSelfCheck: {
                     isShowingProfileSheet = false
                     runSelfCheckAndShowDiagnostics()
@@ -209,9 +214,17 @@ struct ContentView: View {
                 onUseInstalledDirectQuicIdentity: useInstalledDirectQuicIdentityFromDiagnostics,
                 onSetRelayOnlyForced: setDirectPathRelayOnlyForced,
                 onSetDirectQuicAutoUpgradeDisabled: setDirectQuicAutoUpgradeDisabled,
+                onSetDirectQuicTransmitStartupPolicy: setDirectQuicTransmitStartupPolicy,
                 onForceDirectQuicProbe: forceDirectQuicProbeFromDiagnostics,
                 onClearDirectQuicRetryBackoff: clearDirectQuicRetryBackoffFromDiagnostics,
                 onCancelDirectQuicAttempt: cancelDirectQuicAttemptFromDiagnostics
+            )
+        }
+        .fullScreenCover(isPresented: $isShowingCallPrototype) {
+            TurboCallPrototypeView(
+                contactName: callPrototypeContactName,
+                contactHandle: callPrototypeContactHandle,
+                onClose: { isShowingCallPrototype = false }
             )
         }
         .onOpenURL { url in
@@ -375,6 +388,18 @@ struct ContentView: View {
     private var detailContact: Contact? {
         guard let contactDetailsContactID else { return nil }
         return viewModel.contact(for: contactDetailsContactID)
+    }
+
+    private var callPrototypeContact: Contact? {
+        viewModel.selectedContact ?? viewModel.activeConversationContact ?? viewModel.contacts.first
+    }
+
+    private var callPrototypeContactName: String {
+        callPrototypeContact?.name ?? "Hat Tiling"
+    }
+
+    private var callPrototypeContactHandle: String {
+        callPrototypeContact?.handle ?? "@prototype"
     }
 
     private var addContactStatusMessage: String? {
@@ -586,6 +611,10 @@ struct ContentView: View {
                 isRunningDirectQuicDebugAction = false
             }
         }
+    }
+
+    private func setDirectQuicTransmitStartupPolicy(_ policy: DirectQuicTransmitStartupPolicy) {
+        viewModel.setDirectQuicTransmitStartupPolicyForDebug(policy)
     }
 
     private func importDirectQuicIdentityFromDiagnostics(fileURL: URL, password: String) {

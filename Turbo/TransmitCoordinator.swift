@@ -90,6 +90,9 @@ enum TransmitReducer {
             effects.append(.beginTransmit(request))
 
         case .beginSucceeded(let target, let request):
+            guard nextState.pendingRequest == request else {
+                return TransmitTransition(state: nextState)
+            }
             nextState.pendingRequest = nil
             nextState.activeTarget = target
             if nextState.isPressingTalk {
@@ -112,6 +115,9 @@ enum TransmitReducer {
             if let activeTarget = nextState.activeTarget {
                 nextState.phase = .stopping(contactID: activeTarget.contactID)
                 effects.append(.stopTransmit(activeTarget))
+            } else if case .requesting = nextState.phase {
+                nextState.phase = .idle
+                nextState.pendingRequest = nil
             }
 
         case .systemEnded:

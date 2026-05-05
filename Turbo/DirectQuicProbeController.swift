@@ -107,14 +107,42 @@ nonisolated enum DirectQuicIdentityConfiguration {
         ), !label.isEmpty else {
             return .missingLabel
         }
-        if loadIdentityIfPresent(label: label) != nil {
-            return .ready(label)
+        if let productionIdentity = DirectQuicProductionIdentityManager.existingIdentity(label: label) {
+            return .readyProduction(label, productionIdentity.certificateFingerprint)
+        }
+        if let debugIdentity = loadIdentityIfPresent(label: label),
+           let fingerprint = try? Self.fingerprint(for: debugIdentity) {
+            return .readyDebug(label, fingerprint)
         }
         if let fingerprint = selectedInstalledIdentityFingerprint(defaults: defaults),
            loadInstalledIdentityMatchingFingerprint(fingerprint) != nil {
-            return .readyInstalled(label)
+            return .readyInstalled(label, fingerprint)
         }
         return .missingIdentity(label)
+    }
+
+    static func provisionProductionIdentity(
+        label: String,
+        deviceID: String,
+        defaults: UserDefaults = .standard
+    ) throws -> DirectQuicResolvedIdentity {
+        let identity = try DirectQuicProductionIdentityManager.provisionIdentity(
+            label: label,
+            deviceID: deviceID
+        )
+        setResolvedLabel(label, defaults: defaults)
+        setSelectedInstalledIdentityFingerprint(nil, defaults: defaults)
+        return identity
+    }
+
+    static func productionIdentityRegistrationMetadata(label: String) -> DirectQuicIdentityRegistrationMetadata? {
+        guard let identity = DirectQuicProductionIdentityManager.existingIdentity(label: label) else {
+            return nil
+        }
+        return DirectQuicIdentityRegistrationMetadata(
+            fingerprint: identity.certificateFingerprint,
+            certificateDerBase64: identity.certificateDerBase64
+        )
     }
 
     static func importPKCS12Identity(
@@ -263,15 +291,41 @@ nonisolated enum DirectQuicIdentityConfiguration {
 nonisolated enum DirectQuicIdentityStatus: Equatable {
     case missingLabel
     case missingIdentity(String)
-    case ready(String)
-    case readyInstalled(String)
+    case readyProduction(String, String)
+    case readyDebug(String, String)
+    case readyInstalled(String, String)
 
     var resolvedLabel: String? {
         switch self {
         case .missingLabel:
             return nil
-        case .missingIdentity(let label), .ready(let label), .readyInstalled(let label):
+        case .missingIdentity(let label),
+             .readyProduction(let label, _),
+             .readyDebug(let label, _),
+             .readyInstalled(let label, _):
             return label
+        }
+    }
+
+    var fingerprint: String? {
+        switch self {
+        case .missingLabel, .missingIdentity:
+            return nil
+        case .readyProduction(_, let fingerprint),
+             .readyDebug(_, let fingerprint),
+             .readyInstalled(_, let fingerprint):
+            return fingerprint
+        }
+    }
+
+    var source: DirectQuicIdentitySource {
+        switch self {
+        case .readyProduction:
+            return .production
+        case .readyDebug, .readyInstalled:
+            return .debugP12
+        case .missingLabel, .missingIdentity:
+            return .missing
         }
     }
 
@@ -281,10 +335,12 @@ nonisolated enum DirectQuicIdentityStatus: Equatable {
             return "missing-label"
         case .missingIdentity(let label):
             return "missing-identity (\(label))"
-        case .ready(let label):
-            return "ready (\(label))"
-        case .readyInstalled(let label):
-            return "ready-installed (\(label))"
+        case .readyProduction(let label, _):
+            return "ready-production (\(label))"
+        case .readyDebug(let label, _):
+            return "ready-debug-p12 (\(label))"
+        case .readyInstalled(let label, _):
+            return "ready-installed-debug-p12 (\(label))"
         }
     }
 }
@@ -397,6 +453,7 @@ nonisolated private struct DirectQuicIdentityMaterial {
     let label: String
     let identity: SecIdentity
     let certificateFingerprint: String
+    let source: DirectQuicIdentitySource
 }
 
 nonisolated private struct DirectQuicPreparedDialerAttempt: Equatable {
@@ -1806,16 +1863,25 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
 
     private func resolvedIdentityMaterial() throws -> DirectQuicIdentityMaterial {
         let label = try resolvedIdentityLabel()
-        let identity = try Self.loadIdentity(label: label)
+        if let productionIdentity = DirectQuicProductionIdentityManager.existingIdentity(label: label) {
+            return DirectQuicIdentityMaterial(
+                label: label,
+                identity: productionIdentity.identity,
+                certificateFingerprint: productionIdentity.certificateFingerprint,
+                source: .production
+            )
+        }
+        let identity = try Self.loadDebugIdentity(label: label)
         let certificateFingerprint = try Self.fingerprint(for: identity)
         return DirectQuicIdentityMaterial(
             label: label,
             identity: identity,
-            certificateFingerprint: certificateFingerprint
+            certificateFingerprint: certificateFingerprint,
+            source: .debugP12
         )
     }
 
-    private static func loadIdentity(label: String) throws -> SecIdentity {
+    private static func loadDebugIdentity(label: String) throws -> SecIdentity {
         do {
             return try DirectQuicIdentityConfiguration.loadIdentity(label: label)
         } catch DirectQuicProbeError.identityNotFound {

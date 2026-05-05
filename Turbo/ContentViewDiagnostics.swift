@@ -26,6 +26,7 @@ struct TurboDiagnosticsView: View {
     let onUseInstalledDirectQuicIdentity: () -> Void
     let onSetRelayOnlyForced: (Bool) -> Void
     let onSetDirectQuicAutoUpgradeDisabled: (Bool) -> Void
+    let onSetDirectQuicTransmitStartupPolicy: (DirectQuicTransmitStartupPolicy) -> Void
     let onForceDirectQuicProbe: () -> Void
     let onClearDirectQuicRetryBackoff: () -> Void
     let onCancelDirectQuicAttempt: () -> Void
@@ -162,6 +163,7 @@ struct TurboDiagnosticsView: View {
                     diagnosticsRow("STUN servers", "\(directQuic.stunServerCount)")
                     diagnosticsRow("Promotion timeout", "\(directQuic.promotionTimeoutMilliseconds) ms")
                     diagnosticsRow("Base retry backoff", "\(directQuic.retryBackoffBaseMilliseconds) ms")
+                    diagnosticsRow("Transmit startup", directQuic.transmitStartupPolicy.rawValue)
 
                     Toggle(
                         "Relay-only override",
@@ -181,6 +183,15 @@ struct TurboDiagnosticsView: View {
                                 : "Disable auto-upgrade",
                             systemImage: directQuic.autoUpgradeDisabled ? "bolt.fill" : "bolt.slash"
                         )
+                    }
+                    .disabled(isRunningDirectQuicDebugAction)
+
+                    Picker("Transmit startup", selection: Binding(
+                        get: { directQuic.transmitStartupPolicy },
+                        set: onSetDirectQuicTransmitStartupPolicy
+                    )) {
+                        Text("Apple-gated").tag(DirectQuicTransmitStartupPolicy.appleGated)
+                        Text("Speculative foreground").tag(DirectQuicTransmitStartupPolicy.speculativeForeground)
                     }
                     .disabled(isRunningDirectQuicDebugAction)
 
@@ -478,6 +489,7 @@ struct TurboDiagnosticsSheet: View {
     let onUseInstalledDirectQuicIdentity: () -> Void
     let onSetRelayOnlyForced: (Bool) -> Void
     let onSetDirectQuicAutoUpgradeDisabled: (Bool) -> Void
+    let onSetDirectQuicTransmitStartupPolicy: (DirectQuicTransmitStartupPolicy) -> Void
     let onForceDirectQuicProbe: () -> Void
     let onClearDirectQuicRetryBackoff: () -> Void
     let onCancelDirectQuicAttempt: () -> Void
@@ -515,6 +527,7 @@ struct TurboDiagnosticsSheet: View {
                 onUseInstalledDirectQuicIdentity: onUseInstalledDirectQuicIdentity,
                 onSetRelayOnlyForced: onSetRelayOnlyForced,
                 onSetDirectQuicAutoUpgradeDisabled: onSetDirectQuicAutoUpgradeDisabled,
+                onSetDirectQuicTransmitStartupPolicy: onSetDirectQuicTransmitStartupPolicy,
                 onForceDirectQuicProbe: onForceDirectQuicProbe,
                 onClearDirectQuicRetryBackoff: onClearDirectQuicRetryBackoff,
                 onCancelDirectQuicAttempt: onCancelDirectQuicAttempt

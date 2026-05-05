@@ -67,9 +67,13 @@ struct DirectQuicDiagnosticsSummary: Equatable {
     let role: String?
     let identityLabel: String?
     let identityStatus: String
+    let identitySource: String
+    let fingerprint: String?
+    let provisioningStatus: String
     let installedIdentityCount: Int
     let relayOnlyOverride: Bool
     let autoUpgradeDisabled: Bool
+    let transmitStartupPolicy: DirectQuicTransmitStartupPolicy
     let backendAdvertisesUpgrade: Bool
     let effectiveUpgradeEnabled: Bool
     let transportPathState: MediaTransportPathState

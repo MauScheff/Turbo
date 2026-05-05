@@ -459,6 +459,38 @@ extension PTTViewModel {
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
     }
 
+    private func shouldUseForegroundAppManagedWakePlayback(
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard pttWakeRuntime.shouldBufferAudioChunk(for: contactID) else { return false }
+        return prefersForegroundAppManagedReceivePlayback(
+            for: contactID,
+            applicationState: applicationState
+        )
+    }
+
+    private func startForegroundAppManagedWakePlayback(
+        for contactID: UUID,
+        channelID: String
+    ) {
+        pttWakeRuntime.replacePlaybackFallbackTask(for: contactID, with: nil)
+        pttWakeRuntime.markAppManagedFallbackStarted(for: contactID)
+        recordWakeReceiveTiming(
+            stage: "foreground-app-managed-playback-started",
+            contactID: contactID,
+            channelID: channelID
+        )
+        diagnostics.record(
+            .media,
+            message: "Using app-managed wake playback for foreground audio",
+            metadata: [
+                "channelId": channelID,
+                "contactId": contactID.uuidString,
+            ]
+        )
+    }
+
     private func shouldTreatIncomingControlSignalAsWakeCandidate(for contactID: UUID) -> Bool {
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         guard !isPTTAudioSessionActive else { return false }
@@ -1240,6 +1272,34 @@ extension PTTViewModel {
         envelope: TurboSignalEnvelope,
         contactID: UUID
     ) -> Bool {
+        if let authorizationFailure = directQuicProductionSignalAuthorizationFailure(
+            signal: signal,
+            envelope: envelope,
+            contactID: contactID
+        ) {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Rejected direct QUIC signal because backend peer identity did not authorize it",
+                metadata: [
+                    "type": envelope.type.rawValue,
+                    "channelId": envelope.channelId,
+                    "contactId": contactID.uuidString,
+                    "attemptId": signal.attemptId,
+                    "reason": authorizationFailure,
+                    "fromDeviceId": envelope.fromDeviceId,
+                    "backendPeerFingerprint": backendPeerDirectQuicFingerprint(for: contactID) ?? "none",
+                ]
+            )
+            mediaRuntime.directQuicUpgrade.applyRetryBackoff(
+                for: contactID,
+                request: directQuicRetryBackoffRequest(
+                    reason: authorizationFailure,
+                    attemptID: signal.attemptId
+                )
+            )
+            return false
+        }
         if effectiveDirectQuicUpgradeEnabled {
             return true
         }
@@ -1308,6 +1368,15 @@ extension PTTViewModel {
         }
         if shouldRepairRemoteParticipant {
             await updateSystemRemoteParticipant(for: contactID, isActive: true)
+        }
+        if shouldUseForegroundAppManagedWakePlayback(
+            for: contactID,
+            applicationState: applicationState
+        ) {
+            startForegroundAppManagedWakePlayback(
+                for: contactID,
+                channelID: channelID
+            )
         }
         if bufferWakeAudioChunkUntilPTTActivation(
             payload,
@@ -1517,6 +1586,8 @@ extension PTTViewModel {
                             message: "Deferring receive teardown until remote audio drain after transmit stop",
                             metadata: ["contactId": contactID.uuidString]
                         )
+                        pttWakeRuntime.clear(for: contactID)
+                        clearRemoteAudioActivity(for: contactID)
                     } else {
                         pttWakeRuntime.clear(for: contactID)
                     }
@@ -1548,7 +1619,6 @@ extension PTTViewModel {
                     )
                 let shouldClearRemoteParticipant =
                     envelope.type == .transmitStop
-                    && !shouldDeferReceiveTeardown
                     && shouldClearSystemRemoteParticipantFromSignalPath(for: contactID)
                 if shouldSetRemoteParticipant || shouldClearRemoteParticipant {
                     await updateSystemRemoteParticipant(
@@ -1661,7 +1731,10 @@ extension PTTViewModel {
         let senderUserID =
             contacts.first(where: { $0.id == contactID })?.remoteUserId
             ?? ""
-        if shouldTreatIncomingControlSignalAsWakeCandidate(for: contactID) {
+        let applicationState = currentApplicationState()
+        let shouldArmSystemWake = applicationState != .active
+            && shouldTreatIncomingControlSignalAsWakeCandidate(for: contactID)
+        if shouldArmSystemWake {
             ensurePendingWakeCandidate(
                 for: contactID,
                 channelId: payload.channelId,
@@ -1669,7 +1742,6 @@ extension PTTViewModel {
                 senderDeviceId: payload.fromDeviceId
             )
         }
-        markRemoteAudioActivity(for: contactID, source: .transmitStartSignal)
         recordWakeReceiveTiming(
             stage: "direct-quic-transmit-prepare-observed",
             contactID: contactID,
@@ -1680,6 +1752,8 @@ extension PTTViewModel {
                 "fromDeviceId": payload.fromDeviceId,
                 "requestId": payload.requestId,
                 "reason": payload.reason,
+                "applicationState": String(describing: applicationState),
+                "armedSystemWake": String(shouldArmSystemWake),
             ],
             ifAbsent: true
         )
@@ -1692,11 +1766,20 @@ extension PTTViewModel {
                 "attemptId": attemptID,
                 "requestId": payload.requestId,
                 "reason": payload.reason,
+                "applicationState": String(describing: applicationState),
+                "armedSystemWake": String(shouldArmSystemWake),
             ]
         )
-        if shouldSetSystemRemoteParticipantFromSignalPath(
+        if applicationState == .active {
+            await prewarmLocalMediaIfNeeded(for: contactID)
+            await syncLocalReceiverAudioReadinessSignal(
+                for: contactID,
+                reason: "direct-quic-transmit-prepare"
+            )
+        }
+        if applicationState != .active, shouldSetSystemRemoteParticipantFromSignalPath(
             for: contactID,
-            applicationState: currentApplicationState()
+            applicationState: applicationState
         ) {
             await updateSystemRemoteParticipant(
                 for: contactID,
@@ -1954,7 +2037,10 @@ extension PTTViewModel {
                 )
                 isTransmitting =
                     shouldAcceptBackendLocalTransmit
-                    || transmitSnapshot.isSystemTransmitting
+                    || (
+                        transmitSnapshot.isSystemTransmitting
+                        && !transmitSnapshot.explicitStopRequested
+                    )
                     || (
                         transmitSnapshot.activeContactID == contactID
                         && transmitSnapshot.isPressActive
@@ -2012,40 +2098,46 @@ extension PTTViewModel {
 
     func refreshInvites() async {
         guard let backend = backendServices else { return }
-        do {
-            async let incomingTask = withHTTPTransportFault(route: .incomingInvites) {
-                try await backend.incomingInvites()
-            }
-            async let outgoingTask = withHTTPTransportFault(route: .outgoingInvites) {
-                try await backend.outgoingInvites()
-            }
-            let incoming = try await incomingTask
-            let outgoing = try await outgoingTask
+        func updates(
+            incoming: [TurboInviteResponse]?,
+            outgoing: [TurboInviteResponse]?
+        ) -> ([BackendInviteUpdate]?, [BackendInviteUpdate]?) {
             var nextIncoming: [UUID: TurboInviteResponse] = [:]
             var nextOutgoing: [UUID: TurboInviteResponse] = [:]
-            for invite in incoming {
-                if let handle = invite.fromHandle {
-                    let contactID = ensureContactExists(
-                        handle: handle,
-                        remoteUserId: invite.fromUserId,
-                        channelId: invite.channelId
-                    )
-                    nextIncoming[contactID] = invite
+
+            if let incoming {
+                for invite in incoming {
+                    if let handle = invite.fromHandle {
+                        let contactID = ensureContactExists(
+                            handle: handle,
+                            remoteUserId: invite.fromUserId,
+                            channelId: invite.channelId
+                        )
+                        nextIncoming[contactID] = invite
+                    }
                 }
             }
-            for invite in outgoing {
-                if let handle = invite.toHandle {
-                    let contactID = ensureContactExists(
-                        handle: handle,
-                        remoteUserId: invite.toUserId,
-                        channelId: invite.channelId
-                    )
-                    nextOutgoing[contactID] = invite
+
+            if let outgoing {
+                for invite in outgoing {
+                    if let handle = invite.toHandle {
+                        let contactID = ensureContactExists(
+                            handle: handle,
+                            remoteUserId: invite.toUserId,
+                            channelId: invite.channelId
+                        )
+                        nextOutgoing[contactID] = invite
+                    }
                 }
             }
-            let incomingUpdates = nextIncoming.map { BackendInviteUpdate(contactID: $0.key, invite: $0.value) }
-            let outgoingUpdates = nextOutgoing.map { BackendInviteUpdate(contactID: $0.key, invite: $0.value) }
-            backendSyncCoordinator.send(.invitesUpdated(incoming: incomingUpdates, outgoing: outgoingUpdates, now: .now))
+
+            return (
+                incoming.map { _ in nextIncoming.map { BackendInviteUpdate(contactID: $0.key, invite: $0.value) } },
+                outgoing.map { _ in nextOutgoing.map { BackendInviteUpdate(contactID: $0.key, invite: $0.value) } }
+            )
+        }
+
+        func finishInviteSync(stateReason: String) async {
             syncTalkRequestNotificationBadge()
             reconcileTalkRequestSurface()
             pruneContactsToAuthoritativeState()
@@ -2054,18 +2146,80 @@ extension PTTViewModel {
                 allowSelectingFallbackContact: currentApplicationState() == .active
             )
             updateStatusForSelectedContact()
-            captureDiagnosticsState("backend-sync:invites")
+            captureDiagnosticsState(stateReason)
             await reconcileSelectedSessionIfNeeded()
+        }
+
+        let incomingResult: Result<[TurboInviteResponse], Error>
+        do {
+            incomingResult = .success(
+                try await withHTTPTransportFault(route: .incomingInvites) {
+                    try await backend.incomingInvites()
+                }
+            )
         } catch {
+            incomingResult = .failure(error)
+        }
+
+        let outgoingResult: Result<[TurboInviteResponse], Error>
+        do {
+            outgoingResult = .success(
+                try await withHTTPTransportFault(route: .outgoingInvites) {
+                    try await backend.outgoingInvites()
+                }
+            )
+        } catch {
+            outgoingResult = .failure(error)
+        }
+
+        switch (incomingResult, outgoingResult) {
+        case (.success(let incoming), .success(let outgoing)):
+            let (incomingUpdates, outgoingUpdates) = updates(incoming: incoming, outgoing: outgoing)
+            backendSyncCoordinator.send(
+                .invitesUpdated(
+                    incoming: incomingUpdates ?? [],
+                    outgoing: outgoingUpdates ?? [],
+                    now: .now
+                )
+            )
+            await finishInviteSync(stateReason: "backend-sync:invites")
+
+        case (.success(let incoming), .failure(let error)):
             guard !isExpectedBackendSyncCancellation(error) else { return }
+            let (incomingUpdates, _) = updates(incoming: incoming, outgoing: nil)
+            backendSyncCoordinator.send(.invitesPartiallyUpdated(incoming: incomingUpdates, outgoing: nil, now: .now))
+            diagnostics.record(
+                .backend,
+                level: .error,
+                message: "Invite sync partially recovered",
+                metadata: ["failedRoute": "outgoing", "error": error.localizedDescription]
+            )
+            await finishInviteSync(stateReason: "backend-sync:invites-partial")
+
+        case (.failure(let error), .success(let outgoing)):
+            guard !isExpectedBackendSyncCancellation(error) else { return }
+            let (_, outgoingUpdates) = updates(incoming: nil, outgoing: outgoing)
+            backendSyncCoordinator.send(.invitesPartiallyUpdated(incoming: nil, outgoing: outgoingUpdates, now: .now))
+            diagnostics.record(
+                .backend,
+                level: .error,
+                message: "Invite sync partially recovered",
+                metadata: ["failedRoute": "incoming", "error": error.localizedDescription]
+            )
+            await finishInviteSync(stateReason: "backend-sync:invites-partial")
+
+        case (.failure(let incomingError), .failure(let outgoingError)):
+            guard !isExpectedBackendSyncCancellation(incomingError) else { return }
+            guard !isExpectedBackendSyncCancellation(outgoingError) else { return }
             if await recoverBackendControlPlaneAfterSyncFailureIfNeeded(
                 scope: "invite-sync",
-                error: error
+                error: incomingError
             ) {
                 return
             }
-            backendSyncCoordinator.send(.invitesFailed("Invite sync failed: \(error.localizedDescription)"))
-            diagnostics.record(.backend, level: .error, message: "Invite sync failed", metadata: ["error": error.localizedDescription])
+            let message = "incoming=\(incomingError.localizedDescription); outgoing=\(outgoingError.localizedDescription)"
+            backendSyncCoordinator.send(.invitesFailed("Invite sync failed: \(message)"))
+            diagnostics.record(.backend, level: .error, message: "Invite sync failed", metadata: ["error": message])
             captureDiagnosticsState("backend-sync:invites-failed")
             await reconcileSelectedSessionIfNeeded()
         }

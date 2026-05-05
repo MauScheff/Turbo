@@ -677,6 +677,19 @@ struct TurboChannelAudioReadinessPayload: Decodable, Equatable {
     }
 }
 
+struct TurboDirectQuicPeerIdentityPayload: Codable, Equatable {
+    let fingerprint: String
+    let certificateDerBase64: String?
+    let status: String?
+    let createdAt: String?
+    let updatedAt: String?
+
+    var activeFingerprint: String? {
+        guard status == nil || status == "active" else { return nil }
+        return DirectQuicProductionIdentityManager.normalizedFingerprint(fingerprint)
+    }
+}
+
 enum TurboWakeCapabilityStatus: Equatable {
     case unavailable
     case wakeCapable(targetDeviceId: String)
@@ -784,7 +797,7 @@ private extension TurboWakeCapabilityStatus {
     }
 }
 
-struct TurboBackendConfig {
+struct TurboBackendConfig: Sendable {
     let baseURL: URL
     let devUserHandle: String
     let deviceID: String
@@ -860,6 +873,9 @@ enum TurboDirectPathDebugOverride {
     static let autoUpgradeDisabledStorageKey = "TurboDebugDisableDirectQuicAutoUpgrade"
     static let autoUpgradeDisabledLaunchArgument = "-TurboDebugDisableDirectQuicAutoUpgrade"
     static let autoUpgradeDisabledEnvironmentKey = "TURBO_DEBUG_DISABLE_DIRECT_QUIC_AUTO_UPGRADE"
+    static let transmitStartupPolicyStorageKey = "TurboDebugDirectQuicTransmitStartupPolicy"
+    static let transmitStartupPolicyLaunchArgument = "-TurboDebugDirectQuicTransmitStartupPolicy"
+    static let transmitStartupPolicyEnvironmentKey = "TURBO_DEBUG_DIRECT_QUIC_TRANSMIT_STARTUP_POLICY"
 
     static func isRelayOnlyForced(
         processInfo: ProcessInfo = .processInfo,
@@ -929,6 +945,44 @@ enum TurboDirectPathDebugOverride {
         defaults.set(isDisabled, forKey: autoUpgradeDisabledStorageKey)
     }
 
+    static func transmitStartupPolicy(
+        processInfo: ProcessInfo = .processInfo,
+        defaults: UserDefaults = .standard
+    ) -> DirectQuicTransmitStartupPolicy {
+        transmitStartupPolicy(
+            arguments: processInfo.arguments,
+            environment: processInfo.environment,
+            defaults: defaults
+        )
+    }
+
+    static func transmitStartupPolicy(
+        arguments: [String],
+        environment: [String: String],
+        defaults: UserDefaults = .standard
+    ) -> DirectQuicTransmitStartupPolicy {
+        if let launchArgumentValue = launchArgumentValue(transmitStartupPolicyLaunchArgument, in: arguments),
+           let parsed = DirectQuicTransmitStartupPolicy(rawValue: launchArgumentValue) {
+            return parsed
+        }
+        if let environmentValue = environment[transmitStartupPolicyEnvironmentKey],
+           let parsed = DirectQuicTransmitStartupPolicy(rawValue: environmentValue) {
+            return parsed
+        }
+        if let stored = defaults.string(forKey: transmitStartupPolicyStorageKey),
+           let parsed = DirectQuicTransmitStartupPolicy(rawValue: stored) {
+            return parsed
+        }
+        return .appleGated
+    }
+
+    static func setTransmitStartupPolicy(
+        _ policy: DirectQuicTransmitStartupPolicy,
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.set(policy.rawValue, forKey: transmitStartupPolicyStorageKey)
+    }
+
     private static func launchArgumentValue(_ arguments: [String]) -> String? {
         launchArgumentValue(launchArgument, in: arguments)
     }
@@ -951,6 +1005,11 @@ enum TurboDirectPathDebugOverride {
             return nil
         }
     }
+}
+
+enum DirectQuicTransmitStartupPolicy: String, Codable, Equatable, Hashable, Sendable {
+    case appleGated = "apple-gated"
+    case speculativeForeground = "speculative-foreground"
 }
 
 private extension KeyedDecodingContainer {
@@ -1474,6 +1533,7 @@ struct TurboBackendRuntimeConfig: Decodable {
     let supportsWebSocket: Bool
     let telemetryEnabled: Bool?
     let supportsDirectQuicUpgrade: Bool
+    let supportsDirectQuicProvisioning: Bool
     let directQuicPolicy: TurboDirectQuicPolicy?
 
     init(
@@ -1481,12 +1541,14 @@ struct TurboBackendRuntimeConfig: Decodable {
         supportsWebSocket: Bool,
         telemetryEnabled: Bool? = nil,
         supportsDirectQuicUpgrade: Bool = false,
+        supportsDirectQuicProvisioning: Bool = false,
         directQuicPolicy: TurboDirectQuicPolicy? = nil
     ) {
         self.mode = mode
         self.supportsWebSocket = supportsWebSocket
         self.telemetryEnabled = telemetryEnabled
         self.supportsDirectQuicUpgrade = supportsDirectQuicUpgrade
+        self.supportsDirectQuicProvisioning = supportsDirectQuicProvisioning
         self.directQuicPolicy = directQuicPolicy
     }
 
@@ -1495,6 +1557,7 @@ struct TurboBackendRuntimeConfig: Decodable {
         case supportsWebSocket
         case telemetryEnabled
         case supportsDirectQuicUpgrade
+        case supportsDirectQuicProvisioning
         case directQuicPolicy
     }
 
@@ -1504,6 +1567,7 @@ struct TurboBackendRuntimeConfig: Decodable {
         supportsWebSocket = try container.decode(Bool.self, forKey: .supportsWebSocket)
         telemetryEnabled = try container.decodeIfPresent(Bool.self, forKey: .telemetryEnabled)
         supportsDirectQuicUpgrade = try container.decodeIfPresent(Bool.self, forKey: .supportsDirectQuicUpgrade) ?? false
+        supportsDirectQuicProvisioning = try container.decodeIfPresent(Bool.self, forKey: .supportsDirectQuicProvisioning) ?? false
         directQuicPolicy = try container.decodeIfPresent(TurboDirectQuicPolicy.self, forKey: .directQuicPolicy)
     }
 }
@@ -2158,6 +2222,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
     private let readinessPayload: TurboChannelReadinessPayload
     private let audioReadinessPayload: TurboChannelAudioReadinessPayload
     private let wakeReadinessPayload: TurboChannelWakeReadinessPayload
+    let peerDirectQuicIdentity: TurboDirectQuicPeerIdentityPayload?
 
     init(
         channelId: String,
@@ -2169,7 +2234,8 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         status: String,
         readinessPayload: TurboChannelReadinessPayload? = nil,
         audioReadinessPayload: TurboChannelAudioReadinessPayload? = nil,
-        wakeReadinessPayload: TurboChannelWakeReadinessPayload? = nil
+        wakeReadinessPayload: TurboChannelWakeReadinessPayload? = nil,
+        peerDirectQuicIdentity: TurboDirectQuicPeerIdentityPayload? = nil
     ) {
         self.channelId = channelId
         self.peerUserId = peerUserId
@@ -2189,6 +2255,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             selfWakeCapability: TurboWakeCapabilityStatusPayload(kind: "unavailable"),
             peerWakeCapability: TurboWakeCapabilityStatusPayload(kind: "unavailable")
         )
+        self.peerDirectQuicIdentity = peerDirectQuicIdentity
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2202,6 +2269,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         case readiness
         case audioReadiness
         case wakeReadiness
+        case peerDirectQuicIdentity
     }
 
     init(from decoder: Decoder) throws {
@@ -2214,6 +2282,10 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         readinessPayload = try container.decode(TurboChannelReadinessPayload.self, forKey: .readiness)
         audioReadinessPayload = try container.decode(TurboChannelAudioReadinessPayload.self, forKey: .audioReadiness)
         wakeReadinessPayload = try container.decode(TurboChannelWakeReadinessPayload.self, forKey: .wakeReadiness)
+        peerDirectQuicIdentity = try container.decodeIfPresent(
+            TurboDirectQuicPeerIdentityPayload.self,
+            forKey: .peerDirectQuicIdentity
+        )
     }
 
     var statusView: TurboChannelReadinessStatus {
@@ -2248,6 +2320,10 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         audioReadinessPayload.peerTargetDeviceId
     }
 
+    var peerDirectQuicFingerprint: String? {
+        peerDirectQuicIdentity?.activeFingerprint
+    }
+
     var remoteWakeCapability: RemoteWakeCapabilityState {
         wakeReadinessPayload.remoteStatus
     }
@@ -2267,7 +2343,8 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             status: statusKind,
             readinessPayload: readinessPayload,
             audioReadinessPayload: audioReadinessPayload.settingRemoteStatus(status),
-            wakeReadinessPayload: wakeReadinessPayload
+            wakeReadinessPayload: wakeReadinessPayload,
+            peerDirectQuicIdentity: peerDirectQuicIdentity
         )
     }
 
@@ -2282,7 +2359,8 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             status: statusKind,
             readinessPayload: readinessPayload,
             audioReadinessPayload: audioReadinessPayload,
-            wakeReadinessPayload: wakeReadinessPayload.settingRemoteStatus(status)
+            wakeReadinessPayload: wakeReadinessPayload.settingRemoteStatus(status),
+            peerDirectQuicIdentity: peerDirectQuicIdentity
         )
     }
 }

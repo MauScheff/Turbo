@@ -2,7 +2,9 @@
 
 import argparse
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
 import os
 import ssl
@@ -348,6 +350,30 @@ def require_wake_readiness_contract(payload: dict[str, Any], *, label: str) -> N
     require_target(peer_kind, peer_wake.get("targetDeviceId"), side="peer")
 
 
+def direct_quic_identity_for_device(device_id: str) -> dict[str, str]:
+    digest = hashlib.sha256(f"route-probe:{device_id}".encode("utf-8")).hexdigest()
+    certificate = base64.b64encode(f"route-probe-certificate:{device_id}".encode("utf-8")).decode("ascii")
+    return {
+        "fingerprint": f"sha256:{digest}",
+        "certificateDerBase64": certificate,
+    }
+
+
+def require_direct_quic_peer_identity(
+    payload: dict[str, Any],
+    *,
+    expected_fingerprint: str,
+    label: str,
+) -> None:
+    identity = payload.get("peerDirectQuicIdentity")
+    require(isinstance(identity, dict), f"{label} missing peerDirectQuicIdentity: {payload}")
+    require(identity.get("status") == "active", f"{label} peer Direct QUIC identity is not active: {identity}")
+    require(
+        identity.get("fingerprint") == expected_fingerprint,
+        f"{label} peer Direct QUIC fingerprint mismatch: {identity}",
+    )
+
+
 def require_diagnostics_report(
     response: dict[str, Any],
     *,
@@ -689,11 +715,20 @@ async def main() -> int:
                     "/v1/devices/register",
                     current["handle"],
                     method="POST",
-                    body={"deviceId": current["device_id"], "deviceLabel": current["device_id"]},
+                    body={
+                        "deviceId": current["device_id"],
+                        "deviceLabel": current["device_id"],
+                        "directQuicIdentity": direct_quic_identity_for_device(current["device_id"]),
+                    },
                     insecure=args.insecure,
                 ),
             )
             require(device.get("deviceId") == current["device_id"], f"device registration mismatched id: {device}")
+            require(
+                device.get("directQuicIdentity", {}).get("fingerprint")
+                == direct_quic_identity_for_device(current["device_id"])["fingerprint"],
+                f"device registration did not round-trip Direct QUIC identity: {device}",
+            )
 
             diagnostics_upload = run_check(
                 results,
@@ -918,6 +953,11 @@ async def main() -> int:
             require(
                 device_after_background.get("deviceId") == current["device_id"],
                 f"device registration after background mismatched id: {device_after_background}",
+            )
+            require(
+                device_after_background.get("directQuicIdentity", {}).get("fingerprint")
+                == direct_quic_identity_for_device(current["device_id"])["fingerprint"],
+                f"device registration without identity did not preserve Direct QUIC metadata: {device_after_background}",
             )
 
             heartbeat_after_reregister = run_check(
@@ -1383,6 +1423,16 @@ async def main() -> int:
                 require(
                     callee_readiness_after_signal.get("audioReadiness", {}).get("peer", {}).get("kind") == "ready",
                     f"callee readiness should show ready peer audio after receiver-ready signal: {callee_readiness_after_signal}",
+                )
+                require_direct_quic_peer_identity(
+                    caller_readiness_after_signal,
+                    expected_fingerprint=direct_quic_identity_for_device(callee["device_id"])["fingerprint"],
+                    label="channel-readiness:caller:receiver-ready",
+                )
+                require_direct_quic_peer_identity(
+                    callee_readiness_after_signal,
+                    expected_fingerprint=direct_quic_identity_for_device(caller["device_id"])["fingerprint"],
+                    label="channel-readiness:callee:receiver-ready",
                 )
 
             run_check(

@@ -36,6 +36,9 @@ smoke-probe:
 route-probe:
   .venv/bin/python scripts/route_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
 
+direct-quic-provisioning-probe:
+  .venv/bin/python scripts/direct_quic_provisioning_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
+
 route-probe-local base="http://localhost:8090/s/turbo" caller="@avery" callee="@blake":
   .venv/bin/python scripts/route_probe.py --base-url "{{base}}" --caller "{{caller}}" --callee "{{callee}}"
 
@@ -196,7 +199,7 @@ simulator-scenario-suite:
   just simulator-scenario
 
 simulator-scenario-suite-hosted-smoke:
-  just simulator-scenario "presence_online_projection,request_accept_ready_refresh_stability"
+  sh -c 'python3 scripts/run_simulator_scenarios.py --scenario "presence_online_projection,request_accept_ready_refresh_stability" --base-url "https://beepbeep.to" --handle-a "@avery" --handle-b "@blake" --device-id-a "sim-scenario-avery-$(uuidgen | tr "[:upper:]" "[:lower:]")" --device-id-b "sim-scenario-blake-$(uuidgen | tr "[:upper:]" "[:lower:]")"'
 
 simulator-scenario-suite-local:
   just simulator-scenario-local "" http://localhost:8090/s/turbo

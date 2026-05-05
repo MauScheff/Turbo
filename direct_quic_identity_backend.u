@@ -1,0 +1,278 @@
+type turbo.domain.DirectQuicDeviceIdentityStatus = Active | Revoked
+
+type turbo.domain.DirectQuicDeviceIdentity =
+  DirectQuicDeviceIdentity Text Text DirectQuicDeviceIdentityStatus Instant Instant
+
+type turbo.domain.DirectQuicDeviceIdentityRegistration =
+  DirectQuicDeviceIdentityRegistration Text Text
+
+turbo.domain.directQuicDeviceIdentityFingerprint : DirectQuicDeviceIdentity -> Text
+turbo.domain.directQuicDeviceIdentityFingerprint = cases
+  DirectQuicDeviceIdentity fingerprint _ _ _ _ -> fingerprint
+
+turbo.domain.directQuicDeviceIdentityCertificateDerBase64 : DirectQuicDeviceIdentity -> Text
+turbo.domain.directQuicDeviceIdentityCertificateDerBase64 = cases
+  DirectQuicDeviceIdentity _ certificateDerBase64 _ _ _ -> certificateDerBase64
+
+turbo.domain.directQuicDeviceIdentityIsActive : DirectQuicDeviceIdentity -> Boolean
+turbo.domain.directQuicDeviceIdentityIsActive = cases
+  DirectQuicDeviceIdentity _ _ Active _ _  -> true
+  DirectQuicDeviceIdentity _ _ Revoked _ _ -> false
+
+turbo.domain.directQuicFingerprintIsValid : Text -> Boolean
+turbo.domain.directQuicFingerprintIsValid fingerprint =
+  use Nat ==
+  Boolean.and
+    (Text.startsWith "sha256:" fingerprint)
+    (Boolean.and
+      (Text.size fingerprint == 71)
+      (List.all Char.ascii.isHexDigit (Text.toCharList (Text.drop 7 fingerprint))))
+
+turbo.domain.directQuicCertificateDerBase64IsValid : Text -> Boolean
+turbo.domain.directQuicCertificateDerBase64IsValid certificateDerBase64 =
+  use Nat > <
+  Boolean.and
+    (Text.size certificateDerBase64 > 0)
+    (Text.size certificateDerBase64 < 32768)
+
+turbo.domain.directQuicIdentityRegistrationIsValid : DirectQuicDeviceIdentityRegistration -> Boolean
+turbo.domain.directQuicIdentityRegistrationIsValid = cases
+  DirectQuicDeviceIdentityRegistration fingerprint certificateDerBase64 ->
+    Boolean.and
+      (directQuicFingerprintIsValid fingerprint)
+      (directQuicCertificateDerBase64IsValid certificateDerBase64)
+
+turbo.store.devices.directQuicIdentity.tables.byDevice : Database -> OrderedTable Text DirectQuicDeviceIdentity
+turbo.store.devices.directQuicIdentity.tables.byDevice db =
+  OrderedTable.named db "turboDirectQuicDeviceIdentityByDevice_v3" Universal.ordering
+
+turbo.store.devices.directQuicIdentity.get : Database -> DeviceId -> '{Exception, Remote} Optional DirectQuicDeviceIdentity
+turbo.store.devices.directQuicIdentity.get db deviceId = do
+  OrderedTable.tryRead (devices.directQuicIdentity.tables.byDevice db) (DeviceId.toText deviceId)
+
+turbo.store.devices.directQuicIdentity.upsert :
+  Database
+  -> DeviceId
+  -> DirectQuicDeviceIdentityRegistration
+  -> '{Exception, Storage, Remote, Random} DirectQuicDeviceIdentity
+turbo.store.devices.directQuicIdentity.upsert db deviceId registration = do
+  use OrderedTable delete.tx tryRead.tx write.tx
+  byDevice = devices.directQuicIdentity.tables.byDevice db
+  deviceKey = DeviceId.toText deviceId
+  now = now!
+  transact (OrderedTable.database byDevice) do
+    existing = tryRead.tx byDevice deviceKey
+    createdAt = match existing with
+      Some (DirectQuicDeviceIdentity _ _ _ createdAt _) -> createdAt
+      None                                              -> now
+    identity = match registration with
+      DirectQuicDeviceIdentityRegistration fingerprint certificateDerBase64 ->
+        DirectQuicDeviceIdentity fingerprint certificateDerBase64 Active createdAt now
+    _ = delete.tx byDevice deviceKey
+    write.tx byDevice deviceKey identity
+    identity
+
+turbo.service.devices.internal.directQuicIdentityRegistrationDecoder :
+  '{Decoder} DirectQuicDeviceIdentityRegistration
+turbo.service.devices.internal.directQuicIdentityRegistrationDecoder = do
+  fingerprint = Decoder.object.at! "fingerprint" Decoder.text
+  certificateDerBase64 = Decoder.object.at! "certificateDerBase64" Decoder.text
+  DirectQuicDeviceIdentityRegistration fingerprint certificateDerBase64
+
+turbo.service.devices.internal.registerDeviceRequestDecoder :
+  '{Decoder} (Text, Optional Text, Optional Text, Optional Text, Optional DirectQuicDeviceIdentityRegistration)
+turbo.service.devices.internal.registerDeviceRequestDecoder = do
+  deviceId = Decoder.object.at! "deviceId" Decoder.text
+  deviceLabel = (Decoder.object.optionalAt "deviceLabel" Decoder.text)()
+  alertPushToken = (Decoder.object.optionalAt "alertPushToken" Decoder.text)()
+  alertPushEnvironment = (Decoder.object.optionalAt "alertPushEnvironment" Decoder.text)()
+  directQuicIdentity =
+    (Decoder.object.optionalAt "directQuicIdentity" directQuicIdentityRegistrationDecoder)()
+  (deviceId, deviceLabel, alertPushToken, alertPushEnvironment, directQuicIdentity)
+
+turbo.service.internal.directQuicDeviceIdentityJson : DirectQuicDeviceIdentity -> Json
+turbo.service.internal.directQuicDeviceIdentityJson = cases
+  DirectQuicDeviceIdentity fingerprint certificateDerBase64 status createdAt updatedAt ->
+    statusText = match status with
+      Active  -> "active"
+      Revoked -> "revoked"
+    object.empty
+      |> addText "fingerprint" fingerprint
+      |> addText "certificateDerBase64" certificateDerBase64
+      |> addText "status" statusText
+      |> addText "createdAt" (Instant.toText createdAt)
+      |> addText "updatedAt" (Instant.toText updatedAt)
+
+turbo.service.internal.channelAudioReadinessJson : ChannelAudioReadiness -> Json
+turbo.service.internal.channelAudioReadinessJson audioReadiness =
+  use object add
+  object.empty
+    |> add "self" (audioReadinessStatusJson (channelAudioReadinessSelf audioReadiness))
+    |> add "peer" (audioReadinessStatusJson (channelAudioReadinessPeer audioReadiness))
+    |> addOptionalText "peerTargetDeviceId" (Optional.map DeviceId.toText (channelAudioReadinessPeerTargetDeviceId audioReadiness))
+
+turbo.service.devices.register : Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.devices.register db = do
+  use Parser /
+  use object empty
+  noCapture POST (s "v1" / s "devices" / s "register")
+  match requireUser db () with
+    Left err   -> unauthorized.json (empty |> addText "error" err)
+    Right user ->
+      request = decodeJson devices.internal.registerDeviceRequestDecoder
+      deviceJson = cases
+        Device deviceId userId platform deviceLabel alertPushToken _ lastSeenAt ->
+          platformText =
+            IOS = platform
+            "ios"
+          directQuicIdentity = devices.directQuicIdentity.get db deviceId ()
+          base =
+            empty
+              |> addText "deviceId" (DeviceId.toText deviceId)
+              |> addText "userId" (UserId.toText userId)
+              |> addText "platform" platformText
+              |> addOptionalText "deviceLabel" deviceLabel
+              |> addBoolean "hasAlertPushToken" (isSome alertPushToken)
+              |> addText "lastSeenAt" (Instant.toText lastSeenAt)
+          match directQuicIdentity with
+            Some identity -> base |> object.add "directQuicIdentity" (directQuicDeviceIdentityJson identity)
+            None          -> base
+      match request with
+        (deviceIdText, deviceLabel, alertPushToken, alertPushEnvironment, directQuicIdentity) ->
+          userId =
+            (User userId _ _ _ _) = user
+            userId
+          deviceId = DeviceId.fromText deviceIdText
+          match directQuicIdentity with
+            Some registration ->
+              if not (directQuicIdentityRegistrationIsValid registration) then
+                badRequest.json (empty |> addText "error" "invalid directQuicIdentity")
+              else
+                device = store.devices.register db userId deviceId DevicePlatform.IOS deviceLabel alertPushToken ()
+                _ = devices.directQuicIdentity.upsert db deviceId registration ()
+                _ = match alertPushEnvironment with
+                  Some text ->
+                    match ApnsEnvironment.fromText text with
+                      Some environment -> upsertAlert db userId deviceId environment ()
+                      None             -> ()
+                  None      -> ()
+                ok.json (deviceJson device)
+            None              ->
+              device = store.devices.register db userId deviceId DevicePlatform.IOS deviceLabel alertPushToken ()
+              _ = match alertPushEnvironment with
+                Some text ->
+                  match ApnsEnvironment.fromText text with
+                    Some environment -> upsertAlert db userId deviceId environment ()
+                    None             -> ()
+                None      -> ()
+              ok.json (deviceJson device)
+
+turbo.service.channels.readiness : Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.readiness db = do
+  use Boolean not
+  use Optional map
+  use Parser / text
+  use Text ==
+  use object add empty
+  (channelIdText, deviceIdText) = route GET (s "v1" / s "channels" / text / s "readiness" / text => Tuple.pair)
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      channelId = ChannelId.fromText channelIdText
+      currentDeviceId = DeviceId.fromText deviceIdText
+      isMember = memberships.exists db channelId currentUserId ()
+      if not isMember then unauthorized.json (empty |> addText "error" "not a channel member")
+      else
+        channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+        match channelOpt with
+          None         -> notFound.json (empty |> addText "error" "channel not found")
+          Some channel ->
+            peerUserId =
+              (DirectChannel _ lowUserId highUserId _) = channel
+              if UserId.toText lowUserId == UserId.toText currentUserId then highUserId else lowUserId
+            selfPresence = presence.get db currentDeviceId ()
+            rawSelfHasActiveDevice = match selfPresence with
+              Some presence -> matchesDeviceChannelPresence currentUserId currentDeviceId channelId presence
+              None          -> false
+            selfHasActiveDevice = selfJoinedChannel db currentUserId channelId selfPresence ()
+            _ = if Boolean.and rawSelfHasActiveDevice (not selfHasActiveDevice) then appendStaleSelfPresenceProjectedLiveInvariant db currentUserId channelId currentDeviceId "readiness" () else ()
+            rawPeerPresence = getRawForUserInChannel db peerUserId channelId ()
+            peerPresence = getForUserInChannel db peerUserId channelId ()
+            _ = match (rawPeerPresence, peerPresence) with
+              (Some (DevicePresence peerDeviceId _ _ _ _), None) -> appendStalePeerPresenceProjectedLiveInvariant db currentUserId channelId currentDeviceId peerDeviceId "readiness" ()
+              _                                                  -> ()
+            peerHasActiveDevice = isSome peerPresence
+            peerConnectedPresence = getConnectedForUserInChannel db peerUserId channelId ()
+            peerTargetDeviceId = map (cases DevicePresence deviceId _ _ _ _ -> deviceId) peerConnectedPresence
+            peerDirectQuicIdentity = match peerTargetDeviceId with
+              Some targetDeviceId ->
+                match devices.directQuicIdentity.get db targetDeviceId () with
+                  Some identity -> if directQuicDeviceIdentityIsActive identity then Some identity else None
+                  None          -> None
+              None                -> None
+            selfAudioStatus =
+              if selfHasActiveDevice then
+                match statusForCurrentSession db channelId currentUserId currentDeviceId () with
+                  AudioReadinessUnknown -> AudioReadinessWaiting
+                  status                -> status
+              else AudioReadinessUnknown
+            peerBaseAudioStatus = match peerTargetDeviceId with
+              Some targetDeviceId ->
+                match statusForCurrentSession db channelId peerUserId targetDeviceId () with
+                  AudioReadinessUnknown -> AudioReadinessWaiting
+                  status                -> status
+              None                -> AudioReadinessUnknown
+            selfWakeTargetDeviceId = map (cases EphemeralToken _ _ tokenDeviceId _ _ -> tokenDeviceId) (tokens.get db channelId currentUserId currentDeviceId ())
+            peerWakeTargetDeviceId = map (cases EphemeralToken _ _ tokenDeviceId _ _ -> tokenDeviceId) (latestForUserInChannel db channelId peerUserId ())
+            peerAudioStatus = match (peerBaseAudioStatus, wakeCapabilityStatusFromOptionalDeviceId peerWakeTargetDeviceId) with
+              (AudioReadinessWaiting, WakeCapable _) -> AudioReadinessWakeCapable
+              _                                      -> peerBaseAudioStatus
+            audioReadiness = ChannelAudioReadiness selfAudioStatus peerAudioStatus peerTargetDeviceId
+            wakeReadiness = ChannelWakeReadiness (wakeCapabilityStatusFromOptionalDeviceId selfWakeTargetDeviceId) (wakeCapabilityStatusFromOptionalDeviceId peerWakeTargetDeviceId)
+            activeTransmit = currentTransmit db channelId ()
+            activeTransmitterUserId = map (cases TransmitState _ activeUserId _ _ _ _ _ -> activeUserId) activeTransmit
+            activeTransmitExpiresAt = map (cases TransmitState _ _ _ _ _ _ expiresAt -> Instant.toText expiresAt) activeTransmit
+            readiness = channelReadinessStatusFromDevices currentUserId selfHasActiveDevice peerHasActiveDevice activeTransmitterUserId
+            base =
+              empty
+                |> addText "channelId" channelIdText
+                |> addText "peerUserId" (UserId.toText peerUserId)
+                |> addBoolean "selfHasActiveDevice" selfHasActiveDevice
+                |> addBoolean "peerHasActiveDevice" peerHasActiveDevice
+                |> add "readiness" (channelReadinessStatusJson readiness)
+                |> add "audioReadiness" (channelAudioReadinessJson audioReadiness)
+                |> add "wakeReadiness" (channelWakeReadinessJson wakeReadiness)
+                |> addOptionalText "activeTransmitterUserId" (map UserId.toText activeTransmitterUserId)
+                |> addOptionalText "activeTransmitExpiresAt" activeTransmitExpiresAt
+                |> addText "status" (channelReadinessStatusKindText readiness)
+            payload = match peerDirectQuicIdentity with
+              Some identity -> base |> add "peerDirectQuicIdentity" (directQuicDeviceIdentityJson identity)
+              None          -> base
+            ok.json payload
+
+turbo.service.config : Text -> Boolean -> '{Route, Config, Exception} ()
+turbo.service.config mode supportsWebSocket = do
+  use Parser /
+  use object empty
+  noCapture GET (s "v1" / s "config")
+  ok.json
+    (empty
+      |> addText "mode" mode
+      |> addBoolean "supportsWebSocket" supportsWebSocket
+      |> addBoolean "telemetryEnabled" enabled()
+      |> addBoolean "supportsDirectQuicUpgrade" false
+      |> addBoolean "supportsDirectQuicProvisioning" true
+      |> object.add "directQuicPolicy" (empty |> addNat "promotionTimeoutMs" 2500 |> addNat "retryBackoffMs" 15000))
+
+test> turbo.domain.directQuicFingerprintIsValid.tests.examples = test.verify do
+  ensure (directQuicFingerprintIsValid "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+  ensure (not (directQuicFingerprintIsValid "sha256:zzzzaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+  ensure (not (directQuicFingerprintIsValid "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+
+test> turbo.domain.directQuicIdentityRegistrationIsValid.tests.examples = test.verify do
+  ensure (directQuicIdentityRegistrationIsValid (DirectQuicDeviceIdentityRegistration "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "AQID"))
+  ensure (not (directQuicIdentityRegistrationIsValid (DirectQuicDeviceIdentityRegistration "sha256:bad" "AQID")))
+  ensure (not (directQuicIdentityRegistrationIsValid (DirectQuicDeviceIdentityRegistration "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "")))

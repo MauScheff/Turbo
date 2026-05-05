@@ -1,5 +1,61 @@
 import Foundation
 
+struct TurboBackendCriticalHTTPClient: Sendable {
+    let baseURL: URL
+    let devUserHandle: String
+    let deviceID: String
+
+    init(config: TurboBackendConfig) {
+        baseURL = config.baseURL
+        devUserHandle = config.devUserHandle
+        deviceID = config.deviceID
+    }
+
+    func beginTransmit(channelId: String) async throws -> TurboBeginTransmitResponse {
+        try await request(
+            path: "/v1/channels/\(channelId)/begin-transmit",
+            method: "POST",
+            body: TurboChannelDeviceRequest(deviceId: deviceID)
+        )
+    }
+
+    private func request<Response: Decodable, Body: Encodable>(
+        path: String,
+        method: String,
+        body: Body
+    ) async throws -> Response {
+        let url = baseURL.appending(path: path)
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.addValue(devUserHandle, forHTTPHeaderField: "x-turbo-user-handle")
+        request.addValue("Bearer \(devUserHandle)", forHTTPHeaderField: "Authorization")
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw TurboBackendError.invalidResponse
+        }
+
+        if 200 ..< 300 ~= http.statusCode {
+            do {
+                return try JSONDecoder().decode(Response.self, from: data)
+            } catch {
+                let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+                throw TurboBackendError.invalidResponseDetails(
+                    "\(method) \(path) decode failed: \(error.localizedDescription) body=\(body)"
+                )
+            }
+        }
+
+        if let error = try? JSONDecoder().decode(TurboErrorResponse.self, from: data) {
+            throw TurboBackendError.server(error.error)
+        }
+
+        throw TurboBackendError.server(HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
+    }
+}
+
 @MainActor
 final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     enum WebSocketConnectionState: Equatable {
@@ -37,6 +93,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
 
     var deviceID: String { config.deviceID }
     var devUserHandle: String { config.devUserHandle }
+    var criticalHTTPClient: TurboBackendCriticalHTTPClient { TurboBackendCriticalHTTPClient(config: config) }
     var supportsWebSocket: Bool { runtimeConfig?.supportsWebSocket ?? false }
     var supportsDirectQuicUpgrade: Bool { runtimeConfig?.supportsDirectQuicUpgrade ?? false }
     var directQuicPolicy: TurboDirectQuicPolicy? { runtimeConfig?.directQuicPolicy }
@@ -93,7 +150,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     func registerDevice(
         label: String?,
         alertPushToken: String?,
-        alertPushEnvironment: TurboAPNSEnvironment?
+        alertPushEnvironment: TurboAPNSEnvironment?,
+        directQuicIdentity: DirectQuicIdentityRegistrationMetadata? = nil
     ) async throws -> TurboDeviceRegistrationResponse {
         try await request(
             path: "/v1/devices/register",
@@ -102,7 +160,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
                 deviceId: config.deviceID,
                 deviceLabel: label,
                 alertPushToken: alertPushToken,
-                alertPushEnvironment: alertPushEnvironment?.rawValue
+                alertPushEnvironment: alertPushEnvironment?.rawValue,
+                directQuicIdentity: directQuicIdentity
             )
         )
     }
@@ -562,6 +621,7 @@ private struct TurboRegisterDeviceRequest: Encodable {
     let deviceLabel: String?
     let alertPushToken: String?
     let alertPushEnvironment: String?
+    let directQuicIdentity: DirectQuicIdentityRegistrationMetadata?
 }
 
 private struct TurboDirectChannelRequest: Encodable {

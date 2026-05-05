@@ -887,6 +887,7 @@ struct ReceiverAudioReadinessPublication: Equatable {
 
 struct BackendServices {
     let client: TurboBackendClient
+    let criticalHTTPClient: TurboBackendCriticalHTTPClient
     let currentUserID: String?
     let mode: String
     let telemetryEnabled: Bool
@@ -909,12 +910,14 @@ struct BackendServices {
     func registerDevice(
         label: String?,
         alertPushToken: String?,
-        alertPushEnvironment: TurboAPNSEnvironment?
+        alertPushEnvironment: TurboAPNSEnvironment?,
+        directQuicIdentity: DirectQuicIdentityRegistrationMetadata? = nil
     ) async throws -> TurboDeviceRegistrationResponse {
         try await client.registerDevice(
             label: label,
             alertPushToken: alertPushToken,
-            alertPushEnvironment: alertPushEnvironment
+            alertPushEnvironment: alertPushEnvironment,
+            directQuicIdentity: directQuicIdentity
         )
     }
 
@@ -1047,7 +1050,7 @@ struct BackendServices {
     }
 
     func beginTransmit(channelId: String) async throws -> TurboBeginTransmitResponse {
-        try await client.beginTransmit(channelId: channelId)
+        try await criticalHTTPClient.beginTransmit(channelId: channelId)
     }
 
     func endTransmit(channelId: String) async throws -> TurboEndTransmitResponse {

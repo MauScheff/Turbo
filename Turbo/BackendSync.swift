@@ -94,10 +94,28 @@ struct BackendSyncState: Equatable {
     ) {
         incomingInvites = incoming
         outgoingInvites = outgoing
-        requestCooldownDeadlines = requestCooldownDeadlines.filter { outgoing.keys.contains($0.key) && $0.value > now }
-        requestCooldownSourceKeys = requestCooldownSourceKeys.filter { outgoing.keys.contains($0.key) }
+        reconcileOutgoingInviteCooldowns(now: now)
+    }
 
-        for (contactID, invite) in outgoing {
+    mutating func applyPartialInvites(
+        incoming: [UUID: TurboInviteResponse]?,
+        outgoing: [UUID: TurboInviteResponse]?,
+        now: Date = .now
+    ) {
+        if let incoming {
+            incomingInvites = incoming
+        }
+        if let outgoing {
+            outgoingInvites = outgoing
+        }
+        reconcileOutgoingInviteCooldowns(now: now)
+    }
+
+    private mutating func reconcileOutgoingInviteCooldowns(now: Date) {
+        requestCooldownDeadlines = requestCooldownDeadlines.filter { outgoingInvites.keys.contains($0.key) && $0.value > now }
+        requestCooldownSourceKeys = requestCooldownSourceKeys.filter { outgoingInvites.keys.contains($0.key) }
+
+        for (contactID, invite) in outgoingInvites {
             let sourceKey = requestCooldownSourceKey(for: invite)
             if requestCooldownSourceKeys[contactID] != sourceKey {
                 requestCooldownDeadlines[contactID] = now.addingTimeInterval(30)

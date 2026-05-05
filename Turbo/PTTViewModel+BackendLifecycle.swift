@@ -371,13 +371,20 @@ extension PTTViewModel {
                 try await client.authenticate(),
                 using: client
             )
+            let directQuicIdentity = provisionDirectQuicProductionIdentityForRegistration(
+                deviceID: client.deviceID
+            )
             _ = try await client.registerDevice(
                 label: UIDevice.current.name,
                 alertPushToken: alertPushTokenHex.isEmpty ? nil : alertPushTokenHex,
                 alertPushEnvironment: alertPushTokenHex.isEmpty
                     ? nil
-                    : TurboAPNSEnvironmentResolver.current()
+                    : TurboAPNSEnvironmentResolver.current(),
+                directQuicIdentity: directQuicIdentity
             )
+            if let directQuicIdentity {
+                directQuicRegisteredFingerprint = directQuicIdentity.fingerprint
+            }
             _ = try await client.heartbeatPresence()
             applyAuthenticatedBackendSession(
                 client: client,
@@ -404,6 +411,9 @@ extension PTTViewModel {
                     "handle": session.handle,
                     "deviceId": client.deviceID,
                     "supportsDirectQuicUpgrade": String(runtimeConfig.supportsDirectQuicUpgrade),
+                    "supportsDirectQuicProvisioning": String(runtimeConfig.supportsDirectQuicProvisioning),
+                    "directQuicProvisioningStatus": directQuicProvisioningStatus,
+                    "directQuicFingerprint": directQuicIdentity?.fingerprint ?? "none",
                     "localRelayOnlyOverride": String(localRelayOnlyOverride),
                 ]
             )

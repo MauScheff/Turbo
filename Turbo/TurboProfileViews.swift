@@ -305,6 +305,7 @@ struct TurboProfileSheet: View {
     let onSignOut: () -> Void
     let onShowDevIdentity: () -> Void
     let onShowDiagnostics: () -> Void
+    let onShowCallPrototype: () -> Void
     let onRunSelfCheck: () -> Void
     let onResetDevState: () -> Void
 
@@ -432,6 +433,9 @@ struct TurboProfileSheet: View {
                     .buttonStyle(.bordered)
 
                 Button("Diagnostics", action: onShowDiagnostics)
+                    .buttonStyle(.bordered)
+
+                Button("Call Prototype", action: onShowCallPrototype)
                     .buttonStyle(.bordered)
 
                 Button("Run Self-Check", action: onRunSelfCheck)

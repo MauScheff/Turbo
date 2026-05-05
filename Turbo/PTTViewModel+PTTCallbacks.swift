@@ -709,6 +709,10 @@ extension PTTViewModel {
                     source: source
                 )
             }
+            await startAppleBeganWarmDirectQuicCaptureIfPossible(
+                channelUUID: channelUUID,
+                source: source
+            )
             captureDiagnosticsState("ptt-callback:transmit-began")
         }
     }

@@ -32,7 +32,7 @@ actor AudioChunkSender {
         reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil,
         maximumPendingPayloads: Int = 128,
         maximumPayloadsPerMessage: Int = 4,
-        payloadBatchCollectionNanoseconds: UInt64 = 220_000_000,
+        payloadBatchCollectionNanoseconds: UInt64 = 0,
         transportAvailabilityPollNanoseconds: UInt64 = 50_000_000,
         transportAvailabilityMaxAttempts: Int = 80
     ) {
@@ -88,12 +88,12 @@ actor AudioChunkSender {
                 break
             }
             do {
-                await reportTransportDispatchIfNeeded(
+                reportTransportDispatchIfNeeded(
                     payload: payload,
                     pendingPayloadCount: pendingPayloads.count
                 )
                 try await sendChunk(payload)
-                await reportTransportSendSucceededIfNeeded(
+                reportTransportSendSucceededIfNeeded(
                     payload: payload,
                     pendingPayloadCount: pendingPayloads.count
                 )
@@ -159,35 +159,37 @@ actor AudioChunkSender {
     private func reportTransportDispatchIfNeeded(
         payload: String,
         pendingPayloadCount: Int
-    ) async {
+    ) {
         guard outboundTransportDispatchReportBudget > 0 else { return }
         outboundTransportDispatchReportBudget -= 1
-        await reportEvent?(
-            "Dispatching outbound audio transport payload",
-            [
-                "payloadLength": String(payload.count),
-                "pendingPayloadCount": String(pendingPayloadCount),
-                "transportDigest": AudioChunkPayloadCodec.transportDigest(payload),
-                "decodedChunkCount": String(AudioChunkPayloadCodec.decode(payload).count),
-            ]
-        )
+        guard let reportEvent else { return }
+        let metadata = [
+            "payloadLength": String(payload.count),
+            "pendingPayloadCount": String(pendingPayloadCount),
+            "transportDigest": AudioChunkPayloadCodec.transportDigest(payload),
+            "decodedChunkCount": String(AudioChunkPayloadCodec.decode(payload).count),
+        ]
+        Task {
+            await reportEvent("Dispatching outbound audio transport payload", metadata)
+        }
     }
 
     private func reportTransportSendSucceededIfNeeded(
         payload: String,
         pendingPayloadCount: Int
-    ) async {
+    ) {
         guard outboundTransportSuccessReportBudget > 0 else { return }
         outboundTransportSuccessReportBudget -= 1
-        await reportEvent?(
-            "Delivered outbound audio transport payload",
-            [
-                "payloadLength": String(payload.count),
-                "pendingPayloadCount": String(pendingPayloadCount),
-                "transportDigest": AudioChunkPayloadCodec.transportDigest(payload),
-                "decodedChunkCount": String(AudioChunkPayloadCodec.decode(payload).count),
-            ]
-        )
+        guard let reportEvent else { return }
+        let metadata = [
+            "payloadLength": String(payload.count),
+            "pendingPayloadCount": String(pendingPayloadCount),
+            "transportDigest": AudioChunkPayloadCodec.transportDigest(payload),
+            "decodedChunkCount": String(AudioChunkPayloadCodec.decode(payload).count),
+        ]
+        Task {
+            await reportEvent("Delivered outbound audio transport payload", metadata)
+        }
     }
 }
 
@@ -260,6 +262,122 @@ enum AudioChunkPayloadCodec {
     nonisolated static func transportDigest(_ payload: String, prefixBytes: Int = 6) -> String {
         let digest = SHA256.hash(data: Data(payload.utf8))
         return digest.prefix(prefixBytes).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+struct PCMLevelMetrics: Equatable {
+    let sampleCount: Int
+    let nonZeroSampleCount: Int
+    let peak: Double
+    let rms: Double
+
+    var isSilent: Bool {
+        nonZeroSampleCount == 0 || peak == 0
+    }
+
+    var diagnosticMetadata: [String: String] {
+        [
+            "pcmSampleCount": String(sampleCount),
+            "pcmNonZeroSamples": String(nonZeroSampleCount),
+            "pcmPeak": Self.formatLevel(peak),
+            "pcmRMS": Self.formatLevel(rms),
+            "pcmSilent": String(isSilent),
+        ]
+    }
+
+    nonisolated static func forBuffer(_ buffer: AVAudioPCMBuffer) -> PCMLevelMetrics? {
+        let frameCount = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard frameCount > 0, channelCount > 0 else { return nil }
+
+        switch buffer.format.commonFormat {
+        case .pcmFormatInt16:
+            guard let channelData = buffer.int16ChannelData else { return nil }
+            return collect(
+                frameCount: frameCount,
+                channelCount: channelCount,
+                isInterleaved: buffer.format.isInterleaved
+            ) { sampleIndex, channelIndex in
+                let sample: Int16
+                if buffer.format.isInterleaved {
+                    sample = channelData.pointee[sampleIndex * channelCount + channelIndex]
+                } else {
+                    sample = channelData[channelIndex][sampleIndex]
+                }
+                return Double(Int(sample)) / 32768.0
+            }
+        case .pcmFormatFloat32:
+            guard let channelData = buffer.floatChannelData else { return nil }
+            return collect(
+                frameCount: frameCount,
+                channelCount: channelCount,
+                isInterleaved: buffer.format.isInterleaved
+            ) { sampleIndex, channelIndex in
+                if buffer.format.isInterleaved {
+                    return Double(channelData.pointee[sampleIndex * channelCount + channelIndex])
+                } else {
+                    return Double(channelData[channelIndex][sampleIndex])
+                }
+            }
+        default:
+            return nil
+        }
+    }
+
+    nonisolated static func forInt16PCMData(_ data: Data) -> PCMLevelMetrics? {
+        let sampleCount = data.count / MemoryLayout<Int16>.size
+        guard sampleCount > 0 else { return nil }
+        return data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.bindMemory(to: Int16.self).baseAddress else {
+                return nil
+            }
+            return collect(sampleCount: sampleCount) { sampleIndex in
+                Double(Int(baseAddress[sampleIndex])) / 32768.0
+            }
+        }
+    }
+
+    private nonisolated static func collect(
+        frameCount: Int,
+        channelCount: Int,
+        isInterleaved _: Bool,
+        sampleAt: (Int, Int) -> Double
+    ) -> PCMLevelMetrics {
+        collect(sampleCount: frameCount * channelCount) { sampleIndex in
+            let frameIndex = sampleIndex / channelCount
+            let channelIndex = sampleIndex % channelCount
+            return sampleAt(frameIndex, channelIndex)
+        }
+    }
+
+    private nonisolated static func collect(
+        sampleCount: Int,
+        sampleAt: (Int) -> Double
+    ) -> PCMLevelMetrics {
+        var nonZeroSampleCount = 0
+        var peak = 0.0
+        var squareSum = 0.0
+
+        for sampleIndex in 0 ..< sampleCount {
+            let sample = sampleAt(sampleIndex)
+            let magnitude = abs(sample)
+            if magnitude > 0 {
+                nonZeroSampleCount += 1
+            }
+            peak = max(peak, magnitude)
+            squareSum += sample * sample
+        }
+
+        return PCMLevelMetrics(
+            sampleCount: sampleCount,
+            nonZeroSampleCount: nonZeroSampleCount,
+            peak: peak,
+            rms: sqrt(squareSum / Double(sampleCount))
+        )
+    }
+
+    private nonisolated static func formatLevel(_ level: Double) -> String {
+        String(format: "%.6f", level)
     }
 }
 
@@ -473,6 +591,15 @@ final class PCMWebSocketMediaSession: MediaSession {
             finishCaptureStopGraceIfNeeded(expectedDeadlineNanoseconds: stopGraceDeadline)
         }
         await audioChunkSender.finishDraining()
+    }
+
+    func abortSendingAudio() async {
+        setSendingAudio(false)
+        await audioChunkSender.reset()
+        await report(
+            "Aborted audio capture without draining",
+            metadata: ["reason": "stale-transmit-startup"]
+        )
     }
 
     func receiveRemoteAudioChunk(_ payload: String) async {
@@ -784,14 +911,20 @@ final class PCMWebSocketMediaSession: MediaSession {
     private func reportCapturedBufferIfNeeded(_ buffer: AVAudioPCMBuffer) {
         guard capturedBufferReportBudget > 0 else { return }
         capturedBufferReportBudget -= 1
+        var metadata = [
+            "frameLength": String(buffer.frameLength),
+            "sampleRate": String(buffer.format.sampleRate),
+            "channelCount": String(buffer.format.channelCount),
+            "pcmFormat": String(describing: buffer.format.commonFormat),
+            "interleaved": String(buffer.format.isInterleaved),
+        ]
+        if let levelMetrics = PCMLevelMetrics.forBuffer(buffer) {
+            metadata.merge(levelMetrics.diagnosticMetadata) { _, new in new }
+        }
         Task {
             await report(
                 "Captured local audio buffer",
-                metadata: [
-                    "frameLength": String(buffer.frameLength),
-                    "sampleRate": String(buffer.format.sampleRate),
-                    "channelCount": String(buffer.format.channelCount)
-                ]
+                metadata: metadata
             )
         }
     }
@@ -799,14 +932,20 @@ final class PCMWebSocketMediaSession: MediaSession {
     private func reportConvertedBufferIfNeeded(_ buffer: AVAudioPCMBuffer) {
         guard convertedBufferReportBudget > 0 else { return }
         convertedBufferReportBudget -= 1
+        var metadata = [
+            "frameLength": String(buffer.frameLength),
+            "sampleRate": String(buffer.format.sampleRate),
+            "channelCount": String(buffer.format.channelCount),
+            "pcmFormat": String(describing: buffer.format.commonFormat),
+            "interleaved": String(buffer.format.isInterleaved),
+        ]
+        if let levelMetrics = PCMLevelMetrics.forBuffer(buffer) {
+            metadata.merge(levelMetrics.diagnosticMetadata) { _, new in new }
+        }
         Task {
             await report(
                 "Converted local audio buffer",
-                metadata: [
-                    "frameLength": String(buffer.frameLength),
-                    "sampleRate": String(buffer.format.sampleRate),
-                    "channelCount": String(buffer.format.channelCount)
-                ]
+                metadata: metadata
             )
         }
     }
@@ -814,10 +953,18 @@ final class PCMWebSocketMediaSession: MediaSession {
     private func reportEnqueuedPayloadIfNeeded(_ payload: String) {
         guard enqueuedPayloadReportBudget > 0 else { return }
         enqueuedPayloadReportBudget -= 1
+        var metadata = [
+            "base64Length": String(payload.count),
+            "payloadDigest": AudioChunkPayloadCodec.transportDigest(payload),
+        ]
+        if let data = Data(base64Encoded: payload),
+           let levelMetrics = PCMLevelMetrics.forInt16PCMData(data) {
+            metadata.merge(levelMetrics.diagnosticMetadata) { _, new in new }
+        }
         Task {
             await report(
                 "Enqueued outbound audio chunk",
-                metadata: ["base64Length": String(payload.count)]
+                metadata: metadata
             )
         }
     }
@@ -925,13 +1072,20 @@ final class PCMWebSocketMediaSession: MediaSession {
         playerNode.scheduleBuffer(playbackBuffer) { [weak self] in
             self?.markScheduledPlaybackBufferCompleted()
         }
+        var metadata = [
+            "frameLength": String(playbackBuffer.frameLength),
+            "sampleRate": String(playbackBuffer.format.sampleRate),
+            "channelCount": String(playbackBuffer.format.channelCount),
+            "pcmFormat": String(describing: playbackBuffer.format.commonFormat),
+            "interleaved": String(playbackBuffer.format.isInterleaved),
+        ]
+        if let levelMetrics = PCMLevelMetrics.forBuffer(playbackBuffer) {
+            metadata.merge(levelMetrics.diagnosticMetadata) { _, new in new }
+        }
         Task {
             await report(
                 "Playback buffer scheduled",
-                metadata: [
-                    "frameLength": String(playbackBuffer.frameLength),
-                    "sampleRate": String(playbackBuffer.format.sampleRate)
-                ]
+                metadata: metadata
             )
         }
     }

@@ -315,6 +315,98 @@ extension PTTViewModel {
         )
     }
 
+    func provisionDirectQuicProductionIdentityForRegistration(
+        deviceID: String
+    ) -> DirectQuicIdentityRegistrationMetadata? {
+        let label = DirectQuicIdentityConfiguration.preferredLabel(
+            deviceID: deviceID,
+            fallbackHandle: currentIdentityHandle
+        )
+        directQuicProvisioningStatus = "provisioning"
+        do {
+            let identity = try DirectQuicIdentityConfiguration.provisionProductionIdentity(
+                label: label,
+                deviceID: deviceID
+            )
+            directQuicProvisioningStatus = "ready"
+            directQuicRegisteredFingerprint = identity.certificateFingerprint
+            diagnostics.record(
+                .media,
+                message: "Direct QUIC production identity provisioned",
+                metadata: [
+                    "label": label,
+                    "fingerprint": identity.certificateFingerprint,
+                    "source": identity.source.rawValue,
+                ]
+            )
+            return DirectQuicIdentityRegistrationMetadata(
+                fingerprint: identity.certificateFingerprint,
+                certificateDerBase64: identity.certificateDerBase64
+            )
+        } catch {
+            directQuicProvisioningStatus = "failed"
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Direct QUIC production identity provisioning failed",
+                metadata: [
+                    "label": label,
+                    "deviceId": deviceID,
+                    "error": error.localizedDescription,
+                ]
+            )
+            return nil
+        }
+    }
+
+    func currentDirectQuicIdentityRegistrationMetadata() -> DirectQuicIdentityRegistrationMetadata? {
+        let label = preferredDirectQuicIdentityLabel()
+        return DirectQuicIdentityConfiguration.productionIdentityRegistrationMetadata(label: label)
+    }
+
+    func backendPeerDirectQuicFingerprint(for contactID: UUID) -> String? {
+        channelReadinessByContactID[contactID]?.peerDirectQuicFingerprint
+    }
+
+    func directQuicProductionSignalAuthorizationFailure(
+        signal: TurboDirectQuicSignalPayload,
+        envelope: TurboSignalEnvelope,
+        contactID: UUID
+    ) -> String? {
+        if case .offer(let payload) = signal,
+           payload.debugBypass == true,
+           developerIdentityControlsEnabled {
+            return nil
+        }
+        guard effectiveDirectQuicUpgradeEnabled else {
+            return nil
+        }
+        let signaledFingerprint: String? = {
+            switch signal {
+            case .offer(let payload):
+                return payload.certificateFingerprint
+            case .answer(let payload):
+                return payload.certificateFingerprint
+            case .candidate, .hangup:
+                return nil
+            }
+        }()
+        guard let signaledFingerprint else { return nil }
+        guard let normalizedSignaled = DirectQuicProductionIdentityManager.normalizedFingerprint(signaledFingerprint) else {
+            return "invalid-signaled-peer-fingerprint"
+        }
+        guard let backendFingerprint = backendPeerDirectQuicFingerprint(for: contactID) else {
+            return "backend-peer-fingerprint-missing"
+        }
+        guard normalizedSignaled == backendFingerprint else {
+            return "backend-peer-fingerprint-mismatch"
+        }
+        guard envelope.fromDeviceId == directQuicPeerDeviceID(for: contactID, fallback: envelope.fromDeviceId) else {
+            return "peer-device-id-mismatch"
+        }
+        return nil
+    }
+
     func cancelDirectQuicPromotionTimeout() {
         mediaRuntime.replaceDirectQuicPromotionTimeoutTask(with: nil)
     }
@@ -603,6 +695,27 @@ extension PTTViewModel {
             ? "Direct path auto-upgrade disabled"
             : "Direct path auto-upgrade enabled"
         captureDiagnosticsState("direct-quic:debug-auto-upgrade")
+    }
+
+    func setDirectQuicTransmitStartupPolicyForDebug(
+        _ policy: DirectQuicTransmitStartupPolicy
+    ) {
+        let previousValue = directQuicTransmitStartupPolicy
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(policy)
+
+        diagnostics.record(
+            .media,
+            message: "Direct QUIC transmit startup policy updated from diagnostics",
+            metadata: [
+                "selectedContact": selectedContact?.handle ?? "none",
+                "previousValue": previousValue.rawValue,
+                "newValue": policy.rawValue,
+            ]
+        )
+        statusMessage = policy == .appleGated
+            ? "Direct transmit waits for Apple PTT"
+            : "Direct transmit starts speculatively in foreground"
+        captureDiagnosticsState("direct-quic:debug-transmit-startup-policy")
     }
 
     func forceSelectedDirectQuicProbeForDebug() async {
@@ -1637,6 +1750,41 @@ extension PTTViewModel {
             peerDeviceID: peerDeviceID
         )
         guard role == .listenerOfferer else { return }
+
+        if !allowDebugBypassWithoutBackendAdvertisement {
+            let localIdentityStatus = DirectQuicIdentityConfiguration.status()
+            guard localIdentityStatus.source == .production,
+                  let localFingerprint = localIdentityStatus.fingerprint,
+                  localFingerprint == directQuicRegisteredFingerprint
+                    || directQuicRegisteredFingerprint == nil else {
+                diagnostics.record(
+                    .media,
+                    level: .error,
+                    message: "Skipped direct QUIC probe because production identity is not registered",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelID,
+                        "identitySource": localIdentityStatus.source.rawValue,
+                        "provisioningStatus": directQuicProvisioningStatus,
+                        "fingerprint": localIdentityStatus.fingerprint ?? "none",
+                        "registeredFingerprint": directQuicRegisteredFingerprint ?? "none",
+                    ]
+                )
+                return
+            }
+            guard backendPeerDirectQuicFingerprint(for: contactID) != nil else {
+                diagnostics.record(
+                    .media,
+                    message: "Skipped direct QUIC probe because backend peer identity is missing",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelID,
+                        "peerDeviceId": peerDeviceID,
+                    ]
+                )
+                return
+            }
+        }
 
         let attemptID = UUID().uuidString.lowercased()
         let transition = mediaRuntime.directQuicUpgrade.beginLocalAttempt(

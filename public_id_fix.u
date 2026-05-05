@@ -1,0 +1,18 @@
+turbo.identity.publicIdFromReference : Text -> Optional Text
+turbo.identity.publicIdFromReference reference =
+  use Nat ==
+  use Text ++ drop size
+  normalized = reference |> Text.trim |> Text.toLowercase
+  didPrefix = "did:web:beepbeep.to:id:"
+  rootShareLinkPrefix = "https://beepbeep.to/"
+  bareRootShareLinkPrefix = "beepbeep.to/"
+  handleShareLinkPrefix = "https://beepbeep.to/@"
+  bareHandleShareLinkPrefix = "beepbeep.to/@"
+  legacyShareLinkPrefix = "https://beepbeep.to/p/"
+  legacyBareShareLinkPrefix = "beepbeep.to/p/"
+  rawPublicId = if startsWith didPrefix normalized then drop (size didPrefix) normalized else if startsWith handleShareLinkPrefix normalized then "@" ++ drop (size handleShareLinkPrefix) normalized else if startsWith bareHandleShareLinkPrefix normalized then "@" ++ drop (size bareHandleShareLinkPrefix) normalized else if startsWith legacyShareLinkPrefix normalized then drop (size legacyShareLinkPrefix) normalized else if startsWith legacyBareShareLinkPrefix normalized then drop (size legacyBareShareLinkPrefix) normalized else if startsWith rootShareLinkPrefix normalized then drop (size rootShareLinkPrefix) normalized else if startsWith bareRootShareLinkPrefix normalized then drop (size bareRootShareLinkPrefix) normalized else normalized
+  publicId = match List.head (splitOnText "/" rawPublicId) with
+    None         -> rawPublicId
+    Some segment -> segment
+  canonical = if size publicId == 0 then "" else if startsWith "@" publicId then publicId else "@" ++ publicId
+  if size canonical == 0 then None else if size canonical == 1 then None else Some canonical

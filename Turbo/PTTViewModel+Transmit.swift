@@ -805,6 +805,47 @@ extension PTTViewModel {
         return true
     }
 
+    func shouldUseForegroundWarmDirectTransmit(
+        for contactID: UUID,
+        applicationState: UIApplication.State? = nil
+    ) -> Bool {
+        shouldBridgePrewarmedDirectMediaDuringSystemTransmit(
+            for: contactID,
+            applicationState: applicationState
+        )
+    }
+
+    func shouldUseSpeculativeForegroundWarmDirectTransmit(
+        for contactID: UUID,
+        applicationState: UIApplication.State? = nil
+    ) -> Bool {
+        guard directQuicTransmitStartupPolicy == .speculativeForeground else { return false }
+        return shouldUseForegroundWarmDirectTransmit(
+            for: contactID,
+            applicationState: applicationState
+        )
+    }
+
+    func isBackendLeaseBypassedTransmitTarget(_ target: TransmitTarget) -> Bool {
+        directQuicBackendLeaseBypassedContactIDs.contains(target.contactID)
+    }
+
+    func directQuicBackendLeaseBypassedRequest(for contactID: UUID) -> TransmitRequestContext? {
+        directQuicBackendLeaseBypassedRequestsByContactID[contactID]
+    }
+
+    func directQuicBackendLeaseBypassTarget(
+        for request: TransmitRequestContext,
+        reason: String
+    ) -> TransmitTarget? {
+        guard !request.usesLocalHTTPBackend else { return nil }
+        guard shouldUseDirectQuicTransport(for: request.contactID) else { return nil }
+        return provisionalDirectQuicTransmitTarget(
+            for: request,
+            reason: reason
+        )
+    }
+
     func deferInteractivePrewarmUntilPTTAudioDeactivation(for contactID: UUID) {
         mediaRuntime.requestInteractivePrewarmAfterAudioDeactivation(for: contactID)
         mediaRuntime.replaceInteractivePrewarmRecoveryTask(with: Task { [weak self] in
@@ -912,6 +953,9 @@ extension PTTViewModel {
             return true
         }
         if backendChannelStatus == ConversationState.transmitting.rawValue {
+            if transmitSnapshot.isStopping(for: refreshedContactID) {
+                return true
+            }
             return !transmitSnapshot.explicitStopRequested
         }
 
@@ -1160,13 +1204,114 @@ extension PTTViewModel {
         )
         // Clear the local press latch immediately so a system-end callback racing
         // with release does not look like an unexpected end that should be retried.
+        let pendingWarmDirectRequest = transmitCoordinator.state.pendingRequest
+        sendForegroundWarmDirectTransmitStopIfNeeded(
+            for: pendingWarmDirectRequest,
+            reason: "touch-release"
+        )
+        if let activeTarget = transmitCoordinator.state.activeTarget ?? transmitRuntime.activeTarget {
+            sendForegroundWarmDirectTransmitStopIfNeeded(
+                target: activeTarget,
+                reason: "touch-release-active-target"
+            )
+        }
         transmitRuntime.markExplicitStopRequested()
         transmitRuntime.markPressEnded()
         transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
+        let systemChannelUUID =
+            transmitCoordinator.state.pendingRequest?.channelUUID
+            ?? transmitCoordinator.state.activeTarget.flatMap { channelUUID(for: $0.contactID) }
+            ?? transmitRuntime.activeTarget.flatMap { channelUUID(for: $0.contactID) }
+            ?? activeChannelId.flatMap { channelUUID(for: $0) }
+        cancelRequestedSystemTransmitHandoffIfNeeded(
+            channelUUID: systemChannelUUID,
+            reason: "touch-release"
+        )
+        transmitTaskCoordinator.send(.cancelBegin)
         Task {
             await transmitCoordinator.handle(.releaseRequested)
             syncTransmitState()
             updateStatusForSelectedContact()
+        }
+    }
+
+    private func sendForegroundWarmDirectTransmitStopIfNeeded(
+        for request: TransmitRequestContext?,
+        reason: String
+    ) {
+        guard let request else { return }
+        guard shouldUseForegroundWarmDirectTransmit(for: request.contactID) else { return }
+        guard let backend = backendServices, backend.supportsWebSocket, backend.isWebSocketConnected else {
+            return
+        }
+        guard let target = provisionalDirectQuicTransmitTarget(
+            for: request,
+            reason: "foreground-warm-direct-stop-\(reason)"
+        ) else {
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Sending foreground warm Direct QUIC transmit stop before backend grant",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "channelId": request.backendChannelID,
+                "targetDeviceId": target.deviceID,
+                "reason": reason,
+            ]
+        )
+        Task { [weak self] in
+            guard let self else { return }
+            try? await self.mediaServices.session()?.stopSendingAudio()
+            try? await backend.sendSignal(
+                TurboSignalEnvelope(
+                    type: .transmitStop,
+                    channelId: target.channelID,
+                    fromUserId: backend.currentUserID ?? "",
+                    fromDeviceId: backend.deviceID,
+                    toUserId: target.userID,
+                    toDeviceId: target.deviceID,
+                    payload: "ptt-end"
+                )
+            )
+        }
+    }
+
+    private func sendForegroundWarmDirectTransmitStopIfNeeded(
+        target: TransmitTarget,
+        reason: String
+    ) {
+        guard isBackendLeaseBypassedTransmitTarget(target) else { return }
+        guard shouldUseForegroundWarmDirectTransmit(for: target.contactID) else { return }
+        guard let backend = backendServices, backend.supportsWebSocket, backend.isWebSocketConnected else {
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Sending foreground warm Direct QUIC transmit stop on release",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "targetDeviceId": target.deviceID,
+                "reason": reason,
+            ]
+        )
+        Task { [weak self] in
+            guard let self else { return }
+            try? await backend.sendSignal(
+                TurboSignalEnvelope(
+                    type: .transmitStop,
+                    channelId: target.channelID,
+                    fromUserId: backend.currentUserID ?? "",
+                    fromDeviceId: backend.deviceID,
+                    toUserId: target.userID,
+                    toDeviceId: target.deviceID,
+                    payload: "ptt-end"
+                )
+            )
+            try? await self.mediaServices.session()?.stopSendingAudio()
         }
     }
 
@@ -1338,6 +1483,54 @@ extension PTTViewModel {
             if await reassertBackendJoinAfterWakeIfNeeded(for: request.contactID) {
                 await refreshChannelState(for: request.contactID)
             }
+            if let target = directQuicBackendLeaseBypassTarget(
+                for: request,
+                reason: "begin-transmit-lease-bypass"
+            ) {
+                diagnostics.record(
+                    .media,
+                    message: "Bypassing backend transmit lease for warm Direct QUIC",
+                    metadata: [
+                        "contactId": request.contactID.uuidString,
+                        "channelId": request.backendChannelID,
+                        "targetDeviceId": target.deviceID,
+                        "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
+                    ]
+                )
+                recordTransmitStartupTiming(
+                    stage: "backend-lease-bypassed-direct-quic",
+                    contactID: request.contactID,
+                    channelUUID: request.channelUUID,
+                    channelID: request.backendChannelID,
+                    metadata: [
+                        "targetDeviceId": target.deviceID,
+                        "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
+                    ]
+                )
+                guard shouldActivateBackendTransmitLease(request: request, workID: workID) else {
+                    diagnostics.record(
+                        .media,
+                        message: "Direct QUIC transmit target resolved after release; skipping activation",
+                        metadata: [
+                            "contactId": target.contactID.uuidString,
+                            "channelId": target.channelID,
+                            "targetDeviceId": target.deviceID,
+                        ]
+                    )
+                    return
+                }
+                directQuicBackendLeaseBypassedContactIDs.insert(target.contactID)
+                directQuicBackendLeaseBypassedRequestsByContactID[target.contactID] = request
+                transmitRuntime.syncActiveTarget(target)
+                configureOutgoingAudioRoute(target: target)
+                await transmitCoordinator.handle(.beginSucceeded(target, request))
+                syncTransmitState()
+                await completeDeferredSystemTransmitActivationIfReady(
+                    request: request,
+                    target: target
+                )
+                return
+            }
             // `beginTransmit` is an HTTP control-plane call that acquires the
             // transmit lease and triggers APNs wake. Do not block that on
             // websocket readiness, which can take several seconds on a cold
@@ -1349,23 +1542,15 @@ extension PTTViewModel {
                 channelUUID: request.channelUUID,
                 channelID: request.backendChannelID
             )
+            let backendLeaseRequestStartedAt = Date()
             let response = try await backend.beginTransmit(channelId: request.backendChannelID)
+            let backendLeaseRequestElapsedMs = Int(Date().timeIntervalSince(backendLeaseRequestStartedAt) * 1_000)
             let target = TransmitTarget(
                 contactID: request.contactID,
                 userID: request.remoteUserID,
                 deviceID: response.targetDeviceId,
                 channelID: request.backendChannelID
             )
-            transmitRuntime.syncActiveTarget(target)
-            if transmitRuntime.isPressingTalk {
-                configureOutgoingAudioRoute(target: target)
-                recordTransmitStartupTiming(
-                    stage: "audio-route-configured-after-lease",
-                    contactID: request.contactID,
-                    channelUUID: request.channelUUID,
-                    channelID: request.backendChannelID
-                )
-            }
             diagnostics.record(
                 .media,
                 message: "Backend transmit lease granted",
@@ -1375,6 +1560,7 @@ extension PTTViewModel {
                     "startedAt": response.startedAt,
                     "expiresAt": response.expiresAt,
                     "targetDeviceId": response.targetDeviceId,
+                    "clientHttpElapsedMs": String(backendLeaseRequestElapsedMs),
                 ]
             )
             recordTransmitStartupTiming(
@@ -1386,6 +1572,7 @@ extension PTTViewModel {
                     "targetDeviceId": response.targetDeviceId,
                     "startedAt": response.startedAt,
                     "expiresAt": response.expiresAt,
+                    "clientHttpElapsedMs": String(backendLeaseRequestElapsedMs),
                 ]
             )
             sendTelemetryEvent(
@@ -1399,35 +1586,40 @@ extension PTTViewModel {
                     "startedAt": response.startedAt,
                     "expiresAt": response.expiresAt,
                     "targetDeviceId": response.targetDeviceId,
+                    "clientHttpElapsedMs": String(backendLeaseRequestElapsedMs),
                 ],
                 peerHandle: request.contactHandle,
                 channelId: target.channelID
             )
+            guard shouldActivateBackendTransmitLease(request: request, workID: workID) else {
+                await cleanupBackendTransmitLeaseGrantedAfterRelease(
+                    target: target,
+                    backend: backend,
+                    source: "begin-transmit"
+                )
+                return
+            }
+            transmitRuntime.syncActiveTarget(target)
+            configureOutgoingAudioRoute(target: target)
+            recordTransmitStartupTiming(
+                stage: "audio-route-configured-after-lease",
+                contactID: request.contactID,
+                channelUUID: request.channelUUID,
+                channelID: request.backendChannelID
+            )
             // The backend lease starts as soon as beginTransmit succeeds.
             // Keep it alive from that point, not from later PTT activation
             // callbacks, which can land seconds later on a cold wake path.
-            if transmitRuntime.isPressingTalk {
-                diagnostics.record(
-                    .media,
-                    message: "Starting transmit lease renewal after backend grant",
-                    metadata: [
-                        "contactId": target.contactID.uuidString,
-                        "channelId": target.channelID,
-                        "source": "begin-transmit",
-                    ]
-                )
-                startRenewingTransmit(target)
-            } else {
-                diagnostics.record(
-                    .media,
-                    message: "Backend transmit lease granted after release; stopping immediately",
-                    metadata: [
-                        "contactId": target.contactID.uuidString,
-                        "channelId": target.channelID,
-                        "source": "begin-transmit",
-                    ]
-                )
-            }
+            diagnostics.record(
+                .media,
+                message: "Starting transmit lease renewal after backend grant",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "source": "begin-transmit",
+                ]
+            )
+            startRenewingTransmit(target)
             await transmitCoordinator.handle(.beginSucceeded(target, request))
             syncTransmitState()
             await completeDeferredSystemTransmitActivationIfReady(
@@ -1448,7 +1640,11 @@ extension PTTViewModel {
                     message: "Recovering transmit begin after membership drift",
                     metadata: ["contact": request.contactHandle, "channelId": request.backendChannelID]
                 )
-                if await recoverTransmitBeginMembershipLoss(request: request, backend: backend) {
+                if await recoverTransmitBeginMembershipLoss(
+                    request: request,
+                    backend: backend,
+                    workID: workID
+                ) {
                     return
                 }
             }
@@ -1466,7 +1662,8 @@ extension PTTViewModel {
 
     private func recoverTransmitBeginMembershipLoss(
         request: TransmitRequestContext,
-        backend: BackendServices
+        backend: BackendServices,
+        workID: Int
     ) async -> Bool {
         do {
             _ = try await backend.joinChannel(channelId: request.backendChannelID)
@@ -1477,7 +1674,6 @@ extension PTTViewModel {
                 deviceID: response.targetDeviceId,
                 channelID: request.backendChannelID
             )
-            transmitRuntime.syncActiveTarget(target)
             diagnostics.record(
                 .media,
                 message: "Backend transmit lease granted",
@@ -1489,28 +1685,25 @@ extension PTTViewModel {
                     "targetDeviceId": response.targetDeviceId,
                 ]
             )
-            if transmitRuntime.isPressingTalk {
-                diagnostics.record(
-                    .media,
-                    message: "Starting transmit lease renewal after recovered backend grant",
-                    metadata: [
-                        "contactId": target.contactID.uuidString,
-                        "channelId": target.channelID,
-                        "source": "membership-recovery",
-                    ]
+            guard shouldActivateBackendTransmitLease(request: request, workID: workID) else {
+                await cleanupBackendTransmitLeaseGrantedAfterRelease(
+                    target: target,
+                    backend: backend,
+                    source: "membership-recovery"
                 )
-                startRenewingTransmit(target)
-            } else {
-                diagnostics.record(
-                    .media,
-                    message: "Recovered backend transmit lease granted after release; stopping immediately",
-                    metadata: [
-                        "contactId": target.contactID.uuidString,
-                        "channelId": target.channelID,
-                        "source": "membership-recovery",
-                    ]
-                )
+                return true
             }
+            transmitRuntime.syncActiveTarget(target)
+            diagnostics.record(
+                .media,
+                message: "Starting transmit lease renewal after recovered backend grant",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "source": "membership-recovery",
+                ]
+            )
+            startRenewingTransmit(target)
             diagnostics.record(
                 .media,
                 message: "Recovered transmit membership drift",
@@ -1535,6 +1728,67 @@ extension PTTViewModel {
         }
     }
 
+    private func shouldActivateBackendTransmitLease(
+        request: TransmitRequestContext,
+        workID: Int
+    ) -> Bool {
+        guard !Task.isCancelled else { return false }
+        guard transmitTaskCoordinator.state.begin.id == workID else { return false }
+        guard transmitRuntime.isPressingTalk else { return false }
+        guard !transmitRuntime.explicitStopRequested else { return false }
+        guard transmitCoordinator.state.isPressingTalk else { return false }
+        guard transmitCoordinator.state.pendingRequest == request else { return false }
+        return true
+    }
+
+    private func cleanupBackendTransmitLeaseGrantedAfterRelease(
+        target: TransmitTarget,
+        backend: BackendServices,
+        source: String
+    ) async {
+        guard !transmitRuntime.isPressingTalk || transmitRuntime.explicitStopRequested else {
+            diagnostics.record(
+                .media,
+                message: "Ignoring stale backend transmit lease while another press is active",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "source": source,
+                ]
+            )
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Backend transmit lease granted after release; ending without activating",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "source": source,
+            ]
+        )
+        transmitTaskCoordinator.send(.renewalCancelled)
+        transmitTaskRuntime.cancelCaptureReassertionTask()
+        try? await mediaServices.session()?.stopSendingAudio()
+        if backend.supportsWebSocket && backend.isWebSocketConnected {
+            try? await backend.sendSignal(
+                TurboSignalEnvelope(
+                    type: .transmitStop,
+                    channelId: target.channelID,
+                    fromUserId: backend.currentUserID ?? "",
+                    fromDeviceId: backend.deviceID,
+                    toUserId: target.userID,
+                    toDeviceId: target.deviceID,
+                    payload: "ptt-end"
+                )
+            )
+        }
+        _ = try? await backend.endTransmit(channelId: target.channelID)
+        await refreshChannelState(for: target.contactID)
+        updateStatusForSelectedContact()
+    }
+
     private func performActivateTransmit(_ request: TransmitRequestContext, target: TransmitTarget) async {
         if request.usesLocalHTTPBackend {
             configureOutgoingAudioRoute(target: target)
@@ -1546,6 +1800,32 @@ extension PTTViewModel {
                 statusMessage = message
                 await transmitCoordinator.handle(.stopFailed(message))
                 syncTransmitState()
+                return
+            }
+            if isBackendLeaseBypassedTransmitTarget(target) {
+                configureOutgoingAudioRoute(target: target)
+                diagnostics.record(
+                    .media,
+                    message: "Activating Direct QUIC transmit without backend lease renewal",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "targetDeviceId": target.deviceID,
+                        "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
+                    ]
+                )
+                if directQuicTransmitStartupPolicy == .speculativeForeground {
+                    await startPrewarmedDirectSystemTransmitBridgeIfPossible(
+                        request: request,
+                        target: target,
+                        trigger: "direct-quic-lease-bypassed"
+                    )
+                }
+                await completeDeferredSystemTransmitActivationIfReady(
+                    request: request,
+                    target: target
+                )
+                await refreshChannelState(for: request.contactID)
                 return
             }
             // Keep the backend transmit lease alive during the cold PTT
@@ -1591,6 +1871,34 @@ extension PTTViewModel {
             for: request.contactID,
             reason: "system-transmit-handoff"
         )
+
+        if shouldUseSpeculativeForegroundWarmDirectTransmit(for: request.contactID) {
+            diagnostics.record(
+                .media,
+                message: "Using foreground warm Direct QUIC transmit without system handoff",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "mediaState": String(describing: mediaConnectionState),
+                ]
+            )
+            configureProvisionalDirectQuicOutgoingAudioRouteIfPossible(
+                for: request,
+                reason: "foreground-warm-direct-transmit"
+            )
+            await startPrewarmedDirectSystemTransmitBridgeIfPossible(
+                request: request,
+                trigger: "foreground-warm-direct-transmit"
+            )
+            recordTransmitStartupTiming(
+                stage: "system-handoff-skipped-warm-direct",
+                contactID: request.contactID,
+                channelUUID: channelUUID,
+                channelID: request.backendChannelID,
+                subsystem: .media
+            )
+            return
+        }
 
         if shouldClosePrewarmedMediaBeforeSystemTransmit(for: request.contactID) {
             diagnostics.record(
@@ -1652,7 +1960,7 @@ extension PTTViewModel {
                 channelID: request.backendChannelID,
                 subsystem: .pushToTalk
             )
-            if shouldBridgePrewarmedDirectMediaDuringSystemTransmit(for: request.contactID) {
+            if shouldUseSpeculativeForegroundWarmDirectTransmit(for: request.contactID) {
                 Task { @MainActor [weak self] in
                     await self?.startPrewarmedDirectSystemTransmitBridgeIfPossible(
                         request: request,
@@ -2024,6 +2332,58 @@ extension PTTViewModel {
         }
     }
 
+    func startAppleBeganWarmDirectQuicCaptureIfPossible(
+        channelUUID: UUID,
+        source: String
+    ) async {
+        guard directQuicTransmitStartupPolicy == .appleGated else { return }
+        guard let target = activeTransmitTarget(for: channelUUID) else { return }
+        guard isBackendLeaseBypassedTransmitTarget(target) else { return }
+        guard let request = directQuicBackendLeaseBypassedRequest(for: target.contactID) else { return }
+        guard shouldUseForegroundWarmDirectTransmit(for: target.contactID) else { return }
+
+        guard isPTTAudioSessionActive else {
+            diagnostics.record(
+                .media,
+                message: "Deferring warm Direct QUIC capture until Apple audio activation",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "channelUUID": channelUUID.uuidString,
+                    "source": source,
+                    "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
+                ]
+            )
+            recordFirstTransmitStartupTimingStageIfAbsent(
+                "early-audio-capture-deferred-until-system-activation",
+                metadata: ["trigger": "system-transmit-began", "bridge": "prewarmed-direct"]
+            )
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Starting warm Direct QUIC capture after Apple transmit began",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "channelUUID": channelUUID.uuidString,
+                "source": source,
+                "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
+            ]
+        )
+        let didStart = await startPrewarmedDirectSystemTransmitBridgeIfPossible(
+            request: request,
+            target: target,
+            trigger: "system-transmit-began"
+        )
+        guard didStart else { return }
+        await sendDirectQuicLeaseBypassedTransmitStartSignalIfPossible(
+            target: target,
+            channelUUID: channelUUID
+        )
+    }
+
     func activeTransmitTarget(for systemChannelUUID: UUID) -> TransmitTarget? {
         transmitProjection.activeTarget(
             for: systemChannelUUID,
@@ -2167,6 +2527,19 @@ extension PTTViewModel {
         return false
     }
 
+    func shouldRefreshPrewarmedAudioCaptureAfterSystemActivation(for contactID: UUID) -> Bool {
+        guard transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") != nil else {
+            return false
+        }
+        guard isPTTAudioSessionActive else { return false }
+        guard transmitStartupTiming.elapsedMilliseconds(
+            for: "audio-capture-refreshed-after-system-activation"
+        ) == nil else {
+            return false
+        }
+        return true
+    }
+
     func shouldContinuePrewarmedDirectSystemTransmitBridge(
         request: TransmitRequestContext,
         target: TransmitTarget,
@@ -2249,13 +2622,23 @@ extension PTTViewModel {
             }
         }
 
-        startRenewingTransmit(target)
+        if !isBackendLeaseBypassedTransmitTarget(target) {
+            startRenewingTransmit(target)
+        }
         recordTransmitStartupTiming(
             stage: "system-activation-started",
             contactID: target.contactID,
             channelUUID: channelUUID,
             channelID: target.channelID
         )
+
+        if isBackendLeaseBypassedTransmitTarget(target) {
+            activationCompleted = await completeDirectQuicLeaseBypassedSystemTransmitActivation(
+                channelUUID: channelUUID,
+                target: target
+            )
+            return
+        }
 
         guard let backend = backendServices, backend.supportsWebSocket else {
             await refreshChannelState(for: target.contactID)
@@ -2317,10 +2700,14 @@ extension PTTViewModel {
             )
             configureOutgoingAudioRoute(target: target)
             if transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") != nil {
-                if isPTTAudioSessionActive,
-                   transmitStartupTiming.elapsedMilliseconds(
-                    for: "audio-capture-refreshed-after-system-activation"
-                   ) == nil {
+                if shouldRefreshPrewarmedAudioCaptureAfterSystemActivation(for: target.contactID) {
+                    guard shouldContinueSystemTransmitActivation(
+                        channelUUID: channelUUID,
+                        target: target,
+                        stage: "audio-capture-refresh-after-system-activation-requested"
+                    ) else {
+                        return
+                    }
                     diagnostics.record(
                         .media,
                         message: "Refreshing prewarmed audio capture after system audio activation",
@@ -2341,9 +2728,9 @@ extension PTTViewModel {
                     guard shouldContinueSystemTransmitActivation(
                         channelUUID: channelUUID,
                         target: target,
-                        stage: "audio-capture-refreshed-after-system-activation"
+                        stage: "audio-capture-refresh-after-system-activation-start-returned"
                     ) else {
-                        try? await mediaServices.session()?.stopSendingAudio()
+                        await mediaServices.session()?.abortSendingAudio()
                         return
                     }
                     recordTransmitStartupTiming(
@@ -2466,6 +2853,191 @@ extension PTTViewModel {
         }
     }
 
+    private func completeDirectQuicLeaseBypassedSystemTransmitActivation(
+        channelUUID: UUID,
+        target: TransmitTarget
+    ) async -> Bool {
+        do {
+            configureOutgoingAudioRoute(target: target)
+            recordTransmitStartupTiming(
+                stage: "media-session-start-requested",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
+            await ensureMediaSession(
+                for: target.contactID,
+                activationMode: .systemActivated,
+                startupMode: .interactive
+            )
+            guard shouldContinueSystemTransmitActivation(
+                channelUUID: channelUUID,
+                target: target,
+                stage: "media-session-start-completed"
+            ) else {
+                return false
+            }
+            recordTransmitStartupTiming(
+                stage: "media-session-start-completed",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
+            if transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") != nil {
+                diagnostics.record(
+                    .media,
+                    message: "Preserving early Direct QUIC capture after system audio activation",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "channelUUID": channelUUID.uuidString,
+                    ]
+                )
+                recordTransmitStartupTiming(
+                    stage: "audio-capture-already-started",
+                    contactID: target.contactID,
+                    channelUUID: channelUUID,
+                    channelID: target.channelID,
+                    metadata: ["backendLease": "bypassed-direct-quic"]
+                )
+                await sendDirectQuicLeaseBypassedTransmitStartSignalIfPossible(
+                    target: target,
+                    channelUUID: channelUUID
+                )
+                transmitRuntime.noteSystemTransmitActivationCompleted(channelUUID: channelUUID)
+                recordTransmitStartupTiming(
+                    stage: "startup-completed",
+                    contactID: target.contactID,
+                    channelUUID: channelUUID,
+                    channelID: target.channelID
+                )
+                recordTransmitStartupTimingSummary(
+                    reason: "startup-completed",
+                    contactID: target.contactID,
+                    channelUUID: channelUUID,
+                    channelID: target.channelID,
+                    metadata: ["backendLease": "bypassed-direct-quic"]
+                )
+                await refreshChannelState(for: target.contactID)
+                return true
+            }
+            recordTransmitStartupTiming(
+                stage: "audio-capture-start-requested",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
+            try await mediaServices.session()?.startSendingAudio()
+            guard shouldContinueSystemTransmitActivation(
+                channelUUID: channelUUID,
+                target: target,
+                stage: "audio-capture-start-completed"
+            ) else {
+                try? await mediaServices.session()?.stopSendingAudio()
+                return false
+            }
+            recordTransmitStartupTiming(
+                stage: "audio-capture-start-completed",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
+            await sendDirectQuicLeaseBypassedTransmitStartSignalIfPossible(
+                target: target,
+                channelUUID: channelUUID
+            )
+            transmitRuntime.noteSystemTransmitActivationCompleted(channelUUID: channelUUID)
+            recordTransmitStartupTiming(
+                stage: "startup-completed",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID
+            )
+            recordTransmitStartupTimingSummary(
+                reason: "startup-completed",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID,
+                metadata: ["backendLease": "bypassed-direct-quic"]
+            )
+            await refreshChannelState(for: target.contactID)
+            return true
+        } catch {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Direct QUIC transmit activation failed",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "error": error.localizedDescription,
+                ]
+            )
+            recordTransmitStartupTimingSummary(
+                reason: "activation-failed",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID,
+                metadata: ["error": error.localizedDescription]
+            )
+            await performStopTransmit(target)
+            return false
+        }
+    }
+
+    private func sendDirectQuicLeaseBypassedTransmitStartSignalIfPossible(
+        target: TransmitTarget,
+        channelUUID: UUID
+    ) async {
+        guard transmitStartupTiming.elapsedMilliseconds(for: "transmit-start-signal-sent") == nil else {
+            return
+        }
+        guard let backend = backendServices, backend.supportsWebSocket else { return }
+        guard backend.isWebSocketConnected else {
+            diagnostics.record(
+                .websocket,
+                message: "Skipped transmit start signal for Direct QUIC lease bypass because WebSocket is not connected",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "channelUUID": channelUUID.uuidString,
+                ]
+            )
+            return
+        }
+        do {
+            try await backend.sendSignal(
+                TurboSignalEnvelope(
+                    type: .transmitStart,
+                    channelId: target.channelID,
+                    fromUserId: backend.currentUserID ?? "",
+                    fromDeviceId: backend.deviceID,
+                    toUserId: target.userID,
+                    toDeviceId: target.deviceID,
+                    payload: "ptt-begin"
+                )
+            )
+            recordTransmitStartupTiming(
+                stage: "transmit-start-signal-sent",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID,
+                metadata: ["backendLease": "bypassed-direct-quic"]
+            )
+        } catch {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Transmit start signal failed for Direct QUIC lease bypass",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
+    }
+
     func startPendingSystemTransmitAudioCaptureIfPossible(
         channelUUID: UUID,
         trigger: String
@@ -2512,9 +3084,13 @@ extension PTTViewModel {
         do {
             guard transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") == nil else {
                 if trigger == "audio-session-activated",
-                   transmitStartupTiming.elapsedMilliseconds(
-                    for: "audio-capture-refreshed-after-system-activation"
-                   ) == nil {
+                   shouldRefreshPrewarmedAudioCaptureAfterSystemActivation(for: request.contactID) {
+                    guard shouldContinuePendingSystemTransmitAudioCapture(
+                        request: request,
+                        stage: "audio-capture-refresh-after-system-activation-requested"
+                    ) else {
+                        return
+                    }
                     diagnostics.record(
                         .media,
                         message: "Refreshing prewarmed audio capture after system audio activation",
@@ -2532,9 +3108,9 @@ extension PTTViewModel {
                     try await mediaServices.session()?.startSendingAudio()
                     guard shouldContinuePendingSystemTransmitAudioCapture(
                         request: request,
-                        stage: "audio-capture-refreshed-after-system-activation"
+                        stage: "audio-capture-refresh-after-system-activation-start-returned"
                     ) else {
-                        try? await mediaServices.session()?.stopSendingAudio()
+                        await mediaServices.session()?.abortSendingAudio()
                         return
                     }
                     recordFirstTransmitStartupTimingStageIfAbsent(
@@ -2684,11 +3260,36 @@ extension PTTViewModel {
         }
         let pendingWake = pttWakeRuntime.pendingIncomingPush
         if let wake = pendingWake {
-            pttWakeRuntime.replacePlaybackFallbackTask(for: wake.contactID, with: nil)
+            let contactID = wake.contactID
+            if wake.activationState == .appManagedFallback,
+               prefersForegroundAppManagedReceivePlayback(for: contactID),
+               mediaSessionContactID == contactID,
+               (mediaConnectionState == .connected || mediaConnectionState == .preparing) {
+                pttWakeRuntime.replacePlaybackFallbackTask(for: contactID, with: nil)
+                recordWakeReceiveTiming(
+                    stage: "late-system-audio-activation-preserved-app-managed-playback",
+                    contactID: contactID,
+                    channelUUID: wake.channelUUID,
+                    channelID: wake.payload.channelId,
+                    subsystem: .pushToTalk
+                )
+                diagnostics.record(
+                    .media,
+                    message: "Preserved app-managed wake playback after late PTT audio activation",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": wake.channelUUID.uuidString,
+                    ]
+                )
+                captureDiagnosticsState("ptt-wake:preserved-app-managed-playback")
+                schedulePostWakeBackendRefresh(for: contactID)
+                return
+            }
+            pttWakeRuntime.replacePlaybackFallbackTask(for: contactID, with: nil)
             pttWakeRuntime.markAudioSessionActivated(for: wake.channelUUID)
             recordWakeReceiveTiming(
                 stage: "system-audio-activation-observed",
-                contactID: wake.contactID,
+                contactID: contactID,
                 channelUUID: wake.channelUUID,
                 channelID: wake.payload.channelId,
                 subsystem: .pushToTalk
@@ -2702,7 +3303,6 @@ extension PTTViewModel {
                     "event": wake.payload.event.rawValue,
                 ]
             )
-            let contactID = wake.contactID
             if let backend = backendServices,
                let channelID =
                 wake.payload.channelId
@@ -2736,6 +3336,7 @@ extension PTTViewModel {
             )
             let bufferedAudioChunks = pttWakeRuntime.takeBufferedAudioChunks(for: contactID)
             if !bufferedAudioChunks.isEmpty {
+                markRemoteAudioActivity(for: contactID, source: .audioChunk)
                 recordWakeReceiveTiming(
                     stage: "buffered-audio-flush-started",
                     contactID: contactID,
@@ -3059,6 +3660,7 @@ extension PTTViewModel {
                 "reason": reason
             ]
         )
+        markRemoteAudioActivity(for: contactID, source: .audioChunk)
         for payload in bufferedAudioChunks {
             await receiveRemoteAudioChunk(payload)
         }
@@ -3389,6 +3991,8 @@ extension PTTViewModel {
         )
         await transmitCoordinator.handle(.stopCompleted)
         syncTransmitState()
+        directQuicBackendLeaseBypassedContactIDs.remove(target.contactID)
+        directQuicBackendLeaseBypassedRequestsByContactID.removeValue(forKey: target.contactID)
         updateStatusForSelectedContact()
         captureDiagnosticsState("transmit-stop:completed-locally")
     }
@@ -3429,6 +4033,26 @@ extension PTTViewModel {
                             payload: "ptt-end"
                         )
                     )
+                }
+                if isBackendLeaseBypassedTransmitTarget(target) {
+                    diagnostics.record(
+                        .media,
+                        message: "Skipped backend endTransmit for Direct QUIC lease bypass",
+                        metadata: [
+                            "contactId": target.contactID.uuidString,
+                            "channelId": target.channelID,
+                            "webSocketConnected": String(backend.isWebSocketConnected),
+                        ]
+                    )
+                    await finalizeExplicitTransmitStopLocallyIfNeeded(
+                        target: target,
+                        source: "explicit-stop-direct-quic-lease-bypass"
+                    )
+                    directQuicBackendLeaseBypassedContactIDs.remove(target.contactID)
+                    directQuicBackendLeaseBypassedRequestsByContactID.removeValue(forKey: target.contactID)
+                    await refreshChannelState(for: target.contactID)
+                    updateStatusForSelectedContact()
+                    return
                 }
                 diagnostics.record(
                     .media,
@@ -3486,6 +4110,24 @@ extension PTTViewModel {
         transmitTaskCoordinator.send(.renewalCancelled)
         transmitTaskRuntime.cancelCaptureReassertionTask()
         try? await mediaServices.session()?.stopSendingAudio()
+
+        if isBackendLeaseBypassedTransmitTarget(target) {
+            diagnostics.record(
+                .media,
+                message: "Skipped backend abort for Direct QUIC lease bypass",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                ]
+            )
+            directQuicBackendLeaseBypassedContactIDs.remove(target.contactID)
+            directQuicBackendLeaseBypassedRequestsByContactID.removeValue(forKey: target.contactID)
+            await finalizeExplicitTransmitStopLocallyIfNeeded(
+                target: target,
+                source: "abort-direct-quic-lease-bypass"
+            )
+            return
+        }
 
         if let backend = backendServices {
             diagnostics.record(

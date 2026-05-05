@@ -34,7 +34,6 @@
           "selected": {
             "handle": "@blake",
             "phase": "idle",
-            "status": "Blake is online",
             "isJoined": false,
             "isTransmitting": false,
             "canTransmitNow": false
@@ -47,7 +46,6 @@
           "selected": {
             "handle": "@avery",
             "phase": "idle",
-            "status": "Avery is online",
             "isJoined": false,
             "isTransmitting": false,
             "canTransmitNow": false

@@ -79,6 +79,7 @@ protocol MediaSession: AnyObject {
     ) async throws
     func startSendingAudio() async throws
     func stopSendingAudio() async throws
+    func abortSendingAudio() async
     func receiveRemoteAudioChunk(_ payload: String) async
     func audioRouteDidChange() async
     func hasPendingPlayback() -> Bool
@@ -88,6 +89,10 @@ protocol MediaSession: AnyObject {
 extension MediaSession {
     func close() {
         close(deactivateAudioSession: true)
+    }
+
+    func abortSendingAudio() async {
+        try? await stopSendingAudio()
     }
 }
 
@@ -138,6 +143,8 @@ final class StubRelayMediaSession: MediaSession {
     }
 
     func stopSendingAudio() async throws {}
+
+    func abortSendingAudio() async {}
 
     func receiveRemoteAudioChunk(_ payload: String) async {}
 

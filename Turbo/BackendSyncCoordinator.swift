@@ -29,6 +29,7 @@ enum BackendSyncEvent: Equatable {
     case channelStateFailed(contactID: UUID, message: String)
     case clearAllChannelStates
     case invitesUpdated(incoming: [BackendInviteUpdate], outgoing: [BackendInviteUpdate], now: Date)
+    case invitesPartiallyUpdated(incoming: [BackendInviteUpdate]?, outgoing: [BackendInviteUpdate]?, now: Date)
     case invitesFailed(String)
     case outgoingInviteSeeded(contactID: UUID, invite: TurboInviteResponse, now: Date)
 }
@@ -124,6 +125,15 @@ enum BackendSyncReducer {
             let incomingMap = Dictionary(uniqueKeysWithValues: incoming.map { ($0.contactID, $0.invite) })
             let outgoingMap = Dictionary(uniqueKeysWithValues: outgoing.map { ($0.contactID, $0.invite) })
             nextState.syncState.applyInvites(incoming: incomingMap, outgoing: outgoingMap, now: now)
+
+        case .invitesPartiallyUpdated(let incoming, let outgoing, let now):
+            let incomingMap = incoming.map {
+                Dictionary(uniqueKeysWithValues: $0.map { ($0.contactID, $0.invite) })
+            }
+            let outgoingMap = outgoing.map {
+                Dictionary(uniqueKeysWithValues: $0.map { ($0.contactID, $0.invite) })
+            }
+            nextState.syncState.applyPartialInvites(incoming: incomingMap, outgoing: outgoingMap, now: now)
 
         case .invitesFailed(let message):
             nextState.syncState.applyRecoverableSyncFailureStatus(message)

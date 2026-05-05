@@ -30,11 +30,24 @@ struct ContactListSections: Equatable {
 
 extension PTTViewModel {
     func localTransmitProjection(for contactID: UUID) -> LocalTransmitProjection {
-        transmitDomainSnapshot.localTransmitProjection(
+        let snapshot = transmitDomainSnapshot
+        let projection = snapshot.localTransmitProjection(
             for: contactID,
             mediaState: mediaConnectionState,
             pttAudioSessionActive: isPTTAudioSessionActive
         )
+        if projection == .starting(.awaitingAudioSession),
+           snapshot.hasTransmitIntent(for: contactID),
+           shouldUseDirectQuicTransport(for: contactID),
+           mediaConnectionState == .connected,
+           (
+            transmitStartupTiming.elapsedMilliseconds(for: "backend-lease-granted") != nil
+            || transmitStartupTiming.elapsedMilliseconds(for: "backend-lease-bypassed-direct-quic") != nil
+           ),
+           transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") != nil {
+            return .transmitting
+        }
+        return projection
     }
 
     func localRelayTransportReadyForTransmit(for contactID: UUID) -> Bool {

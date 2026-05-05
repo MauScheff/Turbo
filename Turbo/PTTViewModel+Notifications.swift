@@ -125,7 +125,7 @@ extension PTTViewModel {
             message: "Foreground talk request notification received",
             metadata: talkRequestNotificationDiagnostics(userInfo: userInfo)
         )
-        await refreshInvites()
+        await refreshRequestStateAfterTalkRequestNotification(userInfo: userInfo, reason: "foreground-notification")
     }
 
     func handleTalkRequestNotificationResponse(userInfo: [AnyHashable: Any]) async {
@@ -135,7 +135,7 @@ extension PTTViewModel {
             message: "Talk request notification opened",
             metadata: metadata
         )
-        await refreshInvites()
+        await refreshRequestStateAfterTalkRequestNotification(userInfo: userInfo, reason: "notification-open")
         guard let handle = talkRequestNotificationHandle(from: userInfo) else { return }
         selectContactMatchingNotificationHandle(handle, reason: "notification-open")
         if backendServices == nil {
@@ -148,6 +148,72 @@ extension PTTViewModel {
             return
         }
         await openContact(reference: handle)
+    }
+
+    func refreshRequestStateAfterTalkRequestNotification(
+        userInfo: [AnyHashable: Any],
+        reason: String
+    ) async {
+        await refreshContactSummaries()
+        await refreshInvites()
+        captureDiagnosticsState("talk-request:\(reason):request-state-refreshed")
+
+        guard let handle = talkRequestNotificationHandle(from: userInfo) else { return }
+        guard let contact = contactMatchingNormalizedHandle(handle) else {
+            recordTalkRequestProjectionInvariant(
+                handle: handle,
+                reason: reason,
+                message: "foreground talk-request notification did not resolve to a local contact after request-state refresh"
+            )
+            scheduleTalkRequestProjectionRecovery(userInfo: userInfo, reason: reason)
+            return
+        }
+
+        guard relationshipState(for: contact.id).isIncomingRequest else {
+            recordTalkRequestProjectionInvariant(
+                handle: handle,
+                reason: reason,
+                message: "foreground talk-request notification was not projected as an incoming request after request-state refresh"
+            )
+            scheduleTalkRequestProjectionRecovery(userInfo: userInfo, reason: reason)
+            return
+        }
+    }
+
+    private func scheduleTalkRequestProjectionRecovery(
+        userInfo: [AnyHashable: Any],
+        reason: String
+    ) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 750_000_000)
+            guard let self else { return }
+            await self.refreshContactSummaries()
+            await self.refreshInvites()
+            self.captureDiagnosticsState("talk-request:\(reason):projection-recovery")
+        }
+    }
+
+    private func recordTalkRequestProjectionInvariant(
+        handle: String,
+        reason: String,
+        message: String
+    ) {
+        diagnostics.recordInvariantViolation(
+            invariantID: "request.foreground_notification_not_projected",
+            scope: .local,
+            message: message,
+            metadata: [
+                "handle": handle,
+                "reason": reason,
+                "selectedContact": selectedContact?.handle ?? "none",
+                "selectedPeerRelationship": selectedSessionDiagnosticsSummary.relationship,
+            ]
+        )
+    }
+
+    private func contactMatchingNormalizedHandle(_ handle: String) -> Contact? {
+        let normalizedHandle = Contact.normalizedHandle(handle)
+        return contacts.first { Contact.normalizedHandle($0.handle) == normalizedHandle }
     }
 
     func openPendingTalkRequestNotificationIfNeeded() async {
@@ -165,7 +231,8 @@ extension PTTViewModel {
                 alertPushToken: alertPushTokenHex.isEmpty ? nil : alertPushTokenHex,
                 alertPushEnvironment: alertPushTokenHex.isEmpty
                     ? nil
-                    : TurboAPNSEnvironmentResolver.current()
+                    : TurboAPNSEnvironmentResolver.current(),
+                directQuicIdentity: currentDirectQuicIdentityRegistrationMetadata()
             )
             diagnostics.record(
                 .backend,
