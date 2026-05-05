@@ -134,6 +134,7 @@ struct ContentView: View {
                     isShowingDiagnostics = true
                 },
                 onShowCallPrototype: {
+                    TurboCallPrototypeView.prewarmDefaultTexture()
                     isShowingProfileSheet = false
                     isShowingCallPrototype = true
                 },

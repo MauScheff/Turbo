@@ -15,6 +15,7 @@ struct RemoteReceiveActivityState: Equatable {
     var lastSource: RemoteReceiveActivitySource
     var hasReceivedAudioChunk: Bool
     var activityGeneration: Int = 0
+    var isPeerTransmitting: Bool = true
 
     var timeoutPhase: RemoteReceiveTimeoutPhase {
         hasReceivedAudioChunk ? .drainingAudio : .awaitingFirstAudioChunk
@@ -25,7 +26,11 @@ struct ReceiveExecutionSessionState: Equatable {
     var remoteActivityByContactID: [UUID: RemoteReceiveActivityState] = [:]
 
     var remoteTransmittingContactIDs: Set<UUID> {
-        Set(remoteActivityByContactID.keys)
+        Set(
+            remoteActivityByContactID.compactMap { contactID, activityState in
+                activityState.isPeerTransmitting ? contactID : nil
+            }
+        )
     }
 
     mutating func replaceRemoteTransmittingContactIDs(_ contactIDs: Set<UUID>) {
@@ -42,7 +47,7 @@ struct ReceiveExecutionSessionState: Equatable {
 enum ReceiveExecutionEvent: Equatable {
     case reset
     case remoteActivityDetected(contactID: UUID, source: RemoteReceiveActivitySource)
-    case remoteTransmitStopped(contactID: UUID)
+    case remoteTransmitStopped(contactID: UUID, preservePlaybackDrain: Bool)
     case silenceTimeoutElapsed(contactID: UUID)
 }
 
@@ -78,13 +83,20 @@ enum ReceiveExecutionReducer {
 
         case .remoteActivityDetected(let contactID, let source):
             let previousActivity = nextState.remoteActivityByContactID[contactID]
+            let continuesPlaybackDrainAfterStop =
+                previousActivity?.isPeerTransmitting == false
+                && source == .audioChunk
+            let startsNewPeerTransmitAfterDrain =
+                previousActivity?.isPeerTransmitting == false
+                && source != .audioChunk
             let hasReceivedAudioChunk =
-                (previousActivity?.hasReceivedAudioChunk ?? false)
+                (!startsNewPeerTransmitAfterDrain && (previousActivity?.hasReceivedAudioChunk ?? false))
                 || source == .audioChunk
             let activityState = RemoteReceiveActivityState(
                 lastSource: source,
                 hasReceivedAudioChunk: hasReceivedAudioChunk,
-                activityGeneration: (previousActivity?.activityGeneration ?? 0) + 1
+                activityGeneration: (previousActivity?.activityGeneration ?? 0) + 1,
+                isPeerTransmitting: !continuesPlaybackDrainAfterStop
             )
             nextState.remoteActivityByContactID[contactID] = activityState
             effects.append(
@@ -95,10 +107,24 @@ enum ReceiveExecutionReducer {
                 )
             )
 
-        case .remoteTransmitStopped(let contactID):
-            guard nextState.remoteActivityByContactID.removeValue(forKey: contactID) != nil else {
+        case .remoteTransmitStopped(let contactID, let preservePlaybackDrain):
+            guard var activityState = nextState.remoteActivityByContactID[contactID] else {
                 break
             }
+            if preservePlaybackDrain, activityState.hasReceivedAudioChunk {
+                activityState.isPeerTransmitting = false
+                activityState.activityGeneration += 1
+                nextState.remoteActivityByContactID[contactID] = activityState
+                effects.append(
+                    .scheduleRemoteSilenceTimeout(
+                        contactID: contactID,
+                        phase: .drainingAudio,
+                        generation: activityState.activityGeneration
+                    )
+                )
+                break
+            }
+            nextState.remoteActivityByContactID.removeValue(forKey: contactID)
             effects.append(.cancelRemoteSilenceTimeout(contactID: contactID))
 
         case .silenceTimeoutElapsed(let contactID):

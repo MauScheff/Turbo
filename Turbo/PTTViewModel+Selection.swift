@@ -36,18 +36,41 @@ extension PTTViewModel {
             mediaState: mediaConnectionState,
             pttAudioSessionActive: isPTTAudioSessionActive
         )
-        if projection == .starting(.awaitingAudioSession),
-           snapshot.hasTransmitIntent(for: contactID),
-           shouldUseDirectQuicTransport(for: contactID),
-           mediaConnectionState == .connected,
-           (
-            transmitStartupTiming.elapsedMilliseconds(for: "backend-lease-granted") != nil
-            || transmitStartupTiming.elapsedMilliseconds(for: "backend-lease-bypassed-direct-quic") != nil
-           ),
-           transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") != nil {
+        if shouldProjectWarmDirectQuicTransmitAsLive(
+            projection: projection,
+            snapshot: snapshot,
+            contactID: contactID
+        ) {
             return .transmitting
         }
         return projection
+    }
+
+    private func shouldProjectWarmDirectQuicTransmitAsLive(
+        projection: LocalTransmitProjection,
+        snapshot: TransmitDomainSnapshot,
+        contactID: UUID
+    ) -> Bool {
+        guard case .starting(let stage) = projection else { return false }
+        switch stage {
+        case .awaitingSystemTransmit, .awaitingAudioSession:
+            break
+        case .requestingLease, .awaitingAudioConnection:
+            return false
+        }
+        guard snapshot.hasTransmitIntent(for: contactID),
+              shouldUseDirectQuicTransport(for: contactID),
+              mediaConnectionState == .connected,
+              transmitStartupTiming.contactID == contactID,
+              (
+                transmitStartupTiming.elapsedMilliseconds(for: "backend-lease-granted") != nil
+                || transmitStartupTiming.elapsedMilliseconds(for: "backend-lease-bypassed-direct-quic") != nil
+              ),
+              transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") != nil
+        else {
+            return false
+        }
+        return true
     }
 
     func localRelayTransportReadyForTransmit(for contactID: UUID) -> Bool {

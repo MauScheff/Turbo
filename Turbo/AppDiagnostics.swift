@@ -568,6 +568,8 @@ final class DiagnosticsStore {
         let systemSession = fields["systemSession"] ?? "none"
         let phaseDetail = fields["selectedPeerPhaseDetail"] ?? "none"
         let mediaState = fields["mediaState"] ?? "none"
+        let selectedPeerRelationship = fields["selectedPeerRelationship"] ?? "none"
+        let pendingAction = fields["pendingAction"] ?? "none"
 
         var violations: [DiagnosticsInvariantViolationCandidate] = []
 
@@ -616,6 +618,35 @@ final class DiagnosticsStore {
                     )
                 )
             }
+        }
+
+        if phase == "peerReady",
+           selectedPeerRelationship == "none",
+           pendingAction == "none",
+           isJoined == false,
+           systemSession == "none",
+           backendReadiness == "inactive",
+           backendSelfJoined == true,
+           backendPeerJoined == true {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.stale_membership_peer_ready_without_session",
+                    scope: .backend,
+                    message: "backend retained durable channel membership while selectedPeerPhase is peerReady without a local session",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerRelationship": selectedPeerRelationship,
+                        "pendingAction": pendingAction,
+                        "isJoined": fields["isJoined"] ?? "none",
+                        "systemSession": systemSession,
+                        "backendChannelStatus": backendChannelStatus,
+                        "backendReadiness": backendReadiness,
+                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
+                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
+                        "backendPeerDeviceConnected": fields["backendPeerDeviceConnected"] ?? "none",
+                    ]
+                )
+            )
         }
 
         if backendPeerJoined == true, backendSelfJoined == false {
@@ -760,7 +791,6 @@ final class DiagnosticsStore {
         }
 
         let reconciliationAction = fields["selectedPeerReconciliationAction"] ?? "none"
-        let pendingAction = fields["pendingAction"] ?? "none"
         let signalingJoinRecoveryActive =
             snapshotBool(fields, key: "backendSignalingJoinRecoveryActive") == true
         let disconnectingTeardownInFlight =

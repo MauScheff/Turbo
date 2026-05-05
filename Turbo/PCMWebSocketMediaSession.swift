@@ -12,8 +12,8 @@ actor AudioChunkSender {
     private var sendChunk: (@Sendable (String) async throws -> Void)?
     private let reportFailure: @Sendable (String) async -> Void
     private let reportEvent: (@Sendable (String, [String: String]) async -> Void)?
-    // Wake transmit can legitimately buffer a few seconds of speech while the
-    // background receiver re-establishes its playback path after PTT activation.
+    // Keep sender-side live audio bounded; receiver-side wake buffering happens
+    // after transport delivery, so stale outbound chunks are worse than drops.
     private let maximumPendingPayloads: Int
     private let maximumPayloadsPerMessage: Int
     private let payloadBatchCollectionNanoseconds: UInt64
@@ -25,12 +25,13 @@ actor AudioChunkSender {
     private var flushPendingImmediately = false
     private var outboundTransportDispatchReportBudget = 64
     private var outboundTransportSuccessReportBudget = 64
+    private var outboundTransportDropReportBudget = 16
 
     init(
         sendChunk: (@Sendable (String) async throws -> Void)?,
         reportFailure: @escaping @Sendable (String) async -> Void,
         reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil,
-        maximumPendingPayloads: Int = 128,
+        maximumPendingPayloads: Int = 16,
         maximumPayloadsPerMessage: Int = 4,
         payloadBatchCollectionNanoseconds: UInt64 = 0,
         transportAvailabilityPollNanoseconds: UInt64 = 50_000_000,
@@ -53,7 +54,12 @@ actor AudioChunkSender {
     func enqueue(_ payload: String) async {
         pendingPayloads.append(payload)
         if pendingPayloads.count > maximumPendingPayloads {
-            pendingPayloads.removeFirst(pendingPayloads.count - maximumPendingPayloads)
+            let droppedPayloadCount = pendingPayloads.count - maximumPendingPayloads
+            pendingPayloads.removeFirst(droppedPayloadCount)
+            reportTransportDropIfNeeded(
+                droppedPayloadCount: droppedPayloadCount,
+                pendingPayloadCount: pendingPayloads.count
+            )
         }
         guard !isDraining else { return }
         isDraining = true
@@ -70,6 +76,7 @@ actor AudioChunkSender {
     func resetReportingBudgets() {
         outboundTransportDispatchReportBudget = 64
         outboundTransportSuccessReportBudget = 64
+        outboundTransportDropReportBudget = 16
     }
 
     func finishDraining(pollNanoseconds: UInt64 = 10_000_000) async {
@@ -189,6 +196,24 @@ actor AudioChunkSender {
         ]
         Task {
             await reportEvent("Delivered outbound audio transport payload", metadata)
+        }
+    }
+
+    private func reportTransportDropIfNeeded(
+        droppedPayloadCount: Int,
+        pendingPayloadCount: Int
+    ) {
+        guard outboundTransportDropReportBudget > 0 else { return }
+        outboundTransportDropReportBudget -= 1
+        guard let reportEvent else { return }
+        let metadata = [
+            "droppedPayloadCount": String(droppedPayloadCount),
+            "pendingPayloadCount": String(pendingPayloadCount),
+            "maximumPendingPayloads": String(maximumPendingPayloads),
+            "reason": "outbound-transport-backpressure",
+        ]
+        Task {
+            await reportEvent("Dropped stale outbound audio transport payload", metadata)
         }
     }
 }
@@ -436,6 +461,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     private var isPlaybackReady = false
     private var isCaptureReady = false
     private var captureSendState: CaptureSendState = .idle
+    private var captureSendCancellationGeneration: UInt64 = 0
     private var inputTapInstalled = false
     private var pendingPlaybackBuffers: [AVAudioPCMBuffer] = []
     private var pendingRemoteAudioChunks: [Data] = []
@@ -561,6 +587,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     }
 
     func startSendingAudio() async throws {
+        let cancellationGeneration = currentCaptureSendCancellationGeneration()
         if !isPlaybackReady || !isCaptureReady {
             try await start(activationMode: .appManaged, startupMode: .interactive)
         }
@@ -579,6 +606,16 @@ final class PCMWebSocketMediaSession: MediaSession {
             "Starting audio capture with transport state",
             metadata: ["configured": String(currentSendAudioChunk != nil)]
         )
+        guard shouldEnableSendingAudio(
+            expectedCancellationGeneration: cancellationGeneration
+        ) else {
+            await audioChunkSender.reset()
+            await report(
+                "Skipped enabling audio capture because transmit start was cancelled",
+                metadata: ["reason": "stale-transmit-startup"]
+            )
+            return
+        }
         await audioChunkSender.resetReportingBudgets()
         resetPlaybackForTransmit()
         setSendingAudio(true)
@@ -594,7 +631,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     }
 
     func abortSendingAudio() async {
-        setSendingAudio(false)
+        cancelCaptureSendState()
         await audioChunkSender.reset()
         await report(
             "Aborted audio capture without draining",
@@ -648,6 +685,7 @@ final class PCMWebSocketMediaSession: MediaSession {
             if isPlaybackReady {
                 try preparePlaybackPathIfNeeded()
                 try startPlaybackEngineIfNeeded()
+                reassertPlaybackNodeAfterRouteChangeIfNeeded()
             }
             if isCaptureReady {
                 try refreshCapturePathForCurrentRoute()
@@ -674,6 +712,7 @@ final class PCMWebSocketMediaSession: MediaSession {
 
     func close(deactivateAudioSession: Bool) {
         stateLock.lock()
+        noteCaptureSendCancellationLocked()
         captureSendState = .idle
         stateLock.unlock()
         Task {
@@ -791,9 +830,33 @@ final class PCMWebSocketMediaSession: MediaSession {
         captureSendState = newValue ? .sending : .idle
     }
 
+    private func cancelCaptureSendState() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        noteCaptureSendCancellationLocked()
+        captureSendState = .idle
+    }
+
+    private func currentCaptureSendCancellationGeneration() -> UInt64 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return captureSendCancellationGeneration
+    }
+
+    private func shouldEnableSendingAudio(expectedCancellationGeneration: UInt64) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return captureSendCancellationGeneration == expectedCancellationGeneration
+    }
+
+    private func noteCaptureSendCancellationLocked() {
+        captureSendCancellationGeneration &+= 1
+    }
+
     private func beginCaptureStopGraceIfNeeded() -> UInt64? {
         stateLock.lock()
         defer { stateLock.unlock() }
+        noteCaptureSendCancellationLocked()
         guard case .sending = captureSendState else {
             captureSendState = .idle
             return nil
@@ -1230,6 +1293,32 @@ final class PCMWebSocketMediaSession: MediaSession {
         for buffer in buffers {
             schedulePlaybackBuffer(buffer)
         }
+    }
+
+    private func reassertPlaybackNodeAfterRouteChangeIfNeeded() {
+        guard shouldReassertPlaybackNodeAfterRouteChange() else { return }
+        playerNode.play()
+        Task {
+            await report(
+                "Playback node reasserted after audio route change",
+                metadata: [
+                    "pendingBufferCount": String(pendingPlaybackBufferCount()),
+                    "scheduledBufferCount": String(scheduledPlaybackBufferCountSnapshot()),
+                ]
+            )
+        }
+    }
+
+    private func shouldReassertPlaybackNodeAfterRouteChange() -> Bool {
+        playerNode.isPlaying
+            || pendingPlaybackBufferCount() > 0
+            || scheduledPlaybackBufferCountSnapshot() > 0
+    }
+
+    private func scheduledPlaybackBufferCountSnapshot() -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return scheduledPlaybackBufferCount
     }
 
     private func requestPlaybackStartWhenReady() {

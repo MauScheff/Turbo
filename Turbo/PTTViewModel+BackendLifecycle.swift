@@ -144,6 +144,20 @@ extension PTTViewModel {
         captureDiagnosticsState("backend:reconnect-finished")
     }
 
+    func reassertBackendJoinAfterWebSocketReconnectIfNeeded() async {
+        guard backendRuntime.isReady else { return }
+        guard backendRuntime.signalingJoinRecoveryTask == nil else { return }
+        guard let contact = signalingJoinRecoveryContact() else { return }
+
+        diagnostics.record(
+            .backend,
+            message: "Reasserting backend join after WebSocket reconnect",
+            metadata: ["contactId": contact.id.uuidString, "handle": contact.handle]
+        )
+        captureDiagnosticsState("websocket:join-reassertion")
+        await reassertBackendJoin(for: contact)
+    }
+
     func handleBackendServerNotice(_ message: String) {
         backendStatusMessage = message
         diagnostics.record(.websocket, message: "Backend server notice", metadata: ["message": message])
@@ -783,6 +797,7 @@ extension PTTViewModel {
             Task {
                 await backendSyncCoordinator.handle(.webSocketStateChanged(state, selectedContactID: selectedContactId))
                 await controlPlaneCoordinator.handle(.webSocketStateChanged(state))
+                await reassertBackendJoinAfterWebSocketReconnectIfNeeded()
                 let readinessContactIDs = Set([selectedContactId, activeChannelId, mediaSessionContactID].compactMap { $0 })
                 for contactID in readinessContactIDs {
                     await syncLocalReceiverAudioReadinessSignal(

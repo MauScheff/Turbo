@@ -874,8 +874,10 @@ enum TurboDirectPathDebugOverride {
     static let autoUpgradeDisabledLaunchArgument = "-TurboDebugDisableDirectQuicAutoUpgrade"
     static let autoUpgradeDisabledEnvironmentKey = "TURBO_DEBUG_DISABLE_DIRECT_QUIC_AUTO_UPGRADE"
     static let transmitStartupPolicyStorageKey = "TurboDebugDirectQuicTransmitStartupPolicy"
+    static let transmitStartupPolicyStorageVersionKey = "TurboDebugDirectQuicTransmitStartupPolicyVersion"
     static let transmitStartupPolicyLaunchArgument = "-TurboDebugDirectQuicTransmitStartupPolicy"
     static let transmitStartupPolicyEnvironmentKey = "TURBO_DEBUG_DIRECT_QUIC_TRANSMIT_STARTUP_POLICY"
+    private static let transmitStartupPolicyStorageVersion = 3
 
     static func isRelayOnlyForced(
         processInfo: ProcessInfo = .processInfo,
@@ -971,6 +973,18 @@ enum TurboDirectPathDebugOverride {
         }
         if let stored = defaults.string(forKey: transmitStartupPolicyStorageKey),
            let parsed = DirectQuicTransmitStartupPolicy(rawValue: stored) {
+            if parsed == .speculativeForeground,
+               defaults.integer(forKey: transmitStartupPolicyStorageVersionKey) < transmitStartupPolicyStorageVersion {
+                defaults.set(
+                    DirectQuicTransmitStartupPolicy.appleGated.rawValue,
+                    forKey: transmitStartupPolicyStorageKey
+                )
+                defaults.set(
+                    transmitStartupPolicyStorageVersion,
+                    forKey: transmitStartupPolicyStorageVersionKey
+                )
+                return .appleGated
+            }
             return parsed
         }
         return .appleGated
@@ -981,6 +995,7 @@ enum TurboDirectPathDebugOverride {
         defaults: UserDefaults = .standard
     ) {
         defaults.set(policy.rawValue, forKey: transmitStartupPolicyStorageKey)
+        defaults.set(transmitStartupPolicyStorageVersion, forKey: transmitStartupPolicyStorageVersionKey)
     }
 
     private static func launchArgumentValue(_ arguments: [String]) -> String? {

@@ -362,6 +362,32 @@ struct TurboTests {
             ) == .appleGated
         )
 
+        defaults.set(
+            DirectQuicTransmitStartupPolicy.speculativeForeground.rawValue,
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        defaults.removeObject(forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageVersionKey)
+        #expect(
+            TurboDirectPathDebugOverride.transmitStartupPolicy(
+                arguments: [],
+                environment: [:],
+                defaults: defaults
+            ) == .appleGated
+        )
+        #expect(
+            defaults.string(forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey)
+                == DirectQuicTransmitStartupPolicy.appleGated.rawValue
+        )
+
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.appleGated, defaults: defaults)
+        #expect(
+            TurboDirectPathDebugOverride.transmitStartupPolicy(
+                arguments: [],
+                environment: [:],
+                defaults: defaults
+            ) == .appleGated
+        )
+
         TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground, defaults: defaults)
         #expect(
             TurboDirectPathDebugOverride.transmitStartupPolicy(
@@ -8216,6 +8242,96 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func appleGatedSystemTransmitClosesPrewarmedDirectMediaBeforeAppleAudioActivation() {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.appleGated)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+
+        viewModel.mediaRuntime.contactID = contactID
+        viewModel.mediaRuntime.connectionState = .connected
+        viewModel.mediaRuntime.session = StubRelayMediaSession()
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-123",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        if let direct = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        ) {
+            viewModel.applyDirectQuicUpgradeTransition(direct, for: contactID)
+        }
+
+        #expect(viewModel.shouldUseDirectQuicTransport(for: contactID))
+        #expect(viewModel.shouldBridgePrewarmedDirectMediaDuringSystemTransmit(for: contactID))
+        #expect(viewModel.shouldClosePrewarmedMediaBeforeSystemTransmit(for: contactID))
+    }
+
+    @MainActor
+    @Test func speculativeSystemTransmitPreservesPrewarmedDirectMediaBeforeAppleAudioActivation() {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+
+        viewModel.mediaRuntime.contactID = contactID
+        viewModel.mediaRuntime.connectionState = .connected
+        viewModel.mediaRuntime.session = StubRelayMediaSession()
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-123",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        if let direct = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        ) {
+            viewModel.applyDirectQuicUpgradeTransition(direct, for: contactID)
+        }
+
+        #expect(viewModel.shouldUseDirectQuicTransport(for: contactID))
+        #expect(viewModel.shouldBridgePrewarmedDirectMediaDuringSystemTransmit(for: contactID))
+        #expect(!viewModel.shouldClosePrewarmedMediaBeforeSystemTransmit(for: contactID))
+    }
+
+    @MainActor
     @Test func prewarmedDirectQuicSystemTransmitBridgeStartsCaptureAfterPTTFlagIsActive() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -8299,7 +8415,123 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func prewarmedDirectQuicSystemTransmitBridgeStartsCaptureBeforeBackendLease() async {
+    @Test func appleGatedPrewarmedDirectQuicSystemTransmitDefersCaptureBeforeAppleAudioActivation() async {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.appleGated)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let mediaSession = RecordingMediaSession()
+        let request = TransmitRequestContext(
+            contactID: contactID,
+            contactHandle: "@blake",
+            backendChannelID: "channel-123",
+            remoteUserID: "peer-user",
+            channelUUID: channelUUID,
+            usesLocalHTTPBackend: false,
+            backendSupportsWebSocket: true
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applicationStateOverride = .active
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "self-user", mode: "cloud")
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        viewModel.mediaRuntime.connectionState = .connected
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-123",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        if let direct = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        ) {
+            viewModel.applyDirectQuicUpgradeTransition(direct, for: contactID)
+        }
+        viewModel.transmitCoordinator.effectHandler = nil
+        viewModel.startTransmitStartupTiming(for: request, source: "test")
+        await viewModel.transmitCoordinator.handle(.pressRequested(request))
+        viewModel.transmitRuntime.markPressBegan()
+
+        #expect(viewModel.transmitCoordinator.state.activeTarget == nil)
+
+        let didStartBridge = await viewModel.startPrewarmedDirectSystemTransmitBridgeIfPossible(
+            request: request,
+            trigger: "test-pre-backend"
+        )
+        let didStartDuplicateBridge = await viewModel.startPrewarmedDirectSystemTransmitBridgeIfPossible(
+            request: request,
+            trigger: "test-pre-backend-duplicate"
+        )
+
+        #expect(!didStartBridge)
+        #expect(!didStartDuplicateBridge)
+        #expect(mediaSession.startSendingAudioCallCount == 0)
+        #expect(mediaSession.closedDeactivateAudioSessionFlags.isEmpty)
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Deferring warm Direct QUIC capture until Apple audio activation"
+            )
+        )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "early-audio-capture-deferred-until-system-activation"
+            ) != nil
+        )
+    }
+
+    @MainActor
+    @Test func speculativePrewarmedDirectQuicSystemTransmitBridgeStartsCaptureBeforeBackendLease() async {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -8376,7 +8608,130 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func speculativeWarmDirectQuicLeaseBypassProjectsTalkingBeforeAppleSystemTransmit() async {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let mediaSession = RecordingMediaSession()
+        let request = TransmitRequestContext(
+            contactID: contactID,
+            contactHandle: "@blake",
+            backendChannelID: "channel-123",
+            remoteUserID: "peer-user",
+            channelUUID: channelUUID,
+            usesLocalHTTPBackend: false,
+            backendSupportsWebSocket: true
+        )
+
+        viewModel.applicationStateOverride = .active
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        viewModel.mediaRuntime.connectionState = .connected
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-123",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        if let direct = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        ) {
+            viewModel.applyDirectQuicUpgradeTransition(direct, for: contactID)
+        }
+        viewModel.transmitCoordinator.effectHandler = nil
+        viewModel.startTransmitStartupTiming(for: request, source: "test")
+        await viewModel.transmitCoordinator.handle(.pressRequested(request))
+        viewModel.transmitRuntime.markPressBegan()
+
+        let didStartBridge = await viewModel.startPrewarmedDirectSystemTransmitBridgeIfPossible(
+            request: request,
+            trigger: "test-pre-backend"
+        )
+        viewModel.recordTransmitStartupTiming(
+            stage: "backend-lease-bypassed-direct-quic",
+            contactID: contactID,
+            channelUUID: channelUUID,
+            channelID: "channel-123",
+            metadata: ["targetDeviceId": "peer-device"]
+        )
+        let target = TransmitTarget(
+            contactID: contactID,
+            userID: "peer-user",
+            deviceID: "peer-device",
+            channelID: "channel-123"
+        )
+        viewModel.directQuicBackendLeaseBypassedContactIDs.insert(contactID)
+        viewModel.transmitRuntime.syncActiveTarget(target)
+        await viewModel.transmitCoordinator.handle(.beginSucceeded(target, request))
+        viewModel.syncTransmitState()
+
+        #expect(didStartBridge)
+        #expect(viewModel.isPTTAudioSessionActive == false)
+        #expect(viewModel.pttCoordinator.state.isTransmitting == false)
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "early-audio-capture-start-completed"
+            ) != nil
+        )
+        #expect(viewModel.localTransmitProjection(for: contactID) == .transmitting)
+        #expect(viewModel.selectedPeerState(for: contactID).statusMessage == "Talking to Blake")
+    }
+
+    @MainActor
     @Test func systemAudioActivationRefreshesDirectQuicCaptureAfterPreactivationBridge() async {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -8462,6 +8817,23 @@ struct TurboTests {
 
     @MainActor
     @Test func systemAudioActivationRefreshAbortPreventsCaptureStartAfterRelease() async {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -8550,6 +8922,23 @@ struct TurboTests {
 
     @MainActor
     @Test func systemAudioActivationRefreshAbortHandlesStartReturningAfterRelease() async {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -8643,6 +9032,23 @@ struct TurboTests {
 
     @MainActor
     @Test func directQuicBridgeShowsTalkingOnlyAfterBackendLeaseBeforeAppleAudioActivation() async {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -8721,7 +9127,7 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func appleGatedWarmDirectQuicBypassesBackendLeaseAndDefersCaptureUntilAppleAudioActivation() async throws {
+    @Test func appleGatedWarmDirectQuicDefersCaptureUntilAppleAudioActivation() async throws {
         let previousPolicy = UserDefaults.standard.string(
             forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
         )
@@ -8799,9 +9205,25 @@ struct TurboTests {
         #expect(viewModel.transmitCoordinator.state.activeTarget?.deviceID == "peer-device")
         #expect(viewModel.directQuicBackendLeaseBypassedContactIDs.contains(contactID))
         #expect(mediaSession.startSendingAudioCallCount == 0)
+        #expect(mediaSession.closedDeactivateAudioSessionFlags == [false])
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "prewarmed-media-closed"
+            ) != nil
+        )
         #expect(
             viewModel.diagnosticsTranscript.contains(
                 "Bypassing backend transmit lease for warm Direct QUIC"
+            )
+        )
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Closing app-managed media session before system transmit handoff"
+            )
+        )
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Preserving direct QUIC media path during media close"
             )
         )
         #expect(
@@ -8817,7 +9239,7 @@ struct TurboTests {
         #expect(
             viewModel.transmitStartupTiming.elapsedMilliseconds(
                 for: "early-audio-capture-deferred-until-system-activation"
-            ) != nil
+            ) == nil
         )
         #expect(
             viewModel.transmitStartupTiming.elapsedMilliseconds(
@@ -8833,7 +9255,7 @@ struct TurboTests {
         viewModel.handleDidActivateAudioSession(.sharedInstance())
         try await Task.sleep(nanoseconds: 150_000_000)
 
-        #expect(mediaSession.startSendingAudioCallCount == 1)
+        #expect(mediaSession.startSendingAudioCallCount == 0)
         #expect(
             viewModel.transmitStartupTiming.elapsedMilliseconds(
                 for: "early-audio-capture-start-completed"
@@ -8844,11 +9266,262 @@ struct TurboTests {
                 for: "audio-capture-start-completed"
             ) != nil
         )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "audio-capture-refreshed-after-system-activation"
+            ) == nil
+        )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "transmit-start-signal-sent"
+            ) == nil
+        )
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Skipped transmit start signal for Direct QUIC lease bypass because WebSocket is not connected"
+            )
+        )
         #expect(viewModel.localTransmitProjection(for: contactID) == .transmitting)
     }
 
     @MainActor
+    @Test func speculativeWarmDirectQuicRequestsAppleHandoffWithoutGatingAudioCapture() async throws {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let pttClient = RecordingPTTSystemClient()
+        let viewModel = PTTViewModel(pttSystemClient: pttClient)
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let mediaSession = RecordingMediaSession()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applicationStateOverride = .active
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "self-user", mode: "cloud")
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.syncPTTState()
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(status: .ready, canTransmit: true)
+            )
+        )
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        viewModel.mediaRuntime.connectionState = .connected
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-123",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        if let direct = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        ) {
+            viewModel.applyDirectQuicUpgradeTransition(direct, for: contactID)
+        }
+
+        viewModel.beginTransmit()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(pttClient.beginTransmitRequests == [channelUUID])
+        #expect(viewModel.directQuicBackendLeaseBypassedContactIDs.contains(contactID))
+        #expect(mediaSession.startSendingAudioCallCount == 1)
+        #expect(mediaSession.closedDeactivateAudioSessionFlags.isEmpty)
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "system-handoff-requested"
+            ) != nil
+        )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "early-audio-capture-start-completed"
+            ) != nil
+        )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "backend-lease-bypassed-direct-quic"
+            ) != nil
+        )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "system-handoff-skipped-warm-direct"
+            ) == nil
+        )
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Starting foreground warm Direct QUIC audio after system handoff request"
+            )
+        )
+        #expect(viewModel.localTransmitProjection(for: contactID) == .transmitting)
+        #expect(viewModel.selectedPeerState(for: contactID).statusMessage == "Talking to Blake")
+    }
+
+    @MainActor
+    @Test func appleGatedWarmDirectQuicAbortHandlesAudioStartReturningAfterRelease() async throws {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.appleGated)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let pttClient = RecordingPTTSystemClient()
+        let viewModel = PTTViewModel(pttSystemClient: pttClient)
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let mediaSession = RecordingMediaSession()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applicationStateOverride = .active
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "self-user", mode: "cloud")
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.syncPTTState()
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(status: .ready, canTransmit: true)
+            )
+        )
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        viewModel.mediaRuntime.connectionState = .connected
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-123",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        if let direct = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        ) {
+            viewModel.applyDirectQuicUpgradeTransition(direct, for: contactID)
+        }
+        mediaSession.startSendingAudioDelayNanoseconds = 100_000_000
+
+        viewModel.beginTransmit()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        viewModel.handleDidBeginTransmitting(channelUUID, source: "test")
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        viewModel.endTransmit()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        viewModel.handleDidActivateAudioSession(.sharedInstance())
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(pttClient.beginTransmitRequests == [channelUUID])
+        #expect(pttClient.stopTransmitRequests.contains(channelUUID))
+        #expect(mediaSession.closedDeactivateAudioSessionFlags == [false])
+        #expect(mediaSession.startSendingAudioCallCount == 0)
+        #expect(mediaSession.abortSendingAudioCallCount == 0)
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "prewarmed-media-closed"
+            ) != nil
+        )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "early-audio-capture-deferred-until-system-activation"
+            ) == nil
+        )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "early-audio-capture-start-completed"
+            ) == nil
+        )
+        #expect(
+            !viewModel.diagnostics.invariantViolations.contains {
+                $0.invariantID == "transmit.stale_startup_side_effect"
+            }
+        )
+        #expect(viewModel.isTransmitting == false)
+    }
+
+    @MainActor
     @Test func pendingPTTHandoffReassertsPrewarmedDirectCaptureBeforeAudioActivation() async {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -11358,11 +12031,77 @@ struct TurboTests {
 
         transition = ReceiveExecutionReducer.reduce(
             state: transition.state,
-            event: .remoteTransmitStopped(contactID: contactID)
+            event: .remoteTransmitStopped(contactID: contactID, preservePlaybackDrain: false)
         )
 
         #expect(transition.state.remoteTransmittingContactIDs.isEmpty)
         #expect(transition.effects == [.cancelRemoteSilenceTimeout(contactID: contactID)])
+    }
+
+    @Test func receiveExecutionReducerPreservesPlaybackDrainAfterTransmitStop() {
+        let contactID = UUID()
+
+        var transition = ReceiveExecutionReducer.reduce(
+            state: ReceiveExecutionSessionState(),
+            event: .remoteActivityDetected(contactID: contactID, source: .audioChunk)
+        )
+        transition = ReceiveExecutionReducer.reduce(
+            state: transition.state,
+            event: .remoteTransmitStopped(contactID: contactID, preservePlaybackDrain: true)
+        )
+
+        #expect(transition.state.remoteTransmittingContactIDs.isEmpty)
+        #expect(
+            transition.state.remoteActivityByContactID[contactID]
+                == RemoteReceiveActivityState(
+                    lastSource: .audioChunk,
+                    hasReceivedAudioChunk: true,
+                    activityGeneration: 2,
+                    isPeerTransmitting: false
+                )
+        )
+        #expect(
+            transition.effects
+                == [
+                    .scheduleRemoteSilenceTimeout(
+                        contactID: contactID,
+                        phase: .drainingAudio,
+                        generation: 2
+                    )
+                ]
+        )
+
+        transition = ReceiveExecutionReducer.reduce(
+            state: transition.state,
+            event: .remoteActivityDetected(contactID: contactID, source: .audioChunk)
+        )
+
+        #expect(transition.state.remoteTransmittingContactIDs.isEmpty)
+        #expect(
+            transition.state.remoteActivityByContactID[contactID]
+                == RemoteReceiveActivityState(
+                    lastSource: .audioChunk,
+                    hasReceivedAudioChunk: true,
+                    activityGeneration: 3,
+                    isPeerTransmitting: false
+                )
+        )
+
+        transition = ReceiveExecutionReducer.reduce(
+            state: transition.state,
+            event: .remoteActivityDetected(contactID: contactID, source: .transmitStartSignal)
+        )
+
+        #expect(transition.state.remoteTransmittingContactIDs == [contactID])
+        #expect(
+            transition.state.remoteActivityByContactID[contactID]
+                == RemoteReceiveActivityState(
+                    lastSource: .transmitStartSignal,
+                    hasReceivedAudioChunk: false,
+                    activityGeneration: 4,
+                    isPeerTransmitting: true
+                )
+        )
     }
 
     @Test func receiveExecutionReducerUsesExtendedInitialTimeoutUntilFirstAudioChunkArrives() {
@@ -12065,6 +12804,23 @@ struct TurboTests {
 
     @MainActor
     @Test func foregroundJoinedReceivePrefersAppManagedPlaybackOverSystemActivation() {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -12110,6 +12866,62 @@ struct TurboTests {
             viewModel.shouldUseSystemActivatedReceivePlayback(
                 for: contactID,
                 applicationState: .background
+            )
+        )
+    }
+
+    @MainActor
+    @Test func appleGatedForegroundJoinedReceiveUsesSystemActivatedPlayback() {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.appleGated)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.remoteTransmittingContactIDs.insert(contactID)
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.isPTTAudioSessionActive = true
+
+        #expect(
+            viewModel.prefersForegroundAppManagedReceivePlayback(
+                for: contactID,
+                applicationState: .active
+            ) == false
+        )
+        #expect(
+            viewModel.shouldUseSystemActivatedReceivePlayback(
+                for: contactID,
+                applicationState: .active
             )
         )
     }
@@ -12569,6 +13381,80 @@ struct TurboTests {
         #expect(messages.contains("Delivered outbound audio transport payload"))
     }
 
+    @Test func audioChunkSenderDropsOldestQueuedPayloadsUnderBackpressure() async {
+        actor Gate {
+            var isOpen = false
+            var continuations: [CheckedContinuation<Void, Never>] = []
+
+            func wait() async {
+                guard !isOpen else { return }
+                await withCheckedContinuation { continuation in
+                    continuations.append(continuation)
+                }
+            }
+
+            func open() {
+                isOpen = true
+                let waiting = continuations
+                continuations.removeAll(keepingCapacity: false)
+                for continuation in waiting {
+                    continuation.resume()
+                }
+            }
+        }
+
+        actor Recorder {
+            var payloads: [String] = []
+            var events: [String] = []
+
+            func appendPayload(_ payload: String) {
+                payloads.append(payload)
+            }
+
+            func appendEvent(_ event: String) {
+                events.append(event)
+            }
+        }
+
+        let gate = Gate()
+        let recorder = Recorder()
+        let sender = AudioChunkSender(
+            sendChunk: { payload in
+                await gate.wait()
+                await recorder.appendPayload(payload)
+            },
+            reportFailure: { _ in },
+            reportEvent: { message, _ in
+                await recorder.appendEvent(message)
+            },
+            maximumPendingPayloads: 3,
+            maximumPayloadsPerMessage: 1
+        )
+
+        let firstSend = Task {
+            await sender.enqueue("chunk-0")
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        let queuedSends = (1...6).map { index in
+            Task {
+                await sender.enqueue("chunk-\(index)")
+            }
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        await gate.open()
+        await firstSend.value
+        for queuedSend in queuedSends {
+            await queuedSend.value
+        }
+        await sender.finishDraining(pollNanoseconds: 1_000_000)
+
+        let deliveredPayloads = await recorder.payloads.flatMap(AudioChunkPayloadCodec.decode)
+        #expect(deliveredPayloads == ["chunk-0", "chunk-4", "chunk-5", "chunk-6"])
+        #expect(await recorder.events.contains("Dropped stale outbound audio transport payload"))
+    }
+
     @Test func audioChunkSenderWaitsBrieflyForLateTransportHandler() async {
         actor Recorder {
             var payloads: [String] = []
@@ -12947,6 +13833,23 @@ struct TurboTests {
 
     @MainActor
     @Test func foregroundIncomingAudioChunkUsesAppManagedPlaybackWithoutWaitingForPTTActivation() async throws {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -12998,6 +13901,101 @@ struct TurboTests {
         #expect(
             viewModel.diagnosticsTranscript.contains(
                 "Using app-managed wake playback for foreground audio"
+            )
+        )
+    }
+
+    @MainActor
+    @Test func appleGatedForegroundIncomingAudioChunkBuffersUntilPTTActivation() async throws {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.appleGated)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "test"
+            )
+        )
+        viewModel.syncPTTState()
+        viewModel.isPTTAudioSessionActive = false
+        let mediaSession = RecordingMediaSession()
+        mediaSession.delegate = viewModel
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+
+        viewModel.handleIncomingSignal(
+            TurboSignalEnvelope(
+                type: .audioChunk,
+                channelId: "channel-123",
+                fromUserId: "peer-user",
+                fromDeviceId: "peer-device",
+                toUserId: "self-user",
+                toDeviceId: "self-device",
+                payload: "AQI="
+            )
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(viewModel.pttWakeRuntime.pendingIncomingPush?.activationState == .signalBuffered)
+        #expect(viewModel.pttWakeRuntime.pendingIncomingPush?.bufferedAudioChunks == ["AQI="])
+        #expect(mediaSession.receivedRemoteAudioChunks.isEmpty)
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Buffered wake audio chunk until PTT activation"
+            )
+        )
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Using app-managed wake playback for foreground audio"
+            ) == false
+        )
+
+        await viewModel.handleActivatedAudioSession(.sharedInstance())
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(viewModel.pttWakeRuntime.pendingIncomingPush?.activationState == .systemActivated)
+        #expect(viewModel.pttWakeRuntime.pendingIncomingPush?.bufferedAudioChunks == [])
+        #expect(mediaSession.closedDeactivateAudioSessionFlags == [false])
+        #expect(viewModel.mediaSessionContactID == contactID)
+        #expect(viewModel.mediaConnectionState == .connected)
+        #expect(
+            viewModel.receiveExecutionCoordinator.state
+                .remoteActivityByContactID[contactID]?.hasReceivedAudioChunk == true
+        )
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Flushing buffered wake audio after PTT activation"
             )
         )
     }
@@ -13081,6 +14079,23 @@ struct TurboTests {
 
     @MainActor
     @Test func latePTTAudioActivationPreservesForegroundAppManagedWakePlayback() async throws {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -13132,12 +14147,18 @@ struct TurboTests {
         await viewModel.handleActivatedAudioSession(.sharedInstance())
 
         #expect(mediaSession.closedDeactivateAudioSessionFlags.isEmpty)
+        #expect(mediaSession.audioRouteDidChangeCallCount == 1)
         #expect(viewModel.mediaSessionContactID == contactID)
         #expect(viewModel.mediaConnectionState == .connected)
         #expect(viewModel.pttWakeRuntime.pendingIncomingPush?.activationState == .appManagedFallback)
         #expect(
             viewModel.diagnosticsTranscript.contains(
                 "Preserved app-managed wake playback after late PTT audio activation"
+            )
+        )
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Refreshed app-managed wake playback after late PTT audio activation"
             )
         )
     }
@@ -13511,6 +14532,28 @@ struct TurboTests {
                 "Deferring receive teardown until remote audio drain after transmit stop"
             )
         )
+        #expect(
+            !viewModel.diagnosticsTranscript.contains(
+                "Closed receive media session after transmit stop"
+            )
+        )
+
+        viewModel.handleIncomingSignal(
+            TurboSignalEnvelope(
+                type: .transmitStop,
+                channelId: "channel-123",
+                fromUserId: "peer-user",
+                fromDeviceId: "peer-device",
+                toUserId: "self-user",
+                toDeviceId: "self-device",
+                payload: "duplicate"
+            )
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(!viewModel.remoteTransmittingContactIDs.contains(contactID))
+        #expect(viewModel.mediaSessionContactID == contactID)
+        #expect(viewModel.mediaConnectionState == .connected)
         #expect(
             !viewModel.diagnosticsTranscript.contains(
                 "Closed receive media session after transmit stop"
@@ -19947,6 +20990,69 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func websocketReconnectReassertsBackendJoinForActiveLocalSession() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: channelUUID,
+            backendChannelId: "channel",
+            remoteUserId: "peer-user"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.syncPTTState()
+
+        var capturedEffects: [BackendCommandEffect] = []
+        viewModel.backendCommandCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        viewModel.handleWebSocketStateChange(.connected)
+
+        await Task.yield()
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        #expect(capturedEffects.contains(
+            .join(
+                BackendJoinRequest(
+                    contactID: contactID,
+                    handle: "@blake",
+                    intent: .joinReadyPeer,
+                    relationship: .none,
+                    existingRemoteUserID: "peer-user",
+                    existingBackendChannelID: "channel",
+                    incomingInvite: nil,
+                    outgoingInvite: nil,
+                    requestCooldownRemaining: nil,
+                    usesLocalHTTPBackend: false
+                )
+            )
+        ))
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Reasserting backend join after WebSocket reconnect"
+            )
+        )
+    }
+
+    @MainActor
     @Test func websocketIdleClearsCachedReceiverAudioReadinessPublications() {
         let viewModel = PTTViewModel()
         let client = TurboBackendClient(config: makeUnreachableBackendConfig())
@@ -22405,6 +23511,44 @@ struct TurboTests {
         #expect(exported.contains("[selected.ready_while_backend_cannot_transmit]"))
         #expect(store.invariantViolations.contains { $0.invariantID == "selected.ready_without_join" })
         #expect(store.latestError?.message == "selectedPeerPhase=ready while backendCanTransmit=false")
+    }
+
+    @MainActor
+    @Test func diagnosticsExportIncludesStaleMembershipPeerReadyInvariant() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        store.captureState(
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "peerReady",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "false",
+                "isTransmitting": "false",
+                "systemSession": "none",
+                "backendChannelStatus": "waiting-for-peer",
+                "backendReadiness": "inactive",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "false",
+                "selectedPeerStatus": "Blake is ready to connect"
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=peerReady")
+
+        #expect(exported.contains("[selected.stale_membership_peer_ready_without_session]"))
+        #expect(
+            store.invariantViolations.contains {
+                $0.invariantID == "selected.stale_membership_peer_ready_without_session"
+            }
+        )
+        #expect(
+            store.latestError?.message
+                == "backend retained durable channel membership while selectedPeerPhase is peerReady without a local session"
+        )
     }
 
     @MainActor

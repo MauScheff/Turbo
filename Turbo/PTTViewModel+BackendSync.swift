@@ -523,6 +523,7 @@ extension PTTViewModel {
         for contactID: UUID,
         applicationState: UIApplication.State
     ) -> Bool {
+        guard directQuicTransmitStartupPolicy == .speculativeForeground else { return false }
         guard applicationState == .active else { return false }
         guard isJoined, activeChannelId == contactID else { return false }
         return systemSessionMatches(contactID)
@@ -646,11 +647,24 @@ extension PTTViewModel {
     }
 
     func clearRemoteAudioActivity(for contactID: UUID) {
-        receiveExecutionCoordinator.send(.remoteTransmitStopped(contactID: contactID))
+        receiveExecutionCoordinator.send(
+            .remoteTransmitStopped(contactID: contactID, preservePlaybackDrain: false)
+        )
         mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
         if selectedContactId == contactID {
             updateStatusForSelectedContact()
             captureDiagnosticsState("remote-audio:cleared")
+        }
+    }
+
+    func markRemoteTransmitStoppedPreservingPlaybackDrain(for contactID: UUID) {
+        receiveExecutionCoordinator.send(
+            .remoteTransmitStopped(contactID: contactID, preservePlaybackDrain: true)
+        )
+        mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
+        if selectedContactId == contactID {
+            updateStatusForSelectedContact()
+            captureDiagnosticsState("remote-audio:draining")
         }
     }
 
@@ -1587,7 +1601,7 @@ extension PTTViewModel {
                             metadata: ["contactId": contactID.uuidString]
                         )
                         pttWakeRuntime.clear(for: contactID)
-                        clearRemoteAudioActivity(for: contactID)
+                        markRemoteTransmitStoppedPreservingPlaybackDrain(for: contactID)
                     } else {
                         pttWakeRuntime.clear(for: contactID)
                     }

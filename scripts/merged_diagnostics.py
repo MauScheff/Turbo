@@ -463,6 +463,19 @@ def analyze_report(report: Report) -> list[InvariantViolation]:
                 )
             )
 
+    if snapshot_has_stale_peer_ready_membership(snapshot, phase):
+        violations.append(
+            build_violation(
+                subject=report.handle,
+                invariant_id="selected.stale_membership_peer_ready_without_session",
+                scope="backend",
+                message=(
+                    "backend retained durable channel membership while selectedPeerPhase=peerReady "
+                    "without a local session"
+                ),
+            )
+        )
+
     if backend_peer_joined and not backend_self_joined:
         if phase in {"idle", "requested"}:
             violations.append(
@@ -581,6 +594,19 @@ def analyze_report(report: Report) -> list[InvariantViolation]:
     return violations
 
 
+def snapshot_has_stale_peer_ready_membership(snapshot: dict[str, str], phase: str) -> bool:
+    return (
+        phase == "peerReady"
+        and snapshot.get("selectedPeerRelationship", "none") == "none"
+        and snapshot.get("pendingAction", "none") == "none"
+        and snapshot_bool(snapshot, "isJoined") is False
+        and snapshot.get("systemSession", "none") == "none"
+        and snapshot.get("backendReadiness", "none") == "inactive"
+        and snapshot_bool(snapshot, "backendSelfJoined") is True
+        and snapshot_bool(snapshot, "backendPeerJoined") is True
+    )
+
+
 def dedupe_violations(violations: Iterable[InvariantViolation]) -> list[InvariantViolation]:
     deduped: list[InvariantViolation] = []
     seen: set[tuple[str, str, str]] = set()
@@ -616,6 +642,21 @@ def analyze_reports(reports: list[Report]) -> list[InvariantViolation]:
             and snapshot_bool(right.snapshot, "backendPeerJoined")
             and snapshot_bool(right.snapshot, "backendPeerDeviceConnected")
         )
+
+        if snapshot_has_stale_peer_ready_membership(
+            left.snapshot, left_phase
+        ) and snapshot_has_stale_peer_ready_membership(right.snapshot, right_phase):
+            violations.append(
+                build_violation(
+                    subject="pair",
+                    invariant_id="pair.symmetric_peer_ready_without_session",
+                    scope="pair",
+                    message=(
+                        "both devices project peerReady from durable backend membership while neither has a local session "
+                        f"left={left.handle}:{left_phase} right={right.handle}:{right_phase}"
+                    ),
+                )
+            )
 
         if left_backend_ready and right_backend_ready:
             not_ready_phases = {"idle", "requested", "incomingRequest", "peerReady"}

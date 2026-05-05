@@ -2,9 +2,12 @@ import SwiftUI
 import UIKit
 
 private struct HatTextureTuning: Equatable {
-    var zoom: CGFloat = 1.85
-    var opacity: Double = 0.9
-    var lineWidth: CGFloat = 1.0
+    var zoom: CGFloat = 1.81
+    var opacity: Double = 0.98
+    var lineWidth: CGFloat = 0.55
+    var backgroundHue: Double = 0.24
+    var backgroundSaturation: Double = 0.12
+    var backgroundBrightness: Double = 0.003
 }
 
 struct TurboCallPrototypeView: View {
@@ -13,7 +16,17 @@ struct TurboCallPrototypeView: View {
     let onClose: () -> Void
 
     @State private var tuning = HatTextureTuning()
-    @State private var showsTextureControls = true
+    @State private var showsTextureControls = false
+
+    @MainActor
+    static func prewarmDefaultTexture() {
+        let windowSize = UIApplication.shared.connectedScenes.compactMap { scene -> CGSize? in
+            guard let windowScene = scene as? UIWindowScene else { return nil }
+            return windowScene.windows.first(where: \.isKeyWindow)?.bounds.size
+                ?? windowScene.windows.first?.bounds.size
+        }.first
+        HatTilingBackground.prewarmTexture(size: windowSize ?? CGSize(width: 393, height: 852), tuning: HatTextureTuning())
+    }
 
     var body: some View {
         ZStack {
@@ -43,8 +56,12 @@ struct TurboCallPrototypeView: View {
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.92))
+                    .foregroundStyle(.white)
                     .frame(width: 38, height: 38)
+                    .background(
+                        Circle()
+                            .fill(Color(red: 0.11, green: 0.11, blue: 0.13))
+                    )
             }
             .buttonStyle(TurboCallControlButtonStyle())
             .accessibilityLabel("Close call prototype")
@@ -56,7 +73,10 @@ struct TurboCallPrototypeView: View {
             Circle()
                 .fill(
                     LinearGradient(
-                        colors: [Color.white.opacity(0.14), Color.white.opacity(0.04)],
+                        colors: [
+                            Color(red: 0.16, green: 0.165, blue: 0.19),
+                            Color(red: 0.08, green: 0.085, blue: 0.105)
+                        ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
@@ -64,7 +84,7 @@ struct TurboCallPrototypeView: View {
                 .frame(width: 82, height: 82)
                 .overlay(
                     Circle()
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        .stroke(Color(red: 0.27, green: 0.275, blue: 0.31), lineWidth: 1)
                 )
                 .overlay(
                     Text(initials(for: contactName))
@@ -156,6 +176,24 @@ struct TurboCallPrototypeView: View {
                 value: $tuning.lineWidth,
                 range: 0.55...1.8
             )
+            TurboTuningSliderRow(
+                title: "Hue",
+                valueText: String(format: "%.2f", tuning.backgroundHue),
+                value: $tuning.backgroundHue,
+                range: 0.0...1.0
+            )
+            TurboTuningSliderRow(
+                title: "Saturation",
+                valueText: String(format: "%.2f", tuning.backgroundSaturation),
+                value: $tuning.backgroundSaturation,
+                range: 0.0...0.65
+            )
+            TurboTuningSliderRow(
+                title: "Brightness",
+                valueText: String(format: "%.3f", tuning.backgroundBrightness),
+                value: $tuning.backgroundBrightness,
+                range: 0.0...0.08
+            )
         }
         .padding(16)
         .background(Color.white.opacity(0.07))
@@ -207,7 +245,7 @@ private struct TurboCallActionButton: View {
                 Circle()
                     .fill(
                         RadialGradient(
-                            colors: [tint.opacity(0.34), highlight.opacity(0.98)],
+                            colors: [tint, highlight],
                             center: .topLeading,
                             startRadius: 10,
                             endRadius: 76
@@ -216,7 +254,7 @@ private struct TurboCallActionButton: View {
                     .frame(width: 88, height: 88)
                     .overlay(
                         Circle()
-                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                            .stroke(Color.white.opacity(0.16), lineWidth: 1)
                     )
                     .overlay(
                         Image(systemName: symbolName)
@@ -298,6 +336,7 @@ private struct HatTilingBackground: View {
     private static let referenceBounds = HatTilingGenerator.boundingBox(
         for: HatTilingGenerator.polygons(level: 1, tileIndex: 0)
     )
+    @MainActor private static var renderedTextureCache: [String: CGImage] = [:]
 
     var body: some View {
         GeometryReader { proxy in
@@ -315,18 +354,55 @@ private struct HatTilingBackground: View {
                         .frame(width: size.width, height: size.height)
                 }
 
-                Color.black
+                Color(
+                    hue: tuning.backgroundHue,
+                    saturation: tuning.backgroundSaturation,
+                    brightness: tuning.backgroundBrightness
+                )
                     .opacity(tuning.opacity)
                     .ignoresSafeArea()
             }
             .task(id: request) {
                 guard size.width > 0, size.height > 0 else { return }
-                renderedTexture = renderTexture(size: size, tuning: tuning)
+                renderedTexture = Self.cachedTexture(size: size, tuning: tuning)
             }
         }
     }
 
-    private func renderTexture(size: CGSize, tuning: HatTextureTuning) -> CGImage? {
+    @MainActor
+    static func prewarmTexture(size: CGSize, tuning: HatTextureTuning) {
+        guard size.width > 0, size.height > 0 else { return }
+        _ = cachedTexture(size: size, tuning: tuning)
+    }
+
+    @MainActor
+    private static func cachedTexture(size: CGSize, tuning: HatTextureTuning) -> CGImage? {
+        let cacheKey = textureCacheKey(size: size, tuning: tuning)
+        if let cachedTexture = renderedTextureCache[cacheKey] {
+            return cachedTexture
+        }
+
+        guard let renderedTexture = renderTexture(size: size, tuning: tuning) else {
+            return nil
+        }
+
+        renderedTextureCache[cacheKey] = renderedTexture
+        return renderedTexture
+    }
+
+    private static func textureCacheKey(size: CGSize, tuning: HatTextureTuning) -> String {
+        [
+            "\(Int(size.width.rounded()))x\(Int(size.height.rounded()))",
+            String(format: "z%.3f", tuning.zoom),
+            String(format: "o%.3f", tuning.opacity),
+            String(format: "l%.3f", tuning.lineWidth),
+            String(format: "h%.3f", tuning.backgroundHue),
+            String(format: "s%.3f", tuning.backgroundSaturation),
+            String(format: "b%.3f", tuning.backgroundBrightness)
+        ].joined(separator: "|")
+    }
+
+    private static func renderTexture(size: CGSize, tuning: HatTextureTuning) -> CGImage? {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = false
@@ -336,12 +412,12 @@ private struct HatTilingBackground: View {
             let cgContext = rendererContext.cgContext
             cgContext.setAllowsAntialiasing(true)
             cgContext.setShouldAntialias(true)
-            drawField(context: cgContext, size: size, tuning: tuning)
+            Self.drawField(context: cgContext, size: size, tuning: tuning)
         }
         return image.cgImage
     }
 
-    private func drawField(
+    private static func drawField(
         context: CGContext,
         size: CGSize,
         tuning: HatTextureTuning
@@ -355,7 +431,7 @@ private struct HatTilingBackground: View {
             height: size.height + 160
         )
 
-        drawTexture(
+        Self.drawTexture(
             context: context,
             polygons: Self.fieldRecords,
             sourceCenter: Self.fieldCenter,
@@ -365,18 +441,18 @@ private struct HatTilingBackground: View {
             ),
             scale: scale,
             viewport: viewport,
-            opacity: tuning.opacity
+            lineWidth: tuning.lineWidth
         )
     }
 
-    private func drawTexture(
+    private static func drawTexture(
         context: CGContext,
         polygons: [PolygonRecord],
         sourceCenter: CGPoint,
         destinationCenter: CGPoint,
         scale: CGFloat,
         viewport: CGRect,
-        opacity: Double
+        lineWidth: CGFloat
     ) {
         for polygon in polygons {
             let transformedBounds = CGRect(
@@ -391,7 +467,7 @@ private struct HatTilingBackground: View {
             let path = CGMutablePath()
 
             for (index, point) in polygon.points.enumerated() {
-                let transformed = transform(
+                let transformed = Self.transform(
                     point: point,
                     sourceCenter: sourceCenter,
                     destinationCenter: destinationCenter,
@@ -408,12 +484,12 @@ private struct HatTilingBackground: View {
             path.closeSubpath()
             context.addPath(path)
             context.setStrokeColor(UIColor.black.cgColor)
-            context.setLineWidth(max(0.65, scale * 0.138 * tuning.lineWidth))
+            context.setLineWidth(max(0.65, scale * 0.138 * lineWidth))
             context.strokePath()
         }
     }
 
-    private func transform(
+    private static func transform(
         point: CGPoint,
         sourceCenter: CGPoint,
         destinationCenter: CGPoint,

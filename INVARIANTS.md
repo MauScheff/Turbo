@@ -64,6 +64,7 @@ Every invariant rule should define:
     - `selected.ready_without_join`
     - `selected.backend_ready_ui_not_live`
     - `pair.backend_ready_ui_not_live`
+    - `channel.stale_membership_on_session_connect`
 - `scope`
   - one of:
     - `local`
@@ -328,9 +329,12 @@ Current first-pass IDs in the repo:
 - `selected.ready_while_backend_cannot_transmit`
 - `selected.backend_ready_ui_not_live`
 - `selected.peer_joined_ui_not_connectable`
+- `selected.stale_membership_peer_ready_without_session`
 - `selected.local_join_failure_present`
 - `selected.online_contact_projected_offline`
 - `pair.backend_ready_ui_not_live`
+- `pair.symmetric_peer_ready_without_session`
+- `channel.stale_membership_on_session_connect`
 - `transmit.stale_startup_side_effect`
 
 Add new IDs here when you add new rules so the catalog remains discoverable.
