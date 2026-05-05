@@ -909,6 +909,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                 }
             },
             backendCanTransmit: selectedChannelProjection.map(\.canTransmit),
+            firstTalkStartupProfile: selectedContactId.map {
+                firstTalkStartupProfile(for: $0, startGraceIfNeeded: false).diagnosticsValue
+            },
             pttTokenRegistrationKind: pttSystemPolicyCoordinator.state.tokenRegistrationKind,
             incomingWakeActivationState: selectedContact.flatMap { contact in
                 pttWakeRuntime.incomingWakeActivationState(for: contact.id).map { String(describing: $0) }
@@ -1019,6 +1022,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "remoteWakeCapability": selectedSession.remoteWakeCapability ?? "unavailable",
             "remoteWakeCapabilityKind": selectedSession.remoteWakeCapabilityKind ?? "unavailable",
             "backendCanTransmit": selectedSession.backendCanTransmit.map(String.init(describing:)) ?? "none",
+            "firstTalkStartupProfile": selectedSession.firstTalkStartupProfile ?? "none",
             "directQuicRelayOnlyOverride": String(directQuic.relayOnlyOverride),
             "directQuicAutoUpgradeDisabled": String(directQuic.autoUpgradeDisabled),
             "directQuicBackendAdvertised": String(directQuic.backendAdvertisesUpgrade),

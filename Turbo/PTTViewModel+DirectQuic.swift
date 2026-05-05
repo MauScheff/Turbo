@@ -7,6 +7,7 @@ extension PTTViewModel {
     private var foregroundDirectQuicPathLostRetryBackoffMilliseconds: Int { 1_000 }
     private var foregroundDirectQuicInitialConnectivityRetryBackoffMilliseconds: Int { 1_000 }
     private var foregroundDirectQuicInitialConnectivityRetryLimit: Int { 2 }
+    var directQuicFirstTalkGraceMilliseconds: Int { 5_000 }
 
     func directQuicAttemptRole(
         localDeviceID: String,
@@ -483,6 +484,78 @@ extension PTTViewModel {
 
     func shouldRequestAutomaticDirectQuicProbe(for contactID: UUID) -> Bool {
         automaticDirectQuicProbeBlockReason(for: contactID) == nil
+    }
+
+    func directQuicFirstTalkWarmupBlockReason(for contactID: UUID) -> String? {
+        if isDirectPathRelayOnlyForced {
+            return "relay-only-forced"
+        }
+        if isDirectQuicAutoUpgradeDisabledForDebug {
+            return "auto-upgrade-disabled"
+        }
+        if currentApplicationState() != .active,
+           !hasActiveBackgroundPTTFlowOwningDirectQuic(for: contactID) {
+            return "background-idle"
+        }
+        let existingAttempt = mediaRuntime.directQuicUpgrade.attempt(for: contactID)
+        if existingAttempt == nil,
+           !backendAdvertisesDirectQuicUpgrade {
+            return "backend-capability-disabled"
+        }
+        guard backendServices != nil else {
+            return "backend-unavailable"
+        }
+        guard selectedContactId == contactID else {
+            return "not-selected-contact"
+        }
+        guard let contact = contacts.first(where: { $0.id == contactID }) else {
+            return "contact-missing"
+        }
+        guard contact.backendChannelId != nil,
+              contact.remoteUserId != nil else {
+            return "channel-metadata-missing"
+        }
+        guard directQuicPeerDeviceID(for: contactID) != nil else {
+            return "peer-device-missing"
+        }
+        guard systemSessionMatches(contactID),
+              isJoined,
+              activeChannelId == contactID else {
+            return "local-session-not-aligned"
+        }
+        guard let channel = selectedChannelSnapshot(for: contactID) else {
+            return "channel-snapshot-missing"
+        }
+        guard case .both(let peerDeviceConnected) = channel.membership,
+              peerDeviceConnected else {
+            return "peer-device-not-connected"
+        }
+        guard channel.canTransmit,
+              channel.readinessStatus == .ready else {
+            return "channel-not-ready"
+        }
+        if existingAttempt != nil {
+            return nil
+        }
+        if !shouldAllowDirectQuicDebugBypassForAutomaticProbe() {
+            let localIdentityStatus = DirectQuicIdentityConfiguration.status()
+            guard localIdentityStatus.source == .production,
+                  let localFingerprint = localIdentityStatus.fingerprint,
+                  localFingerprint == directQuicRegisteredFingerprint
+                    || directQuicRegisteredFingerprint == nil else {
+                return "identity-unavailable"
+            }
+            guard backendPeerDirectQuicFingerprint(for: contactID) != nil else {
+                return "peer-identity-missing"
+            }
+        }
+        if let retryBackoff = mediaRuntime.directQuicUpgrade.retryBackoffState(for: contactID) {
+            let isFastConnectivityRetry =
+                retryBackoff.category == .connectivity
+                && retryBackoff.milliseconds <= foregroundDirectQuicInitialConnectivityRetryBackoffMilliseconds
+            return isFastConnectivityRetry ? nil : "retry-backoff"
+        }
+        return nil
     }
 
     func maybeStartAutomaticDirectQuicProbe(
@@ -1053,6 +1126,7 @@ extension PTTViewModel {
         )
         cancelDirectQuicPromotionTimeout()
         cancelDirectQuicAutoProbe()
+        mediaRuntime.clearFirstTalkDirectQuicGrace(for: contactID)
         applyDirectQuicUpgradeTransition(transition, for: contactID)
         if let activeTarget = transmitProjection.activeTarget,
            activeTarget.contactID == contactID {

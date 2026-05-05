@@ -726,6 +726,126 @@ extension PTTViewModel {
         )
     }
 
+    func firstTalkStartupProfile(
+        for contactID: UUID,
+        startGraceIfNeeded: Bool = true
+    ) -> FirstTalkStartupProfile {
+        if shouldUseDirectQuicTransport(for: contactID) {
+            if startGraceIfNeeded {
+                mediaRuntime.clearFirstTalkDirectQuicGrace(for: contactID)
+            }
+            return .directQuicWarm
+        }
+
+        let relayReadiness = firstTalkReadiness(for: contactID)
+        let relayProfile: FirstTalkStartupProfile = relayReadiness.isReady ? .relayWarm : .relayWarming
+
+        guard let contact = contacts.first(where: { $0.id == contactID }),
+              let channelID = contact.backendChannelId else {
+            if startGraceIfNeeded {
+                mediaRuntime.clearFirstTalkDirectQuicGrace(for: contactID)
+            }
+            return relayProfile
+        }
+
+        guard directQuicFirstTalkWarmupBlockReason(for: contactID) == nil else {
+            if startGraceIfNeeded {
+                mediaRuntime.clearFirstTalkDirectQuicGrace(for: contactID)
+            }
+            return relayProfile
+        }
+
+        let existingGrace = mediaRuntime.firstTalkDirectQuicGrace(
+            for: contactID,
+            channelID: channelID
+        )
+        if !startGraceIfNeeded {
+            guard let existingGrace else { return relayProfile }
+            let elapsedMilliseconds = Int(Date().timeIntervalSince(existingGrace.startedAt) * 1_000)
+            return !existingGrace.expired && elapsedMilliseconds < directQuicFirstTalkGraceMilliseconds
+                ? .directQuicWarming
+                : relayProfile
+        }
+        let grace = mediaRuntime.markFirstTalkDirectQuicGraceStartedIfNeeded(
+            for: contactID,
+            channelID: channelID
+        )
+        if existingGrace == nil {
+            diagnostics.record(
+                .media,
+                message: "Started Direct QUIC first-talk grace window",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "graceMs": String(directQuicFirstTalkGraceMilliseconds),
+                ]
+            )
+            kickDirectQuicFirstTalkWarmupProbeIfNeeded(for: contactID)
+        }
+
+        let elapsedMilliseconds = Int(Date().timeIntervalSince(grace.startedAt) * 1_000)
+        guard !grace.expired,
+              elapsedMilliseconds < directQuicFirstTalkGraceMilliseconds else {
+            mediaRuntime.expireFirstTalkDirectQuicGrace(
+                for: contactID,
+                channelID: channelID
+            )
+            return relayProfile
+        }
+
+        scheduleDirectQuicFirstTalkGraceExpirationRefresh(
+            for: contactID,
+            channelID: channelID,
+            remainingMilliseconds: directQuicFirstTalkGraceMilliseconds - elapsedMilliseconds
+        )
+        return .directQuicWarming
+    }
+
+    func kickDirectQuicFirstTalkWarmupProbeIfNeeded(for contactID: UUID) {
+        guard shouldRequestAutomaticDirectQuicProbe(for: contactID) else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.maybeStartAutomaticDirectQuicProbe(
+                for: contactID,
+                reason: "first-talk-grace"
+            )
+        }
+    }
+
+    func scheduleDirectQuicFirstTalkGraceExpirationRefresh(
+        for contactID: UUID,
+        channelID: String,
+        remainingMilliseconds: Int
+    ) {
+        guard !mediaRuntime.hasFirstTalkDirectQuicGraceExpiryTask(for: contactID) else { return }
+        let delayMilliseconds = max(remainingMilliseconds, 0)
+        mediaRuntime.replaceFirstTalkDirectQuicGraceExpiryTask(
+            for: contactID,
+            with: Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delayMilliseconds) * 1_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.mediaRuntime.expireFirstTalkDirectQuicGrace(
+                        for: contactID,
+                        channelID: channelID
+                    )
+                    self.diagnostics.record(
+                        .media,
+                        message: "Direct QUIC first-talk grace expired; allowing relay startup",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "channelId": channelID,
+                            "graceMs": String(self.directQuicFirstTalkGraceMilliseconds),
+                        ]
+                    )
+                    self.updateStatusForSelectedContact()
+                    self.captureDiagnosticsState("direct-quic:first-talk-grace-expired")
+                }
+            }
+        )
+    }
+
     func prewarmForegroundTalkPathIfNeeded(
         for contactID: UUID,
         reason: String,

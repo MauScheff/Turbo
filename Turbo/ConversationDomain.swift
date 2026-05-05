@@ -619,6 +619,38 @@ enum LocalMediaWarmupState: Equatable {
     case failed
 }
 
+enum FirstTalkStartupProfile: Equatable {
+    case directQuicWarm
+    case directQuicWarming
+    case relayWarm
+    case relayWarming
+    case unavailable
+
+    var diagnosticsValue: String {
+        switch self {
+        case .directQuicWarm:
+            return "direct-quic-warm"
+        case .directQuicWarming:
+            return "direct-quic-warming"
+        case .relayWarm:
+            return "relay-warm"
+        case .relayWarming:
+            return "relay-warming"
+        case .unavailable:
+            return "unavailable"
+        }
+    }
+
+    var blocksFirstTalkTransmit: Bool {
+        switch self {
+        case .directQuicWarming, .relayWarming, .unavailable:
+            return true
+        case .directQuicWarm, .relayWarm:
+            return false
+        }
+    }
+}
+
 enum RemoteAudioReadinessState: Equatable {
     case unknown
     case waiting
@@ -944,6 +976,7 @@ struct ConversationDerivationContext: Equatable {
     let localMediaWarmupState: LocalMediaWarmupState
     let localRelayTransportReady: Bool
     let directMediaPathActive: Bool
+    let firstTalkStartupProfile: FirstTalkStartupProfile
     let incomingWakeActivationState: IncomingWakeActivationState?
     let hadConnectedSessionContinuity: Bool
     let channel: ChannelReadinessSnapshot?
@@ -974,6 +1007,7 @@ struct ConversationDerivationContext: Equatable {
         localMediaWarmupState: LocalMediaWarmupState = .cold,
         localRelayTransportReady: Bool = true,
         directMediaPathActive: Bool = false,
+        firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm,
         incomingWakeActivationState: IncomingWakeActivationState? = nil,
         hadConnectedSessionContinuity: Bool = false,
         channel: ChannelReadinessSnapshot?
@@ -1005,6 +1039,7 @@ struct ConversationDerivationContext: Equatable {
         self.localMediaWarmupState = localMediaWarmupState
         self.localRelayTransportReady = localRelayTransportReady
         self.directMediaPathActive = directMediaPathActive
+        self.firstTalkStartupProfile = firstTalkStartupProfile
         self.incomingWakeActivationState = incomingWakeActivationState
         self.hadConnectedSessionContinuity = hadConnectedSessionContinuity
         self.channel = channel
@@ -1984,6 +2019,10 @@ private extension ConversationDerivationContext {
                 break
             }
 
+            if firstTalkStartupProfile == .directQuicWarming {
+                return .waiting(reason: .localTransportWarmup, statusMessage: "Connecting...")
+            }
+
             if authoritativeBackendReady {
                 return .ready
             }
@@ -2103,6 +2142,9 @@ private extension ConversationDerivationContext {
               localTransmit == .idle,
               case .both(_, let canTransmit, _) = backendChannelReadiness,
               effectivePeerDeviceConnectedForTransmit else {
+            return false
+        }
+        guard !firstTalkStartupProfile.blocksFirstTalkTransmit else {
             return false
         }
         let localMediaReadyForTransmit = localMediaWarmupState == .ready || directMediaPathActive

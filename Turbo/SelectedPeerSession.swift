@@ -39,6 +39,7 @@ struct SelectedPeerSessionState: Equatable {
     var mediaState: MediaConnectionState = .idle
     var localRelayTransportReady = true
     var directMediaPathActive = false
+    var firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm
     var incomingWakeActivationState: IncomingWakeActivationState?
     var hadConnectedSessionContinuity = false
     var durableSessionProjection: DurableSessionProjection = .inactive
@@ -67,8 +68,51 @@ struct SelectedPeerSyncSnapshot: Equatable {
     let mediaState: MediaConnectionState
     let localRelayTransportReady: Bool
     let directMediaPathActive: Bool
+    let firstTalkStartupProfile: FirstTalkStartupProfile
     let incomingWakeActivationState: IncomingWakeActivationState?
     let localJoinFailure: PTTJoinFailure?
+
+    init(
+        selection: SelectedPeerSelection,
+        relationship: PairRelationshipState,
+        baseState: ConversationState,
+        channel: ChannelReadinessSnapshot?,
+        isJoined: Bool,
+        activeChannelID: UUID?,
+        pendingAction: PendingSessionAction,
+        pendingConnectAcceptedIncomingRequest: Bool,
+        requesterAutoJoinOnPeerAcceptanceEnabled: Bool,
+        localTransmit: LocalTransmitProjection,
+        peerSignalIsTransmitting: Bool,
+        systemSessionState: SystemPTTSessionState,
+        systemSessionMatchesContact: Bool,
+        mediaState: MediaConnectionState,
+        localRelayTransportReady: Bool,
+        directMediaPathActive: Bool,
+        firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm,
+        incomingWakeActivationState: IncomingWakeActivationState?,
+        localJoinFailure: PTTJoinFailure?
+    ) {
+        self.selection = selection
+        self.relationship = relationship
+        self.baseState = baseState
+        self.channel = channel
+        self.isJoined = isJoined
+        self.activeChannelID = activeChannelID
+        self.pendingAction = pendingAction
+        self.pendingConnectAcceptedIncomingRequest = pendingConnectAcceptedIncomingRequest
+        self.requesterAutoJoinOnPeerAcceptanceEnabled = requesterAutoJoinOnPeerAcceptanceEnabled
+        self.localTransmit = localTransmit
+        self.peerSignalIsTransmitting = peerSignalIsTransmitting
+        self.systemSessionState = systemSessionState
+        self.systemSessionMatchesContact = systemSessionMatchesContact
+        self.mediaState = mediaState
+        self.localRelayTransportReady = localRelayTransportReady
+        self.directMediaPathActive = directMediaPathActive
+        self.firstTalkStartupProfile = firstTalkStartupProfile
+        self.incomingWakeActivationState = incomingWakeActivationState
+        self.localJoinFailure = localJoinFailure
+    }
 }
 
 enum SelectedPeerEvent: Equatable {
@@ -151,6 +195,7 @@ enum SelectedPeerReducer {
             nextState.mediaState = snapshot.mediaState
             nextState.localRelayTransportReady = snapshot.localRelayTransportReady
             nextState.directMediaPathActive = snapshot.directMediaPathActive
+            nextState.firstTalkStartupProfile = snapshot.firstTalkStartupProfile
             nextState.incomingWakeActivationState = snapshot.incomingWakeActivationState
         case .selectedContactChanged(let selection):
             switch selection {
@@ -304,6 +349,7 @@ enum SelectedPeerReducer {
             }(),
             localRelayTransportReady: state.localRelayTransportReady,
             directMediaPathActive: state.directMediaPathActive,
+            firstTalkStartupProfile: state.firstTalkStartupProfile,
             incomingWakeActivationState: state.incomingWakeActivationState,
             hadConnectedSessionContinuity: hadConnectedSessionContinuity,
             channel: state.channel

@@ -602,6 +602,12 @@ enum IncomingRelayAudioDiagnosticDisposition: Equatable {
     case suppressed
 }
 
+struct FirstTalkDirectQuicGrace: Equatable {
+    let channelID: String
+    let startedAt: Date
+    var expired: Bool
+}
+
 final class MediaRuntimeState {
     var session: MediaSession?
     var contactID: UUID?
@@ -611,6 +617,8 @@ final class MediaRuntimeState {
     var directQuicProbeController: DirectQuicProbeController?
     var directQuicPromotionTimeoutTask: Task<Void, Never>?
     var directQuicAutoProbeTask: Task<Void, Never>?
+    private var firstTalkDirectQuicGraceByContactID: [UUID: FirstTalkDirectQuicGrace] = [:]
+    private var firstTalkDirectQuicGraceExpiryTaskByContactID: [UUID: Task<Void, Never>] = [:]
     var sendAudioChunk: (@Sendable (String) async throws -> Void)?
     var startupState: MediaSessionStartupState = .idle
     var pendingInteractivePrewarmAfterAudioDeactivationContactID: UUID?
@@ -712,6 +720,8 @@ final class MediaRuntimeState {
             directQuicProbeController?.cancel(reason: "media-runtime-reset")
             directQuicProbeController = nil
         }
+        firstTalkDirectQuicGraceExpiryTaskByContactID.values.forEach { $0.cancel() }
+        firstTalkDirectQuicGraceExpiryTaskByContactID = [:]
         session?.close(deactivateAudioSession: deactivateAudioSession)
         session = nil
         contactID = nil
@@ -720,6 +730,7 @@ final class MediaRuntimeState {
             transportPathState = .relay
             directQuicUpgrade.reset()
         }
+        firstTalkDirectQuicGraceByContactID = [:]
         outboundReceiverPrewarmRequestIDByContactID = [:]
         handledReceiverPrewarmRequestIDs = []
         receiverPrewarmAckRequestIDByContactID = [:]
@@ -778,6 +789,71 @@ final class MediaRuntimeState {
     func replaceDirectQuicAutoProbeTask(with task: Task<Void, Never>?) {
         directQuicAutoProbeTask?.cancel()
         directQuicAutoProbeTask = task
+    }
+
+    func firstTalkDirectQuicGrace(
+        for contactID: UUID,
+        channelID: String
+    ) -> FirstTalkDirectQuicGrace? {
+        guard let grace = firstTalkDirectQuicGraceByContactID[contactID],
+              grace.channelID == channelID else {
+            return nil
+        }
+        return grace
+    }
+
+    func markFirstTalkDirectQuicGraceStartedIfNeeded(
+        for contactID: UUID,
+        channelID: String,
+        now: Date = Date()
+    ) -> FirstTalkDirectQuicGrace {
+        if let existing = firstTalkDirectQuicGrace(
+            for: contactID,
+            channelID: channelID
+        ) {
+            return existing
+        }
+        clearFirstTalkDirectQuicGrace(for: contactID)
+        let grace = FirstTalkDirectQuicGrace(
+            channelID: channelID,
+            startedAt: now,
+            expired: false
+        )
+        firstTalkDirectQuicGraceByContactID[contactID] = grace
+        return grace
+    }
+
+    func expireFirstTalkDirectQuicGrace(
+        for contactID: UUID,
+        channelID: String
+    ) {
+        guard var grace = firstTalkDirectQuicGrace(
+            for: contactID,
+            channelID: channelID
+        ) else {
+            return
+        }
+        grace.expired = true
+        firstTalkDirectQuicGraceByContactID[contactID] = grace
+        firstTalkDirectQuicGraceExpiryTaskByContactID[contactID] = nil
+    }
+
+    func replaceFirstTalkDirectQuicGraceExpiryTask(
+        for contactID: UUID,
+        with task: Task<Void, Never>?
+    ) {
+        firstTalkDirectQuicGraceExpiryTaskByContactID[contactID]?.cancel()
+        firstTalkDirectQuicGraceExpiryTaskByContactID[contactID] = task
+    }
+
+    func hasFirstTalkDirectQuicGraceExpiryTask(for contactID: UUID) -> Bool {
+        firstTalkDirectQuicGraceExpiryTaskByContactID[contactID] != nil
+    }
+
+    func clearFirstTalkDirectQuicGrace(for contactID: UUID) {
+        firstTalkDirectQuicGraceByContactID.removeValue(forKey: contactID)
+        firstTalkDirectQuicGraceExpiryTaskByContactID[contactID]?.cancel()
+        firstTalkDirectQuicGraceExpiryTaskByContactID.removeValue(forKey: contactID)
     }
 
     func updateTransportPathState(_ state: MediaTransportPathState) {

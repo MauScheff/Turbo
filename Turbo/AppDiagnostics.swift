@@ -28,6 +28,7 @@ struct SelectedSessionDiagnosticsSummary: Equatable {
     let remoteWakeCapability: String?
     let remoteWakeCapabilityKind: String?
     let backendCanTransmit: Bool?
+    let firstTalkStartupProfile: String?
     let pttTokenRegistrationKind: String
     let incomingWakeActivationState: String?
     let incomingWakeBufferedChunkCount: Int?

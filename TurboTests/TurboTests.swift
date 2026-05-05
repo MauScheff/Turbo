@@ -1893,6 +1893,77 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func firstTalkStartupProfileFallsBackToRelayAfterDirectQuicGraceExpires() {
+        TurboDirectPathDebugOverride.setRelayOnlyForced(false)
+        TurboDirectPathDebugOverride.setAutoUpgradeDisabled(false)
+        defer {
+            TurboDirectPathDebugOverride.setAutoUpgradeDisabled(false)
+            TurboDirectPathDebugOverride.setRelayOnlyForced(false)
+        }
+
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: channelUUID,
+            backendChannelId: "channel",
+            remoteUserId: "peer"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+        client.setWebSocketConnectionStateForTesting(.connected)
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "self", mode: "cloud")
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.mediaRuntime.attach(session: RecordingMediaSession(), contactID: contactID)
+        viewModel.mediaRuntime.updateConnectionState(.connected)
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(status: .ready, canTransmit: true)
+            )
+        )
+        viewModel.backendSyncCoordinator.send(
+            .channelReadinessUpdated(
+                contactID: contactID,
+                readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)
+            )
+        )
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        _ = viewModel.mediaRuntime.markFirstTalkDirectQuicGraceStartedIfNeeded(
+            for: contactID,
+            channelID: "channel"
+        )
+
+        #expect(viewModel.firstTalkStartupProfile(for: contactID) == .directQuicWarming)
+        #expect(viewModel.selectedPeerState(for: contactID).detail == .waitingForPeer(reason: .localTransportWarmup))
+
+        viewModel.mediaRuntime.expireFirstTalkDirectQuicGrace(
+            for: contactID,
+            channelID: "channel"
+        )
+
+        #expect(viewModel.firstTalkStartupProfile(for: contactID) == .relayWarm)
+        #expect(viewModel.selectedPeerState(for: contactID).phase == .ready)
+    }
+
+    @MainActor
     @Test func directQuicReceiverPrewarmRequestDoesNotCreateTransmitState() async {
         let viewModel = PTTViewModel()
         viewModel.applicationStateOverride = .active
@@ -2568,6 +2639,73 @@ struct TurboTests {
                 localJoinFailure: nil,
                 mediaState: .connected,
                 localMediaWarmupState: .ready,
+                channel: ChannelReadinessSnapshot(
+                    channelState: makeChannelState(status: .ready, canTransmit: true),
+                    readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)
+                )
+            ),
+            relationship: .none
+        )
+
+        #expect(state.phase == .ready)
+        #expect(state.statusMessage == "Connected")
+        #expect(state.canTransmitNow)
+    }
+
+    @Test func selectedPeerStateWaitsDuringDirectQuicFirstTalkGrace() {
+        let contactID = UUID()
+        let state = ConversationStateMachine.selectedPeerState(
+            for: ConversationDerivationContext(
+                contactID: contactID,
+                selectedContactID: contactID,
+                baseState: .ready,
+                contactName: "Blake",
+                contactIsOnline: true,
+                isJoined: true,
+                activeChannelID: contactID,
+                systemSessionMatchesContact: true,
+                systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+                pendingAction: .none,
+                localJoinFailure: nil,
+                mediaState: .connected,
+                localMediaWarmupState: .ready,
+                localRelayTransportReady: true,
+                directMediaPathActive: false,
+                firstTalkStartupProfile: .directQuicWarming,
+                channel: ChannelReadinessSnapshot(
+                    channelState: makeChannelState(status: .ready, canTransmit: true),
+                    readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)
+                )
+            ),
+            relationship: .none
+        )
+
+        #expect(state.phase == .waitingForPeer)
+        #expect(state.detail == .waitingForPeer(reason: .localTransportWarmup))
+        #expect(state.statusMessage == "Connecting...")
+        #expect(state.canTransmitNow == false)
+    }
+
+    @Test func selectedPeerStateAllowsRelayWarmAfterDirectQuicGrace() {
+        let contactID = UUID()
+        let state = ConversationStateMachine.selectedPeerState(
+            for: ConversationDerivationContext(
+                contactID: contactID,
+                selectedContactID: contactID,
+                baseState: .ready,
+                contactName: "Blake",
+                contactIsOnline: true,
+                isJoined: true,
+                activeChannelID: contactID,
+                systemSessionMatchesContact: true,
+                systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+                pendingAction: .none,
+                localJoinFailure: nil,
+                mediaState: .connected,
+                localMediaWarmupState: .ready,
+                localRelayTransportReady: true,
+                directMediaPathActive: false,
+                firstTalkStartupProfile: .relayWarm,
                 channel: ChannelReadinessSnapshot(
                     channelState: makeChannelState(status: .ready, canTransmit: true),
                     readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)

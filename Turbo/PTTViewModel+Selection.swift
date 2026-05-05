@@ -142,6 +142,7 @@ extension PTTViewModel {
             localMediaWarmupState: localMediaWarmupState(for: contact.id),
             localRelayTransportReady: localRelayTransportReadyForTransmit(for: contact.id),
             directMediaPathActive: shouldUseDirectQuicTransport(for: contact.id),
+            firstTalkStartupProfile: firstTalkStartupProfile(for: contact.id),
             incomingWakeActivationState: pttWakeRuntime.incomingWakeActivationState(for: contact.id),
             hadConnectedSessionContinuity: selectedContactId == contact.id
                 ? selectedPeerCoordinator.state.hadConnectedSessionContinuity
@@ -216,6 +217,7 @@ extension PTTViewModel {
                     mediaState: mediaConnectionState,
                     localRelayTransportReady: localRelayTransportReadyForTransmit(for: contact.id),
                     directMediaPathActive: shouldUseDirectQuicTransport(for: contact.id),
+                    firstTalkStartupProfile: firstTalkStartupProfile(for: contact.id),
                     incomingWakeActivationState:
                         pttWakeRuntime.incomingWakeActivationState(for: contact.id),
                     localJoinFailure: pttCoordinator.state.lastJoinFailure
