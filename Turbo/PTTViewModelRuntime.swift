@@ -653,8 +653,8 @@ final class MediaRuntimeState {
     var directQuicProbeController: DirectQuicProbeController?
     var directQuicPromotionTimeoutTask: Task<Void, Never>?
     var directQuicAutoProbeTask: Task<Void, Never>?
-    private var firstTalkDirectQuicGraceByContactID: [UUID: FirstTalkDirectQuicGrace] = [:]
-    private var firstTalkDirectQuicGraceExpiryTaskByContactID: [UUID: Task<Void, Never>] = [:]
+    private var firstTalkDirectQuicGraceEntries: [(contactID: UUID, grace: FirstTalkDirectQuicGrace)] = []
+    private var firstTalkDirectQuicGraceExpiryTasks: [(contactID: UUID, task: Task<Void, Never>)] = []
     var sendAudioChunk: (@Sendable (String) async throws -> Void)?
     var startupState: MediaSessionStartupState = .idle
     var pendingInteractivePrewarmAfterAudioDeactivationContactID: UUID?
@@ -668,6 +668,7 @@ final class MediaRuntimeState {
     private var mediaEncryptionSessionsByContactID: [UUID: MediaEncryptionSession] = [:]
     private var mediaEncryptionSendSequenceByContactID: [UUID: UInt64] = [:]
     private var mediaEncryptionReceiveSequenceByContactID: [UUID: UInt64] = [:]
+    private var mediaEncryptionPlaintextFallbackLogKeys: Set<String> = []
 
     var hasSession: Bool {
         session != nil
@@ -759,8 +760,8 @@ final class MediaRuntimeState {
             directQuicProbeController?.cancel(reason: "media-runtime-reset")
             directQuicProbeController = nil
         }
-        firstTalkDirectQuicGraceExpiryTaskByContactID.values.forEach { $0.cancel() }
-        firstTalkDirectQuicGraceExpiryTaskByContactID = [:]
+        firstTalkDirectQuicGraceExpiryTasks.forEach { $0.task.cancel() }
+        firstTalkDirectQuicGraceExpiryTasks = []
         session?.close(deactivateAudioSession: deactivateAudioSession)
         session = nil
         contactID = nil
@@ -769,16 +770,13 @@ final class MediaRuntimeState {
             transportPathState = .relay
             directQuicUpgrade.reset()
         }
-        firstTalkDirectQuicGraceByContactID = [:]
+        firstTalkDirectQuicGraceEntries = []
         outboundReceiverPrewarmRequestIDByContactID = [:]
         handledReceiverPrewarmRequestIDs = []
         receiverPrewarmAckRequestIDByContactID = [:]
         directQuicWarmPongIDByContactID = [:]
         incomingRelayAudioDetailedReportsRemainingByContactID = [:]
         incomingRelayAudioSuppressionReportedContactIDs = []
-        mediaEncryptionSessionsByContactID = [:]
-        mediaEncryptionSendSequenceByContactID = [:]
-        mediaEncryptionReceiveSequenceByContactID = [:]
         sendAudioChunk = nil
         startupState = .idle
     }
@@ -837,7 +835,7 @@ final class MediaRuntimeState {
         for contactID: UUID,
         channelID: String
     ) -> FirstTalkDirectQuicGrace? {
-        guard let grace = firstTalkDirectQuicGraceByContactID[contactID],
+        guard let grace = firstTalkDirectQuicGraceEntries.first(where: { $0.contactID == contactID })?.grace,
               grace.channelID == channelID else {
             return nil
         }
@@ -861,7 +859,7 @@ final class MediaRuntimeState {
             startedAt: now,
             expired: false
         )
-        firstTalkDirectQuicGraceByContactID[contactID] = grace
+        firstTalkDirectQuicGraceEntries.append((contactID: contactID, grace: grace))
         return grace
     }
 
@@ -876,26 +874,35 @@ final class MediaRuntimeState {
             return
         }
         grace.expired = true
-        firstTalkDirectQuicGraceByContactID[contactID] = grace
-        firstTalkDirectQuicGraceExpiryTaskByContactID[contactID] = nil
+        if let index = firstTalkDirectQuicGraceEntries.firstIndex(where: { $0.contactID == contactID }) {
+            firstTalkDirectQuicGraceEntries[index] = (contactID: contactID, grace: grace)
+        }
+        firstTalkDirectQuicGraceExpiryTasks.removeAll { $0.contactID == contactID }
     }
 
     func replaceFirstTalkDirectQuicGraceExpiryTask(
         for contactID: UUID,
         with task: Task<Void, Never>?
     ) {
-        firstTalkDirectQuicGraceExpiryTaskByContactID[contactID]?.cancel()
-        firstTalkDirectQuicGraceExpiryTaskByContactID[contactID] = task
+        if let index = firstTalkDirectQuicGraceExpiryTasks.firstIndex(where: { $0.contactID == contactID }) {
+            firstTalkDirectQuicGraceExpiryTasks[index].task.cancel()
+            firstTalkDirectQuicGraceExpiryTasks.remove(at: index)
+        }
+        if let task {
+            firstTalkDirectQuicGraceExpiryTasks.append((contactID: contactID, task: task))
+        }
     }
 
     func hasFirstTalkDirectQuicGraceExpiryTask(for contactID: UUID) -> Bool {
-        firstTalkDirectQuicGraceExpiryTaskByContactID[contactID] != nil
+        firstTalkDirectQuicGraceExpiryTasks.contains { $0.contactID == contactID }
     }
 
     func clearFirstTalkDirectQuicGrace(for contactID: UUID) {
-        firstTalkDirectQuicGraceByContactID.removeValue(forKey: contactID)
-        firstTalkDirectQuicGraceExpiryTaskByContactID[contactID]?.cancel()
-        firstTalkDirectQuicGraceExpiryTaskByContactID.removeValue(forKey: contactID)
+        firstTalkDirectQuicGraceEntries.removeAll { $0.contactID == contactID }
+        if let index = firstTalkDirectQuicGraceExpiryTasks.firstIndex(where: { $0.contactID == contactID }) {
+            firstTalkDirectQuicGraceExpiryTasks[index].task.cancel()
+            firstTalkDirectQuicGraceExpiryTasks.remove(at: index)
+        }
     }
 
     func updateTransportPathState(_ state: MediaTransportPathState) {
@@ -914,6 +921,18 @@ final class MediaRuntimeState {
         let requestID = UUID().uuidString.lowercased()
         outboundReceiverPrewarmRequestIDByContactID[contactID] = requestID
         return requestID
+    }
+
+    func receiverPrewarmRequestIsAcknowledged(for contactID: UUID) -> Bool {
+        guard let requestID = outboundReceiverPrewarmRequestIDByContactID[contactID],
+              let ackRequestID = receiverPrewarmAckRequestIDByContactID[contactID] else {
+            return false
+        }
+        return requestID == ackRequestID
+    }
+
+    func hasReceiverPrewarmRequest(for contactID: UUID) -> Bool {
+        outboundReceiverPrewarmRequestIDByContactID[contactID] != nil
     }
 
     func markReceiverPrewarmRequestHandled(_ requestID: String) -> Bool {
@@ -942,6 +961,20 @@ final class MediaRuntimeState {
 
     func mediaEncryptionSession(for contactID: UUID) -> MediaEncryptionSession? {
         mediaEncryptionSessionsByContactID[contactID]
+    }
+
+    func resetMediaEncryptionState() {
+        mediaEncryptionSessionsByContactID = [:]
+        mediaEncryptionSendSequenceByContactID = [:]
+        mediaEncryptionReceiveSequenceByContactID = [:]
+        mediaEncryptionPlaintextFallbackLogKeys = []
+    }
+
+    func takeShouldLogMediaEncryptionPlaintextFallback(
+        contactID: UUID,
+        direction: String
+    ) -> Bool {
+        mediaEncryptionPlaintextFallbackLogKeys.insert("\(direction):\(contactID.uuidString)").inserted
     }
 
     func nextMediaEncryptionSendSequence(for contactID: UUID) -> UInt64 {

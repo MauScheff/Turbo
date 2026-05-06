@@ -344,6 +344,25 @@ extension PTTViewModel {
                 )
             } catch {
                 let message = error.localizedDescription
+                if shouldTreatEphemeralTokenUploadFailureAsStaleMembership(
+                    error,
+                    request: request
+                ) {
+                    pttSystemPolicyCoordinator.send(.reset)
+                    diagnostics.record(
+                        .pushToTalk,
+                        message: "Ignored stale ephemeral PTT token upload failure after membership loss",
+                        metadata: [
+                            "backendChannelId": request.backendChannelID,
+                            "tokenPrefix": String(request.tokenHex.prefix(8)),
+                            "systemChannelUUID": pttCoordinator.state.systemChannelUUID?.uuidString ?? "none",
+                            "error": message,
+                        ]
+                    )
+                    syncPTTSystemPolicyState()
+                    captureDiagnosticsState("ptt-token-upload:stale-membership-ignored")
+                    return
+                }
                 pttSystemPolicyCoordinator.send(.tokenUploadFailed(message))
                 statusMessage = "Token upload failed: \(message)"
                 diagnostics.record(
@@ -359,6 +378,26 @@ extension PTTViewModel {
                 )
             }
         }
+    }
+
+    func shouldTreatEphemeralTokenUploadFailureAsStaleMembership(
+        _ error: Error,
+        request: PTTTokenUploadRequest
+    ) -> Bool {
+        guard case let TurboBackendError.server(message) = error,
+              message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "not a channel member" else {
+            return false
+        }
+
+        guard let contact = contacts.first(where: { $0.backendChannelId == request.backendChannelID }) else {
+            return false
+        }
+
+        if sessionCoordinator.pendingAction.isLeaveInFlight(for: contact.id) {
+            return true
+        }
+
+        return backendSyncCoordinator.state.syncState.channelStates[contact.id]?.membership == .absent
     }
 
     func configureBackendIfNeeded() async {
@@ -734,6 +773,7 @@ extension PTTViewModel {
         pttCoordinator.reset()
         tearDownTransmitRuntime(resetCoordinator: true)
         closeMediaSession()
+        mediaRuntime.resetMediaEncryptionState()
         receiveExecutionCoordinator.send(.reset)
         isPTTAudioSessionActive = false
         selectedContactId = nil

@@ -514,6 +514,40 @@ extension PTTViewModel {
             return
         }
 
+        if let contactID,
+           shouldIgnoreDidJoinAfterBackendMembershipLoss(contactID: contactID) {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Ignoring stale PTT join after backend membership loss",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "reason": reason,
+                    "pendingAction": String(describing: sessionCoordinator.pendingAction),
+                    "backendChannelStatus": backendSyncCoordinator.state.syncState.channelStates[contactID]?.status ?? "none",
+                ]
+            )
+            try? pttSystemClient.leaveChannel(channelUUID: channelUUID)
+            statusMessage = "Disconnecting..."
+            captureDiagnosticsState("ptt-callback:joined-blocked-by-membership-loss")
+            return
+        }
+
+        if shouldIgnoreDuplicateDidJoinForActiveChannel(channelUUID: channelUUID, contactID: contactID) {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Ignoring duplicate PTT join for active channel",
+                metadata: [
+                    "contactId": contactID?.uuidString ?? "none",
+                    "channelUUID": channelUUID.uuidString,
+                    "reason": reason,
+                    "systemSession": String(describing: pttCoordinator.state.systemSessionState),
+                ]
+            )
+            captureDiagnosticsState("ptt-callback:joined-duplicate")
+            return
+        }
+
         Task {
             await pttCoordinator.handle(
                 .didJoinChannel(
@@ -536,6 +570,32 @@ extension PTTViewModel {
                 await prewarmLocalMediaIfNeeded(for: contactID)
             }
             captureDiagnosticsState("ptt-callback:joined")
+        }
+    }
+
+    func shouldIgnoreDidJoinAfterBackendMembershipLoss(contactID: UUID) -> Bool {
+        guard sessionCoordinator.pendingAction.pendingJoinContactID != contactID,
+              sessionCoordinator.pendingAction.pendingConnectContactID != contactID else {
+            return false
+        }
+
+        return backendSyncCoordinator.state.syncState.channelStates[contactID]?.membership == .absent
+    }
+
+    func shouldIgnoreDuplicateDidJoinForActiveChannel(channelUUID: UUID, contactID: UUID?) -> Bool {
+        let state = pttCoordinator.state
+        guard state.isJoined,
+              state.systemChannelUUID == channelUUID else {
+            return false
+        }
+
+        switch (state.activeContactID, contactID) {
+        case (nil, nil):
+            return true
+        case (let activeContactID?, let contactID?):
+            return activeContactID == contactID
+        default:
+            return false
         }
     }
 
@@ -709,10 +769,17 @@ extension PTTViewModel {
                 )
                 return
             }
+            let callbackTarget = activeTransmitTarget(for: channelUUID)
+            if await rejectSystemTransmitBeginIfPeerIsActive(
+                channelUUID: channelUUID,
+                source: source,
+                callbackTarget: callbackTarget
+            ) {
+                return
+            }
             transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
             transmitRuntime.noteSystemTransmitBegan()
             systemTransmitBeginRecoveryAttemptsByChannelUUID.removeValue(forKey: channelUUID)
-            let callbackTarget = activeTransmitTarget(for: channelUUID)
             await pttCoordinator.handle(
                 .didBeginTransmitting(
                     channelUUID: channelUUID,
@@ -770,6 +837,61 @@ extension PTTViewModel {
             )
             captureDiagnosticsState("ptt-callback:transmit-began")
         }
+    }
+
+    private func rejectSystemTransmitBeginIfPeerIsActive(
+        channelUUID: UUID,
+        source: String,
+        callbackTarget: TransmitTarget?
+    ) async -> Bool {
+        guard callbackTarget == nil else { return false }
+        guard let contactID = contactId(for: channelUUID) else { return false }
+
+        let channelSnapshot = selectedChannelSnapshot(for: contactID)
+        let backendPeerIsTransmitting = channelSnapshot?.readinessStatus?.conversationState == .receiving
+            || channelSnapshot?.status == .receiving
+        let remoteActivityBlocksTransmit = remoteReceiveBlocksLocalTransmit(for: contactID)
+        guard backendPeerIsTransmitting || remoteActivityBlocksTransmit else { return false }
+
+        diagnostics.recordInvariantViolation(
+            invariantID: "ptt.system_begin_while_peer_transmitting",
+            scope: .local,
+            message: "system-originated transmit begin was rejected because peer transmit is authoritative",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "contactId": contactID.uuidString,
+                "source": source,
+                "backendChannelStatus": channelSnapshot?.status?.rawValue ?? "none",
+                "backendReadiness": channelSnapshot?.readinessStatus?.kind ?? "none",
+                "backendCanTransmit": String(channelSnapshot?.canTransmit ?? false),
+                "backendPeerIsTransmitting": String(backendPeerIsTransmitting),
+                "remoteActivityBlocksTransmit": String(remoteActivityBlocksTransmit),
+            ]
+        )
+        diagnostics.record(
+            .pushToTalk,
+            message: "Rejected system transmit begin while peer is active",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "contactId": contactID.uuidString,
+                "source": source,
+                "backendChannelStatus": channelSnapshot?.status?.rawValue ?? "none",
+                "backendReadiness": channelSnapshot?.readinessStatus?.kind ?? "none",
+                "backendCanTransmit": String(channelSnapshot?.canTransmit ?? false),
+                "backendPeerIsTransmitting": String(backendPeerIsTransmitting),
+                "remoteActivityBlocksTransmit": String(remoteActivityBlocksTransmit),
+            ]
+        )
+
+        systemTransmitBeginRecoveryAttemptsByChannelUUID.removeValue(forKey: channelUUID)
+        transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
+        transmitRuntime.markPressEnded()
+        try? pttSystemClient.stopTransmitting(channelUUID: channelUUID)
+        await transmitCoordinator.handle(.systemEnded)
+        syncTransmitState()
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("ptt-callback:transmit-began-rejected-peer-active")
+        return true
     }
 
     func handleDidEndTransmitting(_ channelUUID: UUID, source: String) {
@@ -914,7 +1036,38 @@ extension PTTViewModel {
         if isRecoverablePTTTransmissionInProgress(error),
            let contactID = contactId(for: channelUUID),
            transmitRuntime.isPressingTalk,
-           systemTransmitBeginRecoveryAttemptsByChannelUUID[channelUUID, default: 0] == 0 {
+            systemTransmitBeginRecoveryAttemptsByChannelUUID[channelUUID, default: 0] == 0 {
+            let channelSnapshot = selectedChannelSnapshot(for: contactID)
+            let backendPeerIsTransmitting = channelSnapshot?.readinessStatus?.conversationState == .receiving
+                || channelSnapshot?.status == .receiving
+            let remoteActivityBlocksTransmit = remoteReceiveBlocksLocalTransmit(for: contactID)
+            if backendPeerIsTransmitting || remoteActivityBlocksTransmit {
+                systemTransmitBeginRecoveryAttemptsByChannelUUID.removeValue(forKey: channelUUID)
+                transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
+                transmitRuntime.markPressEnded()
+                cancelPendingTransmitWork()
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Rejected system transmit begin failure retry while peer is active",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "contactId": contactID.uuidString,
+                        "error": formatPTTError(error),
+                        "backendChannelStatus": channelSnapshot?.status?.rawValue ?? "none",
+                        "backendReadiness": channelSnapshot?.readinessStatus?.kind ?? "none",
+                        "backendCanTransmit": String(channelSnapshot?.canTransmit ?? false),
+                        "backendPeerIsTransmitting": String(backendPeerIsTransmitting),
+                        "remoteActivityBlocksTransmit": String(remoteActivityBlocksTransmit),
+                    ]
+                )
+                Task {
+                    await transmitCoordinator.handle(.systemEnded)
+                    syncTransmitState()
+                    updateStatusForSelectedContact()
+                    captureDiagnosticsState("ptt-callback:transmit-begin-failed-peer-active")
+                }
+                return
+            }
             systemTransmitBeginRecoveryAttemptsByChannelUUID[channelUUID, default: 0] += 1
             diagnostics.record(
                 .pushToTalk,

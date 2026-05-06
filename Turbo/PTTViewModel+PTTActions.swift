@@ -134,7 +134,7 @@ extension PTTViewModel {
             return
         }
 
-        let mode = PTTransmissionMode.fullDuplex
+        let mode = PTTransmissionMode.halfDuplex
         guard lastReportedPTTTransmissionMode != mode
             || lastReportedPTTTransmissionModeChannelUUID != channelUUID else {
             return

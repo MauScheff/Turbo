@@ -1153,6 +1153,19 @@ extension PTTViewModel {
         for contactID: UUID,
         reason: String
     ) async {
+        if mediaRuntime.hasReceiverPrewarmRequest(for: contactID) {
+            diagnostics.record(
+                .media,
+                message: "Skipping duplicate Direct QUIC receiver prewarm request",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "acknowledged": String(mediaRuntime.receiverPrewarmRequestIsAcknowledged(for: contactID)),
+                ]
+            )
+            return
+        }
+
         if shouldUseDirectQuicTransport(for: contactID),
            await sendDirectQuicReceiverPrewarmRequest(for: contactID, reason: reason) {
             await sendDirectQuicWarmPingIfPossible(for: contactID, reason: reason)
@@ -1204,6 +1217,7 @@ extension PTTViewModel {
             )
             return true
         } catch {
+            mediaRuntime.clearReceiverPrewarmState(for: contactID)
             diagnostics.record(
                 .media,
                 message: "Direct QUIC receiver prewarm request failed; using relay readiness fallback",

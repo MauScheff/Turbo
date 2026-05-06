@@ -1430,10 +1430,13 @@ extension PTTViewModel {
             envelope: envelope,
             contactID: contactID
         ) {
+            let recoverableIdentityRace = isRecoverableDirectQuicAuthorizationRace(authorizationFailure)
             diagnostics.record(
                 .media,
-                level: .error,
-                message: "Rejected direct QUIC signal because backend peer identity did not authorize it",
+                level: recoverableIdentityRace ? .info : .error,
+                message: recoverableIdentityRace
+                    ? "Deferred direct QUIC signal until backend peer identity is available"
+                    : "Rejected direct QUIC signal because backend peer identity did not authorize it",
                 metadata: [
                     "type": envelope.type.rawValue,
                     "channelId": envelope.channelId,
@@ -1444,13 +1447,15 @@ extension PTTViewModel {
                     "backendPeerFingerprint": backendPeerDirectQuicFingerprint(for: contactID) ?? "none",
                 ]
             )
-            mediaRuntime.directQuicUpgrade.applyRetryBackoff(
-                for: contactID,
-                request: directQuicRetryBackoffRequest(
-                    reason: authorizationFailure,
-                    attemptID: signal.attemptId
+            if !recoverableIdentityRace {
+                mediaRuntime.directQuicUpgrade.applyRetryBackoff(
+                    for: contactID,
+                    request: directQuicRetryBackoffRequest(
+                        reason: authorizationFailure,
+                        attemptID: signal.attemptId
+                    )
                 )
-            )
+            }
             return false
         }
         if effectiveDirectQuicUpgradeEnabled {
@@ -1470,6 +1475,10 @@ extension PTTViewModel {
             return false
         }
         return existingAttempt.attemptId == signal.attemptId
+    }
+
+    func isRecoverableDirectQuicAuthorizationRace(_ reason: String) -> Bool {
+        reason == "backend-peer-fingerprint-missing"
     }
 
     func handleIncomingAudioPayload(
@@ -1868,12 +1877,16 @@ extension PTTViewModel {
                     applicationState: applicationState
                 )
                 if envelope.payload == "app-background-media-closed" {
-                    Task {
-                        await retireDirectQuicPath(
-                            for: contactID,
-                            reason: "peer-app-background-media-closed",
-                            sendHangup: false,
-                            configureActiveRoute: true
+                    if let attempt = directQuicAttempt(for: contactID) {
+                        diagnostics.record(
+                            .media,
+                            message: "Preserving Direct QUIC path after receiver readiness closed",
+                            metadata: [
+                                "contactId": contactID.uuidString,
+                                "channelId": attempt.channelID,
+                                "attemptId": attempt.attemptId,
+                                "isDirectActive": String(attempt.isDirectActive),
+                            ]
                         )
                     }
                 }

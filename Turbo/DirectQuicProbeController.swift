@@ -698,6 +698,41 @@ nonisolated private final class ContinuationGate: @unchecked Sendable {
     }
 }
 
+nonisolated final class DirectQuicSerialAsyncQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation = 0
+    private var tailTask: Task<Void, Never>?
+
+    func reset() {
+        let task = lock.withLock { () -> Task<Void, Never>? in
+            generation += 1
+            let task = tailTask
+            tailTask = nil
+            return task
+        }
+        task?.cancel()
+    }
+
+    func enqueue(_ operation: @escaping @Sendable () async -> Void) {
+        let task = lock.withLock { () -> Task<Void, Never> in
+            let generation = self.generation
+            let previousTask = tailTask
+            let task = Task {
+                await previousTask?.value
+                guard !Task.isCancelled, self.isCurrentGeneration(generation) else { return }
+                await operation()
+            }
+            tailTask = task
+            return task
+        }
+        _ = task
+    }
+
+    private func isCurrentGeneration(_ generation: Int) -> Bool {
+        lock.withLock { self.generation == generation }
+    }
+}
+
 nonisolated final class DirectQuicProbeController: @unchecked Sendable {
     private static let consentIntervalNanoseconds: UInt64 = 1_000_000_000
     // Apple PTT activation can hold the first transmit/receive path for several
@@ -707,6 +742,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "Turbo.DirectQuicProbe")
     private let stateLock = NSLock()
+    private let incomingAudioPayloadQueue = DirectQuicSerialAsyncQueue()
     private let reportEvent: (@Sendable (String, [String: String]) async -> Void)?
 
     private var listener: NWListener?
@@ -941,6 +977,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
             outstandingConsentID = nil
             outstandingConsentSentAt = nil
         }
+        incomingAudioPayloadQueue.reset()
         receiveMediaMessages(on: connection)
         startConsentLoop(on: connection)
 
@@ -1054,6 +1091,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         resources.1?.cancel()
         resources.2?.cancel()
         resources.3?.cancel()
+        incomingAudioPayloadQueue.reset()
         Task {
             await report("Cancelled direct QUIC probe resources", metadata: ["reason": reason])
         }
@@ -1679,7 +1717,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
                         case .audioChunk:
                             guard let payload = decodedMessage.payload else { continue }
                             let onIncomingAudioPayload = self.withLockedState { self.onIncomingAudioPayload }
-                            Task {
+                            self.incomingAudioPayloadQueue.enqueue {
                                 await onIncomingAudioPayload?(payload)
                             }
                         case .probeHello:

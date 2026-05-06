@@ -1179,6 +1179,19 @@ struct ConversationDerivationContext: Equatable {
         return true
     }
 
+    var pendingBackendConnectIsReadyForLocalRestore: Bool {
+        guard pendingAction.pendingConnectContactID == contactID else { return false }
+        guard pendingAction.pendingJoinContactID == nil else { return false }
+        guard localSessionReadiness == .none else { return false }
+        guard systemSessionState == .none else { return false }
+        guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness,
+              peerDeviceConnected,
+              readinessStatus == .ready else {
+            return false
+        }
+        return true
+    }
+
     var backendMembershipIsStaleWithoutLocalSessionEvidence: Bool {
         guard localSessionReadiness == .none else { return false }
         guard systemSessionState == .none else { return false }
@@ -1194,6 +1207,9 @@ struct ConversationDerivationContext: Equatable {
     }
 
     var backendReadyAutoRestoreAllowed: Bool {
+        if pendingBackendConnectIsReadyForLocalRestore {
+            return true
+        }
         if pendingAction.pendingJoinContactID == contactID {
             return true
         }

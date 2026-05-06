@@ -869,7 +869,8 @@ final class DiagnosticsStore {
            backendReadiness == "ready",
            backendSelfJoined == true,
            backendPeerJoined == true,
-           backendPeerDeviceConnected == true {
+           backendPeerDeviceConnected == true,
+           remoteWakeCapabilityKind == "wake-capable" {
             violations.append(
                 DiagnosticsInvariantViolationCandidate(
                     invariantID: "selected.backend_ready_missing_remote_audio_signal",
@@ -885,6 +886,7 @@ final class DiagnosticsStore {
                         "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
                         "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
                         "backendPeerDeviceConnected": fields["backendPeerDeviceConnected"] ?? "none",
+                        "remoteWakeCapabilityKind": remoteWakeCapabilityKind,
                     ]
                 )
             )

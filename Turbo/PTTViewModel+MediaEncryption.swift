@@ -102,20 +102,24 @@ extension PTTViewModel {
             session = mediaRuntime.mediaEncryptionSession(for: target.contactID)
         }
         guard let session else {
-            guard isMediaEncryptionRequired(for: target.contactID) else {
-                return payload
+            if mediaRuntime.takeShouldLogMediaEncryptionPlaintextFallback(
+                contactID: target.contactID,
+                direction: "outgoing"
+            ) {
+                diagnostics.record(
+                    .media,
+                    level: .notice,
+                    message: "Sending plaintext media payload because E2EE session is unavailable",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "toDeviceId": target.deviceID,
+                        "peerIdentityAdvertised": String(isMediaEncryptionRequired(for: target.contactID)),
+                        "localIdentityPresent": String(mediaEncryptionLocalIdentity != nil),
+                    ]
+                )
             }
-            diagnostics.recordInvariantViolation(
-                invariantID: "media.e2ee_required_outgoing_session_missing",
-                scope: .local,
-                message: "outgoing audio could not be sealed while media E2EE is required",
-                metadata: [
-                    "contactId": target.contactID.uuidString,
-                    "channelId": target.channelID,
-                    "toDeviceId": target.deviceID,
-                ]
-            )
-            throw MediaEndToEndEncryptionError.requiredSessionUnavailable
+            return payload
         }
         let context = session.context(
             senderDeviceID: session.localDeviceID,
@@ -144,17 +148,23 @@ extension PTTViewModel {
     ) throws -> String? {
         guard MediaEncryptedAudioPacket.isEncodedPacket(payload) else {
             if isMediaEncryptionRequired(for: contactID) {
-                diagnostics.recordInvariantViolation(
-                    invariantID: "media.e2ee_required_plaintext_audio",
-                    scope: .local,
-                    message: "plaintext audio arrived while media E2EE is required",
-                    metadata: [
-                        "contactId": contactID.uuidString,
-                        "channelId": channelID,
-                        "fromDeviceId": fromDeviceID,
-                    ]
-                )
-                return nil
+                if mediaRuntime.takeShouldLogMediaEncryptionPlaintextFallback(
+                    contactID: contactID,
+                    direction: "incoming"
+                ) {
+                    diagnostics.record(
+                        .media,
+                        level: .notice,
+                        message: "Accepted plaintext media payload during opportunistic E2EE fallback",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "channelId": channelID,
+                            "fromDeviceId": fromDeviceID,
+                            "peerIdentityAdvertised": "true",
+                            "sessionConfigured": String(mediaRuntime.mediaEncryptionSession(for: contactID) != nil),
+                        ]
+                    )
+                }
             }
             return payload
         }

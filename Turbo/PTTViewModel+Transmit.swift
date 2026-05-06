@@ -749,7 +749,8 @@ extension PTTViewModel {
             return relayProfile
         }
 
-        guard directQuicFirstTalkWarmupBlockReason(for: contactID) == nil else {
+        let directWarmupBlockReason = directQuicFirstTalkWarmupBlockReason(for: contactID)
+        guard directWarmupBlockReason == nil || directWarmupBlockReason == "not-listener-offerer" else {
             if startGraceIfNeeded {
                 mediaRuntime.clearFirstTalkDirectQuicGrace(for: contactID)
             }
@@ -1918,12 +1919,15 @@ extension PTTViewModel {
         }
     }
 
-    private func shouldActivateBackendTransmitLease(
+    func shouldActivateBackendTransmitLease(
         request: TransmitRequestContext,
         workID: Int
     ) -> Bool {
         guard !Task.isCancelled else { return false }
-        guard transmitTaskCoordinator.state.begin.id == workID else { return false }
+        if let runningRequest = transmitTaskCoordinator.state.begin.request,
+           runningRequest != request {
+            return false
+        }
         guard transmitRuntime.isPressingTalk else { return false }
         guard !transmitRuntime.explicitStopRequested else { return false }
         guard transmitCoordinator.state.isPressingTalk else { return false }
