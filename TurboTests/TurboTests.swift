@@ -544,6 +544,13 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func directQuicPromotionTimeoutDefaultToleratesBackgroundWakeRoundTrip() {
+        let viewModel = PTTViewModel()
+
+        #expect(viewModel.directQuicPromotionTimeoutMilliseconds() == 5_000)
+    }
+
+    @MainActor
     @Test func directQuicExpectedPeerCertificateFingerprintPrefersAnswerThenOffer() {
         let contactID = UUID()
         let viewModel = PTTViewModel()
@@ -1678,6 +1685,38 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func directQuicPromotionTimeoutSchedulesAutomaticReprobeAfterBackoff() async {
+        let contactID = UUID()
+        let viewModel = PTTViewModel()
+
+        viewModel.applicationStateOverride = .active
+        viewModel.selectedContactId = contactID
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-1",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+
+        await viewModel.handleDirectQuicPromotionTimeout(
+            contactID: contactID,
+            attemptID: "attempt-1",
+            timeoutMilliseconds: 5_000
+        )
+
+        #expect(viewModel.mediaRuntime.directQuicUpgrade.attempt(for: contactID) == nil)
+        #expect(viewModel.mediaRuntime.directQuicAutoProbeTask != nil)
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Scheduled automatic Direct QUIC reprobe"
+            )
+        )
+
+        viewModel.mediaRuntime.replaceDirectQuicAutoProbeTask(with: nil)
+    }
+
+    @MainActor
     @Test func directQuicAutomaticProbeReadinessDoesNotRequireRelayMediaConnection() {
         let contactID = UUID()
         let channelUUID = UUID()
@@ -2784,6 +2823,49 @@ struct TurboTests {
         #expect(state.canTransmitNow)
     }
 
+    @Test func selectedPeerStateKeepsWakeReadyWhenDirectPathIsWarmButPeerAudioNeedsWake() {
+        let contactID = UUID()
+        let state = ConversationStateMachine.selectedPeerState(
+            for: ConversationDerivationContext(
+                contactID: contactID,
+                selectedContactID: contactID,
+                baseState: .ready,
+                contactName: "Blake",
+                contactIsOnline: true,
+                isJoined: true,
+                activeChannelID: contactID,
+                systemSessionMatchesContact: true,
+                systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+                pendingAction: .none,
+                localJoinFailure: nil,
+                mediaState: .connected,
+                localMediaWarmupState: .ready,
+                localRelayTransportReady: false,
+                directMediaPathActive: true,
+                channel: ChannelReadinessSnapshot(
+                    channelState: makeChannelState(
+                        status: .ready,
+                        canTransmit: true,
+                        selfJoined: true,
+                        peerJoined: true,
+                        peerDeviceConnected: true
+                    ),
+                    readiness: makeChannelReadiness(
+                        status: .ready,
+                        remoteAudioReadiness: .wakeCapable,
+                        remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+                    )
+                )
+            ),
+            relationship: .none
+        )
+
+        #expect(state.phase == .wakeReady)
+        #expect(state.statusMessage == "Hold to talk to wake Blake")
+        #expect(state.canTransmitNow == false)
+        #expect(state.allowsHoldToTalk)
+    }
+
     @MainActor
     @Test func selectedPeerStateUsesWebSocketConnectionForRelayTransportReadiness() {
         let viewModel = PTTViewModel()
@@ -3148,6 +3230,12 @@ struct TurboTests {
         let viewModel = PTTViewModel()
         let contactID = UUID()
         viewModel.selectedContactId = contactID
+        viewModel.backendSyncCoordinator.send(
+            .channelReadinessUpdated(
+                contactID: contactID,
+                readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)
+            )
+        )
         viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
         _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
             contactID: contactID,
@@ -3174,7 +3262,22 @@ struct TurboTests {
         )
 
         #expect(!viewModel.shouldUseDirectQuicTransport(for: contactID))
+        #expect(viewModel.channelReadinessByContactID[contactID]?.remoteAudioReadiness == .wakeCapable)
+        #expect(viewModel.channelReadinessByContactID[contactID]?.remoteWakeCapability == .wakeCapable(targetDeviceId: "peer-device"))
         #expect(viewModel.diagnosticsTranscript.contains("Direct QUIC path closing received"))
+    }
+
+    @Test func channelReadinessSnapshotDoesNotTreatWakeCapablePeerAsReadyForLiveTransmit() {
+        let snapshot = ChannelReadinessSnapshot(
+            channelState: makeChannelState(status: .ready, canTransmit: true),
+            readiness: makeChannelReadiness(
+                status: .ready,
+                remoteAudioReadiness: .wakeCapable,
+                remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+            )
+        )
+
+        #expect(!snapshot.remoteAudioReadyForLiveTransmit)
     }
 
     @MainActor
@@ -10460,6 +10563,38 @@ struct TurboTests {
         #expect(viewModel.shouldRecreateMediaSession(connectionState: .failed("send failed")))
         #expect(viewModel.shouldRecreateMediaSession(connectionState: .closed))
         #expect(!viewModel.shouldRecreateMediaSession(connectionState: .connected))
+    }
+
+    @MainActor
+    @Test func backendTransmitLeaseParserHandlesNanosecondBackendInstants() {
+        let viewModel = PTTViewModel()
+        let now = Date(timeIntervalSince1970: 1_778_059_200.250)
+
+        let remaining = viewModel.backendTransmitLeaseRemainingSeconds(
+            expiresAt: "2026-05-06T09:20:05.750000000Z",
+            now: now
+        )
+
+        #expect(remaining.map { abs($0 - 5.5) < 0.001 } == true)
+    }
+
+    @MainActor
+    @Test func backendTransmitLeaseGrantNearExpiryRequiresImmediateRenewal() {
+        let viewModel = PTTViewModel()
+        let now = Date(timeIntervalSince1970: 1_778_059_200)
+
+        #expect(
+            viewModel.backendTransmitLeaseNeedsImmediateRenewal(
+                expiresAt: "2026-05-06T09:20:02.000000000Z",
+                now: now
+            )
+        )
+        #expect(
+            !viewModel.backendTransmitLeaseNeedsImmediateRenewal(
+                expiresAt: "2026-05-06T09:20:05.000000000Z",
+                now: now
+            )
+        )
     }
 
     @Test func mediaRuntimeResetClearsOutgoingAudioRoute() {
@@ -20714,7 +20849,7 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func outgoingAudioSendGateDefaultWakeGraceDoesNotHoldShortReleaseForMultipleSeconds() async {
+    @Test func outgoingAudioSendGateDefaultWakeGraceHoldsShortReleaseForBackgroundWakeRecovery() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -20768,7 +20903,6 @@ struct TurboTests {
                 deviceID: "peer-device",
                 channelID: "channel"
             ),
-            timeoutNanoseconds: 1_800_000_000,
             pollNanoseconds: 10_000_000
         )
 

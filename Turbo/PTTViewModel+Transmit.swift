@@ -25,15 +25,16 @@ private actor RemoteParticipantClearResultBox {
 
 extension PTTViewModel {
     private var wakePlaybackFallbackDelayNanoseconds: UInt64 { 3_500_000_000 }
-    // Wake-capable receive now buffers early audio and the backend preserves the
-    // active transmit target, so a long blind hold here just shifts speech behind
-    // the user's finger and makes short phrases feel cut off on release.
+    // Wake-capable receive needs to preserve short utterances while iOS brings
+    // the background peer's PTT audio session up. Release immediately on an
+    // explicit receiver-ready signal; otherwise use a bounded post-release hold.
     private var wakeCapableInitialAudioSendGraceNanoseconds: UInt64 { 300_000_000 }
-    private var wakeCapablePostReleaseAudioSendGraceNanoseconds: UInt64 { 750_000_000 }
+    private var wakeCapablePostReleaseAudioSendGraceNanoseconds: UInt64 { 4_500_000_000 }
     private var mediaSessionRetryCooldown: TimeInterval { 0.75 }
     private var deferredInteractivePrewarmRecoveryDelayNanoseconds: UInt64 { 500_000_000 }
     private var transmitLeaseRenewIntervalNanoseconds: UInt64 { 1_000_000_000 }
-    private var remoteReceiverAudioReadyGateTimeoutNanoseconds: UInt64 { 3_500_000_000 }
+    private var minimumUsableBackendTransmitLeaseSeconds: TimeInterval { 3.0 }
+    private var remoteReceiverAudioReadyGateTimeoutNanoseconds: UInt64 { 6_000_000_000 }
     private var remoteReceiverAudioReadyGatePollNanoseconds: UInt64 { 50_000_000 }
     private var remoteParticipantClearBeforeTransmitTimeoutNanoseconds: UInt64 { 250_000_000 }
 
@@ -1748,8 +1749,23 @@ extension PTTViewModel {
                 )
                 return
             }
-            transmitRuntime.syncActiveTarget(target)
-            configureOutgoingAudioRoute(target: target)
+            let usableTarget = try await refreshBackendTransmitLeaseBeforeActivationIfNeeded(
+                response: response,
+                target: target,
+                request: request,
+                backend: backend,
+                source: "begin-transmit"
+            )
+            guard shouldActivateBackendTransmitLease(request: request, workID: workID) else {
+                await cleanupBackendTransmitLeaseGrantedAfterRelease(
+                    target: usableTarget,
+                    backend: backend,
+                    source: "begin-transmit-post-renew"
+                )
+                return
+            }
+            transmitRuntime.syncActiveTarget(usableTarget)
+            configureOutgoingAudioRoute(target: usableTarget)
             recordTransmitStartupTiming(
                 stage: "audio-route-configured-after-lease",
                 contactID: request.contactID,
@@ -1768,12 +1784,12 @@ extension PTTViewModel {
                     "source": "begin-transmit",
                 ]
             )
-            startRenewingTransmit(target)
-            await transmitCoordinator.handle(.beginSucceeded(target, request))
+            startRenewingTransmit(usableTarget)
+            await transmitCoordinator.handle(.beginSucceeded(usableTarget, request))
             syncTransmitState()
             await completeDeferredSystemTransmitActivationIfReady(
                 request: request,
-                target: target
+                target: usableTarget
             )
         } catch {
             if Task.isCancelled || isExpectedBackendSyncCancellation(error) {
@@ -1842,27 +1858,42 @@ extension PTTViewModel {
                 )
                 return true
             }
-            transmitRuntime.syncActiveTarget(target)
+            let usableTarget = try await refreshBackendTransmitLeaseBeforeActivationIfNeeded(
+                response: response,
+                target: target,
+                request: request,
+                backend: backend,
+                source: "membership-recovery"
+            )
+            guard shouldActivateBackendTransmitLease(request: request, workID: workID) else {
+                await cleanupBackendTransmitLeaseGrantedAfterRelease(
+                    target: usableTarget,
+                    backend: backend,
+                    source: "membership-recovery-post-renew"
+                )
+                return true
+            }
+            transmitRuntime.syncActiveTarget(usableTarget)
             diagnostics.record(
                 .media,
                 message: "Starting transmit lease renewal after recovered backend grant",
                 metadata: [
-                    "contactId": target.contactID.uuidString,
-                    "channelId": target.channelID,
+                    "contactId": usableTarget.contactID.uuidString,
+                    "channelId": usableTarget.channelID,
                     "source": "membership-recovery",
                 ]
             )
-            startRenewingTransmit(target)
+            startRenewingTransmit(usableTarget)
             diagnostics.record(
                 .media,
                 message: "Recovered transmit membership drift",
                 metadata: ["contact": request.contactHandle, "channelId": request.backendChannelID]
             )
-            await transmitCoordinator.handle(.beginSucceeded(target, request))
+            await transmitCoordinator.handle(.beginSucceeded(usableTarget, request))
             syncTransmitState()
             await completeDeferredSystemTransmitActivationIfReady(
                 request: request,
-                target: target
+                target: usableTarget
             )
             return true
         } catch {
@@ -1888,6 +1919,148 @@ extension PTTViewModel {
         guard transmitCoordinator.state.isPressingTalk else { return false }
         guard transmitCoordinator.state.pendingRequest == request else { return false }
         return true
+    }
+
+    func parsedBackendInstant(_ text: String) -> Date? {
+        guard text.hasSuffix("Z") else { return nil }
+        let withoutZone = String(text.dropLast())
+        let parts = withoutZone.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        let baseText = String(parts[0]) + "Z"
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        guard let baseDate = formatter.date(from: baseText) else { return nil }
+        guard parts.count == 2 else { return baseDate }
+
+        let fractionalDigits = parts[1].prefix { $0 >= "0" && $0 <= "9" }
+        guard !fractionalDigits.isEmpty else { return baseDate }
+        let scale = pow(10.0, Double(fractionalDigits.count))
+        let fractionalSeconds = (Double(fractionalDigits) ?? 0) / scale
+        return baseDate.addingTimeInterval(fractionalSeconds)
+    }
+
+    func backendTransmitLeaseRemainingSeconds(
+        expiresAt: String,
+        now: Date = Date()
+    ) -> TimeInterval? {
+        guard let expiration = parsedBackendInstant(expiresAt) else { return nil }
+        return expiration.timeIntervalSince(now)
+    }
+
+    func backendTransmitLeaseNeedsImmediateRenewal(
+        expiresAt: String,
+        now: Date = Date()
+    ) -> Bool {
+        guard let remaining = backendTransmitLeaseRemainingSeconds(expiresAt: expiresAt, now: now) else {
+            return false
+        }
+        return remaining < minimumUsableBackendTransmitLeaseSeconds
+    }
+
+    private func refreshBackendTransmitLeaseBeforeActivationIfNeeded(
+        response: TurboBeginTransmitResponse,
+        target: TransmitTarget,
+        request: TransmitRequestContext,
+        backend: BackendServices,
+        source: String
+    ) async throws -> TransmitTarget {
+        guard let remainingSeconds = backendTransmitLeaseRemainingSeconds(expiresAt: response.expiresAt) else {
+            diagnostics.record(
+                .media,
+                level: .notice,
+                message: "Could not parse backend transmit lease expiration",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "expiresAt": response.expiresAt,
+                    "source": source,
+                ]
+            )
+            return target
+        }
+        guard remainingSeconds < minimumUsableBackendTransmitLeaseSeconds else { return target }
+
+        let remainingMilliseconds = Int(remainingSeconds * 1_000)
+        diagnostics.record(
+            .media,
+            level: .notice,
+            message: "Backend transmit lease grant had low remaining lifetime; renewing before activation",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "targetDeviceId": target.deviceID,
+                "startedAt": response.startedAt,
+                "expiresAt": response.expiresAt,
+                "remainingMs": String(remainingMilliseconds),
+                "minimumUsableMs": String(Int(minimumUsableBackendTransmitLeaseSeconds * 1_000)),
+                "source": source,
+            ]
+        )
+        recordTransmitStartupTiming(
+            stage: "backend-lease-immediate-renew-requested",
+            contactID: request.contactID,
+            channelUUID: request.channelUUID,
+            channelID: request.backendChannelID,
+            metadata: [
+                "targetDeviceId": target.deviceID,
+                "remainingMs": String(remainingMilliseconds),
+                "source": source,
+            ]
+        )
+
+        let renewStartedAt = Date()
+        do {
+            let renewed = try await backend.renewTransmit(channelId: target.channelID)
+            let renewDurationMs = Int(Date().timeIntervalSince(renewStartedAt) * 1_000)
+            diagnostics.record(
+                .media,
+                message: "Backend transmit lease renewed before activation",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "targetDeviceId": target.deviceID,
+                    "startedAt": renewed.startedAt,
+                    "expiresAt": renewed.expiresAt,
+                    "renewDurationMs": String(renewDurationMs),
+                    "source": source,
+                ]
+            )
+            recordTransmitStartupTiming(
+                stage: "backend-lease-immediate-renewed",
+                contactID: request.contactID,
+                channelUUID: request.channelUUID,
+                channelID: request.backendChannelID,
+                metadata: [
+                    "targetDeviceId": target.deviceID,
+                    "expiresAt": renewed.expiresAt,
+                    "renewDurationMs": String(renewDurationMs),
+                    "source": source,
+                ]
+            )
+            return target
+        } catch {
+            guard shouldTreatTransmitLeaseLossAsStop(error) else { throw error }
+
+            diagnostics.record(
+                .media,
+                level: .notice,
+                message: "Backend transmit lease expired before activation; reacquiring",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "targetDeviceId": target.deviceID,
+                    "remainingMs": String(remainingMilliseconds),
+                    "error": error.localizedDescription,
+                    "source": source,
+                ]
+            )
+            let reacquired = try await backend.beginTransmit(channelId: request.backendChannelID)
+            return TransmitTarget(
+                contactID: request.contactID,
+                userID: request.remoteUserID,
+                deviceID: reacquired.targetDeviceId,
+                channelID: request.backendChannelID
+            )
+        }
     }
 
     private func cleanupBackendTransmitLeaseGrantedAfterRelease(

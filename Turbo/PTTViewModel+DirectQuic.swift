@@ -2,7 +2,7 @@ import Foundation
 import UIKit
 
 extension PTTViewModel {
-    private var defaultDirectQuicPromotionTimeoutMilliseconds: Int { 2_500 }
+    private var defaultDirectQuicPromotionTimeoutMilliseconds: Int { 5_000 }
     private var defaultDirectQuicRetryBackoffMilliseconds: Int { 15_000 }
     private var foregroundDirectQuicPathLostRetryBackoffMilliseconds: Int { 1_000 }
     private var foregroundDirectQuicInitialConnectivityRetryBackoffMilliseconds: Int { 1_000 }
@@ -995,6 +995,12 @@ extension PTTViewModel {
         applyDirectQuicUpgradeTransition(fallback, for: contactID)
         mediaRuntime.directQuicProbeController?.cancel(reason: reason)
         mediaRuntime.directQuicProbeController = nil
+        if retryBackoff?.category == .connectivity {
+            scheduleAutomaticDirectQuicProbe(
+                for: contactID,
+                reason: reason
+            )
+        }
     }
 
     func activateDirectQuicMediaPath(
@@ -1377,12 +1383,41 @@ extension PTTViewModel {
                 "reason": payload.reason,
             ]
         )
+        if isRemoteReceiverBackgroundTransitionReason(payload.reason),
+           let existing = channelReadinessByContactID[contactID] {
+            var updated = existing.settingRemoteAudioReadiness(.wakeCapable)
+            if case .unavailable = existing.remoteWakeCapability,
+               let peerDeviceID = directQuicPeerDeviceID(for: contactID),
+               !peerDeviceID.isEmpty {
+                updated = updated.settingRemoteWakeCapability(
+                    .wakeCapable(targetDeviceId: peerDeviceID)
+                )
+            }
+            backendSyncCoordinator.send(
+                .channelReadinessUpdated(contactID: contactID, readiness: updated)
+            )
+            diagnostics.record(
+                .media,
+                message: "Marked peer receiver wake-capable from Direct QUIC path closing",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "attemptId": payload.attemptId,
+                    "reason": payload.reason,
+                ]
+            )
+        }
         await retireDirectQuicPath(
             for: contactID,
             reason: payload.reason,
             sendHangup: false,
             configureActiveRoute: true
         )
+    }
+
+    func isRemoteReceiverBackgroundTransitionReason(_ reason: String) -> Bool {
+        reason == "app-background-media-closed"
+            || reason == "application-will-resign-active"
+            || reason == "application-did-enter-background"
     }
 
     func sendDirectQuicWarmPingIfPossible(

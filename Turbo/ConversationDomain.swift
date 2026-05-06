@@ -881,8 +881,13 @@ struct ChannelReadinessSnapshot: Equatable {
     }
 
     var remoteAudioReadyForLiveTransmit: Bool {
-        if remoteAudioReadiness == .ready {
+        switch remoteAudioReadiness {
+        case .ready:
             return true
+        case .waiting, .wakeCapable:
+            return false
+        case .unknown:
+            break
         }
 
         return membership.peerDeviceConnected && readinessStatus == .ready
@@ -1997,6 +2002,10 @@ private extension ConversationDerivationContext {
             }
 
             if directMediaPathActive {
+                if remoteAudioReadinessState == .wakeCapable,
+                   case .wakeCapable = remoteWakeCapabilityState {
+                    return .wakeReady
+                }
                 return .ready
             }
 
@@ -2157,6 +2166,10 @@ private extension ConversationDerivationContext {
 
     var remoteAudioReadyForTransmit: Bool {
         if directMediaPathActive {
+            if remoteAudioReadinessState == .wakeCapable,
+               case .wakeCapable = remoteWakeCapabilityState {
+                return false
+            }
             return true
         }
 
