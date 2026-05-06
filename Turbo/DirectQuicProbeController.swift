@@ -140,8 +140,7 @@ nonisolated enum DirectQuicIdentityConfiguration {
             return nil
         }
         return DirectQuicIdentityRegistrationMetadata(
-            fingerprint: identity.certificateFingerprint,
-            certificateDerBase64: identity.certificateDerBase64
+            fingerprint: identity.certificateFingerprint
         )
     }
 

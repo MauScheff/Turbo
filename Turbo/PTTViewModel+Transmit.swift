@@ -2876,6 +2876,14 @@ extension PTTViewModel {
         stage: String,
         recordCompletedSideEffectInvariant: Bool = true
     ) -> Bool {
+        let activeTarget = request.channelUUID.flatMap { activeTransmitTarget(for: $0) }
+        let requestStillCurrent =
+            transmitCoordinator.state.pendingRequest == request
+            || (
+                activeTarget?.contactID == request.contactID
+                && activeTarget?.channelID == request.backendChannelID
+                && activeTarget?.userID == request.remoteUserID
+            )
         let reason: String?
         if transmitRuntime.explicitStopRequested {
             reason = "explicit-stop-requested"
@@ -2885,8 +2893,8 @@ extension PTTViewModel {
             reason = "coordinator-not-pressing"
         } else if pttCoordinator.state.systemChannelUUID != request.channelUUID {
             reason = "system-channel-mismatch"
-        } else if transmitCoordinator.state.pendingRequest != request {
-            reason = "pending-request-mismatch"
+        } else if !requestStillCurrent {
+            reason = "request-not-current"
         } else {
             reason = nil
         }
@@ -2904,6 +2912,7 @@ extension PTTViewModel {
                 "runtimePressActive": String(transmitRuntime.isPressingTalk),
                 "coordinatorPressActive": String(transmitCoordinator.state.isPressingTalk),
                 "explicitStopRequested": String(transmitRuntime.explicitStopRequested),
+                "requestStillCurrent": String(requestStillCurrent),
             ]
         )
         if recordCompletedSideEffectInvariant {
@@ -2913,7 +2922,10 @@ extension PTTViewModel {
                 contactID: request.contactID,
                 channelID: request.backendChannelID,
                 channelUUID: request.channelUUID,
-                metadata: ["requestKind": "pending-system-audio-capture"]
+                metadata: [
+                    "requestKind": "pending-system-audio-capture",
+                    "requestStillCurrent": String(requestStillCurrent),
+                ]
             )
         }
         return false
@@ -4154,12 +4166,26 @@ extension PTTViewModel {
         let fromDeviceID = backend.deviceID
         let toUserID = target.userID
         let toDeviceID = target.deviceID
+        configureMediaEncryptionSessionIfPossible(
+            contactID: target.contactID,
+            channelID: channelID,
+            peerDeviceID: toDeviceID
+        )
         let sendAudioChunk: @Sendable (String) async throws -> Void = { [weak self] payload in
             if let self,
                await self.takeShouldAwaitInitialOutboundAudioSendGate() {
                 _ = await self.waitForRemoteReceiverAudioReadinessBeforeSendingIfNeeded(
                     target: target
                 )
+            }
+
+            let transportPayload: String
+            if let self {
+                transportPayload = try await MainActor.run {
+                    try self.sealOutgoingMediaPayloadIfPossible(payload, target: target)
+                }
+            } else {
+                transportPayload = payload
             }
 
             let relaySend: @Sendable () async throws -> Void = {
@@ -4170,7 +4196,7 @@ extension PTTViewModel {
                     fromDeviceId: fromDeviceID,
                     toUserId: toUserID,
                     toDeviceId: toDeviceID,
-                    payload: payload
+                    payload: transportPayload
                 )
                 try await backend.sendSignal(envelope)
             }
@@ -4184,7 +4210,7 @@ extension PTTViewModel {
                 }
                 if let directTransport {
                     do {
-                        try await directTransport.sendAudioPayload(payload)
+                        try await directTransport.sendAudioPayload(transportPayload)
                         return
                     } catch {
                         await MainActor.run {

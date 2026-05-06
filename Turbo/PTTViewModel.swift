@@ -143,6 +143,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var pendingTalkRequestNotificationHandle: String?
     var directQuicProvisioningStatus: String = "not-started"
     var directQuicRegisteredFingerprint: String?
+    var mediaEncryptionProvisioningStatus: String = "not-started"
+    var mediaEncryptionLocalIdentity: MediaEncryptionLocalIdentity?
     @ObservationIgnored
     let localNetworkPermissionPreflight = LocalNetworkPermissionPreflight()
     var applicationStateOverride: UIApplication.State?
@@ -801,6 +803,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     var topChromeDiagnosticsErrorText: String? {
+        guard developerIdentityControlsEnabled else { return nil }
         guard let latestError = diagnostics.latestError else { return nil }
         guard shouldSurfaceTopChromeDiagnosticsError(latestError) else { return nil }
         return "\(latestError.subsystem.rawValue): \(latestError.message)"

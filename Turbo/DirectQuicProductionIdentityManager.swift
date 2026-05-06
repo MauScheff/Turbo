@@ -4,7 +4,6 @@ import Security
 
 nonisolated struct DirectQuicIdentityRegistrationMetadata: Codable, Equatable {
     let fingerprint: String
-    let certificateDerBase64: String
 }
 
 nonisolated enum DirectQuicIdentitySource: String, Equatable {
@@ -17,7 +16,6 @@ nonisolated struct DirectQuicResolvedIdentity {
     let label: String
     let identity: SecIdentity
     let certificateFingerprint: String
-    let certificateDerBase64: String
     let source: DirectQuicIdentitySource
 }
 
@@ -120,7 +118,6 @@ nonisolated enum DirectQuicProductionIdentityManager {
             label: label,
             identity: identity,
             certificateFingerprint: fingerprint(for: certificateDER),
-            certificateDerBase64: certificateDER.base64EncodedString(),
             source: source
         )
     }

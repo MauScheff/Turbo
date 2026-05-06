@@ -96,6 +96,7 @@ enum BackendCommandReducer {
                 return BackendCommandTransition(state: nextState)
             }
             nextState.activeOperation = operation
+            nextState.queuedJoinRequest = nil
             nextState.lastError = nil
             effects.append(.leave(request))
 

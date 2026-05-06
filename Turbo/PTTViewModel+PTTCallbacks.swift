@@ -496,6 +496,24 @@ extension PTTViewModel {
 
     func handleDidJoinChannel(_ channelUUID: UUID, reason: String) {
         let contactID = contactId(for: channelUUID)
+        if let contactID,
+           sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Ignoring stale PTT join while explicit leave is in flight",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "reason": reason,
+                    "pendingAction": String(describing: sessionCoordinator.pendingAction),
+                ]
+            )
+            try? pttSystemClient.leaveChannel(channelUUID: channelUUID)
+            statusMessage = "Disconnecting..."
+            captureDiagnosticsState("ptt-callback:joined-blocked-by-leave")
+            return
+        }
+
         Task {
             await pttCoordinator.handle(
                 .didJoinChannel(
@@ -654,6 +672,20 @@ extension PTTViewModel {
 
     func handleDidBeginTransmitting(_ channelUUID: UUID, source: String) {
         Task {
+            let hadPendingSystemBegin = transmitRuntime.isSystemTransmitBeginPending(channelUUID: channelUUID)
+            guard !transmitRuntime.isSystemTransmitting || hadPendingSystemBegin else {
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Ignored duplicate system transmit begin callback",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "source": source,
+                    ]
+                )
+                return
+            }
+            transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
+            transmitRuntime.noteSystemTransmitBegan()
             systemTransmitBeginRecoveryAttemptsByChannelUUID.removeValue(forKey: channelUUID)
             let callbackTarget = activeTransmitTarget(for: channelUUID)
             await pttCoordinator.handle(
@@ -662,8 +694,6 @@ extension PTTViewModel {
                     source: source
                 )
             )
-            transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
-            transmitRuntime.noteSystemTransmitBegan()
             syncPTTState()
             recordTransmitStartupTiming(
                 stage: "system-transmit-began",
@@ -723,6 +753,24 @@ extension PTTViewModel {
             let hasPendingLifecycle = hasPendingTransmitLifecycle(for: channelUUID)
             let transmitDurationMilliseconds = transmitRuntime.currentSystemTransmitDurationMilliseconds()
             let applicationState = currentApplicationState()
+            guard transmitRuntime.hasSystemTransmitLifecycle else {
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Ignored duplicate system transmit end callback",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "source": source,
+                        "hasMatchingActiveTarget": String(matchingActiveTarget != nil),
+                        "hasPendingLifecycle": String(hasPendingLifecycle),
+                        "applicationState": String(describing: applicationState),
+                    ]
+                )
+                return
+            }
+            let endDisposition = transmitRuntime.handleSystemTransmitEnded(
+                applicationStateIsActive: applicationState == .active,
+                matchingActiveTarget: matchingActiveTarget
+            )
             await pttCoordinator.handle(
                 .didEndTransmitting(
                     channelUUID: channelUUID,
@@ -787,10 +835,7 @@ extension PTTViewModel {
                     "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
                 ]
             )
-            switch transmitRuntime.handleSystemTransmitEnded(
-                applicationStateIsActive: applicationState == .active,
-                matchingActiveTarget: matchingActiveTarget
-            ) {
+            switch endDisposition {
             case .implicitRelease:
                 diagnostics.record(
                     .pushToTalk,

@@ -73,6 +73,14 @@ The iOS app has a backend integration path:
 - Local websocket signaling is not currently used in the fast local-dev loop.
 - The app no longer depends on WebRTC or CocoaPods; media transport is being kept behind an app-owned abstraction so a relay-oriented implementation can replace the prototype spike cleanly.
 
+### Transport security
+
+When Direct QUIC is available, BeepBeep can connect two devices directly so audio does not have to travel through the relay path.
+
+Audio is end-to-end encrypted on both Direct and Relayed connections. Direct sends audio device to device. Relayed keeps the conversation working when a mobile carrier, VPN, firewall, or network change blocks a direct connection. BeepBeep handles this automatically and uses the fastest available path.
+
+Each device keeps its private media key locally. The backend only stores public key metadata for setup, so relayed audio stays opaque to BeepBeep. Direct QUIC also keeps its private transport key locally and uses a backend-shared certificate fingerprint so each app can verify the direct peer.
+
 ## Backend goal
 
 The backend should act as the control plane, not the media plane.

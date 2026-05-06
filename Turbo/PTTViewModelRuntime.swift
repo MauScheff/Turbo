@@ -5,6 +5,7 @@
 //  Created by Codex on 08.04.2026.
 //
 
+import CryptoKit
 import Foundation
 
 final class BackendRuntimeState {
@@ -343,6 +344,14 @@ struct TransmitRuntimeState {
         executionState.lastSystemTransmitBeganAt
     }
 
+    var hasSystemTransmitLifecycle: Bool {
+        executionState.hasSystemTransmitLifecycle
+    }
+
+    var isSystemTransmitting: Bool {
+        executionState.isSystemTransmitting
+    }
+
     var shouldAwaitInitialOutboundAudioSendGate: Bool {
         executionState.initialOutboundAudioSendGateState.shouldAwaitInitialRemoteReady
     }
@@ -608,6 +617,33 @@ struct FirstTalkDirectQuicGrace: Equatable {
     var expired: Bool
 }
 
+struct MediaEncryptionSession {
+    let channelID: String
+    let localDeviceID: String
+    let peerDeviceID: String
+    let localFingerprint: String
+    let peerFingerprint: String
+    let localPrivateKey: Curve25519.KeyAgreement.PrivateKey
+    let peerIdentity: MediaEncryptionIdentityRegistrationMetadata
+
+    var keyID: String {
+        MediaEndToEndEncryption.keyID(
+            localFingerprint: localFingerprint,
+            peerFingerprint: peerFingerprint,
+            channelID: channelID
+        )
+    }
+
+    func context(senderDeviceID: String, receiverDeviceID: String) -> MediaEncryptionContext {
+        MediaEncryptionContext(
+            channelID: channelID,
+            sessionID: MediaEndToEndEncryption.sessionID(channelID: channelID),
+            senderDeviceID: senderDeviceID,
+            receiverDeviceID: receiverDeviceID
+        )
+    }
+}
+
 final class MediaRuntimeState {
     var session: MediaSession?
     var contactID: UUID?
@@ -629,6 +665,9 @@ final class MediaRuntimeState {
     private(set) var directQuicWarmPongIDByContactID: [UUID: String] = [:]
     private var incomingRelayAudioDetailedReportsRemainingByContactID: [UUID: Int] = [:]
     private var incomingRelayAudioSuppressionReportedContactIDs: Set<UUID> = []
+    private var mediaEncryptionSessionsByContactID: [UUID: MediaEncryptionSession] = [:]
+    private var mediaEncryptionSendSequenceByContactID: [UUID: UInt64] = [:]
+    private var mediaEncryptionReceiveSequenceByContactID: [UUID: UInt64] = [:]
 
     var hasSession: Bool {
         session != nil
@@ -737,6 +776,9 @@ final class MediaRuntimeState {
         directQuicWarmPongIDByContactID = [:]
         incomingRelayAudioDetailedReportsRemainingByContactID = [:]
         incomingRelayAudioSuppressionReportedContactIDs = []
+        mediaEncryptionSessionsByContactID = [:]
+        mediaEncryptionSendSequenceByContactID = [:]
+        mediaEncryptionReceiveSequenceByContactID = [:]
         sendAudioChunk = nil
         startupState = .idle
     }
@@ -891,6 +933,39 @@ final class MediaRuntimeState {
         receiverPrewarmAckRequestIDByContactID[contactID] = nil
         directQuicWarmPongIDByContactID[contactID] = nil
     }
+
+    func setMediaEncryptionSession(_ session: MediaEncryptionSession?, for contactID: UUID) {
+        mediaEncryptionSessionsByContactID[contactID] = session
+        mediaEncryptionSendSequenceByContactID[contactID] = 0
+        mediaEncryptionReceiveSequenceByContactID[contactID] = nil
+    }
+
+    func mediaEncryptionSession(for contactID: UUID) -> MediaEncryptionSession? {
+        mediaEncryptionSessionsByContactID[contactID]
+    }
+
+    func nextMediaEncryptionSendSequence(for contactID: UUID) -> UInt64 {
+        let sequence = mediaEncryptionSendSequenceByContactID[contactID] ?? 0
+        mediaEncryptionSendSequenceByContactID[contactID] = sequence + 1
+        return sequence
+    }
+
+    func resetMediaEncryptionReceiveSequence(for contactID: UUID) {
+        mediaEncryptionReceiveSequenceByContactID[contactID] = nil
+    }
+
+    func acceptMediaEncryptionReceiveSequence(
+        _ sequenceNumber: UInt64,
+        for contactID: UUID
+    ) -> Bool {
+        guard let lastSequence = mediaEncryptionReceiveSequenceByContactID[contactID] else {
+            mediaEncryptionReceiveSequenceByContactID[contactID] = sequenceNumber
+            return true
+        }
+        guard sequenceNumber > lastSequence else { return false }
+        mediaEncryptionReceiveSequenceByContactID[contactID] = sequenceNumber
+        return true
+    }
 }
 
 enum MediaTransportPathState: String, Equatable {
@@ -902,7 +977,7 @@ enum MediaTransportPathState: String, Equatable {
     var label: String {
         switch self {
         case .relay:
-            return "Relay"
+            return "Relayed"
         case .promoting:
             return "Promoting"
         case .direct:
@@ -970,6 +1045,7 @@ struct BackendServices {
 
     var supportsWebSocket: Bool { client.supportsWebSocket }
     var supportsDirectQuicUpgrade: Bool { client.supportsDirectQuicUpgrade }
+    var supportsMediaEndToEndEncryption: Bool { client.supportsMediaEndToEndEncryption }
     var isWebSocketConnected: Bool { client.isWebSocketConnected }
     var deviceID: String { client.deviceID }
     var usesLocalHTTPBackend: Bool { mode == "local-http" }
@@ -987,13 +1063,15 @@ struct BackendServices {
         label: String?,
         alertPushToken: String?,
         alertPushEnvironment: TurboAPNSEnvironment?,
-        directQuicIdentity: DirectQuicIdentityRegistrationMetadata? = nil
+        directQuicIdentity: DirectQuicIdentityRegistrationMetadata? = nil,
+        mediaEncryptionIdentity: MediaEncryptionIdentityRegistrationMetadata? = nil
     ) async throws -> TurboDeviceRegistrationResponse {
         try await client.registerDevice(
             label: label,
             alertPushToken: alertPushToken,
             alertPushEnvironment: alertPushEnvironment,
-            directQuicIdentity: directQuicIdentity
+            directQuicIdentity: directQuicIdentity,
+            mediaEncryptionIdentity: mediaEncryptionIdentity
         )
     }
 

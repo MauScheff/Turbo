@@ -720,6 +720,21 @@ extension PTTViewModel {
             return
         }
 
+        guard !sessionCoordinator.pendingAction.isLeaveInFlight(for: contact.id) else {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Ignored local PTT join while explicit leave is in flight",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "channelUUID": contact.channelId.uuidString,
+                    "pendingAction": String(describing: sessionCoordinator.pendingAction),
+                ]
+            )
+            statusMessage = "Disconnecting..."
+            captureDiagnosticsState("ptt-join:blocked-by-leave")
+            return
+        }
+
         let stalePendingJoinWithoutLocalSessionEvidence =
             sessionCoordinator.pendingJoinContactID == contact.id
             && !systemSessionMatches(contact.id)

@@ -245,6 +245,7 @@ extension PTTViewModel {
 
     func shouldRecoverBackendSignalingJoinDrift(from message: String) -> Bool {
         guard backendRuntime.isReady else { return false }
+        guard currentApplicationState() == .active else { return false }
         let normalized = message
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
@@ -388,13 +389,17 @@ extension PTTViewModel {
             let directQuicIdentity = provisionDirectQuicProductionIdentityForRegistration(
                 deviceID: client.deviceID
             )
+            let mediaEncryptionIdentity = provisionMediaEncryptionIdentityForRegistration(
+                deviceID: client.deviceID
+            )
             _ = try await client.registerDevice(
                 label: UIDevice.current.name,
                 alertPushToken: alertPushTokenHex.isEmpty ? nil : alertPushTokenHex,
                 alertPushEnvironment: alertPushTokenHex.isEmpty
                     ? nil
                     : TurboAPNSEnvironmentResolver.current(),
-                directQuicIdentity: directQuicIdentity
+                directQuicIdentity: directQuicIdentity,
+                mediaEncryptionIdentity: mediaEncryptionIdentity
             )
             if let directQuicIdentity {
                 directQuicRegisteredFingerprint = directQuicIdentity.fingerprint
@@ -426,8 +431,11 @@ extension PTTViewModel {
                     "deviceId": client.deviceID,
                     "supportsDirectQuicUpgrade": String(runtimeConfig.supportsDirectQuicUpgrade),
                     "supportsDirectQuicProvisioning": String(runtimeConfig.supportsDirectQuicProvisioning),
+                    "supportsMediaEndToEndEncryption": String(runtimeConfig.supportsMediaEndToEndEncryption),
                     "directQuicProvisioningStatus": directQuicProvisioningStatus,
                     "directQuicFingerprint": directQuicIdentity?.fingerprint ?? "none",
+                    "mediaEncryptionProvisioningStatus": mediaEncryptionProvisioningStatus,
+                    "mediaEncryptionFingerprint": mediaEncryptionIdentity?.fingerprint ?? "none",
                     "localRelayOnlyOverride": String(localRelayOnlyOverride),
                 ]
             )
@@ -441,6 +449,7 @@ extension PTTViewModel {
                     "handle": session.handle,
                     "telemetryEnabled": String(runtimeConfig.telemetryEnabled ?? false),
                     "supportsDirectQuicUpgrade": String(runtimeConfig.supportsDirectQuicUpgrade),
+                    "supportsMediaEndToEndEncryption": String(runtimeConfig.supportsMediaEndToEndEncryption),
                     "localRelayOnlyOverride": String(localRelayOnlyOverride),
                 ]
             )

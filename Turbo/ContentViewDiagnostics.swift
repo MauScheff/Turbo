@@ -195,12 +195,16 @@ struct TurboDiagnosticsView: View {
                     }
                     .disabled(isRunningDirectQuicDebugAction)
 
-                    Button(isRunningDirectQuicDebugAction ? "Running…" : "Import PKCS#12 identity") {
+                    Text("PKCS#12 controls are a developer fallback. Production Direct QUIC uses the generated local identity and backend fingerprint registration.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Button(isRunningDirectQuicDebugAction ? "Running…" : "Import debug PKCS#12 identity") {
                         onImportDirectQuicIdentity()
                     }
                     .disabled(isRunningDirectQuicDebugAction)
 
-                    Button(isRunningDirectQuicDebugAction ? "Running…" : "Use installed identity") {
+                    Button(isRunningDirectQuicDebugAction ? "Running…" : "Use installed debug identity") {
                         onUseInstalledDirectQuicIdentity()
                     }
                     .disabled(

@@ -492,7 +492,12 @@ extension PTTViewModel {
             return nil
         }
 
-        return mediaTransportPathState
+        switch mediaTransportPathState {
+        case .direct:
+            return .direct
+        case .relay, .promoting, .recovering:
+            return .relay
+        }
     }
 
     private var listEligibleContacts: [Contact] {

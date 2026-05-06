@@ -44,6 +44,15 @@ enum SystemTransmitExecutionState: Equatable {
         guard case .transmitting(let startedAt) = self else { return nil }
         return startedAt
     }
+
+    var hasLifecycle: Bool {
+        self != .idle
+    }
+
+    var isTransmitting: Bool {
+        guard case .transmitting = self else { return false }
+        return true
+    }
 }
 
 enum SystemTransmitActivationExecutionState: Equatable {
@@ -94,6 +103,8 @@ struct TransmitExecutionSessionState: Equatable {
     var interruptedContactID: UUID? { pressState.interruptedContactID }
     var pendingSystemBeginChannelUUID: UUID? { systemTransmitState.pendingSystemBeginChannelUUID }
     var lastSystemTransmitBeganAt: Date? { systemTransmitState.lastSystemTransmitBeganAt }
+    var hasSystemTransmitLifecycle: Bool { systemTransmitState.hasLifecycle }
+    var isSystemTransmitting: Bool { systemTransmitState.isTransmitting }
 }
 
 enum TransmitExecutionEvent: Equatable {
@@ -202,6 +213,7 @@ enum TransmitExecutionReducer {
             nextState = .initial
 
         case .handleSystemTransmitEnded(let applicationStateIsActive, let matchingActiveTarget):
+            guard nextState.hasSystemTransmitLifecycle else { break }
             let disposition: SystemTransmitEndDisposition
             if !applicationStateIsActive,
                !nextState.explicitStopRequested,

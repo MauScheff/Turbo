@@ -483,6 +483,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     private let playbackEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private let stateLock = NSLock()
+    private let receivePlaybackLock = NSLock()
     private let targetFormat: AVAudioFormat
     private var captureConverter: AVAudioConverter?
     private var playbackConverter: AVAudioConverter?
@@ -597,8 +598,10 @@ final class PCMWebSocketMediaSession: MediaSession {
             startupMode: startupMode,
             playbackAlreadyReady: playbackAlreadyReady
         )
-        isPlaybackReady = true
-        try drainPendingRemoteAudioChunksIfReady()
+        try withReceivePlaybackLock {
+            isPlaybackReady = true
+            try drainPendingRemoteAudioChunksIfReady()
+        }
 
         let requiresCapture = startupMode == .interactive
         if requiresCapture {
@@ -618,6 +621,12 @@ final class PCMWebSocketMediaSession: MediaSession {
                 "playbackReady": String(isPlaybackReady)
             ]
         )
+    }
+
+    private func withReceivePlaybackLock<T>(_ body: () throws -> T) rethrows -> T {
+        receivePlaybackLock.lock()
+        defer { receivePlaybackLock.unlock() }
+        return try body()
     }
 
     func startSendingAudio() async throws {
@@ -689,26 +698,37 @@ final class PCMWebSocketMediaSession: MediaSession {
         }
 
         guard !decodedChunks.isEmpty else { return }
-        if !isPlaybackReady {
-            for chunk in decodedChunks {
-                enqueuePendingRemoteAudioChunk(chunk)
-            }
-            await report(
-                "Queued remote audio chunk until playback ready",
-                metadata: ["pendingChunkCount": String(pendingRemoteAudioChunkCount())]
-            )
-            return
-        }
+        var queuedPendingChunkCount: Int?
+        var playbackFailure: String?
         do {
-            for chunk in decodedChunks {
-                try schedulePlayback(for: chunk)
+            try withReceivePlaybackLock {
+                if !isPlaybackReady {
+                    for chunk in decodedChunks {
+                        enqueuePendingRemoteAudioChunk(chunk)
+                    }
+                    queuedPendingChunkCount = pendingRemoteAudioChunkCount()
+                } else {
+                    for chunk in decodedChunks {
+                        try schedulePlayback(for: chunk)
+                    }
+                }
             }
         } catch {
+            playbackFailure = error.localizedDescription
+            state = .failed("playback failed: \(error.localizedDescription)")
+        }
+
+        if let queuedPendingChunkCount {
+            await report(
+                "Queued remote audio chunk until playback ready",
+                metadata: ["pendingChunkCount": String(queuedPendingChunkCount)]
+            )
+        }
+        if let playbackFailure {
             await report(
                 "Receive playback failed",
-                metadata: ["error": error.localizedDescription]
+                metadata: ["error": playbackFailure]
             )
-            state = .failed("playback failed: \(error.localizedDescription)")
         }
     }
 
@@ -1383,9 +1403,20 @@ final class PCMWebSocketMediaSession: MediaSession {
     }
 
     private func shouldReassertPlaybackNode() -> Bool {
-        playerNode.isPlaying
-            || pendingPlaybackBufferCount() > 0
-            || scheduledPlaybackBufferCountSnapshot() > 0
+        Self.shouldReassertPlaybackNode(
+            isPlayerNodePlaying: playerNode.isPlaying,
+            pendingPlaybackBufferCount: pendingPlaybackBufferCount(),
+            scheduledPlaybackBufferCount: scheduledPlaybackBufferCountSnapshot()
+        )
+    }
+
+    static func shouldReassertPlaybackNode(
+        isPlayerNodePlaying: Bool,
+        pendingPlaybackBufferCount: Int,
+        scheduledPlaybackBufferCount: Int
+    ) -> Bool {
+        guard !isPlayerNodePlaying else { return false }
+        return pendingPlaybackBufferCount > 0 || scheduledPlaybackBufferCount > 0
     }
 
     private func scheduledPlaybackBufferCountSnapshot() -> Int {

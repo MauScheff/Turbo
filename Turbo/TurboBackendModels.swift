@@ -679,7 +679,6 @@ struct TurboChannelAudioReadinessPayload: Decodable, Equatable {
 
 struct TurboDirectQuicPeerIdentityPayload: Codable, Equatable {
     let fingerprint: String
-    let certificateDerBase64: String?
     let status: String?
     let createdAt: String?
     let updatedAt: String?
@@ -689,6 +688,8 @@ struct TurboDirectQuicPeerIdentityPayload: Codable, Equatable {
         return DirectQuicProductionIdentityManager.normalizedFingerprint(fingerprint)
     }
 }
+
+typealias TurboMediaEncryptionPeerIdentityPayload = MediaEncryptionPeerIdentityPayload
 
 enum TurboWakeCapabilityStatus: Equatable {
     case unavailable
@@ -1549,6 +1550,7 @@ struct TurboBackendRuntimeConfig: Decodable {
     let telemetryEnabled: Bool?
     let supportsDirectQuicUpgrade: Bool
     let supportsDirectQuicProvisioning: Bool
+    let supportsMediaEndToEndEncryption: Bool
     let directQuicPolicy: TurboDirectQuicPolicy?
 
     init(
@@ -1557,6 +1559,7 @@ struct TurboBackendRuntimeConfig: Decodable {
         telemetryEnabled: Bool? = nil,
         supportsDirectQuicUpgrade: Bool = false,
         supportsDirectQuicProvisioning: Bool = false,
+        supportsMediaEndToEndEncryption: Bool = false,
         directQuicPolicy: TurboDirectQuicPolicy? = nil
     ) {
         self.mode = mode
@@ -1564,6 +1567,7 @@ struct TurboBackendRuntimeConfig: Decodable {
         self.telemetryEnabled = telemetryEnabled
         self.supportsDirectQuicUpgrade = supportsDirectQuicUpgrade
         self.supportsDirectQuicProvisioning = supportsDirectQuicProvisioning
+        self.supportsMediaEndToEndEncryption = supportsMediaEndToEndEncryption
         self.directQuicPolicy = directQuicPolicy
     }
 
@@ -1573,6 +1577,7 @@ struct TurboBackendRuntimeConfig: Decodable {
         case telemetryEnabled
         case supportsDirectQuicUpgrade
         case supportsDirectQuicProvisioning
+        case supportsMediaEndToEndEncryption
         case directQuicPolicy
     }
 
@@ -1583,6 +1588,7 @@ struct TurboBackendRuntimeConfig: Decodable {
         telemetryEnabled = try container.decodeIfPresent(Bool.self, forKey: .telemetryEnabled)
         supportsDirectQuicUpgrade = try container.decodeIfPresent(Bool.self, forKey: .supportsDirectQuicUpgrade) ?? false
         supportsDirectQuicProvisioning = try container.decodeIfPresent(Bool.self, forKey: .supportsDirectQuicProvisioning) ?? false
+        supportsMediaEndToEndEncryption = try container.decodeIfPresent(Bool.self, forKey: .supportsMediaEndToEndEncryption) ?? false
         directQuicPolicy = try container.decodeIfPresent(TurboDirectQuicPolicy.self, forKey: .directQuicPolicy)
     }
 }
@@ -2238,6 +2244,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
     private let audioReadinessPayload: TurboChannelAudioReadinessPayload
     private let wakeReadinessPayload: TurboChannelWakeReadinessPayload
     let peerDirectQuicIdentity: TurboDirectQuicPeerIdentityPayload?
+    let peerMediaEncryptionIdentity: TurboMediaEncryptionPeerIdentityPayload?
 
     init(
         channelId: String,
@@ -2250,7 +2257,8 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         readinessPayload: TurboChannelReadinessPayload? = nil,
         audioReadinessPayload: TurboChannelAudioReadinessPayload? = nil,
         wakeReadinessPayload: TurboChannelWakeReadinessPayload? = nil,
-        peerDirectQuicIdentity: TurboDirectQuicPeerIdentityPayload? = nil
+        peerDirectQuicIdentity: TurboDirectQuicPeerIdentityPayload? = nil,
+        peerMediaEncryptionIdentity: TurboMediaEncryptionPeerIdentityPayload? = nil
     ) {
         self.channelId = channelId
         self.peerUserId = peerUserId
@@ -2271,6 +2279,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             peerWakeCapability: TurboWakeCapabilityStatusPayload(kind: "unavailable")
         )
         self.peerDirectQuicIdentity = peerDirectQuicIdentity
+        self.peerMediaEncryptionIdentity = peerMediaEncryptionIdentity
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2285,6 +2294,7 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         case audioReadiness
         case wakeReadiness
         case peerDirectQuicIdentity
+        case peerMediaEncryptionIdentity
     }
 
     init(from decoder: Decoder) throws {
@@ -2300,6 +2310,10 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         peerDirectQuicIdentity = try container.decodeIfPresent(
             TurboDirectQuicPeerIdentityPayload.self,
             forKey: .peerDirectQuicIdentity
+        )
+        peerMediaEncryptionIdentity = try container.decodeIfPresent(
+            TurboMediaEncryptionPeerIdentityPayload.self,
+            forKey: .peerMediaEncryptionIdentity
         )
     }
 
@@ -2339,6 +2353,10 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         peerDirectQuicIdentity?.activeFingerprint
     }
 
+    var peerMediaEncryptionRegistration: MediaEncryptionIdentityRegistrationMetadata? {
+        peerMediaEncryptionIdentity?.activeRegistration
+    }
+
     var remoteWakeCapability: RemoteWakeCapabilityState {
         wakeReadinessPayload.remoteStatus
     }
@@ -2359,7 +2377,8 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             readinessPayload: readinessPayload,
             audioReadinessPayload: audioReadinessPayload.settingRemoteStatus(status),
             wakeReadinessPayload: wakeReadinessPayload,
-            peerDirectQuicIdentity: peerDirectQuicIdentity
+            peerDirectQuicIdentity: peerDirectQuicIdentity,
+            peerMediaEncryptionIdentity: peerMediaEncryptionIdentity
         )
     }
 
@@ -2375,7 +2394,8 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             readinessPayload: readinessPayload,
             audioReadinessPayload: audioReadinessPayload,
             wakeReadinessPayload: wakeReadinessPayload.settingRemoteStatus(status),
-            peerDirectQuicIdentity: peerDirectQuicIdentity
+            peerDirectQuicIdentity: peerDirectQuicIdentity,
+            peerMediaEncryptionIdentity: peerMediaEncryptionIdentity
         )
     }
 }

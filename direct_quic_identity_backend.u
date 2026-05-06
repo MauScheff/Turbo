@@ -1,23 +1,44 @@
-type turbo.domain.DirectQuicDeviceIdentityStatus = Active | Revoked
-
 type turbo.domain.DirectQuicDeviceIdentity =
-  DirectQuicDeviceIdentity Text Text DirectQuicDeviceIdentityStatus Instant Instant
+  DirectQuicDeviceIdentity Text Instant Instant
+
+turbo.domain.DirectQuicDeviceIdentity.doc : Doc
+turbo.domain.DirectQuicDeviceIdentity.doc = {{
+A fingerprint-only Direct QUIC identity bound to a backend device id by storage key.
+
+The certificate DER and private key stay on the iOS device. The backend persists only the active leaf-certificate fingerprint and lifecycle timestamps; readiness may project this record to the peer so the client can pin the TLS certificate observed on the QUIC path.
+}}
 
 type turbo.domain.DirectQuicDeviceIdentityRegistration =
-  DirectQuicDeviceIdentityRegistration Text Text
+  DirectQuicDeviceIdentityRegistration Text
+
+turbo.domain.DirectQuicDeviceIdentityRegistration.doc : Doc
+turbo.domain.DirectQuicDeviceIdentityRegistration.doc = {{
+Registration payload for a device's current Direct QUIC certificate fingerprint.
+
+This intentionally carries only `sha256:<64 hex chars>`. Older clients may still send certificate DER beside the fingerprint at the JSON boundary, but the decoder ignores that field and the backend never stores or returns it.
+}}
 
 turbo.domain.directQuicDeviceIdentityFingerprint : DirectQuicDeviceIdentity -> Text
 turbo.domain.directQuicDeviceIdentityFingerprint = cases
-  DirectQuicDeviceIdentity fingerprint _ _ _ _ -> fingerprint
+  DirectQuicDeviceIdentity fingerprint _ _ -> fingerprint
 
-turbo.domain.directQuicDeviceIdentityCertificateDerBase64 : DirectQuicDeviceIdentity -> Text
-turbo.domain.directQuicDeviceIdentityCertificateDerBase64 = cases
-  DirectQuicDeviceIdentity _ certificateDerBase64 _ _ _ -> certificateDerBase64
+turbo.domain.directQuicDeviceIdentityFingerprint.doc : Doc
+turbo.domain.directQuicDeviceIdentityFingerprint.doc = {{
+Extracts the pinned Direct QUIC certificate fingerprint from a stored active identity.
+
+This is the only identity material that may cross the backend boundary. Callers must treat the returned value as a verifier for a peer-observed TLS certificate, not as certificate material.
+}}
 
 turbo.domain.directQuicDeviceIdentityIsActive : DirectQuicDeviceIdentity -> Boolean
 turbo.domain.directQuicDeviceIdentityIsActive = cases
-  DirectQuicDeviceIdentity _ _ Active _ _  -> true
-  DirectQuicDeviceIdentity _ _ Revoked _ _ -> false
+  DirectQuicDeviceIdentity _ _ _ -> true
+
+turbo.domain.directQuicDeviceIdentityIsActive.doc : Doc
+turbo.domain.directQuicDeviceIdentityIsActive.doc = {{
+Reports whether a stored Direct QUIC identity is currently projectable to peers.
+
+The v4 identity table stores only active identities, so this is intentionally total and currently always true. If revocation or multi-state identity lifecycle is introduced, this predicate becomes the authoritative projection gate.
+}}
 
 turbo.domain.directQuicFingerprintIsValid : Text -> Boolean
 turbo.domain.directQuicFingerprintIsValid fingerprint =
@@ -28,23 +49,28 @@ turbo.domain.directQuicFingerprintIsValid fingerprint =
       (Text.size fingerprint == 71)
       (List.all Char.ascii.isHexDigit (Text.toCharList (Text.drop 7 fingerprint))))
 
-turbo.domain.directQuicCertificateDerBase64IsValid : Text -> Boolean
-turbo.domain.directQuicCertificateDerBase64IsValid certificateDerBase64 =
-  use Nat > <
-  Boolean.and
-    (Text.size certificateDerBase64 > 0)
-    (Text.size certificateDerBase64 < 32768)
+turbo.domain.directQuicFingerprintIsValid.doc : Doc
+turbo.domain.directQuicFingerprintIsValid.doc = {{
+Validates the production Direct QUIC fingerprint wire format.
+
+The accepted shape is exactly `sha256:` followed by 64 ASCII hexadecimal digits. The function deliberately rejects DER, bare digests, alternate algorithms, wrong lengths, and non-hex characters before identity registration reaches storage.
+}}
 
 turbo.domain.directQuicIdentityRegistrationIsValid : DirectQuicDeviceIdentityRegistration -> Boolean
 turbo.domain.directQuicIdentityRegistrationIsValid = cases
-  DirectQuicDeviceIdentityRegistration fingerprint certificateDerBase64 ->
-    Boolean.and
-      (directQuicFingerprintIsValid fingerprint)
-      (directQuicCertificateDerBase64IsValid certificateDerBase64)
+  DirectQuicDeviceIdentityRegistration fingerprint ->
+    directQuicFingerprintIsValid fingerprint
+
+turbo.domain.directQuicIdentityRegistrationIsValid.doc : Doc
+turbo.domain.directQuicIdentityRegistrationIsValid.doc = {{
+Validates a Direct QUIC identity registration by delegating to the fingerprint wire-format invariant.
+
+This keeps the registration contract fingerprint-only: a valid registration proves only that the client supplied a syntactically pin-able SHA-256 certificate fingerprint.
+}}
 
 turbo.store.devices.directQuicIdentity.tables.byDevice : Database -> OrderedTable Text DirectQuicDeviceIdentity
 turbo.store.devices.directQuicIdentity.tables.byDevice db =
-  OrderedTable.named db "turboDirectQuicDeviceIdentityByDevice_v3" Universal.ordering
+  OrderedTable.named db "turboDirectQuicDeviceIdentityByDevice_v4" Universal.ordering
 
 turbo.store.devices.directQuicIdentity.get : Database -> DeviceId -> '{Exception, Remote} Optional DirectQuicDeviceIdentity
 turbo.store.devices.directQuicIdentity.get db deviceId = do
@@ -56,28 +82,42 @@ turbo.store.devices.directQuicIdentity.upsert :
   -> DirectQuicDeviceIdentityRegistration
   -> '{Exception, Storage, Remote, Random} DirectQuicDeviceIdentity
 turbo.store.devices.directQuicIdentity.upsert db deviceId registration = do
-  use OrderedTable delete.tx tryRead.tx write.tx
+  use OrderedTable tryRead.tx write.tx
   byDevice = devices.directQuicIdentity.tables.byDevice db
   deviceKey = DeviceId.toText deviceId
   now = now!
   transact (OrderedTable.database byDevice) do
     existing = tryRead.tx byDevice deviceKey
+    fingerprint = match registration with
+      DirectQuicDeviceIdentityRegistration fingerprint -> fingerprint
     createdAt = match existing with
-      Some (DirectQuicDeviceIdentity _ _ _ createdAt _) -> createdAt
-      None                                              -> now
-    identity = match registration with
-      DirectQuicDeviceIdentityRegistration fingerprint certificateDerBase64 ->
-        DirectQuicDeviceIdentity fingerprint certificateDerBase64 Active createdAt now
-    _ = delete.tx byDevice deviceKey
+      Some (DirectQuicDeviceIdentity existingFingerprint existingCreatedAt _) ->
+        if existingFingerprint == fingerprint then existingCreatedAt else now
+      None -> now
+    identity = DirectQuicDeviceIdentity fingerprint createdAt now
     write.tx byDevice deviceKey identity
     identity
+
+turbo.store.devices.directQuicIdentity.upsert.doc : Doc
+turbo.store.devices.directQuicIdentity.upsert.doc = {{
+{{ docExample 1 do db deviceId registration -> directQuicIdentity.upsert db deviceId registration }} installs the authenticated device's active Direct QUIC fingerprint.
+
+The write is idempotent for the same fingerprint. A different fingerprint for the same device id is treated as rotation and replaces the active fingerprint in the v4 table.
+}}
 
 turbo.service.devices.internal.directQuicIdentityRegistrationDecoder :
   '{Decoder} DirectQuicDeviceIdentityRegistration
 turbo.service.devices.internal.directQuicIdentityRegistrationDecoder = do
   fingerprint = Decoder.object.at! "fingerprint" Decoder.text
-  certificateDerBase64 = Decoder.object.at! "certificateDerBase64" Decoder.text
-  DirectQuicDeviceIdentityRegistration fingerprint certificateDerBase64
+  _ = (Decoder.object.optionalAt "certificateDerBase64" Decoder.text)()
+  DirectQuicDeviceIdentityRegistration fingerprint
+
+turbo.service.devices.internal.directQuicIdentityRegistrationDecoder.doc : Doc
+turbo.service.devices.internal.directQuicIdentityRegistrationDecoder.doc = {{
+Decodes the nested `directQuicIdentity` registration object from the device-registration request body.
+
+The decoder requires `fingerprint` and intentionally consumes but ignores legacy `certificateDerBase64` input. This preserves migration compatibility without allowing certificate DER to enter backend storage or projections.
+}}
 
 turbo.service.devices.internal.registerDeviceRequestDecoder :
   '{Decoder} (Text, Optional Text, Optional Text, Optional Text, Optional DirectQuicDeviceIdentityRegistration)
@@ -92,16 +132,19 @@ turbo.service.devices.internal.registerDeviceRequestDecoder = do
 
 turbo.service.internal.directQuicDeviceIdentityJson : DirectQuicDeviceIdentity -> Json
 turbo.service.internal.directQuicDeviceIdentityJson = cases
-  DirectQuicDeviceIdentity fingerprint certificateDerBase64 status createdAt updatedAt ->
-    statusText = match status with
-      Active  -> "active"
-      Revoked -> "revoked"
+  DirectQuicDeviceIdentity fingerprint createdAt updatedAt ->
     object.empty
       |> addText "fingerprint" fingerprint
-      |> addText "certificateDerBase64" certificateDerBase64
-      |> addText "status" statusText
+      |> addText "status" "active"
       |> addText "createdAt" (Instant.toText createdAt)
       |> addText "updatedAt" (Instant.toText updatedAt)
+
+turbo.service.internal.directQuicDeviceIdentityJson.doc : Doc
+turbo.service.internal.directQuicDeviceIdentityJson.doc = {{
+Projects a stored Direct QUIC identity into backend JSON.
+
+The projection exposes fingerprint, active status, and lifecycle timestamps only. It must never include certificate DER or private-key material.
+}}
 
 turbo.service.internal.channelAudioReadinessJson : ChannelAudioReadiness -> Json
 turbo.service.internal.channelAudioReadinessJson audioReadiness =
@@ -166,6 +209,15 @@ turbo.service.devices.register db = do
                     None             -> ()
                 None      -> ()
               ok.json (deviceJson device)
+
+turbo.service.devices.register.doc : Doc
+turbo.service.devices.register.doc = {{
+{{ docExample 1 do db -> service.devices.register db }} serves the device registration endpoint for the current dev user.
+
+The request body must contain `deviceId` and may include `deviceLabel`, APNs token fields, and `directQuicIdentity.fingerprint`. Direct QUIC registration is fingerprint-only: old `certificateDerBase64` payloads are accepted for migration but ignored, and responses never expose certificate DER.
+
+**Also see:** {{ docLink (docEmbedTermLink do store.devices.register) }}, {{ docLink (docEmbedTermLink do directQuicIdentity.upsert) }}
+}}
 
 turbo.service.channels.readiness : Database -> '{Route, Exception, Storage, Remote, Random} ()
 turbo.service.channels.readiness db = do
@@ -253,6 +305,15 @@ turbo.service.channels.readiness db = do
               None          -> base
             ok.json payload
 
+turbo.service.channels.readiness.doc : Doc
+turbo.service.channels.readiness.doc = {{
+{{ docExample 1 do db -> readiness db }} reports the caller and peer readiness state for a direct channel.
+
+This is a control-plane readiness check used by the client to distinguish local join state from true peer availability. When the connected peer device has an active Direct QUIC identity, readiness projects only that peer's fingerprint in `peerDirectQuicIdentity`; clients must compare it with the TLS certificate fingerprint observed on the direct QUIC path.
+
+It matches `GET /v1/channels/<channelId>/readiness/<deviceId>`.
+}}
+
 turbo.service.config : Text -> Boolean -> '{Route, Config, Exception} ()
 turbo.service.config mode supportsWebSocket = do
   use Parser /
@@ -263,7 +324,7 @@ turbo.service.config mode supportsWebSocket = do
       |> addText "mode" mode
       |> addBoolean "supportsWebSocket" supportsWebSocket
       |> addBoolean "telemetryEnabled" enabled()
-      |> addBoolean "supportsDirectQuicUpgrade" false
+      |> addBoolean "supportsDirectQuicUpgrade" true
       |> addBoolean "supportsDirectQuicProvisioning" true
       |> object.add "directQuicPolicy" (empty |> addNat "promotionTimeoutMs" 2500 |> addNat "retryBackoffMs" 15000))
 
@@ -273,6 +334,57 @@ test> turbo.domain.directQuicFingerprintIsValid.tests.examples = test.verify do
   ensure (not (directQuicFingerprintIsValid "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
 
 test> turbo.domain.directQuicIdentityRegistrationIsValid.tests.examples = test.verify do
-  ensure (directQuicIdentityRegistrationIsValid (DirectQuicDeviceIdentityRegistration "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "AQID"))
-  ensure (not (directQuicIdentityRegistrationIsValid (DirectQuicDeviceIdentityRegistration "sha256:bad" "AQID")))
-  ensure (not (directQuicIdentityRegistrationIsValid (DirectQuicDeviceIdentityRegistration "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "")))
+  ensure (directQuicIdentityRegistrationIsValid (DirectQuicDeviceIdentityRegistration "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+  ensure (not (directQuicIdentityRegistrationIsValid (DirectQuicDeviceIdentityRegistration "sha256:bad")))
+
+turbo.domain.directQuicFingerprintIsValid.tests.props : [Result]
+turbo.domain.directQuicFingerprintIsValid.tests.props =
+  test.verify do
+    use Text ++
+    use Nat ==
+    Each.repeat 100
+    nibble = Random.natIn 0 15
+    length = Random.natIn 0 128
+    hex = match nibble with
+      0 -> "0"
+      1 -> "1"
+      2 -> "2"
+      3 -> "3"
+      4 -> "4"
+      5 -> "5"
+      6 -> "6"
+      7 -> "7"
+      8 -> "8"
+      9 -> "9"
+      10 -> "a"
+      11 -> "b"
+      12 -> "c"
+      13 -> "d"
+      14 -> "e"
+      _ -> "f"
+    validFingerprint = "sha256:" ++ Text.repeat 64 hex
+    randomLengthFingerprint = "sha256:" ++ Text.repeat length hex
+    nonHexFingerprint = "sha256:" ++ Text.repeat 63 hex ++ "g"
+    uppercaseAlgorithm = "SHA256:" ++ Text.repeat 64 hex
+    labeled "valid sha256 fingerprints are accepted" do
+      ensure (directQuicFingerprintIsValid validFingerprint)
+    labeled "digest length is exact" do
+      if length == 64 then
+        ensure (directQuicFingerprintIsValid randomLengthFingerprint)
+      else
+        ensure (not (directQuicFingerprintIsValid randomLengthFingerprint))
+    labeled "non-hex digest characters are rejected" do
+      ensure (not (directQuicFingerprintIsValid nonHexFingerprint))
+    labeled "algorithm prefix is exact" do
+      ensure (not (directQuicFingerprintIsValid uppercaseAlgorithm))
+
+turbo.domain.directQuicIdentityRegistrationIsValid.tests.props : [Result]
+turbo.domain.directQuicIdentityRegistrationIsValid.tests.props =
+  test.verify do
+    use Text ++
+    Each.repeat 100
+    length = Random.natIn 0 128
+    candidate = "sha256:" ++ Text.repeat length "a"
+    registration = DirectQuicDeviceIdentityRegistration candidate
+    labeled "registration validity is exactly fingerprint validity" do
+      ensureEqual (directQuicFingerprintIsValid candidate) (directQuicIdentityRegistrationIsValid registration)

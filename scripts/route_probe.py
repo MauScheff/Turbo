@@ -2,7 +2,6 @@
 
 import argparse
 import asyncio
-import base64
 import contextlib
 import hashlib
 import json
@@ -352,10 +351,8 @@ def require_wake_readiness_contract(payload: dict[str, Any], *, label: str) -> N
 
 def direct_quic_identity_for_device(device_id: str) -> dict[str, str]:
     digest = hashlib.sha256(f"route-probe:{device_id}".encode("utf-8")).hexdigest()
-    certificate = base64.b64encode(f"route-probe-certificate:{device_id}".encode("utf-8")).decode("ascii")
     return {
         "fingerprint": f"sha256:{digest}",
-        "certificateDerBase64": certificate,
     }
 
 
@@ -367,6 +364,10 @@ def require_direct_quic_peer_identity(
 ) -> None:
     identity = payload.get("peerDirectQuicIdentity")
     require(isinstance(identity, dict), f"{label} missing peerDirectQuicIdentity: {payload}")
+    require(
+        "certificateDerBase64" not in identity,
+        f"{label} peer Direct QUIC identity leaked certificate DER material: {identity}",
+    )
     require(identity.get("status") == "active", f"{label} peer Direct QUIC identity is not active: {identity}")
     require(
         identity.get("fingerprint") == expected_fingerprint,
@@ -729,6 +730,10 @@ async def main() -> int:
                 == direct_quic_identity_for_device(current["device_id"])["fingerprint"],
                 f"device registration did not round-trip Direct QUIC identity: {device}",
             )
+            require(
+                "certificateDerBase64" not in device.get("directQuicIdentity", {}),
+                f"device registration leaked Direct QUIC certificate DER material: {device}",
+            )
 
             diagnostics_upload = run_check(
                 results,
@@ -958,6 +963,10 @@ async def main() -> int:
                 device_after_background.get("directQuicIdentity", {}).get("fingerprint")
                 == direct_quic_identity_for_device(current["device_id"])["fingerprint"],
                 f"device registration without identity did not preserve Direct QUIC metadata: {device_after_background}",
+            )
+            require(
+                "certificateDerBase64" not in device_after_background.get("directQuicIdentity", {}),
+                f"device registration without identity leaked Direct QUIC certificate DER material: {device_after_background}",
             )
 
             heartbeat_after_reregister = run_check(

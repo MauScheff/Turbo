@@ -170,6 +170,20 @@ extension PTTViewModel {
         }
 
         guard relationshipState(for: contact.id).isIncomingRequest else {
+            guard !talkRequestNotificationAlreadyHandled(for: contact.id) else {
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Ignored stale foreground talk request notification after request was already handled",
+                    metadata: [
+                        "handle": handle,
+                        "reason": reason,
+                        "pendingAction": String(describing: sessionCoordinator.pendingAction),
+                        "isJoined": String(isJoined && activeChannelId == contact.id),
+                        "backendSelfJoined": String(selectedChannelSnapshot(for: contact.id)?.membership.hasLocalMembership ?? false),
+                    ]
+                )
+                return
+            }
             recordTalkRequestProjectionInvariant(
                 handle: handle,
                 reason: reason,
@@ -178,6 +192,19 @@ extension PTTViewModel {
             scheduleTalkRequestProjectionRecovery(userInfo: userInfo, reason: reason)
             return
         }
+    }
+
+    func talkRequestNotificationAlreadyHandled(for contactID: UUID) -> Bool {
+        if sessionCoordinator.pendingAction.pendingConnectContactID == contactID {
+            return true
+        }
+        if isJoined, activeChannelId == contactID {
+            return true
+        }
+        if selectedChannelSnapshot(for: contactID)?.membership.hasLocalMembership == true {
+            return true
+        }
+        return false
     }
 
     private func scheduleTalkRequestProjectionRecovery(
@@ -232,7 +259,8 @@ extension PTTViewModel {
                 alertPushEnvironment: alertPushTokenHex.isEmpty
                     ? nil
                     : TurboAPNSEnvironmentResolver.current(),
-                directQuicIdentity: currentDirectQuicIdentityRegistrationMetadata()
+                directQuicIdentity: currentDirectQuicIdentityRegistrationMetadata(),
+                mediaEncryptionIdentity: currentMediaEncryptionIdentityRegistrationMetadata()
             )
             diagnostics.record(
                 .backend,

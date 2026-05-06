@@ -1815,8 +1815,8 @@ private extension ConversationStateMachine {
                 )
             case .stopping:
                 return (
-                    .waitingForPeer(reason: .localSessionTransition),
-                    "Stopping..."
+                    .ready,
+                    "Connected"
                 )
             case .releaseRequired:
                 return (
@@ -1825,18 +1825,14 @@ private extension ConversationStateMachine {
                 )
             case .startingTransmit(let stage):
                 switch stage {
-                case .requestingLease:
-                    return (.startingTransmit(stage: stage), "Requesting transmit...")
-                case .awaitingSystemTransmit:
-                    return (.startingTransmit(stage: stage), "Waking \(contactName)...")
-                case .awaitingAudioSession:
-                    return (.startingTransmit(stage: stage), "Waiting for microphone...")
+                case .requestingLease, .awaitingSystemTransmit, .awaitingAudioSession:
+                    return (.startingTransmit(stage: stage), "Connecting...")
                 case .awaitingAudioConnection(let mediaState):
                     switch mediaState {
                     case .failed:
                         return (.startingTransmit(stage: stage), "Audio unavailable")
                     case .preparing, .idle, .closed:
-                        return (.startingTransmit(stage: stage), "Establishing audio...")
+                        return (.startingTransmit(stage: stage), "Connecting...")
                     case .connected:
                         return (.transmitting, "Talking to \(contactName)")
                     }
@@ -2003,7 +1999,8 @@ private extension ConversationDerivationContext {
 
             if directMediaPathActive {
                 if remoteAudioReadinessState == .wakeCapable,
-                   case .wakeCapable = remoteWakeCapabilityState {
+                   case .wakeCapable = remoteWakeCapabilityState,
+                   !authoritativeBackendReady {
                     return .wakeReady
                 }
                 return .ready
@@ -2168,7 +2165,7 @@ private extension ConversationDerivationContext {
         if directMediaPathActive {
             if remoteAudioReadinessState == .wakeCapable,
                case .wakeCapable = remoteWakeCapabilityState {
-                return false
+                return backendReadyAuthoritativelySatisfiesRemoteAudio
             }
             return true
         }

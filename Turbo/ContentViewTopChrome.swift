@@ -17,6 +17,7 @@ struct TurboHeaderView: View {
     let showsAudioRoutePicker: Bool
     let onAddContact: () -> Void
     let onShowProfile: () -> Void
+    let onShowTransportPathInfo: () -> Void
     let onRequestMicrophonePermission: () -> Void
     let onRequestLocalNetworkPermission: () -> Void
     let onRequestNotificationPermission: () -> Void
@@ -69,20 +70,15 @@ struct TurboHeaderView: View {
             .padding(.vertical, 6)
 
             if let transportPathState {
-                HStack(spacing: 5) {
-                    if transportPathState.showsSecureIcon {
-                        Image(systemName: "lock.fill")
-                            .font(.caption2.weight(.semibold))
-                    }
-
-                    Text(transportPathState.label)
-                        .font(.caption2.weight(.semibold))
+                Button(action: onShowTransportPathInfo) {
+                    TurboTransportPathBadge(
+                        state: transportPathState,
+                        tint: transportPathTint
+                    )
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(transportPathTint.opacity(0.14))
-                .foregroundStyle(transportPathTint)
-                .clipShape(Capsule())
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(transportPathState.label) connection path")
+                .accessibilityHint("Shows what the connection badge means")
             }
 
             if needsMicrophonePermission {
@@ -136,6 +132,96 @@ struct TurboHeaderView: View {
                     .lineLimit(2)
             }
         }
+    }
+}
+
+struct TurboTransportPathInfoModal: View {
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 16) {
+                Text("Connection types")
+                    .font(.headline.weight(.semibold))
+
+                Spacer(minLength: 8)
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 30)
+                        .background(Color.secondary.opacity(0.12))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close")
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                TurboTransportPathInfoRow(
+                    state: .direct,
+                    tint: .green,
+                    description: "Fast device-to-device audio. Needs Local Network access."
+                )
+
+                TurboTransportPathInfoRow(
+                    state: .relay,
+                    tint: .orange,
+                    description: "Audio passes through BeepBeep when direct is not available."
+                )
+            }
+
+            Text("Your audio is end-to-end encrypted on both paths, so not even BeepBeep can listen. We use the fastest connection available automatically.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(18)
+        .frame(maxWidth: 420, alignment: .leading)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 24, y: 12)
+        .padding(.horizontal, 18)
+    }
+}
+
+private struct TurboTransportPathInfoRow: View {
+    let state: MediaTransportPathState
+    let tint: Color
+    let description: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            TurboTransportPathBadge(state: state, tint: tint)
+
+            Text(description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct TurboTransportPathBadge: View {
+    let state: MediaTransportPathState
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if state.showsSecureIcon {
+                Image(systemName: "lock.fill")
+                    .font(.caption2.weight(.semibold))
+            }
+
+            Text(state.label)
+                .font(.caption2.weight(.semibold))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(tint.opacity(0.14))
+        .foregroundStyle(tint)
+        .clipShape(Capsule())
     }
 }
 

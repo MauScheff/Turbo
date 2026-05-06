@@ -8,6 +8,7 @@ import urllib.parse
 import uuid
 
 from route_probe import (
+    RouteProbeFailure,
     connected_websocket_pair,
     direct_quic_identity_for_device,
     request,
@@ -36,6 +37,14 @@ def peer_identity_fingerprint(payload: dict) -> str | None:
     return fingerprint if isinstance(fingerprint, str) else None
 
 
+def require_no_certificate_material(identity: object, label: str) -> None:
+    require(isinstance(identity, dict), f"{label} missing Direct QUIC identity: {identity}")
+    require(
+        "certificateDerBase64" not in identity,
+        f"{label} leaked certificate DER material: {identity}",
+    )
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Verify deployed Direct QUIC provisioning metadata.")
     parser.add_argument("--base-url", default="https://beepbeep.to")
@@ -52,14 +61,32 @@ async def main() -> int:
         config.get("supportsDirectQuicProvisioning") is True,
         f"backend did not advertise Direct QUIC provisioning support: {config}",
     )
+    supports_upgrade = config.get("supportsDirectQuicUpgrade")
     require(
-        config.get("supportsDirectQuicUpgrade") is False,
-        f"Direct QUIC upgrade should remain globally gated during provisioning smoke: {config}",
+        isinstance(supports_upgrade, bool),
+        f"backend did not report Direct QUIC upgrade capability as a boolean: {config}",
     )
 
     request(args.base_url, "/v1/dev/seed", caller["handle"], method="POST", insecure=args.insecure)
     request(args.base_url, "/v1/dev/reset-state", caller["handle"], method="POST", insecure=args.insecure)
     request(args.base_url, "/v1/dev/seed", caller["handle"], method="POST", insecure=args.insecure)
+
+    try:
+        request(
+            args.base_url,
+            "/v1/devices/register",
+            caller["handle"],
+            method="POST",
+            body={
+                "deviceId": f"invalid-direct-quic-{uuid.uuid4()}",
+                "deviceLabel": "invalid-direct-quic",
+                "directQuicIdentity": {"fingerprint": "sha256:bad"},
+            },
+            insecure=args.insecure,
+        )
+        raise RuntimeError("invalid Direct QUIC fingerprint registration unexpectedly succeeded")
+    except RouteProbeFailure:
+        pass
 
     for current in (caller, callee):
         session = request(args.base_url, "/v1/auth/session", current["handle"], method="POST", insecure=args.insecure)
@@ -81,6 +108,33 @@ async def main() -> int:
             registered.get("directQuicIdentity", {}).get("fingerprint") == current["identity"]["fingerprint"],
             f"registration did not round-trip Direct QUIC identity for {current['handle']}: {registered}",
         )
+        require_no_certificate_material(
+            registered.get("directQuicIdentity"),
+            f"registration:{current['handle']}",
+        )
+
+    rotated_caller_identity = direct_quic_identity_for_device(f"{caller['device_id']}:rotated")
+    rotated = request(
+        args.base_url,
+        "/v1/devices/register",
+        caller["handle"],
+        method="POST",
+        body={
+            "deviceId": caller["device_id"],
+            "deviceLabel": caller["device_id"],
+            "directQuicIdentity": {
+                **rotated_caller_identity,
+                "certificateDerBase64": "AQID",
+            },
+        },
+        insecure=args.insecure,
+    )
+    require(
+        rotated.get("directQuicIdentity", {}).get("fingerprint") == rotated_caller_identity["fingerprint"],
+        f"rotated registration did not replace Direct QUIC fingerprint: {rotated}",
+    )
+    require_no_certificate_material(rotated.get("directQuicIdentity"), "registration:rotated-caller")
+    caller["identity"] = rotated_caller_identity
 
     preserved = request(
         args.base_url,
@@ -97,6 +151,7 @@ async def main() -> int:
         preserved.get("directQuicIdentity", {}).get("fingerprint") == caller["identity"]["fingerprint"],
         f"registration without identity did not preserve Direct QUIC metadata: {preserved}",
     )
+    require_no_certificate_material(preserved.get("directQuicIdentity"), "registration:preserved-caller")
 
     invite = request(
         args.base_url,
@@ -143,14 +198,23 @@ async def main() -> int:
         peer_identity_fingerprint(caller_readiness) == callee["identity"]["fingerprint"],
         f"caller readiness did not project callee Direct QUIC identity: {caller_readiness}",
     )
+    require_no_certificate_material(
+        caller_readiness.get("peerDirectQuicIdentity"),
+        "readiness:caller-peer",
+    )
     require(
         peer_identity_fingerprint(callee_readiness) == caller["identity"]["fingerprint"],
         f"callee readiness did not project caller Direct QUIC identity: {callee_readiness}",
+    )
+    require_no_certificate_material(
+        callee_readiness.get("peerDirectQuicIdentity"),
+        "readiness:callee-peer",
     )
 
     print(
         "DIRECT QUIC PROVISIONING PROBE PASSED: "
         f"{caller['device_id']} <-> {callee['device_id']} against {args.base_url}"
+        f" supportsDirectQuicUpgrade={supports_upgrade}"
     )
     return 0
 

@@ -214,7 +214,7 @@ extension PTTViewModel {
     func directQuicPromotionTimeoutMilliseconds() -> Int {
         let configured = backendServices?.directQuicPolicy?.promotionTimeoutMs
             ?? defaultDirectQuicPromotionTimeoutMilliseconds
-        return max(configured, 250)
+        return max(configured, defaultDirectQuicPromotionTimeoutMilliseconds, 250)
     }
 
     func directQuicRetryBackoffMilliseconds() -> Int {
@@ -341,8 +341,7 @@ extension PTTViewModel {
                 ]
             )
             return DirectQuicIdentityRegistrationMetadata(
-                fingerprint: identity.certificateFingerprint,
-                certificateDerBase64: identity.certificateDerBase64
+                fingerprint: identity.certificateFingerprint
             )
         } catch {
             directQuicProvisioningStatus = "failed"
@@ -1014,8 +1013,7 @@ extension PTTViewModel {
         guard let nominatedPath = controller.nominatedPath(matching: attemptID) else {
             diagnostics.record(
                 .media,
-                level: .error,
-                message: "Direct QUIC activation skipped because no nominated path is available",
+                message: "Direct QUIC activation deferred because no nominated path is available yet",
                 metadata: [
                     "contactId": contactID.uuidString,
                     "channelId": attempt.channelID,

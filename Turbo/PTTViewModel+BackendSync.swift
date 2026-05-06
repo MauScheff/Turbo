@@ -301,12 +301,20 @@ extension PTTViewModel {
         fetched: TurboChannelReadinessResponse?,
         peerDeviceConnected: Bool,
         peerMembershipPresent: Bool = true,
-        existingSessionWasRoutable: Bool = false
+        existingSessionWasRoutable: Bool = false,
+        suppressWakeCapableAudioReadiness: Bool = false
     ) -> TurboChannelReadinessResponse? {
         guard let fetched else { return existing }
-        guard let existing else { return fetched }
+        let effectiveFetched: TurboChannelReadinessResponse = {
+            guard suppressWakeCapableAudioReadiness,
+                  fetched.remoteAudioReadiness == .wakeCapable else {
+                return fetched
+            }
+            return fetched.settingRemoteAudioReadiness(.waiting)
+        }()
+        guard let existing else { return effectiveFetched }
         guard case .wakeCapable(let existingTargetDeviceId) = existing.remoteWakeCapability else {
-            return fetched
+            return effectiveFetched
         }
 
         let existingWakeFallbackWasAuthoritative: Bool = {
@@ -322,8 +330,8 @@ extension PTTViewModel {
         }()
 
         let fetchedLooksLikeTransientBackgroundDrift: Bool = {
-            guard !fetched.canTransmit else { return false }
-            switch fetched.statusView {
+            guard !effectiveFetched.canTransmit else { return false }
+            switch effectiveFetched.statusView {
             case .waitingForSelf, .waitingForPeer:
                 return true
             case .inactive, .ready, .selfTransmitting, .peerTransmitting, .unknown:
@@ -337,12 +345,13 @@ extension PTTViewModel {
                 !peerDeviceConnected
                 || (existingWakeFallbackWasAuthoritative && fetchedLooksLikeTransientBackgroundDrift)
             )
-        guard shouldPreserveWakeCapableFallback else { return fetched }
+        guard shouldPreserveWakeCapableFallback else { return effectiveFetched }
 
-        var merged = fetched
+        var merged = effectiveFetched
 
-        if existing.remoteAudioReadiness == .wakeCapable {
-            switch fetched.remoteAudioReadiness {
+        if existing.remoteAudioReadiness == .wakeCapable,
+           !suppressWakeCapableAudioReadiness {
+            switch effectiveFetched.remoteAudioReadiness {
             case .waiting, .unknown:
                 merged = merged.settingRemoteAudioReadiness(.wakeCapable)
             case .ready, .wakeCapable:
@@ -350,7 +359,7 @@ extension PTTViewModel {
             }
         }
 
-        if case .unavailable = fetched.remoteWakeCapability {
+        if case .unavailable = effectiveFetched.remoteWakeCapability {
             merged = merged.settingRemoteWakeCapability(
                 .wakeCapable(targetDeviceId: existingTargetDeviceId)
             )
@@ -437,7 +446,11 @@ extension PTTViewModel {
         }
     }
 
-    private func shouldTreatIncomingSignalAsWakeCandidate(for contactID: UUID) -> Bool {
+    private func shouldTreatIncomingSignalAsWakeCandidate(
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState != .active else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         guard !pttWakeRuntime.shouldSuppressProvisionalWakeCandidate(for: contactID) else { return false }
         guard receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.hasReceivedAudioChunk != true else {
@@ -445,10 +458,9 @@ extension PTTViewModel {
         }
         // Once the system-owned PTT audio session is active, later signal-path
         // chunks belong to the current receive flow and must not rearm wake.
-        // Foreground Direct QUIC can beat the websocket transmit-start and the
-        // system receive activation; buffer those first chunks behind the same
-        // activation boundary so speech is not played into a route Apple is
-        // about to replace.
+        // Foreground receive stays on the existing media path; provisional wake
+        // candidates are only for background/inactive receivers that need
+        // Apple PTT activation.
         guard !isPTTAudioSessionActive else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
     }
@@ -498,7 +510,11 @@ extension PTTViewModel {
         )
     }
 
-    private func shouldTreatIncomingControlSignalAsWakeCandidate(for contactID: UUID) -> Bool {
+    private func shouldTreatIncomingControlSignalAsWakeCandidate(
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState != .active else { return false }
         guard let channelUUID = channelUUID(for: contactID) else { return false }
         guard !isPTTAudioSessionActive else { return false }
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
@@ -778,7 +794,7 @@ extension PTTViewModel {
         // move back to ready before the final queued chunks drain to the
         // receiver. In that phase, only an explicit transmit-stop signal or
         // the remote-audio silence timeout should end receive locally.
-        guard receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.lastSource != .audioChunk else {
+        guard receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.hasReceivedAudioChunk != true else {
             return false
         }
 
@@ -849,7 +865,11 @@ extension PTTViewModel {
             || effectiveChannelReadiness?.statusView.isPeerTransmitting == true
         guard backendShowsPeerTransmit else { return }
         guard !remoteTransmittingContactIDs.contains(contactID) else { return }
-        guard shouldTreatIncomingSignalAsWakeCandidate(for: contactID) else { return }
+        let applicationState = currentApplicationState()
+        guard shouldTreatIncomingSignalAsWakeCandidate(
+            for: contactID,
+            applicationState: applicationState
+        ) else { return }
 
         let senderUserId =
             effectiveChannelState.activeTransmitterUserId
@@ -896,7 +916,7 @@ extension PTTViewModel {
 
         if shouldSetSystemRemoteParticipantFromSignalPath(
             for: contactID,
-            applicationState: currentApplicationState()
+            applicationState: applicationState
         ) {
             await updateSystemRemoteParticipant(
                 for: contactID,
@@ -950,6 +970,45 @@ extension PTTViewModel {
             || systemSessionActive
             || mediaSessionActive
             || transmitLifecycleTouchesContact
+    }
+
+    func shouldTreatChannelRefreshFailureAsAuthoritativeChannelLoss(_ error: Error) -> Bool {
+        shouldTreatBackendJoinChannelNotFoundAsRecoverable(error)
+    }
+
+    func clearLocalSessionAfterAuthoritativeChannelLoss(
+        contactID: UUID,
+        backendChannelID: String,
+        error: Error
+    ) {
+        diagnostics.record(
+            .channel,
+            message: "Clearing local session after authoritative channel loss",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "backendChannelId": backendChannelID,
+                "error": error.localizedDescription,
+            ]
+        )
+
+        clearRemoteAudioActivity(for: contactID)
+        if let channelUUID = pttCoordinator.state.systemChannelUUID ?? channelUUID(for: contactID) {
+            if isTransmitting {
+                try? pttSystemClient.stopTransmitting(channelUUID: channelUUID)
+            }
+            try? pttSystemClient.leaveChannel(channelUUID: channelUUID)
+        }
+        tearDownTransmitRuntime(resetCoordinator: true)
+        closeMediaSession()
+        pttCoordinator.reset()
+        syncPTTState()
+        sessionCoordinator.clearPendingConnect(for: contactID)
+        sessionCoordinator.clearPendingJoin(for: contactID)
+        sessionCoordinator.clearLeaveAction(for: contactID)
+        backendSyncCoordinator.send(.channelStateCleared(contactID: contactID))
+        controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("backend-sync:authoritative-channel-loss")
     }
 
     func shouldPreserveLiveChannelState(
@@ -1228,6 +1287,13 @@ extension PTTViewModel {
                 )
                 return
             }
+            guard shouldObserveIncomingDirectQuicSignal(
+                signal,
+                envelope: envelope,
+                contactID: contactID
+            ) else {
+                return
+            }
 
             if !effectiveDirectQuicUpgradeEnabled {
                 diagnostics.record(
@@ -1309,6 +1375,34 @@ extension PTTViewModel {
         }
     }
 
+    func shouldObserveIncomingDirectQuicSignal(
+        _ signal: TurboDirectQuicSignalPayload,
+        envelope: TurboSignalEnvelope,
+        contactID: UUID
+    ) -> Bool {
+        switch signal {
+        case .offer, .hangup:
+            return true
+        case .answer, .candidate:
+            guard directQuicAttempt(for: contactID, matching: signal.attemptId) != nil else {
+                diagnostics.record(
+                    .websocket,
+                    message: "Ignored stale Direct QUIC follow-up signal without active attempt",
+                    metadata: [
+                        "type": envelope.type.rawValue,
+                        "channelId": envelope.channelId,
+                        "contactId": contactID.uuidString,
+                        "attemptId": signal.attemptId,
+                        "fromDeviceId": envelope.fromDeviceId,
+                        "toDeviceId": envelope.toDeviceId,
+                    ]
+                )
+                return false
+            }
+            return true
+        }
+    }
+
     func shouldAcceptIncomingDirectQuicSignal(
         _ signal: TurboDirectQuicSignalPayload,
         envelope: TurboSignalEnvelope,
@@ -1370,6 +1464,37 @@ extension PTTViewModel {
         incomingAudioTransport: IncomingAudioPayloadTransport = .relayWebSocket
     ) async {
         let applicationState = currentApplicationState()
+        configureMediaEncryptionSessionIfPossible(
+            contactID: contactID,
+            channelID: channelID,
+            peerDeviceID: fromDeviceID
+        )
+        let audioPayload: String
+        do {
+            guard let openedPayload = try openIncomingMediaPayloadIfPossible(
+                payload,
+                channelID: channelID,
+                fromDeviceID: fromDeviceID,
+                contactID: contactID
+            ) else {
+                return
+            }
+            audioPayload = openedPayload
+        } catch {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Failed to open incoming media E2EE payload",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "fromDeviceId": fromDeviceID,
+                    "transport": String(describing: incomingAudioTransport),
+                    "error": error.localizedDescription,
+                ]
+            )
+            return
+        }
         let alreadyHasPendingWake = pttWakeRuntime.hasPendingWake(for: contactID)
         let shouldArmDeferredBackgroundAudioWakeCandidate =
             !alreadyHasPendingWake
@@ -1378,7 +1503,10 @@ extension PTTViewModel {
                 applicationState: applicationState
             )
         let shouldArmAudioWakeCandidate =
-            shouldTreatIncomingSignalAsWakeCandidate(for: contactID)
+            shouldTreatIncomingSignalAsWakeCandidate(
+                for: contactID,
+                applicationState: applicationState
+            )
             || shouldArmDeferredBackgroundAudioWakeCandidate
         let wakeIsAlreadySystemActivated =
             pttWakeRuntime.incomingWakeActivationState(for: contactID) == .systemActivated
@@ -1431,7 +1559,7 @@ extension PTTViewModel {
             )
         }
         if bufferWakeAudioChunkUntilPTTActivation(
-            payload,
+            audioPayload,
             channelID: channelID,
             contactID: contactID
         ) {
@@ -1452,7 +1580,7 @@ extension PTTViewModel {
                     senderDeviceId: fromDeviceID
                 )
                 if bufferWakeAudioChunkUntilPTTActivation(
-                    payload,
+                    audioPayload,
                     channelID: channelID,
                     contactID: contactID
                 ) {
@@ -1483,7 +1611,7 @@ extension PTTViewModel {
             return
         }
         if mediaSessionContactID == contactID, mediaConnectionState == .preparing {
-            await receiveRemoteAudioChunk(payload)
+            await receiveRemoteAudioChunk(audioPayload)
             return
         }
         let receiveActivationMode: MediaSessionActivationMode =
@@ -1497,7 +1625,7 @@ extension PTTViewModel {
             activationMode: receiveActivationMode,
             startupMode: .playbackOnly
         )
-        await receiveRemoteAudioChunk(payload)
+        await receiveRemoteAudioChunk(audioPayload)
     }
 
     private func recordIncomingWebSocketAudioChunkDiagnosticIfNeeded(
@@ -1546,7 +1674,12 @@ extension PTTViewModel {
         case .transmitStart where envelope.payload == "ptt-prepare":
             pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
             mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
-            if shouldTreatIncomingControlSignalAsWakeCandidate(for: contactID) {
+            mediaRuntime.resetMediaEncryptionReceiveSequence(for: contactID)
+            let applicationState = currentApplicationState()
+            if shouldTreatIncomingControlSignalAsWakeCandidate(
+                for: contactID,
+                applicationState: applicationState
+            ) {
                 ensurePendingWakeCandidate(
                     for: contactID,
                     channelId: envelope.channelId,
@@ -1579,11 +1712,11 @@ extension PTTViewModel {
             Task {
                 if shouldSetSystemRemoteParticipantFromSignalPath(
                     for: contactID,
-                    applicationState: currentApplicationState()
+                    applicationState: applicationState
                 ),
                    !shouldSuppressForegroundDirectQuicRemoteParticipant(
                     for: contactID,
-                    applicationState: currentApplicationState()
+                    applicationState: applicationState
                    ) {
                     await updateSystemRemoteParticipant(
                         for: contactID,
@@ -1600,7 +1733,12 @@ extension PTTViewModel {
             if envelope.type == .transmitStart {
                 pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
                 mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
-                let shouldArmWakeCandidate = shouldTreatIncomingControlSignalAsWakeCandidate(for: contactID)
+                mediaRuntime.resetMediaEncryptionReceiveSequence(for: contactID)
+                let applicationState = currentApplicationState()
+                let shouldArmWakeCandidate = shouldTreatIncomingControlSignalAsWakeCandidate(
+                    for: contactID,
+                    applicationState: applicationState
+                )
                 markRemoteAudioActivity(for: contactID, source: .transmitStartSignal)
                 if shouldArmWakeCandidate {
                     ensurePendingWakeCandidate(
@@ -1683,6 +1821,7 @@ extension PTTViewModel {
                     )
                 let shouldClearRemoteParticipant =
                     envelope.type == .transmitStop
+                    && !shouldDeferReceiveTeardown
                     && shouldClearSystemRemoteParticipantFromSignalPath(for: contactID)
                 if shouldSetRemoteParticipant || shouldClearRemoteParticipant {
                     await updateSystemRemoteParticipant(
@@ -1792,11 +1931,15 @@ extension PTTViewModel {
         attemptID: String
     ) async {
         pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
+        mediaRuntime.resetMediaEncryptionReceiveSequence(for: contactID)
         let senderUserID =
             contacts.first(where: { $0.id == contactID })?.remoteUserId
             ?? ""
         let applicationState = currentApplicationState()
-        let shouldArmWakeCandidate = shouldTreatIncomingControlSignalAsWakeCandidate(for: contactID)
+        let shouldArmWakeCandidate = shouldTreatIncomingControlSignalAsWakeCandidate(
+            for: contactID,
+            applicationState: applicationState
+        )
         if shouldArmWakeCandidate {
             ensurePendingWakeCandidate(
                 for: contactID,
@@ -2043,14 +2186,24 @@ extension PTTViewModel {
             let existingSessionWasRoutable =
                 systemSessionMatches(contactID)
                 || (isJoined && activeChannelId == contactID)
+            let existingChannelReadiness = channelReadinessByContactID[contactID]
+            let directQuicReceiveOrPrepareEvidence =
+                receiveExecutionCoordinator.state
+                    .remoteActivityByContactID[contactID]?
+                    .hasReceivedAudioChunk == true
+                || existingChannelReadiness?.remoteAudioReadiness == .waiting
+            let shouldSuppressWakeCapableAudioReadiness =
+                shouldUseDirectQuicTransport(for: contactID)
+                && directQuicReceiveOrPrepareEvidence
             let effectiveChannelReadiness: TurboChannelReadinessResponse? = {
                 guard effectiveChannelState.membership != .absent else { return nil }
                 return mergedChannelReadinessPreservingWakeCapableFallback(
-                    existing: channelReadinessByContactID[contactID],
+                    existing: existingChannelReadiness,
                     fetched: fetchedChannelReadiness,
                     peerDeviceConnected: effectiveChannelState.membership.peerDeviceConnected,
                     peerMembershipPresent: effectiveChannelState.membership.hasPeerMembership,
-                    existingSessionWasRoutable: existingSessionWasRoutable
+                    existingSessionWasRoutable: existingSessionWasRoutable,
+                    suppressWakeCapableAudioReadiness: shouldSuppressWakeCapableAudioReadiness
                 )
             }()
             let localSessionEstablished =
@@ -2140,6 +2293,16 @@ extension PTTViewModel {
                 scope: "channel-state",
                 error: error
             ) {
+                return
+            }
+            if shouldTreatChannelRefreshFailureAsAuthoritativeChannelLoss(error) {
+                clearLocalSessionAfterAuthoritativeChannelLoss(
+                    contactID: contactID,
+                    backendChannelID: backendChannelId,
+                    error: error
+                )
+                await refreshContactSummaries()
+                await reconcileSelectedSessionIfNeeded()
                 return
             }
             backendSyncCoordinator.send(
@@ -2257,24 +2420,14 @@ extension PTTViewModel {
             guard !isExpectedBackendSyncCancellation(error) else { return }
             let (incomingUpdates, _) = updates(incoming: incoming, outgoing: nil)
             backendSyncCoordinator.send(.invitesPartiallyUpdated(incoming: incomingUpdates, outgoing: nil, now: .now))
-            diagnostics.record(
-                .backend,
-                level: .error,
-                message: "Invite sync partially recovered",
-                metadata: ["failedRoute": "outgoing", "error": error.localizedDescription]
-            )
+            recordInviteSyncPartialRecovery(failedRoute: "outgoing", error: error)
             await finishInviteSync(stateReason: "backend-sync:invites-partial")
 
         case (.failure(let error), .success(let outgoing)):
             guard !isExpectedBackendSyncCancellation(error) else { return }
             let (_, outgoingUpdates) = updates(incoming: nil, outgoing: outgoing)
             backendSyncCoordinator.send(.invitesPartiallyUpdated(incoming: nil, outgoing: outgoingUpdates, now: .now))
-            diagnostics.record(
-                .backend,
-                level: .error,
-                message: "Invite sync partially recovered",
-                metadata: ["failedRoute": "incoming", "error": error.localizedDescription]
-            )
+            recordInviteSyncPartialRecovery(failedRoute: "incoming", error: error)
             await finishInviteSync(stateReason: "backend-sync:invites-partial")
 
         case (.failure(let incomingError), .failure(let outgoingError)):
@@ -2292,5 +2445,14 @@ extension PTTViewModel {
             captureDiagnosticsState("backend-sync:invites-failed")
             await reconcileSelectedSessionIfNeeded()
         }
+    }
+
+    func recordInviteSyncPartialRecovery(failedRoute: String, error: Error) {
+        diagnostics.record(
+            .backend,
+            level: .notice,
+            message: "Invite sync partially recovered",
+            metadata: ["failedRoute": failedRoute, "error": error.localizedDescription]
+        )
     }
 }

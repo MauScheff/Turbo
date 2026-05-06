@@ -23,6 +23,7 @@ struct ContentView: View {
     @State private var isShowingDevIdentitySheet: Bool = false
     @State private var isShowingDiagnostics: Bool = false
     @State private var isShowingCallPrototype: Bool = false
+    @State private var isShowingTransportPathInfo: Bool = false
     @State private var contactDetailsContactID: UUID?
     @State private var draftDevUserHandle: String = ""
     @State private var draftPeerHandle: String = ""
@@ -90,7 +91,25 @@ struct ContentView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .overlay {
+            if isShowingTransportPathInfo {
+                ZStack(alignment: .top) {
+                    Color.black.opacity(0.18)
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            isShowingTransportPathInfo = false
+                        }
+
+                    TurboTransportPathInfoModal(
+                        onClose: { isShowingTransportPathInfo = false }
+                    )
+                    .padding(.top, 72)
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
         .animation(.spring(response: 0.28, dampingFraction: 0.9), value: viewModel.activeIncomingTalkRequest?.id)
+        .animation(.spring(response: 0.28, dampingFraction: 0.9), value: isShowingTransportPathInfo)
         .onChange(of: viewModel.selectedContactId) { _, _ in
             route = .live
             isShowingAddContactSheet = false
@@ -264,6 +283,9 @@ struct ContentView: View {
                 onShowProfile: {
                     draftProfileName = viewModel.currentProfileName
                     isShowingProfileSheet = true
+                },
+                onShowTransportPathInfo: {
+                    isShowingTransportPathInfo = true
                 },
                 onRequestMicrophonePermission: requestMicrophonePermission,
                 onRequestLocalNetworkPermission: requestLocalNetworkPermission,

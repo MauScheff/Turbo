@@ -96,6 +96,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     var criticalHTTPClient: TurboBackendCriticalHTTPClient { TurboBackendCriticalHTTPClient(config: config) }
     var supportsWebSocket: Bool { runtimeConfig?.supportsWebSocket ?? false }
     var supportsDirectQuicUpgrade: Bool { runtimeConfig?.supportsDirectQuicUpgrade ?? false }
+    var supportsMediaEndToEndEncryption: Bool { runtimeConfig?.supportsMediaEndToEndEncryption ?? false }
     var directQuicPolicy: TurboDirectQuicPolicy? { runtimeConfig?.directQuicPolicy }
     var modeDescription: String { runtimeConfig?.mode ?? "unknown" }
     var isWebSocketConnected: Bool { webSocketConnectionState == .connected }
@@ -151,7 +152,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         label: String?,
         alertPushToken: String?,
         alertPushEnvironment: TurboAPNSEnvironment?,
-        directQuicIdentity: DirectQuicIdentityRegistrationMetadata? = nil
+        directQuicIdentity: DirectQuicIdentityRegistrationMetadata? = nil,
+        mediaEncryptionIdentity: MediaEncryptionIdentityRegistrationMetadata? = nil
     ) async throws -> TurboDeviceRegistrationResponse {
         try await request(
             path: "/v1/devices/register",
@@ -161,7 +163,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
                 deviceLabel: label,
                 alertPushToken: alertPushToken,
                 alertPushEnvironment: alertPushEnvironment?.rawValue,
-                directQuicIdentity: directQuicIdentity
+                directQuicIdentity: directQuicIdentity,
+                mediaEncryptionIdentity: mediaEncryptionIdentity
             )
         )
     }
@@ -629,6 +632,7 @@ private struct TurboRegisterDeviceRequest: Encodable {
     let alertPushToken: String?
     let alertPushEnvironment: String?
     let directQuicIdentity: DirectQuicIdentityRegistrationMetadata?
+    let mediaEncryptionIdentity: MediaEncryptionIdentityRegistrationMetadata?
 }
 
 private struct TurboDirectChannelRequest: Encodable {

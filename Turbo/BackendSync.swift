@@ -73,7 +73,7 @@ struct BackendSyncState: Equatable {
             let downgradedReadiness: RemoteAudioReadinessState
             switch readiness.remoteWakeCapability {
             case .wakeCapable:
-                downgradedReadiness = .wakeCapable
+                downgradedReadiness = .waiting
             case .unavailable:
                 downgradedReadiness = .unknown
             }
