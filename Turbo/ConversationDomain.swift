@@ -189,6 +189,15 @@ enum PendingSessionAction: Equatable {
         return contactID
     }
 
+    var hasAnyLeaveInFlight: Bool {
+        switch self {
+        case .leave:
+            return true
+        case .none, .connect:
+            return false
+        }
+    }
+
     var blocksAutoRejoin: Bool {
         switch self {
         case .leave:
@@ -303,7 +312,8 @@ struct SessionCoordinatorState: Equatable {
         if effectiveChannelState.membership.hasLocalMembership, localSessionEstablished {
             clearAfterSuccessfulJoin(for: contactID)
         } else if !effectiveChannelState.membership.hasLocalMembership, localSessionCleared {
-            clearExplicitLeave(for: contactID)
+            clearPendingJoin(for: contactID)
+            clearLeaveAction(for: contactID)
         }
     }
 
@@ -757,7 +767,11 @@ struct SelectedPeerState: Equatable {
     }
 
     var allowsHoldToTalk: Bool {
-        canTransmitNow || phase == .wakeReady || phase == .transmitting || phase == .startingTransmit
+        canTransmitNow
+            || phase == .ready
+            || phase == .wakeReady
+            || phase == .transmitting
+            || phase == .startingTransmit
     }
 
     var conversationState: ConversationState {
@@ -844,6 +858,7 @@ enum SessionReconciliationAction: Equatable {
     case none
     case restoreLocalSession(contactID: UUID)
     case teardownSelectedSession(contactID: UUID)
+    case clearStaleBackendMembership(contactID: UUID)
 }
 
 struct ChannelReadinessSnapshot: Equatable {
@@ -1162,6 +1177,20 @@ struct ConversationDerivationContext: Equatable {
             return false
         }
         return true
+    }
+
+    var backendMembershipIsStaleWithoutLocalSessionEvidence: Bool {
+        guard localSessionReadiness == .none else { return false }
+        guard systemSessionState == .none else { return false }
+        guard activeChannelID == nil else { return false }
+        guard pendingAction == .none else { return false }
+        guard !explicitLeaveRequested else { return false }
+        guard channel?.requestRelationship == TurboRequestRelationship.none else { return false }
+        guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness else {
+            return false
+        }
+        guard !peerDeviceConnected else { return false }
+        return readinessStatus == .inactive
     }
 
     var backendReadyAutoRestoreAllowed: Bool {
@@ -1695,7 +1724,14 @@ enum ConversationStateMachine {
                 isTransmitting: isTransmitting,
                 requestCooldownRemaining: requestCooldownRemaining
             )
-        case .idle, .requested, .incomingRequest, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving:
+        case .ready:
+            return ConversationPrimaryAction(
+                kind: .holdToTalk,
+                label: "Hold To Talk",
+                isEnabled: selectedPeerState.allowsHoldToTalk,
+                style: .accent
+            )
+        case .idle, .requested, .incomingRequest, .localJoinFailed, .startingTransmit, .transmitting, .receiving:
             return primaryAction(
                 conversationState: selectedPeerState.conversationState,
                 isSelectedChannelJoined: isSelectedChannelJoined,
@@ -1755,6 +1791,10 @@ enum ConversationStateMachine {
 
         if context.wakeRecoveryInFlight && localSessionActive {
             return .none
+        }
+
+        if context.backendMembershipIsStaleWithoutLocalSessionEvidence {
+            return .clearStaleBackendMembership(contactID: context.contactID)
         }
 
         switch context.backendChannelReadiness {
@@ -2006,31 +2046,31 @@ private extension ConversationDerivationContext {
                 return .ready
             }
 
-            switch localMediaWarmupState {
-            case .cold:
-                if remoteAudioReadinessState == .wakeCapable,
-                   case .wakeCapable = remoteWakeCapabilityState {
-                    return .wakeReady
-                }
-                return .waiting(reason: .localAudioPrewarm, statusMessage: "Preparing audio...")
-            case .prewarming:
-                if remoteAudioReadinessState == .wakeCapable,
-                   case .wakeCapable = remoteWakeCapabilityState {
-                    return .wakeReady
-                }
-                return .waiting(reason: .localAudioPrewarm, statusMessage: "Preparing audio...")
-            case .failed:
-                return .waiting(reason: .localAudioPrewarm, statusMessage: "Audio unavailable")
-            case .ready:
-                break
-            }
-
             if firstTalkStartupProfile == .directQuicWarming {
                 return .waiting(reason: .localTransportWarmup, statusMessage: "Connecting...")
             }
 
             if authoritativeBackendReady {
                 return .ready
+            }
+
+            switch localMediaWarmupState {
+            case .cold:
+                if remoteAudioReadinessState == .wakeCapable,
+                   case .wakeCapable = remoteWakeCapabilityState {
+                    return .wakeReady
+                }
+                return .waiting(reason: .localAudioPrewarm, statusMessage: "Connecting...")
+            case .prewarming:
+                if remoteAudioReadinessState == .wakeCapable,
+                   case .wakeCapable = remoteWakeCapabilityState {
+                    return .wakeReady
+                }
+                return .waiting(reason: .localAudioPrewarm, statusMessage: "Connecting...")
+            case .failed:
+                return .waiting(reason: .localAudioPrewarm, statusMessage: "Audio unavailable")
+            case .ready:
+                break
             }
 
             switch remoteAudioReadinessState {

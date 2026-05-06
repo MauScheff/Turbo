@@ -82,8 +82,8 @@ extension PTTViewModel {
         guard backendRuntime.bootstrapRetryTask == nil else { return }
 
         let delaySeconds = Double(backendBootstrapRetryDelayNanoseconds) / 1_000_000_000
-        statusMessage = "Reconnecting..."
         backendStatusMessage = "Reconnecting backend..."
+        updatePrimaryStatusAfterBackendBootstrapFailure(retrying: true)
         diagnostics.record(
             .backend,
             message: "Scheduling backend bootstrap retry",
@@ -467,9 +467,9 @@ extension PTTViewModel {
             resetBackendRuntimeForReconnect()
             backendSyncCoordinator.send(.bootstrapFailed(error.localizedDescription))
             scheduleBackendBootstrapRetryIfNeeded(trigger: "configure", error: error)
-            if statusMessage != "Reconnecting..." {
-                statusMessage = "Backend unavailable"
-            }
+            updatePrimaryStatusAfterBackendBootstrapFailure(
+                retrying: statusMessage == "Reconnecting..."
+            )
             diagnostics.record(
                 .backend,
                 level: .error,
@@ -478,6 +478,25 @@ extension PTTViewModel {
             )
             syncPTTServiceStatus(reason: "backend-connect-failed")
             captureDiagnosticsState("backend-config:failed")
+        }
+    }
+
+    var shouldProjectBackendConnectivityInPrimaryStatus: Bool {
+        if sessionCoordinator.pendingAction != .none { return true }
+        if isJoined || isTransmitting { return true }
+        if activeChannelId != nil { return true }
+        if systemSessionState != .none { return true }
+        if transmitCoordinator.state.isPressingTalk { return true }
+        if pttCoordinator.state.isTransmitting { return true }
+        if pttWakeRuntime.pendingIncomingPush != nil { return true }
+        return false
+    }
+
+    private func updatePrimaryStatusAfterBackendBootstrapFailure(retrying: Bool) {
+        if shouldProjectBackendConnectivityInPrimaryStatus {
+            statusMessage = retrying ? "Reconnecting..." : "Backend unavailable"
+        } else {
+            updateStatusForSelectedContact()
         }
     }
 

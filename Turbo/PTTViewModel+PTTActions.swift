@@ -662,6 +662,24 @@ extension PTTViewModel {
             )
             captureDiagnosticsState("selected-peer-effect:teardown-local")
             performReconciledTeardown(for: contactID)
+        case .clearStaleBackendMembership(let contactID):
+            guard selectedContactId == contactID,
+                  let contact = contacts.first(where: { $0.id == contactID }),
+                  let backendChannelId = contact.backendChannelId else { return }
+            sessionCoordinator.markReconciledTeardown(contactID: contactID)
+            diagnostics.record(
+                .state,
+                message: "Clearing stale backend membership without local session evidence",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": backendChannelId,
+                ]
+            )
+            captureDiagnosticsState("selected-peer-effect:clear-stale-backend-membership")
+            let request = BackendLeaveRequest(contactID: contactID, backendChannelID: backendChannelId)
+            await backendCommandCoordinator.handle(.leaveRequested(request))
+            sessionCoordinator.clearLeaveAction(for: contactID)
+            updateStatusForSelectedContact()
         }
     }
 

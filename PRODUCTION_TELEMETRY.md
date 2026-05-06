@@ -217,6 +217,34 @@ python3 scripts/query_telemetry.py --query "SHOW TABLES"
 
 The query helper prints a compact operator view by default and supports `--json` for raw API output.
 
+## Relationship To Merged Diagnostics
+
+Production telemetry is now one input to the agent debugging loop, not a replacement for debug diagnostics.
+
+Use direct telemetry queries when the question is operational:
+
+- did an event happen in production?
+- which users/devices/channels emitted alerts?
+- are backend routes timing out?
+- did an invariant fire recently?
+- is a production event stream or Discord alert configured correctly?
+
+Use merged diagnostics when the question is behavioral:
+
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 @mau @bau
+```
+
+`merged_diagnostics.py` pulls Cloudflare telemetry by default when query credentials are present, then combines it with the latest backend diagnostics snapshots. This is the normal agent-facing command for physical-device debugging because it keeps the compact queryable event stream and the full transcript in one timeline.
+
+The practical split is:
+
+- telemetry answers "what high-signal facts happened recently?"
+- backend latest diagnostics answers "what did this exact app instance know and log in detail?"
+- merged diagnostics answers "how do both devices' facts line up?"
+
+Do not move full debug transcripts, audio packet logs, or complete local state dumps into Cloudflare telemetry. Those belong in backend latest diagnostics. Telemetry events should stay compact, queryable, and alert-friendly.
+
 ## Alerts
 
 The worker can mirror alert-worthy events to Discord.

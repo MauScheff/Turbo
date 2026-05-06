@@ -657,6 +657,18 @@ extension PTTViewModel {
     func handleFailedToLeaveChannel(_ channelUUID: UUID, error: any Error) {
         let message = formatPTTError(error)
         Task {
+            if shouldSuppressStaleLeaveFailure(for: channelUUID) {
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Ignored stale PTT leave failure after teardown completed",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "error": message,
+                    ]
+                )
+                captureDiagnosticsState("ptt-callback:leave-failed-stale-ignored")
+                return
+            }
             await pttCoordinator.handle(.failedToLeaveChannel(channelUUID: channelUUID, message: message))
             syncPTTState()
             statusMessage = "Leave failed: \(message)"
@@ -668,6 +680,19 @@ extension PTTViewModel {
             )
             captureDiagnosticsState("ptt-callback:leave-failed")
         }
+    }
+
+    private func shouldSuppressStaleLeaveFailure(for channelUUID: UUID) -> Bool {
+        let systemStillTracksChannel: Bool
+        switch systemSessionState {
+        case .active(_, let activeChannelUUID), .mismatched(let activeChannelUUID):
+            systemStillTracksChannel = activeChannelUUID == channelUUID
+        case .none:
+            systemStillTracksChannel = false
+        }
+        guard !systemStillTracksChannel else { return false }
+        guard !sessionCoordinator.pendingAction.hasAnyLeaveInFlight else { return false }
+        return true
     }
 
     func handleDidBeginTransmitting(_ channelUUID: UUID, source: String) {

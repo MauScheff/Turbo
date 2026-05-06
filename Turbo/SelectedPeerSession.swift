@@ -145,6 +145,7 @@ enum SelectedPeerEffect: Equatable {
     case disconnect(contactID: UUID)
     case restoreLocalSession(contactID: UUID)
     case teardownLocalSession(contactID: UUID)
+    case clearStaleBackendMembership(contactID: UUID)
 }
 
 struct SelectedPeerTransition: Equatable {
@@ -167,10 +168,6 @@ enum SelectedPeerReducer {
             } else {
                 var resetState = SelectedPeerSessionState.initial
                 resetState.selection = snapshot.selection
-                resetState.requesterAutoJoinOnPeerAcceptanceArmed =
-                    nextState.requesterAutoJoinOnPeerAcceptanceArmed
-                resetState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight =
-                    nextState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight
                 nextState = resetState
             }
             nextState.relationship = snapshot.relationship
@@ -273,6 +270,9 @@ enum SelectedPeerReducer {
         }
 
         recomputeDerivedState(&nextState)
+        if shouldArmRequesterAutoJoinForOutstandingOutgoingRequest(state: nextState) {
+            nextState.requesterAutoJoinOnPeerAcceptanceArmed = true
+        }
         if shouldClearRequesterAutoJoinShortcut(state: nextState) {
             nextState.requesterAutoJoinOnPeerAcceptanceArmed = false
             nextState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = false
@@ -502,6 +502,28 @@ enum SelectedPeerReducer {
         }
     }
 
+    private static func shouldArmRequesterAutoJoinForOutstandingOutgoingRequest(
+        state: SelectedPeerSessionState
+    ) -> Bool {
+        guard state.requesterAutoJoinOnPeerAcceptanceEnabled else { return false }
+        guard !state.requesterAutoJoinOnPeerAcceptanceArmed else { return false }
+        guard !state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight else { return false }
+        guard state.relationship.isOutgoingRequest else { return false }
+        guard state.selection != nil else { return false }
+        guard state.pendingAction.pendingConnectContactID == nil else { return false }
+        guard state.pendingAction.pendingJoinContactID == nil else { return false }
+        guard !state.pendingConnectAcceptedIncomingRequest else { return false }
+        guard state.durableSessionProjection == .inactive else { return false }
+        guard !state.isJoined, state.activeChannelID == nil else { return false }
+
+        switch state.selectedPeerState.phase {
+        case .idle, .requested, .peerReady:
+            return true
+        case .incomingRequest, .waitingForPeer, .wakeReady, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+            return false
+        }
+    }
+
     private static func autoJoinReadyPeerEffect(for state: SelectedPeerSessionState) -> SelectedPeerEffect? {
         guard state.requesterAutoJoinOnPeerAcceptanceEnabled else { return nil }
         guard state.requesterAutoJoinOnPeerAcceptanceArmed else { return nil }
@@ -566,6 +588,11 @@ enum SelectedPeerReducer {
                 return nil
             }
             return .teardownLocalSession(contactID: contactID)
+        case (_, .clearStaleBackendMembership(let contactID)):
+            if state.pendingAction.isLeaveInFlight(for: contactID) {
+                return nil
+            }
+            return .clearStaleBackendMembership(contactID: contactID)
         }
     }
 }

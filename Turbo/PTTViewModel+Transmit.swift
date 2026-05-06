@@ -679,7 +679,7 @@ extension PTTViewModel {
         guard !transmitCoordinator.state.isPressingTalk else { return false }
         guard !isPTTAudioSessionActive else { return false }
         guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
-        guard !remoteTransmittingContactIDs.contains(contactID) else { return false }
+        guard !remoteReceiveBlocksLocalTransmit(for: contactID) else { return false }
         guard let channelSnapshot = selectedChannelSnapshot(for: contactID) else { return false }
         guard channelSnapshot.membership.hasLocalMembership else { return false }
         guard channelSnapshot.canTransmit else { return false }
@@ -1088,6 +1088,16 @@ extension PTTViewModel {
         return message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "no active transmit state for sender"
     }
 
+    func shouldTreatTransmitStopCleanupAsAlreadyComplete(_ error: Error) -> Bool {
+        guard case let TurboBackendError.server(message) = error else { return false }
+        switch message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "not a channel member", "no active transmit state for sender":
+            return true
+        default:
+            return false
+        }
+    }
+
     func shouldPreserveLocalTransmitState(
         selectedContactID: UUID?,
         refreshedContactID: UUID,
@@ -1170,11 +1180,11 @@ extension PTTViewModel {
             )
             return
         }
-        guard !remoteTransmittingContactIDs.contains(contact.id) else {
+        guard !remoteReceiveBlocksLocalTransmit(for: contact.id) else {
             diagnostics.record(
                 .media,
                 message: "Ignored begin transmit request",
-                metadata: ["reason": "peer-still-transmitting", "contact": contact.handle]
+                metadata: ["reason": "peer-receive-still-draining", "contact": contact.handle]
             )
             updateStatusForSelectedContact()
             return
@@ -4564,6 +4574,21 @@ extension PTTViewModel {
                 source: "explicit-stop-backend-failed"
             )
             guard !isExpectedBackendSyncCancellation(error) else {
+                await refreshChannelState(for: target.contactID)
+                updateStatusForSelectedContact()
+                return
+            }
+            if shouldTreatTransmitStopCleanupAsAlreadyComplete(error) {
+                diagnostics.record(
+                    .media,
+                    level: .notice,
+                    message: "Treated transmit stop cleanup failure as already complete",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "error": error.localizedDescription,
+                    ]
+                )
                 await refreshChannelState(for: target.contactID)
                 updateStatusForSelectedContact()
                 return

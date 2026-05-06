@@ -4,6 +4,8 @@ This repo treats invariants as typed, named rules instead of ad hoc log strings.
 
 This file is not the user's interface. It is the agent's encoding guide.
 
+For recoverable invalid states, pair this file with `SELF_HEALING.md`. This file explains how to name and emit the broken truth; `SELF_HEALING.md` explains how to choose and prove the bounded repair action.
+
 The user should be able to describe a failure in plain language, for example:
 
 - "Avery still sees Blake online after Blake disconnected."
@@ -18,6 +20,8 @@ The goal is:
 2. emit a stable invariant ID into diagnostics
 3. surface that same ID from merged multi-device diagnostics
 4. turn the violation into a checked-in regression
+
+If the violation is clearly recoverable, the additional goal is to converge the app/backend back to a valid state without requiring force quit, manual reset, or manual peer intervention. Use `SELF_HEALING.md` for that repair design.
 
 Use this file when you are adding a new invariant rule or teaching an agent how to do it.
 
@@ -96,6 +100,18 @@ For distributed app/backend bugs:
 - at least one invariant should exist at the backend/domain seam when the backend is authoritative for the violated truth
 - client-side invariants should describe projection contradictions, not replace backend ownership
 - merged invariants should help rediscover cross-device fallout, not be the only place the broken truth is observable
+
+## Relationship to self-healing
+
+An invariant is observability. A self-heal is a repair policy.
+
+Do not automatically repair every invariant. Add a repair only when the bad state is provably invalid and there is a safe owner for convergence:
+
+- backend stale, client can prove it: emit the invariant and send an idempotent backend repair such as leave/clear-membership
+- client stale, backend already converged: emit or preserve the invariant evidence and clear the stale local coordinator state
+- ambiguous or in-flight: wait for a callback, attempt ID, or timeout before repairing
+
+See `SELF_HEALING.md` for the full taxonomy, current examples, and proof checklist.
 
 ## Naming rules
 

@@ -13,6 +13,7 @@ Use it when the task is about:
 For the repo's official state-machine-first proof model, also read:
 
 - [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md)
+- [`SELF_HEALING.md`](/Users/mau/Development/Turbo/SELF_HEALING.md) when the bug should recover automatically instead of requiring force quit or manual reset
 
 ## Fast inner loop
 
@@ -27,12 +28,81 @@ Optimize for:
 
 ## Turbo-specific iteration notes
 
-- Debug builds auto-publish structured diagnostics after high-signal state transitions. Manual `Upload` in the diagnostics sheet is now fallback behavior, not the primary path.
+- Debug builds emit compact state-capture telemetry events after high-signal state transitions and coalesce automatic latest full diagnostics transcript uploads to the backend. Sustained activity should still refresh the latest backend snapshot periodically.
+- For long or intense physical-device sessions, use merged diagnostics first. Cloudflare telemetry gives the compact event timeline, while backend latest diagnostics gives the full transcript anchor with audio and local state detail.
 - The backend now supports exact-device diagnostics reads for simulator identities too, so `just simulator-scenario-merge` is part of the normal loop.
+- For physical-device timelines, use `python3 scripts/merged_diagnostics.py @mau @bau`; it merges Cloudflare telemetry by default when credentials are available and treats missing latest backend snapshots as source warnings.
+- Agents should not ask for manual in-app diagnostics upload during the normal debug loop. If a current debug build has recent activity and `merged_diagnostics.py` cannot find a backend latest snapshot, investigate auto-publish/backend diagnostics rather than changing the workflow to manual upload.
 - The simulator scenario runner is controlled by a temporary repo-local file `.scenario-runtime-config.json` that `just simulator-scenario` creates and removes through `scripts/run_simulator_scenarios.py`. Do not check this file in or depend on it manually.
 - The scenario runner now serializes scenario invocations with `.scenario-test.lock` and retries transient XCTest bootstrap crashes automatically. Use the `just` entrypoints instead of invoking `xcodebuild` manually when you want the stable loop.
 - For targeted Swift Testing runs, use `just swift-test-target <name>` instead of raw `-only-testing`. The wrapper fails if the requested test name never actually executes, which prevents false-green zero-test runs.
 - If `xcodebuild` says the simulator scenario command succeeded unusually quickly, confirm that tests actually ran. Swift Testing does not use the same selector behavior as classic XCTest, so a bad `-only-testing` filter can silently run zero tests.
+
+## Merged diagnostics workflow
+
+For physical-device reports, start with:
+
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 @mau @bau
+```
+
+When saving an artifact for an agent to grep during an investigation, use:
+
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 2 --telemetry-limit 500 --full-metadata @mau @bau > /tmp/turbo-merged-diagnostics.txt
+```
+
+Backend latest snapshots are fetched by default. `--full-metadata` only affects Cloudflare telemetry rendering in the human timeline; it does not enable or disable full backend transcripts.
+
+Use the tester's actual handles when they are not `@mau` and `@bau`. Add `--json` when you need to count events, compare transport digests, or script over the result. Add `--insecure` only for local certificate-root problems.
+
+Read the result in layers:
+
+1. Source warnings: confirm whether telemetry and backend latest snapshots were both available.
+2. Invariant violations: treat typed invariants as the fastest path to the owning subsystem.
+3. Pair timeline: reconstruct who requested, joined, transmitted, backgrounded, disconnected, or retried.
+4. Full transcript anchors: inspect audio/session details that compact telemetry intentionally does not carry.
+
+If an invariant describes a clearly impossible local/backend state, use `SELF_HEALING.md` before patching. The expected pattern is invariant -> owner -> bounded repair -> repair diagnostic -> regression. Do not treat a self-heal as complete if it only changes UI copy or hides the red error.
+
+For audio bugs, telemetry alone is not enough. The backend latest transcript should show the sender capture path (`Captured local audio buffer`, `Converted local audio buffer`, `Enqueued outbound audio chunk`, outbound transport digest) and the receiver path (`Audio chunk received`, `Playback buffer scheduled`, `Playback node started`). If those are missing from a current debug build, fix diagnostics/autopublish before drawing conclusions about the audio path.
+
+For production-like reports, the same command still applies when Cloudflare query credentials are present. Telemetry makes production events queryable and alertable; merged diagnostics remains the agent-facing debug view that combines queryable events with the latest full transcript.
+
+### Audio packet diagnostics policy
+
+The app should not emit every audio packet to production telemetry. Packet-level audio logs are high-volume, hard to query globally, and can increase the overhead of the real-time path. Keep Cloudflare telemetry for compact lifecycle facts, timings, route failures, and invariant violations.
+
+For normal debug builds, packet-level evidence belongs in the backend latest diagnostics transcript:
+
+- sender capture path:
+  - `Captured local audio buffer`
+  - `Converted local audio buffer`
+  - `Enqueued outbound audio chunk`
+  - outbound dispatch/delivery events with transport digests
+- receiver path:
+  - `Audio chunk received`
+  - `Playback buffer scheduled`
+  - playback start/readiness events
+
+Those logs are intentionally budgeted in the hot path. The current shape records the first few sender capture/convert/enqueue events and the first few relay receive chunks, then emits a suppression notice such as `Suppressing repetitive WebSocket audio chunk diagnostics`. That gives enough evidence to prove startup, silence/non-silence, payload size, and digest continuity without turning every transmit into a huge diagnostics payload.
+
+When a bug specifically requires deeper packet accounting, prefer adding a temporary or gated diagnostic mode instead of making unlimited packet logging the default. A good deep-audio mode should:
+
+- be scoped to debug/dev builds or explicit test configuration
+- emit compact per-chunk sequence facts, not raw PCM or full payloads
+- include transport digest, sequence/index, chunk count, payload length, frame count, and local monotonic timing
+- summarize totals at transmit end: captured, enqueued, dispatched, received, scheduled, dropped, suppressed, and largest inter-arrival/playback gaps
+- flow into backend latest diagnostics so `merged_diagnostics.py` remains the single agent entrypoint
+
+The iteration loop for suspected packet loss is:
+
+1. reproduce once on devices
+2. save merged diagnostics with `--full-metadata`
+3. compare sender enqueue/dispatch digests with receiver `Audio chunk received` digests
+4. inspect playback scheduling for gaps, silence, or route/session changes
+5. if the transcript is insufficient, add a focused deep-audio diagnostic counter or checked-in simulator/local transport scenario
+6. keep the regression in simulator/local infrastructure when the defect is transport/state-machine owned; use physical devices only for Apple audio-session, PushToTalk, background, route, and actual capture/playback boundaries
 
 ## Client-only UX shortcuts
 

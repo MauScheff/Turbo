@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
+import query_telemetry
+
 
 SECTION_HEADER_RE = re.compile(r"^(STATE SNAPSHOT|STATE TIMELINE|INVARIANT VIOLATIONS|DIAGNOSTICS)$")
 TIMELINE_RE = re.compile(r"^\[(?P<timestamp>[^\]]+)\] \[(?P<label>[^\]]+)\] (?P<body>.*)$")
@@ -41,6 +43,29 @@ class Report:
     wake_events: list[tuple[datetime, str]]
 
 
+@dataclass(frozen=True)
+class SourceWarning:
+    subject: str
+    source: str
+    message: str
+
+
+@dataclass(frozen=True)
+class TelemetryEvent:
+    timestamp: datetime
+    handle: str
+    event_name: str
+    source: str
+    severity: str
+    phase: str
+    reason: str
+    message: str
+    channel_id: str
+    peer_handle: str
+    invariant_id: str
+    metadata_text: str
+
+
 def snapshot_bool(snapshot: dict[str, str], key: str) -> bool | None:
     value = snapshot.get(key)
     if value is None or value == "none":
@@ -67,6 +92,12 @@ def parse_args() -> argparse.Namespace:
         help="Disable TLS certificate verification for development endpoints.",
     )
     parser.add_argument(
+        "--backend-timeout",
+        type=int,
+        default=15,
+        help="Maximum seconds for each backend diagnostics HTTP request.",
+    )
+    parser.add_argument(
         "--device",
         action="append",
         default=[],
@@ -84,6 +115,47 @@ def parse_args() -> argparse.Namespace:
         help="Emit a machine-readable JSON payload instead of the human report.",
     )
     parser.add_argument(
+        "--full-metadata",
+        action="store_true",
+        help="Do not truncate telemetry metadata in the human timeline.",
+    )
+    telemetry_group = parser.add_mutually_exclusive_group()
+    telemetry_group.add_argument(
+        "--include-telemetry",
+        dest="include_telemetry",
+        action="store_true",
+        default=True,
+        help="Merge compact Cloudflare telemetry events into the timeline. This is the default.",
+    )
+    telemetry_group.add_argument(
+        "--no-telemetry",
+        dest="include_telemetry",
+        action="store_false",
+        help="Use only backend latest diagnostics snapshots/transcripts.",
+    )
+    parser.add_argument(
+        "--telemetry-hours",
+        type=int,
+        default=6,
+        help="Telemetry lookback window used with --include-telemetry.",
+    )
+    parser.add_argument(
+        "--telemetry-limit",
+        type=int,
+        default=500,
+        help="Maximum Cloudflare telemetry rows to merge.",
+    )
+    parser.add_argument(
+        "--include-heartbeats",
+        action="store_true",
+        help="Include backend presence heartbeat telemetry events in the merged timeline.",
+    )
+    parser.add_argument(
+        "--telemetry-dataset",
+        default=query_telemetry.DEFAULT_DATASET,
+        help="Cloudflare Analytics Engine dataset name.",
+    )
+    parser.add_argument(
         "handles",
         nargs="*",
         help="One or more handles, e.g. @avery @blake",
@@ -96,11 +168,22 @@ def normalize_handle(handle: str) -> str:
     return handle if handle.startswith("@") else f"@{handle}"
 
 
-def fetch_latest_report(base_url: str, handle: str, insecure: bool, device_id: str | None = None) -> Report:
+def fetch_latest_report(
+    base_url: str,
+    handle: str,
+    insecure: bool,
+    *,
+    timeout: int,
+    device_id: str | None = None,
+) -> Report:
     command = [
         "curl",
         "--fail-with-body",
         "-sS",
+        "--connect-timeout",
+        "5",
+        "--max-time",
+        str(timeout),
         "-H",
         f"x-turbo-user-handle: {handle}",
         "-H",
@@ -115,10 +198,12 @@ def fetch_latest_report(base_url: str, handle: str, insecure: bool, device_id: s
         path = f"{path}/{device_id}/"
     command.append(f"{base_url.rstrip('/')}{path}")
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=timeout + 2)
     except subprocess.CalledProcessError as exc:
         body = (exc.stderr or exc.stdout).strip()
         raise RuntimeError(f"{handle}: request failed: {body}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{handle}: request timed out after {timeout}s") from exc
 
     payload = json.loads(result.stdout)
 
@@ -132,17 +217,21 @@ def fetch_latest_report(base_url: str, handle: str, insecure: bool, device_id: s
         snapshot=parse_snapshot(sections.get("STATE SNAPSHOT", "")),
         state_timeline=parse_timeline_section(handle, "state", sections.get("STATE TIMELINE", "")),
         invariant_violations=parse_invariant_section(handle, sections.get("INVARIANT VIOLATIONS", "")),
-        backend_invariant_violations=fetch_backend_invariant_events(base_url, handle, insecure),
+        backend_invariant_violations=fetch_backend_invariant_events(base_url, handle, insecure, timeout=timeout),
         diagnostics=parse_timeline_section(handle, "diag", sections.get("DIAGNOSTICS", "")),
-        wake_events=fetch_wake_events(base_url, handle, insecure),
+        wake_events=fetch_wake_events(base_url, handle, insecure, timeout=timeout),
     )
 
 
-def fetch_json(base_url: str, handle: str, path: str, insecure: bool) -> dict:
+def fetch_json(base_url: str, handle: str, path: str, insecure: bool, *, timeout: int) -> dict:
     command = [
         "curl",
         "--fail-with-body",
         "-sS",
+        "--connect-timeout",
+        "5",
+        "--max-time",
+        str(timeout),
         "-H",
         f"x-turbo-user-handle: {handle}",
         "-H",
@@ -152,15 +241,17 @@ def fetch_json(base_url: str, handle: str, path: str, insecure: bool) -> dict:
         command.append("--insecure")
     command.append(f"{base_url.rstrip('/')}{path}")
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=timeout + 2)
     except subprocess.CalledProcessError as exc:
         body = (exc.stderr or exc.stdout).strip()
         raise RuntimeError(f"{handle}: request failed: {body}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{handle}: request timed out after {timeout}s") from exc
     return json.loads(result.stdout)
 
 
-def fetch_wake_events(base_url: str, handle: str, insecure: bool) -> list[tuple[datetime, str]]:
-    payload = fetch_json(base_url, handle, "/v1/dev/wake-events/recent", insecure)
+def fetch_wake_events(base_url: str, handle: str, insecure: bool, *, timeout: int) -> list[tuple[datetime, str]]:
+    payload = fetch_json(base_url, handle, "/v1/dev/wake-events/recent", insecure, timeout=timeout)
     raw_events = payload.get("events", [])
     if not isinstance(raw_events, list):
         return []
@@ -192,9 +283,20 @@ def missing_route_error(exc: RuntimeError) -> bool:
     return any(fragment in message for fragment in ("404", "not found", "unknown route", "failed to match"))
 
 
-def fetch_backend_invariant_events(base_url: str, handle: str, insecure: bool) -> list[InvariantViolation]:
+def missing_latest_diagnostics_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return "diagnostics report not found" in message or "request timed out" in message or missing_route_error(exc)
+
+
+def fetch_backend_invariant_events(
+    base_url: str,
+    handle: str,
+    insecure: bool,
+    *,
+    timeout: int,
+) -> list[InvariantViolation]:
     try:
-        payload = fetch_json(base_url, handle, "/v1/dev/invariant-events/recent", insecure)
+        payload = fetch_json(base_url, handle, "/v1/dev/invariant-events/recent", insecure, timeout=timeout)
     except RuntimeError as exc:
         if missing_route_error(exc):
             return []
@@ -305,10 +407,13 @@ def parse_timestamp(text: str) -> datetime | None:
     except ValueError:
         pass
 
-    # Fallback for old localized time-only entries: keep them at epoch day in UTC.
-    for fmt in ("%I:%M:%S %p", "%H:%M:%S", "%I:%M:%S\u202fa.m.", "%I:%M:%S\u202fp.m."):
+    # Cloudflare SQL returns UTC timestamps without an explicit timezone. Old
+    # localized transcript entries may be time-only; keep those at epoch day.
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%I:%M:%S %p", "%H:%M:%S", "%I:%M:%S\u202fa.m.", "%I:%M:%S\u202fp.m."):
         try:
             parsed = datetime.strptime(text, fmt)
+            if fmt.startswith("%Y"):
+                return parsed.replace(tzinfo=timezone.utc)
             return datetime(1970, 1, 1, parsed.hour, parsed.minute, parsed.second, tzinfo=timezone.utc)
         except ValueError:
             continue
@@ -362,7 +467,12 @@ def parse_device_mapping(raw_value: str) -> tuple[str, str]:
     return normalize_handle(handle), device_id.strip()
 
 
-def merged_events(reports: Iterable[Report]) -> list[tuple[datetime, str]]:
+def merged_events(
+    reports: Iterable[Report],
+    telemetry_events: Iterable[TelemetryEvent] = (),
+    *,
+    full_metadata: bool = False,
+) -> list[TelemetryEvent]:
     events: list[tuple[datetime, str]] = []
     for report in reports:
         events.extend(report.state_timeline)
@@ -370,7 +480,136 @@ def merged_events(reports: Iterable[Report]) -> list[tuple[datetime, str]]:
         events.extend(render_invariant_events(report.backend_invariant_violations))
         events.extend(report.diagnostics)
         events.extend(report.wake_events)
+    events.extend(render_telemetry_events(telemetry_events, full_metadata=full_metadata))
     return sorted(events, key=lambda item: item[0])
+
+
+def fetch_telemetry_events(
+    handles: Iterable[str],
+    device_ids: Iterable[str],
+    *,
+    hours: int,
+    limit: int,
+    dataset: str,
+    insecure: bool,
+    include_heartbeats: bool,
+) -> list[tuple[datetime, str]]:
+    account_id = query_telemetry.DEFAULT_ACCOUNT_ID
+    api_token = query_telemetry.DEFAULT_API_TOKEN
+    if not account_id or not api_token:
+        print(
+            "telemetry skipped: missing TURBO_CLOUDFLARE_ACCOUNT_ID or "
+            "TURBO_CLOUDFLARE_ANALYTICS_READ_TOKEN",
+            file=sys.stderr,
+        )
+        return []
+
+    identity_filters: list[str] = []
+    for handle in sorted(set(handles)):
+        identity_filters.append(f"blob5 = {sql_string(handle)}")
+    for device_id in sorted(set(device_id for device_id in device_ids if device_id)):
+        identity_filters.append(f"blob6 = {sql_string(device_id)}")
+    if not identity_filters:
+        return []
+
+    filters = [
+        f"timestamp > NOW() - INTERVAL '{hours}' HOUR",
+        "(" + " OR ".join(identity_filters) + ")",
+    ]
+    if not include_heartbeats:
+        filters.append(f"blob1 != {sql_string('backend.presence.heartbeat')}")
+    where_clause = " AND ".join(filters)
+    query = f"""
+SELECT
+  timestamp,
+  blob1 AS event_name,
+  blob2 AS source,
+  blob3 AS severity,
+  blob5 AS user_handle,
+  blob6 AS device_id,
+  blob8 AS channel_id,
+  blob11 AS peer_handle,
+  blob14 AS invariant_id,
+  blob15 AS phase,
+  blob16 AS reason,
+  blob17 AS message,
+  blob18 AS metadata_text,
+  blob19 AS dev_traffic,
+  double2 AS alert_flag
+FROM {dataset}
+WHERE {where_clause}
+ORDER BY timestamp DESC
+LIMIT {limit}
+""".strip()
+    try:
+        response = query_telemetry.execute_query(account_id, api_token, query, insecure=insecure)
+    except SystemExit as exc:
+        print(f"telemetry skipped: {exc}", file=sys.stderr)
+        return []
+
+    rows = response.get("data")
+    if not isinstance(rows, list):
+        return []
+
+    events: list[TelemetryEvent] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        timestamp = parse_timestamp(str(row.get("timestamp", "")))
+        if timestamp is None:
+            continue
+        events.append(
+            TelemetryEvent(
+                timestamp=timestamp,
+                handle=str(row.get("user_handle") or row.get("device_id") or "unknown"),
+                event_name=str(row.get("event_name") or "unknown"),
+                source=str(row.get("source") or "unknown"),
+                severity=str(row.get("severity") or "unknown"),
+                phase=str(row.get("phase") or ""),
+                reason=str(row.get("reason") or ""),
+                message=str(row.get("message") or ""),
+                channel_id=str(row.get("channel_id") or ""),
+                peer_handle=str(row.get("peer_handle") or ""),
+                invariant_id=str(row.get("invariant_id") or ""),
+                metadata_text=str(row.get("metadata_text") or ""),
+            )
+        )
+    return events
+
+
+def render_telemetry_events(
+    telemetry_events: Iterable[TelemetryEvent],
+    *,
+    full_metadata: bool,
+) -> list[tuple[datetime, str]]:
+    events: list[tuple[datetime, str]] = []
+    for event in telemetry_events:
+        pieces = [
+            f"severity={event.severity}",
+            f"source={event.source}",
+            f"event={event.event_name}",
+        ]
+        for key, value in (
+            ("phase", event.phase),
+            ("reason", event.reason),
+            ("message", event.message),
+            ("channel_id", event.channel_id),
+            ("peer_handle", event.peer_handle),
+            ("invariant_id", event.invariant_id),
+        ):
+            if value:
+                pieces.append(f"{key}={value}")
+        if event.metadata_text:
+            metadata_text = event.metadata_text
+            if not full_metadata and len(metadata_text) > 500:
+                metadata_text = metadata_text[:500] + "...<truncated>"
+            pieces.append(f"metadata={metadata_text}")
+        events.append((event.timestamp, f"[{event.handle}] [telemetry] " + " ".join(pieces)))
+    return events
+
+
+def sql_string(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def render_invariant_events(violations: Iterable[InvariantViolation]) -> list[tuple[datetime, str]]:
@@ -782,6 +1021,38 @@ def report_payload(report: Report) -> dict[str, object]:
     }
 
 
+def warning_payload(warning: SourceWarning) -> dict[str, str]:
+    return {
+        "subject": warning.subject,
+        "source": warning.source,
+        "message": warning.message,
+    }
+
+
+def telemetry_payload(event: TelemetryEvent) -> dict[str, object]:
+    parsed_metadata: object = None
+    if event.metadata_text:
+        try:
+            parsed_metadata = json.loads(event.metadata_text)
+        except json.JSONDecodeError:
+            parsed_metadata = event.metadata_text
+    return {
+        "timestamp": event.timestamp.isoformat(),
+        "handle": event.handle,
+        "eventName": event.event_name,
+        "source": event.source,
+        "severity": event.severity,
+        "phase": event.phase,
+        "reason": event.reason,
+        "message": event.message,
+        "channelId": event.channel_id,
+        "peerHandle": event.peer_handle,
+        "invariantId": event.invariant_id,
+        "metadataText": event.metadata_text,
+        "metadata": parsed_metadata,
+    }
+
+
 def main() -> int:
     args = parse_args()
     requested_devices = [parse_device_mapping(raw_value) for raw_value in args.device]
@@ -790,35 +1061,89 @@ def main() -> int:
     if not handles and not requested_devices:
         raise RuntimeError("expected at least one handle or --device mapping")
 
-    try:
-        reports = [fetch_latest_report(args.base_url, handle, args.insecure) for handle in handles]
-        reports.extend(
-            fetch_latest_report(args.base_url, handle, args.insecure, device_id=device_id)
-            for handle, device_id in requested_devices
-        )
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+    reports: list[Report] = []
+    source_warnings: list[SourceWarning] = []
+    requested_subjects: list[tuple[str, str | None]] = [(handle, None) for handle in handles]
+    requested_subjects.extend(requested_devices)
+    for handle, device_id in requested_subjects:
+        subject = handle if device_id is None else f"{handle}/{device_id}"
+        try:
+            reports.append(
+                fetch_latest_report(
+                    args.base_url,
+                    handle,
+                    args.insecure,
+                    timeout=args.backend_timeout,
+                    device_id=device_id,
+                )
+            )
+        except RuntimeError as exc:
+            if missing_latest_diagnostics_error(exc):
+                source_warnings.append(
+                    SourceWarning(
+                        subject=subject,
+                        source="backend-latest-diagnostics",
+                        message=(
+                            "latest diagnostics snapshot not found or unavailable; using telemetry-only timeline "
+                            "for this subject if Cloudflare telemetry is available"
+                        ),
+                    )
+                )
+                continue
+            print(str(exc), file=sys.stderr)
+            return 1
 
     violations = analyze_reports(reports)
+    telemetry_events: list[TelemetryEvent] = []
+    if args.include_telemetry:
+        telemetry_events = fetch_telemetry_events(
+            [handle for handle, _ in requested_subjects] or [report.handle for report in reports],
+            [device_id for _, device_id in requested_subjects if device_id]
+            + [report.device_id for report in reports],
+            hours=args.telemetry_hours,
+            limit=args.telemetry_limit,
+            dataset=args.telemetry_dataset,
+            insecure=args.insecure,
+            include_heartbeats=args.include_heartbeats,
+        )
 
     if args.json:
         payload = {
             "reports": [report_payload(report) for report in reports],
+            "sourceWarnings": [warning_payload(warning) for warning in source_warnings],
             "violations": [violation_payload(violation) for violation in violations],
+            "telemetryEventCount": len(telemetry_events),
+            "telemetryEvents": [telemetry_payload(event) for event in telemetry_events],
             "timeline": [
                 {
                     "timestamp": timestamp.isoformat(),
                     "line": line,
                 }
-                for timestamp, line in merged_events(reports)
+                for timestamp, line in merged_events(
+                    reports,
+                    telemetry_events,
+                    full_metadata=args.full_metadata,
+                )
             ],
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print("LATEST SNAPSHOTS")
-        for report in reports:
-            print(render_snapshot(report))
+        if reports:
+            for report in reports:
+                print(render_snapshot(report))
+        else:
+            print("- none")
+
+        if source_warnings:
+            print("\nDIAGNOSTICS SOURCES")
+            for warning in source_warnings:
+                print(f"- [{warning.subject}] {warning.source}: {warning.message}")
+            if args.include_telemetry:
+                print(f"- telemetry: merged {len(telemetry_events)} Cloudflare events")
+        elif args.include_telemetry:
+            print("\nDIAGNOSTICS SOURCES")
+            print(f"- telemetry: merged {len(telemetry_events)} Cloudflare events")
 
         print("\nINVARIANT VIOLATIONS")
         if violations:
@@ -828,7 +1153,11 @@ def main() -> int:
             print("- none")
 
         print("\nMERGED TIMELINE")
-        for timestamp, line in merged_events(reports):
+        for timestamp, line in merged_events(
+            reports,
+            telemetry_events,
+            full_metadata=args.full_metadata,
+        ):
             print(f"{timestamp.isoformat()} {line}")
 
     if args.fail_on_violations and violations:

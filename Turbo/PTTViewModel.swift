@@ -76,6 +76,9 @@ struct AudioOutputRouteOverridePlan: Equatable {
 @Observable
 final class PTTViewModel: NSObject, MediaSessionDelegate {
     static let shared = PTTViewModel(pttSystemPolicyDefaults: .standard)
+    private static var isRunningAutomatedTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
 
     var isReady: Bool = false
     var isJoined: Bool = false
@@ -133,6 +136,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var directQuicBackendLeaseBypassedContactIDs: Set<UUID> = []
     var directQuicBackendLeaseBypassedRequestsByContactID: [UUID: TransmitRequestContext] = [:]
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
+    private var diagnosticsAutoPublishPendingTrigger: String?
+    private let diagnosticsAutoPublishDelayNanoseconds: UInt64 = 8_000_000_000
     var disconnectRecoveryTask: Task<Void, Never>?
     var automaticDiagnosticsPublishEnabled: Bool = true
     var conversationShortcutPolicy: ConversationShortcutPolicy = .load()
@@ -195,6 +200,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         self.pttSystemPolicyDefaults = pttSystemPolicyDefaults
         audioOutputPreference = .speaker
         UserDefaults.standard.set(AudioOutputPreference.speaker.rawValue, forKey: AudioOutputPreference.storageKey)
+        automaticDiagnosticsPublishEnabled = !Self.isRunningAutomatedTests
         super.init()
         diagnostics.onHighSignalEvent = { [weak self] event in
             self?.handleHighSignalDiagnosticsEvent(event)
@@ -256,10 +262,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         (applicationState ?? currentApplicationState()) == .active
     }
 
-    private func performProtectedBackgroundHandoff(
-        named name: String,
-        operation: @escaping @MainActor () async -> Void
-    ) async {
+    private func beginProtectedBackgroundActivity(named name: String) -> @MainActor () -> Void {
         let lease = BackgroundActivityLease()
         let endLease: @MainActor () -> Void = { [weak self] in
             guard !lease.ended else { return }
@@ -279,9 +282,16 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                 endLease()
             }
         }
+        return endLease
+    }
 
+    private func performProtectedBackgroundHandoff(
+        named name: String,
+        operation: @escaping @MainActor () async -> Void
+    ) async {
+        let endLease = beginProtectedBackgroundActivity(named: name)
+        defer { endLease() }
         await operation()
-        endLease()
     }
 
     /// Debug knob for the requester-side auto-join UX shortcut.
@@ -842,6 +852,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         }
 
         switch (entry.subsystem, entry.message) {
+        case (.backend, "Backend connection failed"):
+            return shouldProjectBackendConnectivityInPrimaryStatus
         case (.pushToTalk, "PTT init failed"):
             return !pttSystemClient.isReady
         case (.media, "Direct QUIC media path lost"):
@@ -1089,19 +1101,113 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func captureDiagnosticsState(_ reason: String) {
         diagnostics.captureState(reason: reason, fields: diagnosticsStateFields)
+        publishDiagnosticsStateTelemetry(reason: reason)
         scheduleAutomaticDiagnosticsPublish(trigger: reason)
+    }
+
+    private func publishDiagnosticsStateTelemetry(reason: String) {
+#if DEBUG
+        guard automaticDiagnosticsPublishEnabled else { return }
+        sendTelemetryEvent(
+            eventName: "ios.diagnostics.state_capture",
+            severity: .debug,
+            phase: diagnosticsStateFields["selectedPeerPhase"],
+            reason: reason,
+            message: statusMessage,
+            metadata: diagnosticsStateTelemetryMetadata()
+        )
+#endif
+    }
+
+    private func diagnosticsStateTelemetryMetadata() -> [String: String] {
+        var metadata: [String: String] = [
+            "backendStatus": backendStatusMessage,
+            "pendingAction": String(describing: sessionCoordinator.pendingAction),
+            "primaryStatus": statusMessage,
+            "systemSession": String(describing: systemSessionState),
+        ]
+        for key in [
+            "selectedContact",
+            "selectedPeerPhaseDetail",
+            "selectedPeerRelationship",
+            "isJoined",
+            "isTransmitting",
+            "backendChannelStatus",
+            "backendReadiness",
+            "backendSelfJoined",
+            "backendPeerJoined",
+            "backendPeerDeviceConnected",
+            "remoteAudioReadiness",
+            "remoteWakeCapabilityKind",
+        ] {
+            if let value = diagnosticsStateFields[key] {
+                metadata[key] = value
+            }
+        }
+        return metadata
     }
 
     func scheduleAutomaticDiagnosticsPublish(trigger: String) {
 #if DEBUG
         guard automaticDiagnosticsPublishEnabled else { return }
-        guard backendServices != nil, backendConfig != nil else { return }
-        diagnosticsAutoPublishTask?.cancel()
+        guard backendServices != nil else { return }
+        diagnosticsAutoPublishPendingTrigger = trigger
+        guard diagnosticsAutoPublishTask == nil else { return }
         diagnosticsAutoPublishTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            guard !Task.isCancelled else { return }
-            guard let self else { return }
-            _ = try? await self.publishDiagnosticsIfPossible(trigger: trigger, recordSuccess: false)
+            while true {
+                do {
+                    try await Task.sleep(nanoseconds: self?.diagnosticsAutoPublishDelayNanoseconds ?? 8_000_000_000)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    return
+                }
+
+                guard let self, !Task.isCancelled else { return }
+                let publishTrigger = self.diagnosticsAutoPublishPendingTrigger ?? trigger
+                self.diagnosticsAutoPublishPendingTrigger = nil
+
+                do {
+                    let response = try await self.publishDiagnosticsIfPossible(
+                        trigger: "automatic:\(publishTrigger)",
+                        recordSuccess: false
+                    )
+                    self.sendTelemetryEvent(
+                        eventName: "ios.diagnostics.auto_publish_succeeded",
+                        severity: .debug,
+                        reason: publishTrigger,
+                        message: "Automatic diagnostics publish succeeded",
+                        metadata: [
+                            "deviceId": response.report.deviceId,
+                            "uploadedAt": response.report.uploadedAt,
+                        ]
+                    )
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.diagnostics.record(
+                        .app,
+                        level: .notice,
+                        message: "Automatic diagnostics publish failed",
+                        metadata: [
+                            "trigger": publishTrigger,
+                            "error": error.localizedDescription,
+                        ]
+                    )
+                    self.sendTelemetryEvent(
+                        eventName: "ios.diagnostics.auto_publish_failed",
+                        severity: .notice,
+                        reason: publishTrigger,
+                        message: "Automatic diagnostics publish failed",
+                        metadata: ["error": error.localizedDescription]
+                    )
+                }
+
+                if self.diagnosticsAutoPublishPendingTrigger == nil {
+                    self.diagnosticsAutoPublishTask = nil
+                    return
+                }
+            }
         }
 #endif
     }
@@ -1109,6 +1215,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     func cancelAutomaticDiagnosticsPublish() {
         diagnosticsAutoPublishTask?.cancel()
         diagnosticsAutoPublishTask = nil
+        diagnosticsAutoPublishPendingTrigger = nil
     }
 
     func replaceDisconnectRecoveryTask(with task: Task<Void, Never>?) {
@@ -1364,6 +1471,39 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         }
     }
 
+    func scheduleApplicationWillResignActiveHandling() {
+        let endLease = beginProtectedBackgroundActivity(named: "application-will-resign-active")
+        Task { @MainActor [weak self, endLease] in
+            defer { endLease() }
+            guard let self else { return }
+            await self.reconcileIdleTransportForBackgroundTransition(
+                reason: "application-will-resign-active",
+                applicationState: .inactive
+            )
+            await self.suspendForegroundMediaForBackgroundTransition(
+                reason: "application-will-resign-active",
+                applicationState: .inactive
+            )
+        }
+    }
+
+    func scheduleApplicationDidEnterBackgroundHandling() {
+        let endLease = beginProtectedBackgroundActivity(named: "application-did-enter-background")
+        Task { @MainActor [weak self, endLease] in
+            defer { endLease() }
+            guard let self else { return }
+            await self.reconcileIdleTransportForBackgroundTransition(
+                reason: "application-did-enter-background",
+                applicationState: .background
+            )
+            await self.suspendForegroundMediaForBackgroundTransition(
+                reason: "application-did-enter-background",
+                applicationState: .background
+            )
+            await self.handleApplicationDidEnterBackground()
+        }
+    }
+
     @objc private func handleApplicationWillResignActiveNotification(_ notification: Notification) {
         let _ = notification
         diagnostics.record(
@@ -1375,17 +1515,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             reason: "application-will-resign-active",
             applicationState: .inactive
         )
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.reconcileIdleTransportForBackgroundTransition(
-                reason: "application-will-resign-active",
-                applicationState: .inactive
-            )
-            await self.suspendForegroundMediaForBackgroundTransition(
-                reason: "application-will-resign-active",
-                applicationState: .inactive
-            )
-        }
+        scheduleApplicationWillResignActiveHandling()
     }
 
     @objc private func handleApplicationDidEnterBackgroundNotification(_ notification: Notification) {
@@ -1399,17 +1529,6 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             reason: "application-did-enter-background",
             applicationState: .background
         )
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.reconcileIdleTransportForBackgroundTransition(
-                reason: "application-did-enter-background",
-                applicationState: .background
-            )
-            await self.suspendForegroundMediaForBackgroundTransition(
-                reason: "application-did-enter-background",
-                applicationState: .background
-            )
-            await self.handleApplicationDidEnterBackground()
-        }
+        scheduleApplicationDidEnterBackgroundHandling()
     }
 }

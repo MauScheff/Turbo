@@ -18,6 +18,7 @@ The app side currently proves out Apple's PushToTalk framework integration. The 
 - `TOOLING.md`: tooling, operational entrypoints, and infrastructure overview.
 - `STATE_MACHINE_TESTING.md`: canonical scenario-driven state-machine testing workflow.
 - `INVARIANTS.md`: invariant rule catalog and diagnostics-backed regression guidance.
+- `SELF_HEALING.md`: recoverable bad-state taxonomy, repair rules, and proof checklist.
 - `PRODUCTION_TELEMETRY.md`: production telemetry architecture, deployment, alerting, and query workflow.
 - `journal/`: timestamped engineering notes for design lessons, debugging conclusions, and changelog-style session records.
 - `.agents/`: supporting Unison language and workflow notes.
@@ -48,6 +49,8 @@ Use these docs as the primary authority for their respective concerns:
   - the default distributed bug reproduction, proof, and regression-testing model
 - `INVARIANTS.md`
   - how invariant IDs, typed violation logging, merged diagnostics checks, and regression expectations are encoded
+- `SELF_HEALING.md`
+  - how typed invariant violations become bounded, idempotent app/backend repair actions
 - `PRODUCTION_TELEMETRY.md`
   - production telemetry architecture, worker/backend setup, and operator query workflow
 - `handoffs/README.md`
@@ -153,6 +156,7 @@ Then load only the docs needed for the task:
 - Read `BACKEND.md` for backend/cloud/storage/route work.
 - Read `STATE_MACHINE_TESTING.md` when the task is about distributed bugs, scenario design, or proof loops.
 - Read `INVARIANTS.md` when the task is about invariant design, diagnostics-backed regression rules, or merged diagnostics checks.
+- Read `SELF_HEALING.md` when a bad runtime state should recover automatically instead of requiring force quit, reset, or manual disconnect.
 - Read `Server/backend_architecture.md` if you need backend structure or Unison deployment context.
 
 Treat the backend as control-plane-only unless the user explicitly changes scope.
@@ -320,9 +324,17 @@ That means the normal loop is now:
 
 1. reproduce once
 2. tell the agent which side looked wrong
-3. fetch the latest report or merged timeline from the backend
+3. fetch the merged timeline with `scripts/merged_diagnostics.py`
 
-Manual upload remains available, but it is now a fallback rather than the primary workflow.
+Manual upload remains available, but it is now a fallback rather than the primary workflow. Current debug builds should automatically publish the latest full backend diagnostics snapshot; if that snapshot is missing after fresh activity, treat it as an auto-publish or backend diagnostics bug.
+
+For physical-device debugging, agents should normally start with:
+
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 @mau @bau
+```
+
+That command merges Cloudflare telemetry, when credentials are present, with backend latest diagnostics. Telemetry is the compact queryable event stream; backend latest diagnostics is the full transcript/audio/local-state anchor. Use [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md) for the detailed operating model.
 
 For simulator-driven distributed debugging, the normal loop is now:
 

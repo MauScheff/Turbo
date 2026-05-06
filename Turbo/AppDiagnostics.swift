@@ -588,7 +588,12 @@ final class DiagnosticsStore {
             )
         }
 
-        if phase == "ready", backendCanTransmit == false {
+        let backendIsSelfTransmitting =
+            backendChannelStatus == "self-transmitting"
+            || backendReadiness == "self-transmitting"
+        if phase == "ready",
+           backendCanTransmit == false,
+           !backendIsSelfTransmitting {
             violations.append(
                 DiagnosticsInvariantViolationCandidate(
                     invariantID: "selected.ready_while_backend_cannot_transmit",
@@ -645,6 +650,36 @@ final class DiagnosticsStore {
                         "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
                         "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
                         "backendPeerDeviceConnected": fields["backendPeerDeviceConnected"] ?? "none",
+                    ]
+                )
+            )
+        }
+
+        let pendingLocalSessionActionWithoutSession =
+            pendingAction.contains("joiningLocal(")
+            || pendingAction.contains(".joiningLocal(")
+            || pendingAction.contains("leave(")
+        if pendingLocalSessionActionWithoutSession,
+           selectedPeerRelationship == "none",
+           isJoined == false,
+           systemSession == "none",
+           backendSelfJoined == false,
+           backendPeerJoined == false {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_absent_pending_local_action_without_session",
+                    scope: .convergence,
+                    message: "backend membership is absent, but the selected peer still has a pending local session action without local session evidence",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerRelationship": selectedPeerRelationship,
+                        "pendingAction": pendingAction,
+                        "isJoined": fields["isJoined"] ?? "none",
+                        "systemSession": systemSession,
+                        "backendChannelStatus": backendChannelStatus,
+                        "backendReadiness": backendReadiness,
+                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
+                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
                     ]
                 )
             )
@@ -797,31 +832,6 @@ final class DiagnosticsStore {
         let disconnectingTeardownInFlight =
             phaseDetail.contains("disconnecting")
             || pendingAction.contains("reconciledTeardown(")
-
-        if phase == "waitingForPeer",
-           phaseDetail.contains("disconnecting"),
-           pendingAction.contains("reconciledTeardown("),
-           isJoined == false,
-           systemSession == "none",
-           backendSelfJoined == false,
-           backendPeerJoined == false {
-            violations.append(
-                DiagnosticsInvariantViolationCandidate(
-                    invariantID: "selected.reconciled_teardown_without_local_session",
-                    scope: .local,
-                    message: "selected peer is disconnecting for reconciled teardown after local and backend sessions are already absent",
-                    metadata: [
-                        "selectedPeerPhase": phase,
-                        "selectedPeerPhaseDetail": phaseDetail,
-                        "pendingAction": pendingAction,
-                        "isJoined": fields["isJoined"] ?? "none",
-                        "systemSession": systemSession,
-                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
-                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
-                    ]
-                )
-            )
-        }
 
         if phase == "waitingForPeer",
            isJoined == true,

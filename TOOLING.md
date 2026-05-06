@@ -189,23 +189,137 @@ Use `direnv exec . ...` when running commands that depend on repo-local environm
 
 ### Diagnostics infrastructure
 
-Debug builds publish structured diagnostics, and the backend supports exact-device diagnostics reads, including simulator identities.
+Debug builds publish structured diagnostics, and the backend supports exact-device diagnostics reads, including simulator identities. Agents should treat `scripts/merged_diagnostics.py` as the default entrypoint for debugging a two-device report. It is intentionally a merger over multiple sources, not "just telemetry" and not "just backend diagnostics."
+
+Keep the two observability lanes separate:
+
+- Cloudflare telemetry is the high-volume event stream for compact state captures, timing markers, invariant violations, route failures, and production alerts. Use it when you need the recent event timeline, especially during long physical-device sessions.
+- Unison backend diagnostics are the automatic latest full snapshot/transcript surface. Use it when you need the full local transcript, audio packet logs, playback scheduling details, or exact app state snapshot for a device. Automatic debug state captures still go to Cloudflare telemetry; the full backend transcript upload is coalesced so one burst of state changes collapses into one latest artifact, while sustained activity still publishes periodically instead of postponing the upload forever.
 
 This makes the standard loop:
 
 1. reproduce
-2. run the scenario or probe
-3. merge diagnostics
-4. inspect timeline and invariant violations
+2. run the scenario or probe, when the bug can be reproduced without physical devices
+3. merge diagnostics with the single merged diagnostics command
+4. inspect the merged timeline, backend latest transcript anchors, source warnings, and invariant violations
 
 Prefer that over guessing from screenshots or manual tap-through notes.
 
+For physical-device debugging, the expected agent loop is:
+
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 @mau @bau
+```
+
+For an agent investigation where the result will be saved and searched repeatedly, prefer this default:
+
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 2 --telemetry-limit 500 --full-metadata @mau @bau > /tmp/turbo-merged-diagnostics.txt
+```
+
+That command:
+
+- fetches backend latest snapshots/transcripts by default
+- merges Cloudflare telemetry when credentials are available
+- keeps complete telemetry metadata in the human timeline
+- bounds backend route waits so a slow latest-snapshot read does not block the whole investigation
+- produces grep-friendly text for repeated searches during the debugging loop
+
+Use `--insecure` only when local Python certificate roots block Cloudflare queries during development:
+
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 --insecure @mau @bau
+```
+
+Use `--json` when you need to script over the result:
+
+```bash
+python3 scripts/merged_diagnostics.py --json --backend-timeout 8 --telemetry-hours 1 @mau @bau > /tmp/turbo-merged.json
+```
+
+Default flag guidance:
+
+- Use `--backend-timeout 8` by default for physical-device debugging. Raise it to `15` if the backend is healthy but slow; lower it only when you explicitly want telemetry-first behavior.
+- Use `--telemetry-hours 2` by default for manual device sessions. Narrow to `1` for a fresh repro; expand to `4` or more when the user has been testing for a long time.
+- Use `--telemetry-limit 500` by default when saving an artifact for grep. Lower limits are fine for quick status checks; intense sessions can need more rows.
+- Use `--full-metadata` by default when redirecting to a file. Skip it for quick terminal reads where compact output is easier.
+- Do not use `--insecure` as a universal default. It is acceptable in local development when certificate roots are broken, but it disables TLS verification for HTTPS requests.
+- Do not use `--no-telemetry` unless you are intentionally isolating backend latest snapshots/transcripts or Cloudflare credentials are broken.
+- Do not use `--include-heartbeats` unless presence heartbeat cadence is the suspected bug.
+- Use `--json` for automation, not as the default human debugging artifact.
+
+Useful `merged_diagnostics.py` flags:
+
+| Flag | Use when |
+| --- | --- |
+| `--base-url <url>` | Reading diagnostics from a non-default backend, such as a local or staging service. |
+| `--backend-timeout <seconds>` | Bounding each backend latest/invariant/wake diagnostics request so telemetry can still return when the backend is slow. Use `8` or `15` for normal development. |
+| `--device <handle=device-id>` | Fetching an exact device snapshot instead of the latest snapshot for a handle. This is common for simulator identities and scenario artifacts. Repeat once per handle when needed. |
+| `--json` | Feeding merged diagnostics into a script, counting events, comparing transport digests, or attaching a machine-readable artifact. |
+| `--fail-on-violations` | CI/scenario/debug gates where typed invariant violations should make the command fail. |
+| `--full-metadata` | Inspecting complete Cloudflare telemetry metadata in the human timeline instead of the compact truncated view. |
+| `--include-telemetry` | Explicitly enabling Cloudflare telemetry merge. This is already the default. |
+| `--no-telemetry` | Reading only backend latest diagnostics snapshots/transcripts, useful when Cloudflare credentials are absent, slow, or irrelevant. |
+| `--telemetry-hours <hours>` | Expanding or narrowing the Cloudflare lookback window. Use a small window for fresh physical-device reports; expand when debugging a long session. |
+| `--telemetry-limit <n>` | Raising the maximum Cloudflare rows merged into the report. Increase this for intense sessions with many state captures. |
+| `--include-heartbeats` | Including backend presence heartbeat telemetry. Leave this off unless heartbeat cadence itself is the suspected bug. |
+| `--telemetry-dataset <name>` | Querying a non-default Analytics Engine dataset. Rare outside telemetry migration/testing. |
+| `--insecure` | Development-only workaround for local Python certificate-root problems when querying HTTPS/Cloudflare. |
+
+Do not ask the tester to tap "Upload diagnostics" as the normal loop. In current debug builds, the app should automatically publish the latest full transcript after high-signal activity. Manual upload is a fallback for old builds, a suspected auto-publish regression, or one-off local investigation.
+
+Interpret source warnings carefully:
+
+- missing Cloudflare credentials means the command can still use backend latest snapshots, but the compact high-volume timeline is absent
+- missing backend latest snapshot means the command can still show telemetry, but full transcript/audio-packet evidence is absent
+- missing backend latest snapshot on a current debug build after fresh activity is itself a bug in auto-publish or backend diagnostics storage
+- a backend timeout should not block the whole investigation; use the telemetry portion immediately, then probe backend health separately
+
+When debugging audio quality or packet loss, backend latest snapshots matter. Telemetry can show that a transmit began or that an invariant fired, but the full transcript is where agents should look for `Captured local audio buffer`, `Enqueued outbound audio chunk`, transport digests, `Audio chunk received`, and `Playback buffer scheduled`.
+
+Do not put every audio packet into Cloudflare telemetry by default. Packet-level audio evidence belongs in backend latest diagnostics, and it should usually be budgeted or summarized. If a bug needs deeper accounting, add a debug/test-gated diagnostic mode that emits compact sequence/digest/timing facts plus transmit-end totals, then keep using `merged_diagnostics.py` as the single read path.
+
 Scenario runs are stricter than normal app debugging:
 
-- normal debug builds may auto-publish diagnostics opportunistically
+- normal debug builds auto-publish the latest full diagnostics transcript opportunistically after a short coalescing window
+- debug state captures emit compact telemetry events, so high-volume timelines should be queried from Cloudflare instead of increasing backend diagnostics payload size
 - simulator scenarios publish explicit scenario-tagged diagnostics artifacts and verify exact-device reads against those artifacts
 - scenario view models disable automatic diagnostics publishing so scenario verification does not get overwritten by later background uploads from the same simulator identity
-- merged diagnostics now also parse explicit `INVARIANT VIOLATIONS` sections, derive pair-level violations, support `--json`, and can fail non-zero with `--fail-on-violations`
+- merged diagnostics now also parse explicit `INVARIANT VIOLATIONS` sections, derive pair-level violations, support `--json`, include Cloudflare telemetry by default when credentials are available, tolerate missing latest backend snapshots, and can fail non-zero with `--fail-on-violations`
+
+Use Cloudflare telemetry queries for high-volume debugging:
+
+```bash
+python3 scripts/query_telemetry.py --hours 2 --user-handle @mau --limit 100
+python3 scripts/merged_diagnostics.py --telemetry-hours 2 @mau @bau
+```
+
+Telemetry merging requires `TURBO_CLOUDFLARE_ACCOUNT_ID` and `TURBO_CLOUDFLARE_ANALYTICS_READ_TOKEN`. Without those credentials, merged diagnostics still works from the backend latest snapshot. If a physical device is on an older build or the latest backend snapshot is missing, merged diagnostics prints a source warning and still emits the telemetry timeline.
+If local Python certificate roots are stale, add `--insecure` to Cloudflare telemetry queries or merged diagnostics during development.
+If a backend diagnostics route is slow or unhealthy, `merged_diagnostics.py` bounds each backend request with `--backend-timeout` so the command can still return telemetry and source warnings.
+
+If diagnostics uploads appear to be stressing hosted Unison storage, clear the authenticated user's latest diagnostics anchor after deploying the current backend:
+
+```bash
+curl -X POST -H 'x-turbo-user-handle: @mau' -H 'Authorization: Bearer @mau' https://beepbeep.to/v1/dev/diagnostics/clear
+```
+
+If a known exact-device diagnostics row needs to be removed, clear it by key without materializing the stored payload:
+
+```bash
+curl -X POST -H 'x-turbo-user-handle: @mau' -H 'Authorization: Bearer @mau' https://beepbeep.to/v1/dev/diagnostics/clear/<device-id>
+```
+
+Do not use `reset-all` just to clear diagnostics; it also clears product/session state.
+
+Use the backend stability probe when production bootstrap routes appear intermittently unavailable:
+
+```bash
+python3 scripts/backend_stability_probe.py --iterations 30 --timeout 8 --handle @mau
+just backend-stability-probe https://beepbeep.to @mau 30 8
+```
+
+The probe repeatedly checks `/v1/health`, `/v1/config`, and `/v1/auth/session`, reports per-request latency/timeouts, and exits non-zero if any request fails. This is the preferred artifact for Unison Cloud escalation because it separates route availability from app/device behavior.
 
 `just route-probe` should be treated as a semantic probe, not just a route-existence check. In particular, diagnostics upload/latest routes should round-trip the exact `deviceId` and `appVersion` that were just written.
 

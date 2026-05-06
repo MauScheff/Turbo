@@ -36,6 +36,9 @@ smoke-probe:
 route-probe:
   .venv/bin/python scripts/route_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
 
+backend-stability-probe base="https://beepbeep.to" handle="@mau" iterations="10" timeout="8":
+  python3 scripts/backend_stability_probe.py --base-url "{{base}}" --handle "{{handle}}" --iterations "{{iterations}}" --timeout "{{timeout}}"
+
 direct-quic-provisioning-probe:
   .venv/bin/python scripts/direct_quic_provisioning_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
 
@@ -130,26 +133,26 @@ cf-telemetry-worker-deploy:
 telemetry-query query="SHOW TABLES":
   sh -c 'query="$1"; query="${query#query=}"; python3 scripts/query_telemetry.py --query "$query"' _ {{quote(query)}}
 
-telemetry-recent hours="24" limit="50":
-  sh -c 'hours="{{hours}}"; limit="{{limit}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit"'
+telemetry-recent hours="24" limit="50" insecure="":
+  sh -c 'hours="{{hours}}"; limit="{{limit}}"; insecure="{{insecure}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; insecure="${insecure#insecure=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" $insecure'
 
-telemetry-recent-signal hours="24" limit="50":
-  sh -c 'hours="{{hours}}"; limit="{{limit}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --exclude-event-name "backend.presence.heartbeat"'
+telemetry-recent-signal hours="24" limit="50" insecure="":
+  sh -c 'hours="{{hours}}"; limit="{{limit}}"; insecure="{{insecure}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; insecure="${insecure#insecure=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --exclude-event-name "backend.presence.heartbeat" $insecure'
 
-telemetry-recent-dev hours="24" limit="50":
-  sh -c 'hours="{{hours}}"; limit="{{limit}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --dev-traffic true'
+telemetry-recent-dev hours="24" limit="50" insecure="":
+  sh -c 'hours="{{hours}}"; limit="{{limit}}"; insecure="{{insecure}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; insecure="${insecure#insecure=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --dev-traffic true $insecure'
 
-telemetry-follow hours="1" limit="50" poll="5":
-  sh -c 'hours="{{hours}}"; limit="{{limit}}"; poll="{{poll}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; poll="${poll#poll=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --follow --poll-seconds "$poll"'
+telemetry-follow hours="1" limit="50" poll="5" insecure="":
+  sh -c 'hours="{{hours}}"; limit="{{limit}}"; poll="{{poll}}"; insecure="{{insecure}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; poll="${poll#poll=}"; insecure="${insecure#insecure=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --follow --poll-seconds "$poll" $insecure'
 
-telemetry-follow-signal hours="1" limit="50" poll="5":
-  sh -c 'hours="{{hours}}"; limit="{{limit}}"; poll="{{poll}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; poll="${poll#poll=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --exclude-event-name "backend.presence.heartbeat" --follow --poll-seconds "$poll"'
+telemetry-follow-signal hours="1" limit="50" poll="5" insecure="":
+  sh -c 'hours="{{hours}}"; limit="{{limit}}"; poll="{{poll}}"; insecure="{{insecure}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; poll="${poll#poll=}"; insecure="${insecure#insecure=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --exclude-event-name "backend.presence.heartbeat" --follow --poll-seconds "$poll" $insecure'
 
-telemetry-follow-dev hours="1" limit="50" poll="5":
-  sh -c 'hours="{{hours}}"; limit="{{limit}}"; poll="{{poll}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; poll="${poll#poll=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --dev-traffic true --follow --poll-seconds "$poll"'
+telemetry-follow-dev hours="1" limit="50" poll="5" insecure="":
+  sh -c 'hours="{{hours}}"; limit="{{limit}}"; poll="{{poll}}"; insecure="{{insecure}}"; hours="${hours#hours=}"; limit="${limit#limit=}"; poll="${poll#poll=}"; insecure="${insecure#insecure=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --dev-traffic true --follow --poll-seconds "$poll" $insecure'
 
-telemetry-user handle hours="24" limit="50":
-  sh -c 'handle="{{handle}}"; hours="{{hours}}"; limit="{{limit}}"; handle="${handle#handle=}"; hours="${hours#hours=}"; limit="${limit#limit=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --user-handle "$handle"'
+telemetry-user handle hours="24" limit="50" insecure="":
+  sh -c 'handle="{{handle}}"; hours="{{hours}}"; limit="{{limit}}"; insecure="{{insecure}}"; handle="${handle#handle=}"; hours="${hours#hours=}"; limit="${limit#limit=}"; insecure="${insecure#insecure=}"; python3 scripts/query_telemetry.py --hours "$hours" --limit "$limit" --user-handle "$handle" $insecure'
 
 simulator-scenario scenario="" base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" insecure="--insecure":
   python3 scripts/run_simulator_scenarios.py \

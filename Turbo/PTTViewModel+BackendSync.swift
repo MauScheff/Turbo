@@ -936,6 +936,23 @@ extension PTTViewModel {
         }
     }
 
+    func remoteReceiveBlocksLocalTransmit(for contactID: UUID) -> Bool {
+        if remoteTransmittingContactIDs.contains(contactID) {
+            return true
+        }
+        guard mediaSessionContactID == contactID else { return false }
+        guard
+            let activityState = receiveExecutionCoordinator
+                .state
+                .remoteActivityByContactID[contactID],
+            !activityState.isPeerTransmitting,
+            activityState.hasReceivedAudioChunk
+        else {
+            return false
+        }
+        return mediaServices.session()?.hasPendingPlayback() == true
+    }
+
     func isExpectedBackendSyncCancellation(_ error: Error) -> Bool {
         if error is CancellationError {
             return true
@@ -2212,12 +2229,19 @@ extension PTTViewModel {
             let localSessionCleared =
                 !systemSessionMatches(contactID)
                 && !(isJoined && activeChannelId == contactID)
+            let leaveWasInFlight = sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
             sessionCoordinator.reconcileAfterChannelRefresh(
                 for: contactID,
                 effectiveChannelState: effectiveChannelState,
                 localSessionEstablished: localSessionEstablished,
                 localSessionCleared: localSessionCleared
             )
+            if leaveWasInFlight,
+               !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
+                replaceDisconnectRecoveryTask(with: nil)
+                updateStatusForSelectedContact()
+                captureDiagnosticsState("session-teardown:channel-refresh-complete")
+            }
             backendSyncCoordinator.send(
                 .channelStateUpdated(contactID: contactID, channelState: effectiveChannelState)
             )

@@ -10,6 +10,7 @@ Detailed guidance lives in:
 - [`SWIFT.md`](/Users/mau/Development/Turbo/SWIFT.md): app/client architecture and client-side working rules
 - [`SWIFT_DEBUGGING.md`](/Users/mau/Development/Turbo/SWIFT_DEBUGGING.md): simulator/device/PTT/audio debugging loops
 - [`BACKEND.md`](/Users/mau/Development/Turbo/BACKEND.md): backend/control-plane/storage/query guidance
+- [`SELF_HEALING.md`](/Users/mau/Development/Turbo/SELF_HEALING.md): recoverable bad-state taxonomy and repair rules
 - [`PRODUCT_BRIEF.md`](/Users/mau/Development/Turbo/PRODUCT_BRIEF.md): product framing, positioning, and audience-facing narrative
 - [`journal/README.md`](/Users/mau/Development/Turbo/journal/README.md): engineering journal conventions for dense design/debugging notes
 
@@ -21,6 +22,7 @@ Detailed guidance lives in:
 - For Unison syntax and semantics, treat [`UNISON_LANGUAGE.md`](/Users/mau/Development/Turbo/UNISON_LANGUAGE.md) as authoritative.
 - The structure is the answer.
 - When a bug report is really a broken invariant, translate the plain-language report into a typed invariant using [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md), add detection at the authoritative seam, and make it show up in merged diagnostics plus a regression.
+- When a broken invariant describes a provably recoverable bad state, follow [`SELF_HEALING.md`](/Users/mau/Development/Turbo/SELF_HEALING.md): classify ownership, add a bounded idempotent repair action, emit repair diagnostics, and prove both recovery and nearby valid in-flight states.
 - When searching broadly, use [`BACKEND_STRUCTURE.md`](/Users/mau/Development/Turbo/BACKEND_STRUCTURE.md) as a quick backend index, then use the Unison MCP to explore the backend authoritatively when you need the current structure or deeper detail.
 - Investigate first and fix problems at their source—never patch backend issues in the frontend.
 - For distributed, shared-state, or app/backend contract bugs, identify which subsystem owns the broken fact before editing code. Do not stop at the client seam if backend truth may be wrong.

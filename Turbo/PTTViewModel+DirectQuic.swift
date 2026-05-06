@@ -501,7 +501,7 @@ extension PTTViewModel {
            !backendAdvertisesDirectQuicUpgrade {
             return "backend-capability-disabled"
         }
-        guard backendServices != nil else {
+        guard let backend = backendServices else {
             return "backend-unavailable"
         }
         guard selectedContactId == contactID else {
@@ -514,8 +514,15 @@ extension PTTViewModel {
               contact.remoteUserId != nil else {
             return "channel-metadata-missing"
         }
-        guard directQuicPeerDeviceID(for: contactID) != nil else {
+        guard let peerDeviceID = directQuicPeerDeviceID(for: contactID) else {
             return "peer-device-missing"
+        }
+        if existingAttempt == nil,
+           directQuicAttemptRole(
+            localDeviceID: backend.deviceID,
+            peerDeviceID: peerDeviceID
+           ) != .listenerOfferer {
+            return "not-listener-offerer"
         }
         guard systemSessionMatches(contactID),
               isJoined,

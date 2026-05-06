@@ -130,7 +130,7 @@ extension PTTViewModel {
             contactPresence: contactPresencePresentation(for: contact.id),
             isJoined: isJoined,
             localTransmit: localTransmitProjection(for: contact.id),
-            peerSignalIsTransmitting: remoteTransmittingContactIDs.contains(contact.id),
+            peerSignalIsTransmitting: remoteReceiveBlocksLocalTransmit(for: contact.id),
             activeChannelID: activeChannelId,
             systemSessionMatchesContact: systemSessionMatches(contact.id),
             systemSessionState: systemSessionState,
@@ -187,6 +187,8 @@ extension PTTViewModel {
             selectedPeerCoordinator.send(.selectedContactChanged(nil))
             return
         }
+        completeReconciledTeardownIfSystemSessionEnded(for: contact.id)
+        completeAbsentBackendMembershipRecoveryIfLocalSessionEnded(for: contact.id)
         let localTransmit = localTransmitProjection(for: contact.id)
 
         let relationship = relationshipState(for: contact.id)
@@ -211,7 +213,7 @@ extension PTTViewModel {
                     requesterAutoJoinOnPeerAcceptanceEnabled:
                         conversationShortcutPolicy.requesterAutoJoinOnPeerAcceptance,
                     localTransmit: localTransmit,
-                    peerSignalIsTransmitting: remoteTransmittingContactIDs.contains(contact.id),
+                    peerSignalIsTransmitting: remoteReceiveBlocksLocalTransmit(for: contact.id),
                     systemSessionState: systemSessionState,
                     systemSessionMatchesContact: systemSessionMatches(contact.id),
                     mediaState: mediaConnectionState,
@@ -224,6 +226,68 @@ extension PTTViewModel {
                 )
             )
         )
+    }
+
+    private func completeReconciledTeardownIfSystemSessionEnded(for contactID: UUID) {
+        guard sessionCoordinator.pendingAction.pendingTeardownContactID == contactID else { return }
+        guard systemSessionState == .none else { return }
+        guard selectedChannelSnapshot(for: contactID)?.membership.hasLocalMembership != true else { return }
+
+        sessionCoordinator.clearLeaveAction(for: contactID)
+        diagnostics.record(
+            .state,
+            message: "Completing reconciled teardown after local system session ended",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "backendMembership": selectedChannelSnapshot(for: contactID).map { String(describing: $0.membership) } ?? "none",
+            ]
+        )
+        replaceDisconnectRecoveryTask(with: nil)
+        tearDownTransmitRuntime(resetCoordinator: true)
+        closeMediaSession()
+        pttCoordinator.reset()
+        syncPTTState()
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("session-teardown:reconciled-complete")
+    }
+
+    private func completeAbsentBackendMembershipRecoveryIfLocalSessionEnded(for contactID: UUID) {
+        let selectedChannel: ChannelReadinessSnapshot? = {
+            if let channelState = channelStateByContactID[contactID] {
+                return ChannelReadinessSnapshot(
+                    channelState: channelState,
+                    readiness: channelReadinessByContactID[contactID]
+                )
+            }
+            return selectedChannelSnapshot(for: contactID)
+        }()
+        guard let selectedChannel else { return }
+        guard !selectedChannel.membership.hasLocalMembership else { return }
+        guard selectedChannel.requestRelationship == .none else { return }
+
+        let localSessionTouchesContact =
+            systemSessionMatches(contactID)
+            || (isJoined && activeChannelId == contactID)
+        guard !localSessionTouchesContact else { return }
+
+        let pendingJoinIsStale = sessionCoordinator.pendingJoinContactID == contactID
+        let pendingLeaveIsComplete = sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
+        guard pendingJoinIsStale || pendingLeaveIsComplete else { return }
+
+        sessionCoordinator.clearPendingJoin(for: contactID)
+        sessionCoordinator.clearLeaveAction(for: contactID)
+        replaceDisconnectRecoveryTask(with: nil)
+        diagnostics.record(
+            .state,
+            message: "Recovered local session state after backend membership became absent",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "pendingJoinWasStale": String(pendingJoinIsStale),
+                "pendingLeaveWasComplete": String(pendingLeaveIsComplete),
+                "backendMembership": String(describing: selectedChannel.membership),
+            ]
+        )
+        captureDiagnosticsState("session-recovery:backend-membership-absent")
     }
 
     func selectedPeerState(for contactID: UUID) -> SelectedPeerState {

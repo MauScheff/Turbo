@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import ssl
 import sys
 import time
 import urllib.error
@@ -34,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--follow", action="store_true", help="Poll and print new matching events as they arrive.")
     parser.add_argument("--poll-seconds", type=int, default=5)
     parser.add_argument("--json", action="store_true", help="Print the raw response JSON.")
+    parser.add_argument("--insecure", action="store_true", help="Disable TLS certificate verification for development tooling.")
     return parser.parse_args()
 
 
@@ -91,7 +93,7 @@ LIMIT {args.limit}
 """.strip()
 
 
-def execute_query(account_id: str, api_token: str, query: str) -> dict:
+def execute_query(account_id: str, api_token: str, query: str, insecure: bool = False) -> dict:
     if not account_id:
         raise SystemExit("Missing --account-id or TURBO_CLOUDFLARE_ACCOUNT_ID")
     if not api_token:
@@ -104,8 +106,9 @@ def execute_query(account_id: str, api_token: str, query: str) -> dict:
         headers={"Authorization": f"Bearer {api_token}"},
         data=query.encode("utf-8"),
     )
+    context = ssl._create_unverified_context() if insecure else None
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, context=context, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -175,13 +178,13 @@ def row_key(row: dict) -> str:
     return json.dumps(row, sort_keys=True, separators=(",", ":"))
 
 
-def follow_pretty(account_id: str, api_token: str, query: str, poll_seconds: int) -> None:
+def follow_pretty(account_id: str, api_token: str, query: str, poll_seconds: int, insecure: bool) -> None:
     print(query)
     print()
     seen: set[str] = set()
     try:
         while True:
-            response = execute_query(account_id, api_token, query)
+            response = execute_query(account_id, api_token, query, insecure=insecure)
             data = response.get("data")
             rows = [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
             fresh_rows: list[dict] = []
@@ -205,9 +208,9 @@ def main() -> None:
         raise SystemExit("--follow and --json cannot be combined")
     query = args.query or build_recent_query(args)
     if args.follow:
-        follow_pretty(args.account_id, args.api_token, query, args.poll_seconds)
+        follow_pretty(args.account_id, args.api_token, query, args.poll_seconds, args.insecure)
         return
-    response = execute_query(args.account_id, args.api_token, query)
+    response = execute_query(args.account_id, args.api_token, query, insecure=args.insecure)
     if args.json:
         json.dump(response, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")

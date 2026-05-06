@@ -379,6 +379,8 @@ enum DevSelfCheckRunner {
             steps.append(DevSelfCheckStep(.sessionAlignment, status: .failed, detail: "Backend is ready but local session must be restored"))
         case .teardownSelectedSession:
             steps.append(DevSelfCheckStep(.sessionAlignment, status: .failed, detail: "Local session is stale and must be torn down"))
+        case .clearStaleBackendMembership:
+            steps.append(DevSelfCheckStep(.sessionAlignment, status: .failed, detail: "Backend membership is stale and must be cleared"))
         }
 
         return DevSelfCheckOutcome(
