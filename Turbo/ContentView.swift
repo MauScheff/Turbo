@@ -24,6 +24,7 @@ struct ContentView: View {
     @State private var isShowingDiagnostics: Bool = false
     @State private var isShowingCallPrototype: Bool = false
     @State private var isShowingTransportPathInfo: Bool = false
+    @State private var minimizedCallContactID: UUID?
     @State private var contactDetailsContactID: UUID?
     @State private var draftDevUserHandle: String = ""
     @State private var draftPeerHandle: String = ""
@@ -113,6 +114,11 @@ struct ContentView: View {
         .onChange(of: viewModel.selectedContactId) { _, _ in
             route = .live
             isShowingAddContactSheet = false
+        }
+        .onChange(of: callScreenContact?.id) { _, newValue in
+            if newValue == nil {
+                minimizedCallContactID = nil
+            }
         }
         .onChange(of: viewModel.currentProfileName) { _, newValue in
             if !isSavingProfileName && !isShowingProfileSheet {
@@ -241,11 +247,22 @@ struct ContentView: View {
             )
         }
         .fullScreenCover(isPresented: $isShowingCallPrototype) {
-            TurboCallPrototypeView(
-                contactName: callPrototypeContactName,
-                contactHandle: callPrototypeContactHandle,
+            callScreenView(
+                contact: callPrototypeContact,
+                selectedPeerState: callPrototypeSelectedPeerState,
+                primaryAction: callPrototypePrimaryAction,
                 onClose: { isShowingCallPrototype = false }
             )
+        }
+        .fullScreenCover(isPresented: callScreenPresentationBinding) {
+            if let contact = callScreenContact {
+                callScreenView(
+                    contact: contact,
+                    selectedPeerState: viewModel.selectedPeerState(for: contact.id),
+                    primaryAction: callScreenPrimaryAction(for: contact),
+                    onClose: { minimizedCallContactID = contact.id }
+                )
+            }
         }
         .onOpenURL { url in
             handleIncomingURL(url)
@@ -305,7 +322,7 @@ struct ContentView: View {
                     itemStatusPill: contactListItemStatusPillModel,
                     activeSubtitle: { viewModel.contactSubtitle(for: $0) },
                     itemSubtitle: contactListItemSubtitle,
-                    selectContact: viewModel.selectContact,
+                    selectContact: selectContactFromList,
                     showContactDetails: showContactDetails,
                     endSystemSession: viewModel.endSystemSession
                 )
@@ -413,16 +430,127 @@ struct ContentView: View {
         return viewModel.contact(for: contactDetailsContactID)
     }
 
-    private var callPrototypeContact: Contact? {
-        viewModel.selectedContact ?? viewModel.activeConversationContact ?? viewModel.contacts.first
+    private var callPrototypeContact: Contact {
+        viewModel.selectedContact
+            ?? viewModel.activeConversationContact
+            ?? viewModel.contacts.first
+            ?? Contact(id: UUID(), name: "Mellow Claude", handle: "@mellow", isOnline: true, channelId: UUID())
     }
 
-    private var callPrototypeContactName: String {
-        callPrototypeContact?.name ?? "Hat Tiling"
+    private var callPrototypeSelectedPeerState: SelectedPeerState {
+        guard let contact = viewModel.selectedContact ?? viewModel.activeConversationContact ?? viewModel.contacts.first else {
+            return SelectedPeerState(
+                relationship: .none,
+                detail: .ready,
+                statusMessage: "Connected",
+                canTransmitNow: true
+            )
+        }
+        return viewModel.selectedPeerState(for: contact.id)
     }
 
-    private var callPrototypeContactHandle: String {
-        callPrototypeContact?.handle ?? "@prototype"
+    private var callPrototypePrimaryAction: ConversationPrimaryAction {
+        ConversationPrimaryAction(
+            kind: .holdToTalk,
+            label: "Hold To Talk",
+            isEnabled: true,
+            style: .accent
+        )
+    }
+
+    private var callScreenContact: Contact? {
+        let candidates = [
+            viewModel.selectedContact,
+            viewModel.activeConversationContact
+        ].compactMap { $0 }
+
+        var seen = Set<UUID>()
+        for contact in candidates where !seen.contains(contact.id) {
+            seen.insert(contact.id)
+            if shouldShowCallScreen(for: contact) {
+                return contact
+            }
+        }
+        return nil
+    }
+
+    private var callScreenPresentationBinding: Binding<Bool> {
+        Binding(
+            get: {
+                guard route == .live,
+                      let contact = callScreenContact else {
+                    return false
+                }
+                return minimizedCallContactID != contact.id
+            },
+            set: { isPresented in
+                guard !isPresented,
+                      let contact = callScreenContact else {
+                    return
+                }
+                minimizedCallContactID = contact.id
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func callScreenView(
+        contact: Contact,
+        selectedPeerState: SelectedPeerState,
+        primaryAction: ConversationPrimaryAction,
+        onClose: @escaping () -> Void
+    ) -> some View {
+        TurboCallPrototypeView(
+            contact: contact,
+            selectedPeerState: selectedPeerState,
+            primaryAction: primaryAction,
+            isTransmitPressActive: viewModel.isTransmitPressActive,
+            isPTTAudioSessionActive: viewModel.isPTTAudioSessionActive,
+            mediaConnectionState: viewModel.mediaConnectionState,
+            mediaSessionContactID: viewModel.mediaSessionContactID,
+            onClose: onClose,
+            onLeave: {
+                ensureCallContactSelected(contact)
+                viewModel.disconnect()
+            },
+            onJoin: {
+                ensureCallContactSelected(contact)
+                viewModel.joinChannel()
+            },
+            onBeginTransmit: {
+                ensureCallContactSelected(contact)
+                viewModel.beginTransmit()
+            },
+            onTransmitTouchReleased: viewModel.noteTransmitTouchReleased,
+            onEndTransmit: viewModel.endTransmit
+        )
+    }
+
+    private func shouldShowCallScreen(for contact: Contact) -> Bool {
+        switch viewModel.selectedPeerState(for: contact.id).phase {
+        case .waitingForPeer, .localJoinFailed, .ready, .wakeReady,
+             .startingTransmit, .transmitting, .receiving,
+             .blockedByOtherSession, .systemMismatch:
+            return true
+        case .idle, .requested, .incomingRequest, .peerReady:
+            return false
+        }
+    }
+
+    private func callScreenPrimaryAction(for contact: Contact) -> ConversationPrimaryAction {
+        let selectedPeerState = viewModel.selectedPeerState(for: contact.id)
+        let isSelectedChannelJoined = viewModel.isJoined && viewModel.activeChannelId == contact.id
+        return ConversationStateMachine.primaryAction(
+            selectedPeerState: selectedPeerState,
+            isSelectedChannelJoined: isSelectedChannelJoined,
+            isTransmitting: viewModel.isTransmitting,
+            requestCooldownRemaining: viewModel.requestCooldownRemaining(for: contact.id, now: Date())
+        )
+    }
+
+    private func ensureCallContactSelected(_ contact: Contact) {
+        guard viewModel.selectedContactId != contact.id else { return }
+        viewModel.selectContact(contact)
     }
 
     private var addContactStatusMessage: String? {
@@ -442,6 +570,13 @@ struct ContentView: View {
         draftLocalContactName = viewModel.contactLocalName(for: contact.id) ?? ""
         contactDeleteError = nil
         isDeletingContact = false
+    }
+
+    private func selectContactFromList(_ contact: Contact) {
+        viewModel.selectContact(contact)
+        if shouldShowCallScreen(for: contact) {
+            minimizedCallContactID = nil
+        }
     }
 
     private func saveLocalContactName() {

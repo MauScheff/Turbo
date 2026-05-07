@@ -10,6 +10,44 @@ import PushToTalk
 import UIKit
 
 extension PTTViewModel {
+    struct LocalOnlySystemLeaveSuppression {
+        let contactID: UUID
+        let createdAt: Date
+        let reason: String
+    }
+
+    func markLocalOnlySystemLeave(
+        channelUUID: UUID,
+        contactID: UUID,
+        reason: String,
+        now: Date = Date()
+    ) {
+        pruneExpiredLocalOnlySystemLeaveSuppressions(now: now)
+        localOnlySystemLeaveSuppressions[channelUUID] = LocalOnlySystemLeaveSuppression(
+            contactID: contactID,
+            createdAt: now,
+            reason: reason
+        )
+    }
+
+    func consumeLocalOnlySystemLeave(
+        channelUUID: UUID,
+        contactID: UUID?,
+        now: Date = Date()
+    ) -> LocalOnlySystemLeaveSuppression? {
+        pruneExpiredLocalOnlySystemLeaveSuppressions(now: now)
+        guard let suppression = localOnlySystemLeaveSuppressions[channelUUID] else { return nil }
+        guard contactID == nil || contactID == suppression.contactID else { return nil }
+        localOnlySystemLeaveSuppressions[channelUUID] = nil
+        return suppression
+    }
+
+    private func pruneExpiredLocalOnlySystemLeaveSuppressions(now: Date) {
+        localOnlySystemLeaveSuppressions = localOnlySystemLeaveSuppressions.filter { _, suppression in
+            now.timeIntervalSince(suppression.createdAt) < 10
+        }
+    }
+
     func desiredPTTServiceStatus() -> PTServiceStatus? {
         guard pttCoordinator.state.systemChannelUUID != nil else { return nil }
 
@@ -875,6 +913,11 @@ extension PTTViewModel {
         )
         tearDownTransmitRuntime(resetCoordinator: true)
         closeMediaSession()
+        markLocalOnlySystemLeave(
+            channelUUID: channelUUID,
+            contactID: contactID,
+            reason: reason
+        )
         try? pttSystemClient.leaveChannel(channelUUID: channelUUID)
         pttCoordinator.reset()
         syncPTTState()

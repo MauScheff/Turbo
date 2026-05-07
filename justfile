@@ -207,6 +207,25 @@ simulator-scenario-suite-hosted-smoke:
 simulator-scenario-suite-local:
   just simulator-scenario-local "" http://localhost:8090/s/turbo
 
+simulator-fuzz-local seed count base="http://localhost:8090/s/turbo":
+  python3 scripts/run_simulator_fuzz.py run \
+    --seed "{{seed}}" \
+    --count "{{count}}" \
+    --base-url "{{base}}"
+
+simulator-fuzz-local-overnight seed count base="http://localhost:8090/s/turbo":
+  python3 scripts/run_simulator_fuzz.py run \
+    --seed "{{seed}}" \
+    --count "{{count}}" \
+    --base-url "{{base}}" \
+    --stop-on-first-failure
+
+simulator-fuzz-replay artifact_dir:
+  python3 scripts/run_simulator_fuzz.py replay --artifact-dir "{{artifact_dir}}"
+
+simulator-fuzz-shrink artifact_dir:
+  python3 scripts/run_simulator_fuzz.py shrink --artifact-dir "{{artifact_dir}}"
+
 swift-test-target name:
   python3 scripts/run_targeted_swift_tests.py --name "{{name}}"
 

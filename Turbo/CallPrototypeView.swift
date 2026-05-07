@@ -11,12 +11,22 @@ private struct HatTextureTuning: Equatable {
 }
 
 struct TurboCallPrototypeView: View {
-    let contactName: String
-    let contactHandle: String
+    let contact: Contact
+    let selectedPeerState: SelectedPeerState
+    let primaryAction: ConversationPrimaryAction
+    let isTransmitPressActive: Bool
+    let isPTTAudioSessionActive: Bool
+    let mediaConnectionState: MediaConnectionState
+    let mediaSessionContactID: UUID?
     let onClose: () -> Void
+    let onLeave: () -> Void
+    let onJoin: () -> Void
+    let onBeginTransmit: () -> Void
+    let onTransmitTouchReleased: () -> Void
+    let onEndTransmit: () -> Void
 
-    @State private var tuning = HatTextureTuning()
-    @State private var showsTextureControls = false
+    @State private var holdToTalkGestureState = HoldToTalkGestureState()
+    @State private var transmitPressBeganAt: Date?
 
     @MainActor
     static func prewarmDefaultTexture() {
@@ -30,77 +40,103 @@ struct TurboCallPrototypeView: View {
 
     var body: some View {
         ZStack {
-            HatTilingBackground(tuning: tuning)
+            Color(red: 0.18, green: 0.18, blue: 0.19)
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 topBar
-                    .padding(.bottom, 18)
+                    .padding(.bottom, 74)
 
                 identityRow
 
                 Spacer(minLength: 0)
 
-                bottomStack
+                actionButtons
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 28)
             .padding(.top, 18)
-            .padding(.bottom, 28)
+            .padding(.bottom, 58)
+        }
+        .onChange(of: isTransmitPressActive) { _, isActive in
+            holdToTalkGestureState.handleMachinePressChanged(isActive: isActive)
+            if isActive {
+                transmitPressBeganAt = transmitPressBeganAt ?? Date()
+            } else {
+                transmitPressBeganAt = nil
+            }
+        }
+        .onChange(of: contact.id) { _, _ in
+            if holdToTalkGestureState.cancel() {
+                onEndTransmit()
+            }
+            transmitPressBeganAt = nil
+        }
+        .onDisappear {
+            if holdToTalkGestureState.cancel() {
+                onEndTransmit()
+            }
+            transmitPressBeganAt = nil
         }
     }
 
     private var topBar: some View {
         HStack {
-            Spacer()
-
             Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .bold))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 38, height: 38)
+                    .frame(width: 42, height: 42)
                     .background(
                         Circle()
-                            .fill(Color(red: 0.11, green: 0.11, blue: 0.13))
+                            .fill(Color.white.opacity(0.14))
                     )
             }
             .buttonStyle(TurboCallControlButtonStyle())
-            .accessibilityLabel("Close call prototype")
+            .accessibilityLabel("Minimize")
+
+            Spacer()
         }
     }
 
     private var identityRow: some View {
-        HStack(alignment: .center, spacing: 18) {
+        HStack(alignment: .center, spacing: 24) {
             Circle()
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.16, green: 0.165, blue: 0.19),
-                            Color(red: 0.08, green: 0.085, blue: 0.105)
+                            Color(red: 0.73, green: 0.80, blue: 0.98),
+                            Color(red: 0.45, green: 0.49, blue: 0.72)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
                 )
-                .frame(width: 82, height: 82)
+                .frame(width: 76, height: 76)
                 .overlay(
-                    Circle()
-                        .stroke(Color(red: 0.27, green: 0.275, blue: 0.31), lineWidth: 1)
-                )
-                .overlay(
-                    Text(initials(for: contactName))
-                        .font(.system(size: 24, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
+                    Text(initials(for: contact.name))
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
                 )
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(contactName)
-                    .font(.system(size: 30, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.96))
-                    .lineLimit(2)
+                Text("Chat with \(contact.name)")
+                    .font(.system(size: 34, weight: .regular, design: .default))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.58)
 
-                Text(contactHandle)
-                    .font(.system(size: 15, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.48))
+                HStack(spacing: 8) {
+                    TimelineView(.periodic(from: .now, by: 0.2)) { timeline in
+                        Text(callStatusText(now: timeline.date))
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 27, weight: .regular))
+                        .offset(y: 1)
+                }
+                .font(.system(size: 28, weight: .regular, design: .default))
+                .foregroundStyle(.white.opacity(0.48))
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
             }
 
             Spacer()
@@ -108,119 +144,117 @@ struct TurboCallPrototypeView: View {
         .padding(.horizontal, 4)
     }
 
-    private var bottomStack: some View {
-        VStack(spacing: 18) {
-            if showsTextureControls {
-                textureControls
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else {
-                Button("Show Tuning") {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        showsTextureControls = true
-                    }
-                }
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.68))
-                .buttonStyle(.plain)
-            }
-
-            actionButtons
-        }
-    }
-
-    private var textureControls: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Texture Tuning")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .textCase(.uppercase)
-                    .tracking(1.4)
-
-                Spacer()
-
-                Button("Hide") {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        showsTextureControls = false
-                    }
-                }
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.68))
-                .buttonStyle(.plain)
-
-                Button("Reset") {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        tuning = HatTextureTuning()
-                    }
-                }
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.76))
-                .buttonStyle(.plain)
-            }
-
-            TurboTuningSliderRow(
-                title: "Zoom",
-                valueText: String(format: "%.2f", tuning.zoom),
-                value: $tuning.zoom,
-                range: 1.0...2.4
-            )
-            TurboTuningSliderRow(
-                title: "Darken",
-                valueText: String(format: "%.2f", tuning.opacity),
-                value: $tuning.opacity,
-                range: 0.7...0.98
-            )
-            TurboTuningSliderRow(
-                title: "Line",
-                valueText: String(format: "%.2f", tuning.lineWidth),
-                value: $tuning.lineWidth,
-                range: 0.55...1.8
-            )
-            TurboTuningSliderRow(
-                title: "Hue",
-                valueText: String(format: "%.2f", tuning.backgroundHue),
-                value: $tuning.backgroundHue,
-                range: 0.0...1.0
-            )
-            TurboTuningSliderRow(
-                title: "Saturation",
-                valueText: String(format: "%.2f", tuning.backgroundSaturation),
-                value: $tuning.backgroundSaturation,
-                range: 0.0...0.65
-            )
-            TurboTuningSliderRow(
-                title: "Brightness",
-                valueText: String(format: "%.3f", tuning.backgroundBrightness),
-                value: $tuning.backgroundBrightness,
-                range: 0.0...0.08
-            )
-        }
-        .padding(16)
-        .background(Color.white.opacity(0.07))
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-        )
-    }
-
     private var actionButtons: some View {
-        HStack(alignment: .top, spacing: 28) {
+        HStack(alignment: .top) {
             TurboCallActionButton(
                 title: "Leave",
                 symbolName: "xmark",
                 tint: Color(red: 0.96, green: 0.28, blue: 0.24),
-                highlight: Color(red: 0.55, green: 0.13, blue: 0.11)
+                isEnabled: true,
+                action: onLeave
             )
+
+            Spacer(minLength: 64)
 
             TurboCallActionButton(
                 title: "Talk",
                 symbolName: "waveform",
-                tint: Color(red: 0.26, green: 0.56, blue: 1.0),
-                highlight: Color(red: 0.12, green: 0.28, blue: 0.66)
+                tint: talkButtonTint,
+                isEnabled: talkButtonIsEnabled,
+                action: talkButtonTap
             )
+            .simultaneousGesture(talkGesture)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var talkButtonIsEnabled: Bool {
+        primaryAction.isEnabled
+    }
+
+    private var talkButtonTint: Color {
+        if isTransmitPressActive || selectedPeerState.phase == .transmitting {
+            return Color(red: 0.96, green: 0.28, blue: 0.24)
+        }
+        return Color(red: 0.25, green: 0.52, blue: 0.93)
+    }
+
+    private func talkButtonTap() {
+        guard primaryAction.kind == .connect else { return }
+        onJoin()
+    }
+
+    private var talkGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { _ in
+                guard primaryAction.kind == .holdToTalk else { return }
+                guard holdToTalkGestureState.beginIfAllowed(isEnabled: primaryAction.isEnabled) else { return }
+                transmitPressBeganAt = Date()
+                onBeginTransmit()
+            }
+            .onEnded { _ in
+                guard primaryAction.kind == .holdToTalk else { return }
+                onTransmitTouchReleased()
+                guard holdToTalkGestureState.endTouch() else { return }
+                transmitPressBeganAt = nil
+                onEndTransmit()
+            }
+    }
+
+    private func callStatusText(now: Date) -> String {
+        switch selectedPeerState.detail {
+        case .transmitting:
+            return localTransmitAudioIsReady ? "Listening" : "Getting ready"
+        case .receiving:
+            return "Talking"
+        case .ready:
+            return "Ready"
+        case .startingTransmit:
+            return shouldShowTransmitWarmup(now: now) ? "Getting ready" : "Ready"
+        case .wakeReady:
+            return "Ready"
+        case .waitingForPeer(let reason):
+            switch reason {
+            case .disconnecting:
+                return "Disconnecting"
+            case .releaseRequiredAfterInterruptedTransmit:
+                return "Release to retry"
+            case .pendingJoin, .backendSessionTransition, .localSessionTransition,
+                 .peerReadyToConnect:
+                return "Connecting"
+            case .remoteWakeUnavailable:
+                return "Waiting"
+            case .systemWakeActivation, .wakePlaybackDeferredUntilForeground,
+                 .localAudioPrewarm, .localTransportWarmup, .remoteAudioPrewarm:
+                return "Getting ready"
+            }
+        case .peerReady:
+            return "Ready"
+        case .incomingRequest:
+            return "Wants to talk"
+        case .requested:
+            return "Waiting"
+        case .localJoinFailed:
+            return "Could not connect"
+        case .blockedByOtherSession:
+            return "Busy"
+        case .systemMismatch:
+            return "Reconnecting"
+        case .idle(let isOnline):
+            return isOnline ? "Ready" : "Unavailable"
+        }
+    }
+
+    private var localTransmitAudioIsReady: Bool {
+        mediaSessionContactID == contact.id
+            && isPTTAudioSessionActive
+            && mediaConnectionState == .connected
+    }
+
+    private func shouldShowTransmitWarmup(now: Date) -> Bool {
+        guard isTransmitPressActive else { return false }
+        guard let transmitPressBeganAt else { return false }
+        return now.timeIntervalSince(transmitPressBeganAt) >= 0.45
     }
 
     private func initials(for name: String) -> String {
@@ -237,39 +271,29 @@ private struct TurboCallActionButton: View {
     let title: String
     let symbolName: String
     let tint: Color
-    let highlight: Color
+    let isEnabled: Bool
+    let action: () -> Void
 
     var body: some View {
-        Button(action: {}) {
+        Button(action: action) {
             VStack(spacing: 14) {
                 Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [tint, highlight],
-                            center: .topLeading,
-                            startRadius: 10,
-                            endRadius: 76
-                        )
-                    )
-                    .frame(width: 88, height: 88)
-                    .overlay(
-                        Circle()
-                            .stroke(Color.white.opacity(0.16), lineWidth: 1)
-                    )
+                    .fill(tint.opacity(isEnabled ? 1 : 0.45))
+                    .frame(width: 92, height: 92)
                     .overlay(
                         Image(systemName: symbolName)
-                            .font(.system(size: 34, weight: .semibold))
+                            .font(.system(size: 36, weight: .regular))
                             .foregroundStyle(.white)
                     )
 
                 Text(title)
-                    .font(.system(size: 17, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .font(.system(size: 19, weight: .regular, design: .default))
+                    .foregroundStyle(.white.opacity(isEnabled ? 0.92 : 0.48))
             }
-            .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
         }
         .buttonStyle(TurboCallControlButtonStyle())
+        .disabled(!isEnabled)
         .accessibilityLabel(title)
     }
 }
@@ -507,8 +531,28 @@ private struct HatTilingBackground: View {
 
 #Preview("Call Prototype") {
     TurboCallPrototypeView(
-        contactName: "Avery",
-        contactHandle: "@avery",
-        onClose: {}
+        contact: Contact(id: UUID(), name: "Mellow Claude", handle: "@mellow", isOnline: true, channelId: UUID()),
+        selectedPeerState: SelectedPeerState(
+            relationship: .none,
+            detail: .ready,
+            statusMessage: "Connected",
+            canTransmitNow: true
+        ),
+        primaryAction: ConversationPrimaryAction(
+            kind: .holdToTalk,
+            label: "Hold To Talk",
+            isEnabled: true,
+            style: .accent
+        ),
+        isTransmitPressActive: false,
+        isPTTAudioSessionActive: true,
+        mediaConnectionState: .connected,
+        mediaSessionContactID: nil,
+        onClose: {},
+        onLeave: {},
+        onJoin: {},
+        onBeginTransmit: {},
+        onTransmitTouchReleased: {},
+        onEndTransmit: {}
     )
 }

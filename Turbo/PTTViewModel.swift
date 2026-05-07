@@ -132,6 +132,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var lastReportedPTTDescriptorName: String?
     var lastReportedPTTDescriptorChannelUUID: UUID?
     var lastReportedPTTDescriptorReason: String?
+    var localOnlySystemLeaveSuppressions: [UUID: LocalOnlySystemLeaveSuppression] = [:]
     var systemTransmitBeginRecoveryAttemptsByChannelUUID: [UUID: Int] = [:]
     var directQuicBackendLeaseBypassedContactIDs: Set<UUID> = []
     var directQuicBackendLeaseBypassedRequestsByContactID: [UUID: TransmitRequestContext] = [:]

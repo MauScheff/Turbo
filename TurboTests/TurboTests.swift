@@ -11206,6 +11206,57 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func pendingSystemHandoffCanActivateWhenRuntimePressLatchWasLost() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let request = TransmitRequestContext(
+            contactID: contactID,
+            contactHandle: "@blake",
+            backendChannelID: "channel-123",
+            remoteUserID: "peer-user",
+            channelUUID: channelUUID,
+            usesLocalHTTPBackend: false,
+            backendSupportsWebSocket: true
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.transmitCoordinator.effectHandler = nil
+        await viewModel.transmitCoordinator.handle(.pressRequested(request))
+        viewModel.transmitRuntime.noteSystemTransmitBeginRequested(channelUUID: channelUUID)
+
+        #expect(viewModel.transmitRuntime.isPressingTalk == false)
+        #expect(viewModel.transmitCoordinator.state.isPressingTalk)
+        #expect(
+            viewModel.shouldActivateBackendTransmitLease(
+                request: request,
+                workID: 999
+            )
+        )
+
+        viewModel.transmitRuntime.markExplicitStopRequested()
+        #expect(
+            !viewModel.shouldActivateBackendTransmitLease(
+                request: request,
+                workID: 999
+            )
+        )
+    }
+
+    @MainActor
     @Test func systemTransmitHandoffPreservesPrewarmedAudioSession() async throws {
         let pttClient = RecordingPTTSystemClient()
         let viewModel = PTTViewModel(pttSystemClient: pttClient)
@@ -24608,6 +24659,46 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func localOnlySystemChannelRecoveryLeaveDoesNotClearBackendMembershipDuringRejoin() async {
+        let pttClient = RecordingPTTSystemClient()
+        let viewModel = PTTViewModel(pttSystemClient: pttClient)
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-1",
+                remoteUserId: "user-blake"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.sessionCoordinator.queueJoin(contactID: contactID)
+
+        var capturedEffects: [BackendCommandEffect] = []
+        viewModel.backendCommandCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        viewModel.recoverStaleSystemChannel(
+            for: channelUUID,
+            contactID: contactID,
+            reason: "test-channel-limit"
+        )
+        viewModel.sessionCoordinator.queueJoin(contactID: contactID)
+        viewModel.handleDidLeaveChannel(channelUUID, reason: "PTChannelLeaveReason(rawValue: 2)")
+
+        await Task.yield()
+        await Task.yield()
+
+        #expect(pttClient.leaveRequests == [channelUUID])
+        #expect(capturedEffects.isEmpty)
+    }
+
+    @MainActor
     @Test func explicitSystemLeaveStillRequestsBackendLeave() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -27210,6 +27301,7 @@ struct SimulatorScenarioTests {
     }
 }
 
+@MainActor
 struct SimulatorScenarioPlannerTests {
     @Test func scenarioPlannerSupportsDelayDropAndDuplicateDelivery() throws {
         let scheduled = try scheduledScenarioActions(
@@ -27289,6 +27381,64 @@ struct SimulatorScenarioPlannerTests {
         }
     }
 
+    @Test func scenarioSourceSupportsRuntimeScenarioFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("turbo-scenario-source-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let scenarioFile = directory.appendingPathComponent("generated.json")
+        try Data("{}".utf8).write(to: scenarioFile)
+
+        let source = try simulatorScenarioSource(
+            runtimeConfig: SimulatorScenarioRuntimeConfig(
+                enabledUntilEpochSeconds: Date().timeIntervalSince1970 + 60,
+                filter: nil,
+                baseURL: nil,
+                handleA: nil,
+                handleB: nil,
+                deviceIDA: nil,
+                deviceIDB: nil,
+                scenarioFile: scenarioFile.path,
+                scenarioDirectory: nil
+            ),
+            defaultDirectory: directory
+        )
+
+        #expect(source.files == [scenarioFile])
+        #expect(source.description == scenarioFile.path)
+    }
+
+    @Test func scenarioSourceSupportsRuntimeScenarioDirectory() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("turbo-scenario-source-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = directory.appendingPathComponent("b.json")
+        let second = directory.appendingPathComponent("a.json")
+        let ignored = directory.appendingPathComponent("notes.txt")
+        try Data("{}".utf8).write(to: first)
+        try Data("{}".utf8).write(to: second)
+        try Data("ignored".utf8).write(to: ignored)
+
+        let source = try simulatorScenarioSource(
+            runtimeConfig: SimulatorScenarioRuntimeConfig(
+                enabledUntilEpochSeconds: Date().timeIntervalSince1970 + 60,
+                filter: nil,
+                baseURL: nil,
+                handleA: nil,
+                handleB: nil,
+                deviceIDA: nil,
+                deviceIDB: nil,
+                scenarioFile: nil,
+                scenarioDirectory: directory.path
+            ),
+            defaultDirectory: FileManager.default.temporaryDirectory
+        )
+
+        #expect(source.files == [second, first])
+        #expect(source.description == directory.path)
+    }
+
     @Test func transportFaultRuntimeConsumesHTTPAndSignalRulesDeterministically() {
         let faults = TransportFaultRuntimeState()
 
@@ -27349,6 +27499,462 @@ struct SimulatorScenarioPlannerTests {
         #expect(transmitStopPlan.delayMilliseconds == 0)
         #expect(transmitStopPlan.duplicateDeliveries == 0)
         #expect(transmitStopPlan.shouldDrop == true)
+    }
+
+    @Test func conversationProjectionProperties() throws {
+        try runProperty(
+            PropertyRunConfig(seed: 0xC0FFEE, iterations: 240),
+            name: "conversationProjectionProperties"
+        ) { rng, iteration, seed in
+            let sample = ConversationProjectionPropertySample.generate(rng: &rng)
+            let projection = ConversationStateMachine.projection(
+                for: sample.context,
+                relationship: sample.relationship
+            )
+            let selectedPeerState = ConversationStateMachine.selectedPeerState(
+                for: sample.context,
+                relationship: sample.relationship
+            )
+            let reconciliationAction = ConversationStateMachine.reconciliationAction(for: sample.context)
+            let observed = ConversationProjectionObserved(projection: projection)
+
+            try requireProperty(
+                projection.selectedPeerState == selectedPeerState,
+                seed: seed,
+                iteration: iteration,
+                inputSummary: sample.summary,
+                expectedInvariant: "projection.selectedPeerState must match selectedPeerState(for:relationship:)",
+                observed: observed.summary
+            )
+            try requireProperty(
+                projection.reconciliationAction == reconciliationAction,
+                seed: seed,
+                iteration: iteration,
+                inputSummary: sample.summary,
+                expectedInvariant: "projection.reconciliationAction must match reconciliationAction(for:)",
+                observed: observed.summary
+            )
+            try requireProperty(
+                projection.selectedPeerState.detail.phase == projection.selectedPeerState.phase,
+                seed: seed,
+                iteration: iteration,
+                inputSummary: sample.summary,
+                expectedInvariant: "selected peer detail and phase stay aligned",
+                observed: observed.summary
+            )
+            try requireProperty(
+                !projection.selectedPeerState.canTransmitNow || projection.selectedPeerState.phase == .ready,
+                seed: seed,
+                iteration: iteration,
+                inputSummary: sample.summary,
+                expectedInvariant: "canTransmitNow only appears on the ready projection",
+                observed: observed.summary
+            )
+            if sample.context.selectedContactID != sample.context.contactID {
+                try requireProperty(
+                    projection.reconciliationAction == .none,
+                    seed: seed,
+                    iteration: iteration,
+                    inputSummary: sample.summary,
+                    expectedInvariant: "unselected contacts never emit selected-session reconciliation",
+                    observed: observed.summary
+                )
+            }
+            if case .leave(.reconciledTeardown(let contactID)) = sample.context.pendingAction,
+               contactID == sample.context.contactID {
+                try requireProperty(
+                    projection.reconciliationAction == .none,
+                    seed: seed,
+                    iteration: iteration,
+                    inputSummary: sample.summary,
+                    expectedInvariant: "queued reconciled teardown suppresses duplicate reconciliation",
+                    observed: observed.summary
+                )
+            }
+        }
+    }
+
+    @Test func transportFaultPlannerProperties() throws {
+        try runProperty(
+            PropertyRunConfig(seed: 0xF00DCAFE, iterations: 180),
+            name: "transportFaultPlannerProperties"
+        ) { rng, iteration, seed in
+            let actions = SimulatorScenarioActionPropertySample.generateActions(rng: &rng)
+            let scheduled = try scheduledScenarioActions(for: actions)
+            let expectedCount = actions.reduce(0) { partial, action in
+                partial + ((action.drop ?? false) ? 0 : (action.repeatCount ?? 1))
+            }
+            let delays = scheduled.map(\.scheduledDelayMilliseconds)
+            let observed = "scheduledCount=\(scheduled.count) delays=\(delays) actions=\(actions.map(\.type))"
+
+            try requireProperty(
+                scheduled.count == expectedCount,
+                seed: seed,
+                iteration: iteration,
+                inputSummary: SimulatorScenarioActionPropertySample.summary(actions),
+                expectedInvariant: "scheduled action count equals non-dropped repeat deliveries",
+                observed: observed
+            )
+            try requireProperty(
+                delays == delays.sorted(),
+                seed: seed,
+                iteration: iteration,
+                inputSummary: SimulatorScenarioActionPropertySample.summary(actions),
+                expectedInvariant: "scheduled actions are monotonic by delivery time",
+                observed: observed
+            )
+
+            let faults = TransportFaultRuntimeState()
+            let route = rng.pick(TransportFaultHTTPRoute.allCases)
+            let delay = rng.nextInt(in: 0...1_500)
+            let count = rng.nextInt(in: 1...5)
+            faults.setHTTPDelay(route: route, milliseconds: delay, count: count)
+            let consumedDelays = (0..<(count + 2)).map { _ in faults.consumeHTTPDelay(for: route) }
+            try requireProperty(
+                consumedDelays == Array(repeating: delay, count: count) + [0, 0],
+                seed: seed,
+                iteration: iteration,
+                inputSummary: "route=\(route.rawValue) delay=\(delay) count=\(count)",
+                expectedInvariant: "HTTP delay rules are consumed exactly count times",
+                observed: "consumedDelays=\(consumedDelays)"
+            )
+
+            let signalKind = rng.pick(SimulatorScenarioActionPropertySample.signalKinds)
+            let dropCount = rng.nextInt(in: 1...4)
+            faults.dropNextWebSocketSignals(kind: signalKind, count: dropCount)
+            let deliveryPlans = (0..<(dropCount + 2)).map { _ in
+                faults.consumeWebSocketSignalDeliveryPlan(for: signalKind)
+            }
+            try requireProperty(
+                deliveryPlans.prefix(dropCount).allSatisfy(\.shouldDrop)
+                    && deliveryPlans.dropFirst(dropCount).allSatisfy { !$0.shouldDrop },
+                seed: seed,
+                iteration: iteration,
+                inputSummary: "signalKind=\(signalKind.rawValue) dropCount=\(dropCount)",
+                expectedInvariant: "websocket drop rules are consumed exactly count times",
+                observed: "plans=\(deliveryPlans)"
+            )
+        }
+    }
+}
+
+private struct PropertyRunConfig {
+    let seed: UInt64
+    let iterations: Int
+}
+
+private struct PropertyFailure: Error, CustomStringConvertible {
+    let message: String
+
+    var description: String { message }
+}
+
+@MainActor
+private func runProperty(
+    _ config: PropertyRunConfig,
+    name: String,
+    body: (inout SeededRNG, Int, UInt64) throws -> Void
+) throws {
+    for iteration in 0..<config.iterations {
+        let iterationSeed = config.seed &+ UInt64(iteration) &* 0x9E37_79B9_7F4A_7C15
+        var rng = SeededRNG(seed: iterationSeed)
+        do {
+            try body(&rng, iteration, iterationSeed)
+        } catch let failure as PropertyFailure {
+            throw PropertyFailure(message: "\(name) failed\n\(failure.message)")
+        }
+    }
+}
+
+@MainActor
+private func requireProperty(
+    _ condition: Bool,
+    seed: UInt64,
+    iteration: Int,
+    inputSummary: String,
+    expectedInvariant: String,
+    observed: String
+) throws {
+    guard condition else {
+        throw PropertyFailure(
+            message: """
+            seed=\(seed)
+            iteration=\(iteration)
+            input=\(inputSummary)
+            expected=\(expectedInvariant)
+            observed=\(observed)
+            """
+        )
+    }
+}
+
+private struct SeededRNG {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed == 0 ? 0xA076_1D64_78BD_642F : seed
+    }
+
+    mutating func next() -> UInt64 {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return state
+    }
+
+    mutating func nextBool() -> Bool {
+        (next() & 1) == 0
+    }
+
+    mutating func nextInt(in range: ClosedRange<Int>) -> Int {
+        let width = UInt64(range.upperBound - range.lowerBound + 1)
+        return range.lowerBound + Int(next() % width)
+    }
+
+    mutating func pick<Element>(_ values: [Element]) -> Element {
+        values[nextInt(in: 0...(values.count - 1))]
+    }
+
+    mutating func uuid() -> UUID {
+        let a = next()
+        let b = next()
+        var bytes = [UInt8]()
+        for shift in stride(from: 56, through: 0, by: -8) {
+            bytes.append(UInt8((a >> UInt64(shift)) & 0xff))
+        }
+        for shift in stride(from: 56, through: 0, by: -8) {
+            bytes.append(UInt8((b >> UInt64(shift)) & 0xff))
+        }
+        bytes[6] = (bytes[6] & 0x0f) | 0x50
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
+    }
+}
+
+private struct ConversationProjectionPropertySample {
+    let context: ConversationDerivationContext
+    let relationship: PairRelationshipState
+    let summary: String
+
+    @MainActor
+    static func generate(rng: inout SeededRNG) -> ConversationProjectionPropertySample {
+        let contactID = rng.uuid()
+        let selectedContactID = rng.nextBool() ? contactID : (rng.nextBool() ? rng.uuid() : nil)
+        let isSelected = selectedContactID == contactID
+        let channelUUID = rng.uuid()
+        let localSessionKind = rng.nextInt(in: 0...3)
+        let isJoined = localSessionKind == 2 || localSessionKind == 3
+        let activeChannelID = (localSessionKind == 1 || localSessionKind == 3) ? contactID : nil
+        let systemMatches = localSessionKind == 3
+        let systemSessionState: SystemPTTSessionState = {
+            switch rng.nextInt(in: 0...4) {
+            case 0:
+                return .none
+            case 1:
+                return .active(contactID: contactID, channelUUID: channelUUID)
+            case 2:
+                return .active(contactID: rng.uuid(), channelUUID: rng.uuid())
+            case 3:
+                return .mismatched(channelUUID: rng.uuid())
+            default:
+                return systemMatches ? .active(contactID: contactID, channelUUID: channelUUID) : .none
+            }
+        }()
+        let localTransmit = randomLocalTransmit(rng: &rng)
+        let channel = randomChannel(rng: &rng)
+        let relationship = ConversationStateMachine.relationshipState(
+            hasIncomingRequest: rng.nextBool(),
+            hasOutgoingRequest: rng.nextBool(),
+            requestCount: rng.nextInt(in: 0...5)
+        )
+        let pendingAction = randomPendingAction(rng: &rng, contactID: contactID)
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: selectedContactID,
+            baseState: randomBaseState(rng: &rng),
+            contactName: "Blake",
+            contactIsOnline: rng.nextBool(),
+            isJoined: isJoined,
+            localTransmit: localTransmit,
+            peerSignalIsTransmitting: rng.nextBool(),
+            activeChannelID: activeChannelID,
+            systemSessionMatchesContact: systemMatches,
+            systemSessionState: systemSessionState,
+            pendingAction: pendingAction,
+            pendingConnectAcceptedIncomingRequest: rng.nextBool(),
+            localJoinFailure: nil,
+            mediaState: rng.pick([.idle, .preparing, .connected, .closed, .failed("property")]),
+            localMediaWarmupState: rng.pick([.cold, .prewarming, .ready, .failed]),
+            localRelayTransportReady: rng.nextBool(),
+            directMediaPathActive: rng.nextBool(),
+            firstTalkStartupProfile: rng.pick([.directQuicWarm, .directQuicWarming, .relayWarm, .relayWarming, .unavailable]),
+            incomingWakeActivationState: nil,
+            hadConnectedSessionContinuity: rng.nextBool(),
+            channel: channel
+        )
+        return ConversationProjectionPropertySample(
+            context: context,
+            relationship: relationship,
+            summary: [
+                "selected=\(isSelected)",
+                "base=\(context.baseState.rawValue)",
+                "relationship=\(relationship)",
+                "joined=\(isJoined)",
+                "activeChannel=\(activeChannelID != nil)",
+                "system=\(systemSessionState)",
+                "pending=\(pendingAction)",
+                "localTransmit=\(localTransmit)",
+                "channel=\(String(describing: channel?.readinessStatus?.kind))",
+            ].joined(separator: " ")
+        )
+    }
+
+    @MainActor
+    private static func randomBaseState(rng: inout SeededRNG) -> ConversationState {
+        rng.pick([.idle, .requested, .incomingRequest, .waitingForPeer, .ready, .transmitting, .receiving])
+    }
+
+    @MainActor
+    private static func randomPendingAction(rng: inout SeededRNG, contactID: UUID) -> PendingSessionAction {
+        switch rng.nextInt(in: 0...6) {
+        case 0:
+            return .connect(.requestingBackend(contactID: contactID))
+        case 1:
+            return .connect(.joiningLocal(contactID: contactID))
+        case 2:
+            return .leave(.explicit(contactID: contactID))
+        case 3:
+            return .leave(.explicit(contactID: nil))
+        case 4:
+            return .leave(.reconciledTeardown(contactID: contactID))
+        default:
+            return .none
+        }
+    }
+
+    @MainActor
+    private static func randomLocalTransmit(rng: inout SeededRNG) -> LocalTransmitProjection {
+        switch rng.nextInt(in: 0...8) {
+        case 0:
+            return .stopping
+        case 1:
+            return .releaseRequired
+        case 2:
+            return .starting(.requestingLease)
+        case 3:
+            return .starting(.awaitingSystemTransmit)
+        case 4:
+            return .starting(.awaitingAudioSession)
+        case 5:
+            return .starting(.awaitingAudioConnection(mediaState: rng.pick([.idle, .preparing, .connected, .failed("property")])))
+        case 6:
+            return .transmitting
+        default:
+            return .idle
+        }
+    }
+
+    @MainActor
+    private static func randomChannel(rng: inout SeededRNG) -> ChannelReadinessSnapshot? {
+        guard rng.nextBool() else { return nil }
+        let membership = rng.nextInt(in: 0...3)
+        let selfJoined = membership == 1 || membership == 3
+        let peerJoined = membership == 2 || membership == 3
+        let peerDeviceConnected = peerJoined && rng.nextBool()
+        let status = rng.pick([
+            TurboChannelReadinessStatus.inactive,
+            .waitingForSelf,
+            .waitingForPeer,
+            .ready,
+            .selfTransmitting(activeTransmitterUserId: "self"),
+            .peerTransmitting(activeTransmitterUserId: "peer"),
+        ])
+        let channelState = makeChannelState(
+            status: status.conversationState ?? .idle,
+            canTransmit: status == .ready && peerDeviceConnected,
+            selfJoined: selfJoined,
+            peerJoined: peerJoined,
+            peerDeviceConnected: peerDeviceConnected,
+            hasIncomingRequest: rng.nextBool(),
+            hasOutgoingRequest: rng.nextBool()
+        )
+        return ChannelReadinessSnapshot(
+            channelState: channelState,
+            readiness: makeChannelReadiness(
+                status: status,
+                selfHasActiveDevice: selfJoined,
+                peerHasActiveDevice: peerDeviceConnected,
+                remoteAudioReadiness: rng.pick([.unknown, .waiting, .wakeCapable, .ready]),
+                remoteWakeCapability: rng.nextBool()
+                    ? .wakeCapable(targetDeviceId: "peer-device")
+                    : .unavailable
+            )
+        )
+    }
+}
+
+private struct ConversationProjectionObserved {
+    let summary: String
+
+    @MainActor
+    init(projection: SelectedPeerProjection) {
+        summary = [
+            "durable=\(projection.durableSession)",
+            "execution=\(String(describing: projection.connectedExecution))",
+            "control=\(projection.connectedControlPlane)",
+            "phase=\(projection.selectedPeerState.phase)",
+            "detail=\(projection.selectedPeerState.detail)",
+            "canTransmitNow=\(projection.selectedPeerState.canTransmitNow)",
+            "reconcile=\(projection.reconciliationAction)",
+        ].joined(separator: " ")
+    }
+}
+
+private enum SimulatorScenarioActionPropertySample {
+    static let signalKinds: [TurboSignalKind] = [
+        .transmitStart,
+        .transmitStop,
+        .receiverReady,
+        .receiverNotReady,
+    ]
+
+    static func generateActions(rng: inout SeededRNG) -> [SimulatorScenarioAction] {
+        (0..<rng.nextInt(in: 1...12)).map { _ in
+            let type = rng.pick([
+                "openPeer",
+                "connect",
+                "refreshContactSummaries",
+                "refreshInvites",
+                "refreshChannelState",
+                "setHTTPDelay",
+                "dropNextWebSocketSignals",
+                "duplicateNextWebSocketSignals",
+                "wait",
+            ])
+            return SimulatorScenarioAction(
+                actor: rng.pick(["a", "b"]),
+                type: type,
+                peer: type == "openPeer" ? rng.pick(["a", "b"]) : nil,
+                route: type == "setHTTPDelay" ? rng.pick(TransportFaultHTTPRoute.allCases).rawValue : nil,
+                signalKind: type.contains("WebSocket") ? rng.pick(signalKinds).rawValue : nil,
+                milliseconds: type == "setHTTPDelay" || type == "wait" ? rng.nextInt(in: 0...1_000) : nil,
+                count: type.contains("WebSocket") || type == "setHTTPDelay" ? rng.nextInt(in: 1...3) : nil,
+                delayMilliseconds: rng.nextBool() ? rng.nextInt(in: 0...1_000) : nil,
+                repeatCount: rng.nextBool() ? rng.nextInt(in: 1...3) : nil,
+                repeatIntervalMilliseconds: rng.nextBool() ? rng.nextInt(in: 0...250) : nil,
+                reorderIndex: rng.nextBool() ? rng.nextInt(in: 0...12) : nil,
+                drop: rng.nextInt(in: 0...7) == 0
+            )
+        }
+    }
+
+    static func summary(_ actions: [SimulatorScenarioAction]) -> String {
+        actions.enumerated().map { index, action in
+            "\(index):\(action.actor):\(action.type):delay=\(action.delayMilliseconds ?? 0):repeat=\(action.repeatCount ?? 1):drop=\(action.drop ?? false)"
+        }.joined(separator: " ")
     }
 }
 
@@ -27715,6 +28321,8 @@ private struct SimulatorScenarioRuntimeConfig: Decodable {
     let handleB: String?
     let deviceIDA: String?
     let deviceIDB: String?
+    let scenarioFile: String?
+    let scenarioDirectory: String?
 }
 
 private let simulatorScenarioRuntimeConfigURL = URL(fileURLWithPath: #filePath)
@@ -27755,20 +28363,20 @@ private func loadSimulatorScenarioSpecs(runtimeConfig: SimulatorScenarioRuntimeC
     let root = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
         .deletingLastPathComponent()
-    let scenariosDirectory = root.appendingPathComponent("scenarios", isDirectory: true)
-    let scenarioFiles =
-        try FileManager.default.contentsOfDirectory(at: scenariosDirectory, includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "json" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    let checkedInScenariosDirectory = root.appendingPathComponent("scenarios", isDirectory: true)
+    let scenarioSource = try simulatorScenarioSource(
+        runtimeConfig: runtimeConfig,
+        defaultDirectory: checkedInScenariosDirectory
+    )
 
     let decoder = JSONDecoder()
-    let allSpecs = try scenarioFiles.map { fileURL in
+    let allSpecs = try scenarioSource.files.map { fileURL in
         let data = try Data(contentsOf: fileURL)
         let spec = try decoder.decode(SimulatorScenarioConfig.self, from: data)
         return applyScenarioRuntimeConfig(runtimeConfig, to: spec)
     }
     guard !allSpecs.isEmpty else {
-        throw ScenarioFailure(message: "No simulator scenario specs were found in \(scenariosDirectory.path)")
+        throw ScenarioFailure(message: "No simulator scenario specs were found in \(scenarioSource.description)")
     }
 
     let filter = runtimeConfig.filter?
@@ -27791,10 +28399,56 @@ private func loadSimulatorScenarioSpecs(runtimeConfig: SimulatorScenarioRuntimeC
     )
     guard !filtered.isEmpty else {
         throw ScenarioFailure(
-            message: "No runnable simulator scenarios matched filter \(filter.joined(separator: ",")) in \(scenariosDirectory.path)"
+            message: "No runnable simulator scenarios matched filter \(filter.joined(separator: ",")) in \(scenarioSource.description)"
         )
     }
     return filtered
+}
+
+private struct SimulatorScenarioSource {
+    let files: [URL]
+    let description: String
+}
+
+private func simulatorScenarioSource(
+    runtimeConfig: SimulatorScenarioRuntimeConfig,
+    defaultDirectory: URL
+) throws -> SimulatorScenarioSource {
+    let scenarioFile = runtimeConfig.scenarioFile?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let scenarioDirectory = runtimeConfig.scenarioDirectory?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    if let scenarioFile, !scenarioFile.isEmpty,
+       let scenarioDirectory, !scenarioDirectory.isEmpty {
+        throw ScenarioFailure(message: "Runtime config must use scenarioFile or scenarioDirectory, not both")
+    }
+
+    if let scenarioFile, !scenarioFile.isEmpty {
+        let fileURL = simulatorScenarioRuntimeURL(from: scenarioFile, isDirectory: false)
+        return SimulatorScenarioSource(files: [fileURL], description: fileURL.path)
+    }
+
+    let directoryURL: URL
+    if let scenarioDirectory, !scenarioDirectory.isEmpty {
+        directoryURL = simulatorScenarioRuntimeURL(from: scenarioDirectory, isDirectory: true)
+    } else {
+        directoryURL = defaultDirectory
+    }
+
+    let files =
+        try FileManager.default.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    return SimulatorScenarioSource(files: files, description: directoryURL.path)
+}
+
+private func simulatorScenarioRuntimeURL(from value: String, isDirectory: Bool) -> URL {
+    if value.hasPrefix("/") {
+        return URL(fileURLWithPath: value, isDirectory: isDirectory)
+    }
+    if let url = URL(string: value), url.scheme != nil {
+        return url
+    }
+    return URL(fileURLWithPath: value, isDirectory: isDirectory)
 }
 
 private func applyScenarioRuntimeConfig(

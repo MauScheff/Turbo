@@ -601,7 +601,26 @@ extension PTTViewModel {
 
     func handleDidLeaveChannel(_ channelUUID: UUID, reason: String) {
         let contactID = contactId(for: channelUUID)
-        let autoRejoinContactID = sessionCoordinator.autoRejoinContactID(afterLeaving: contactID)
+        let localOnlySuppression = consumeLocalOnlySystemLeave(
+            channelUUID: channelUUID,
+            contactID: contactID
+        )
+        if let localOnlySuppression {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Suppressing backend leave for local-only system channel recovery",
+                metadata: [
+                    "channelUUID": channelUUID.uuidString,
+                    "contactID": localOnlySuppression.contactID.uuidString,
+                    "reason": localOnlySuppression.reason,
+                    "leaveReason": reason,
+                ]
+            )
+        }
+        let autoRejoinContactID =
+            localOnlySuppression == nil
+            ? sessionCoordinator.autoRejoinContactID(afterLeaving: contactID)
+            : nil
         let applicationState = currentApplicationState()
         let systemLeaveWasUserInitiated = isUserInitiatedPTTLeaveReason(reason)
         let shouldTreatLocalSystemLeaveAsExplicitTeardown: Bool = {

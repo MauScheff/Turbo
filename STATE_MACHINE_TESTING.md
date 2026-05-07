@@ -117,6 +117,46 @@ Each new reproducible distributed bug should produce:
 - at least one lower-level reducer / projection test for the broken invariant
 - inclusion in the default suite via `just simulator-scenario-suite` if the file is checked in as `scenarios/*.json`
 
+## Seeded fuzzing
+
+Turbo also has a deterministic simulator fuzz lane for finding distributed
+state-machine regressions before there is a human-written scenario.
+
+- `just simulator-fuzz-local <seed> <count>`
+  - generates model-based scenario JSON under `/tmp/turbo-scenario-fuzz/<run-id>/`
+  - runs each generated scenario through the existing simulator scenario XCTest
+    harness against `http://localhost:8090/s/turbo`
+  - saves generated JSON, XCTest output, merged diagnostics text, merged
+    diagnostics JSON, metadata, and replay commands per seed
+- `just simulator-fuzz-local-overnight <seed> <count>`
+  - same lane, but stops on the first failure by default
+- `just simulator-fuzz-replay <artifact-dir>`
+  - replays the saved `scenario.json` or `minimized.json`
+- `just simulator-fuzz-shrink <artifact-dir>`
+  - tries whole-step removal, action removal, and simple fault-parameter
+    reduction while preserving the same oracle
+
+Generated scenarios are not copied into `scenarios/` automatically. They use the
+same DSL as checked-in scenarios through the runner's `scenarioFile` /
+`scenarioDirectory` runtime config path.
+
+### Fuzz Failure To Regression
+
+When fuzzing finds a failure:
+
+1. Replay it with `just simulator-fuzz-replay <artifact-dir>`.
+2. Shrink it with `just simulator-fuzz-shrink <artifact-dir>`.
+3. Inspect `minimized.json` if present, otherwise `scenario.json`.
+4. Read `merged-diagnostics.txt` and `merged-diagnostics.json` for invariant
+   IDs, typed projections, backend readiness, and pair convergence evidence.
+5. Identify the authoritative owner of the broken fact.
+6. Add or strengthen the invariant if the oracle did not name the broken truth.
+7. Fix the source subsystem, not just the visible projection.
+8. Promote the minimized scenario into `scenarios/` only after it is stable and
+   useful as a regression.
+9. Add a lower-level Swift or Unison property regression for the pure rule that
+   should prevent the scenario from failing again.
+
 ## What You Can Tell The Agent
 
 In simple terms: yes, this machinery is intended to let an agent take a report from physical-device testing and turn it into a deterministic multi-device + backend regression.

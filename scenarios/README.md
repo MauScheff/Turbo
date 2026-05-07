@@ -177,6 +177,45 @@ When you add or rename a checked-in scenario JSON file, update this README and v
 - `just simulator-scenario <scenario>`
 - `just simulator-scenario-merge`
 
+## Generated Scenario Inputs
+
+The XCTest runner still defaults to checked-in `scenarios/*.json`, but the
+runtime config also accepts generated inputs:
+
+- `scenarioFile`
+  - runs one JSON file outside the repo
+- `scenarioDirectory`
+  - runs every `*.json` file in a temporary directory
+
+The Python wrapper exposes these as `--scenario-file` and
+`--scenario-directory` on `scripts/run_simulator_scenarios.py`. This is used by
+the fuzz lane so failing seeds can be replayed from `/tmp/turbo-scenario-fuzz`
+without copying artifacts into the repo.
+
+## Fuzz Lane
+
+Use the local websocket backend for high-volume fuzzing:
+
+1. Start the backend with `just serve-local`.
+2. Run `just simulator-fuzz-local 123 3` for a smoke pass.
+3. Run `just simulator-fuzz-local-overnight 12345 500` for a longer pass.
+4. On failure, use the printed replay and shrink commands.
+
+Each seed directory stores:
+
+- `scenario.json`
+- `metadata.json`
+- `xcode-output.txt`
+- `merged-diagnostics.txt`
+- `merged-diagnostics.json`
+- `merged-diagnostics-strict.txt`
+- `result.json`
+- `minimized.json` when shrinking preserves the failure
+
+Promotion is explicit: inspect the minimized scenario and diagnostics, fix the
+authoritative subsystem, then copy a stable regression into `scenarios/` with a
+clear name and README entry.
+
 ## Local backend loop
 
 When production-backed scenario runs are noisy because the hosted backend is returning intermittent `internal server error`, use the local control-plane path:
