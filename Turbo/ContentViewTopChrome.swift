@@ -295,8 +295,6 @@ struct TurboLaunchSplashView: View {
 
 struct TurboStartView: View {
     let wordmarkName: String
-    let hasCompletedOnboarding: Bool
-    let hasContacts: Bool
     let onContinue: () -> Void
 
     var body: some View {
@@ -320,7 +318,7 @@ struct TurboStartView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .overlay(alignment: .bottom) {
                 Button(action: onContinue) {
-                    Text(hasCompletedOnboarding || hasContacts ? "Continue" : "Get Started")
+                    Text("Get Started")
                         .frame(maxWidth: .infinity, minHeight: 54)
                 }
                 .buttonStyle(.borderedProminent)

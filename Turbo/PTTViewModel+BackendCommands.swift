@@ -1044,6 +1044,26 @@ extension PTTViewModel {
             backendCommandCoordinator.send(.operationFinished)
         } catch {
             let message = error.localizedDescription
+            await refreshChannelState(for: request.contactID)
+            let leaveAlreadyApplied =
+                selectedChannelSnapshot(for: request.contactID)?.membership.hasLocalMembership == false
+
+            if leaveAlreadyApplied {
+                await refreshContactSummaries()
+                await refreshInvites()
+                backendCommandCoordinator.send(.operationFinished)
+                diagnostics.record(
+                    .backend,
+                    message: "Backend leave request failed after membership was already absent",
+                    metadata: [
+                        "contactId": request.contactID.uuidString,
+                        "channelId": request.backendChannelID,
+                        "error": message,
+                    ]
+                )
+                return
+            }
+
             backendCommandCoordinator.send(.operationFailed(message))
             diagnostics.record(
                 .backend,

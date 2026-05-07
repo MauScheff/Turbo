@@ -389,8 +389,6 @@ struct ContentView: View {
     private var startView: some View {
         TurboStartView(
             wordmarkName: wordmarkName,
-            hasCompletedOnboarding: viewModel.hasCompletedIdentityOnboarding,
-            hasContacts: !viewModel.contacts.isEmpty,
             onContinue: {
                 if viewModel.hasCompletedIdentityOnboarding {
                     route = .live

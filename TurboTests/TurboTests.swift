@@ -3728,6 +3728,39 @@ struct TurboTests {
         #expect(state.canTransmitNow)
     }
 
+    @Test func selectedPeerStateWaitsDuringBackendSignalingJoinRecovery() {
+        let contactID = UUID()
+        let state = ConversationStateMachine.selectedPeerState(
+            for: ConversationDerivationContext(
+                contactID: contactID,
+                selectedContactID: contactID,
+                baseState: .ready,
+                contactName: "Blake",
+                contactIsOnline: true,
+                isJoined: true,
+                activeChannelID: contactID,
+                systemSessionMatchesContact: true,
+                systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+                pendingAction: .none,
+                localJoinFailure: nil,
+                mediaState: .connected,
+                localMediaWarmupState: .ready,
+                directMediaPathActive: true,
+                backendSignalingJoinRecoveryActive: true,
+                channel: ChannelReadinessSnapshot(
+                    channelState: makeChannelState(status: .ready, canTransmit: true),
+                    readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)
+                )
+            ),
+            relationship: .none
+        )
+
+        #expect(state.phase == .waitingForPeer)
+        #expect(state.detail == .waitingForPeer(reason: .backendSessionTransition))
+        #expect(state.statusMessage == "Connecting...")
+        #expect(state.canTransmitNow == false)
+    }
+
     @Test func selectedPeerStateWaitsDuringDirectQuicFirstTalkGrace() {
         let contactID = UUID()
         let state = ConversationStateMachine.selectedPeerState(
@@ -6163,7 +6196,7 @@ struct TurboTests {
         case .holdToTalk:
             Issue.record("Expected connect-style primary action while idle")
         }
-        #expect(action.label == "Request")
+        #expect(action.label == "Ask to Talk")
         #expect(action.isEnabled)
         switch action.style {
         case .accent:
@@ -9290,7 +9323,7 @@ struct TurboTests {
         )
 
         #expect(action.kind == .connect)
-        #expect(action.label == "Request")
+        #expect(action.label == "Ask to Talk")
         #expect(action.isEnabled)
         #expect(action.style == .accent)
     }
@@ -9327,7 +9360,7 @@ struct TurboTests {
         )
 
         #expect(action.kind == .connect)
-        #expect(action.label == "Request Again")
+        #expect(action.label == "Ask Again")
         #expect(action.isEnabled)
         #expect(action.style == .muted)
     }
@@ -9346,7 +9379,7 @@ struct TurboTests {
         )
 
         #expect(action.kind == .connect)
-        #expect(action.label == "Request Again")
+        #expect(action.label == "Ask Again")
         #expect(action.isEnabled)
         #expect(action.style == .accent)
     }
@@ -9365,7 +9398,7 @@ struct TurboTests {
         )
 
         #expect(action.kind == .connect)
-        #expect(action.label == "Request again in 12s")
+        #expect(action.label == "Ask again in 12s")
         #expect(action.isEnabled == false)
         #expect(action.style == .muted)
     }
@@ -17907,6 +17940,101 @@ struct TurboTests {
         #expect(
             !viewModel.diagnosticsTranscript.contains(
                 "Media state changed state=closed"
+            )
+        )
+    }
+
+    @MainActor
+    @Test func foregroundDirectQuicIgnoresLateTransmitControlsAfterReceiveDrain() async throws {
+        let viewModel = PTTViewModel()
+        viewModel.applicationStateOverride = .active
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let mediaSession = RecordingMediaSession()
+
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(status: .ready, canTransmit: true)
+            )
+        )
+        viewModel.backendSyncCoordinator.send(
+            .channelReadinessUpdated(
+                contactID: contactID,
+                readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)
+            )
+        )
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        _ = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        )
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        viewModel.mediaRuntime.connectionState = .connected
+        viewModel.markRemoteAudioActivity(for: contactID, source: .audioChunk)
+        viewModel.handleRemoteAudioSilenceTimeout(for: contactID, phase: .drainingAudio)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(viewModel.mediaSessionContactID == contactID)
+        #expect(viewModel.mediaConnectionState == .connected)
+        #expect(!viewModel.remoteTransmittingContactIDs.contains(contactID))
+        #expect(mediaSession.closedDeactivateAudioSessionFlags.isEmpty)
+
+        viewModel.handleIncomingSignal(
+            TurboSignalEnvelope(
+                type: .transmitStart,
+                channelId: "channel",
+                fromUserId: "peer-user",
+                fromDeviceId: "peer-device",
+                toUserId: "self-user",
+                toDeviceId: "self-device",
+                payload: "ptt-begin"
+            )
+        )
+        viewModel.handleIncomingSignal(
+            TurboSignalEnvelope(
+                type: .transmitStop,
+                channelId: "channel",
+                fromUserId: "peer-user",
+                fromDeviceId: "peer-device",
+                toUserId: "self-user",
+                toDeviceId: "self-device",
+                payload: "ptt-end"
+            )
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(viewModel.mediaSessionContactID == contactID)
+        #expect(viewModel.mediaConnectionState == .connected)
+        #expect(!viewModel.remoteTransmittingContactIDs.contains(contactID))
+        #expect(mediaSession.closedDeactivateAudioSessionFlags.isEmpty)
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Ignored redundant foreground Direct QUIC transmit control signal"
             )
         )
     }
@@ -28466,6 +28594,44 @@ struct TurboTests {
                 "backendPeerJoined": "true",
                 "backendPeerDeviceConnected": "true",
                 "remoteWakeCapabilityKind": "unavailable",
+                "selectedPeerStatus": "Waiting for Blake's audio..."
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=waitingForPeer")
+
+        #expect(!exported.contains("[selected.backend_ready_missing_remote_audio_signal]"))
+        #expect(
+            !store.invariantViolations.contains {
+                $0.invariantID == "selected.backend_ready_missing_remote_audio_signal"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsSuppressesBackendReadyMissingRemoteAudioSignalInvariantWhenRemoteAudioExplicitlyWaits() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        store.captureState(
+            reason: "backend-signal:receiver-not-ready",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "waitingForPeer",
+                "selectedPeerPhaseDetail": "waitingForPeer(reason: BeepBeep.SelectedPeerWaitingReason.remoteAudioPrewarm)",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "mediaState": "connected",
+                "isTransmitting": "false",
+                "systemSession": "active(contactID: 123, channelUUID: 456)",
+                "backendChannelStatus": "ready",
+                "backendReadiness": "ready",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "true",
+                "remoteAudioReadiness": "waiting",
+                "remoteWakeCapabilityKind": "wake-capable",
                 "selectedPeerStatus": "Waiting for Blake's audio..."
             ]
         )

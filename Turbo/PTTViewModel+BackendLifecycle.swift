@@ -177,13 +177,14 @@ extension PTTViewModel {
                 "notice": message,
             ]
         )
-        captureDiagnosticsState("backend-signaling:recovery-scheduled")
-
         let contactID = contact.id
         replaceBackendSignalingJoinRecoveryTask(
             with: Task { @MainActor [weak self] in
                 guard let self else { return }
-                defer { self.backendRuntime.signalingJoinRecoveryTask = nil }
+                defer {
+                    self.backendRuntime.signalingJoinRecoveryTask = nil
+                    self.updateStatusForSelectedContact()
+                }
                 self.controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
                 if self.backendSyncCoordinator.state.syncState.channelStates[contactID] == nil,
                    self.shouldReassertBackendJoinAfterSignalingDrift(for: contactID) {
@@ -241,6 +242,8 @@ extension PTTViewModel {
                 self.captureDiagnosticsState("backend-signaling:recovered")
             }
         )
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("backend-signaling:recovery-scheduled")
     }
 
     func shouldRecoverBackendSignalingJoinDrift(from message: String) -> Bool {

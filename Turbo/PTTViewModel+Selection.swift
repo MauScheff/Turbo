@@ -224,6 +224,8 @@ extension PTTViewModel {
                     firstTalkStartupProfile: firstTalkStartupProfile(for: contact.id, startGraceIfNeeded: false),
                     incomingWakeActivationState:
                         pttWakeRuntime.incomingWakeActivationState(for: contact.id),
+                    backendSignalingJoinRecoveryActive:
+                        backendRuntime.signalingJoinRecoveryTask != nil,
                     localJoinFailure: pttCoordinator.state.lastJoinFailure
                 )
             )

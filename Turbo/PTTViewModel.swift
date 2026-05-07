@@ -875,6 +875,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                     && selectedSession.backendSelfJoined == true
                     && selectedSession.backendPeerJoined == true
                     && selectedSession.backendPeerDeviceConnected == true
+                    && selectedSession.remoteAudioReadiness != "waiting"
                     && selectedSession.remoteWakeCapabilityKind == "wake-capable"
                     && backendRuntime.signalingJoinRecoveryTask == nil
             default:
@@ -898,6 +899,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                 && selectedSession.backendSelfJoined == true
                 && selectedSession.backendPeerJoined == true
                 && selectedSession.backendPeerDeviceConnected == true
+                && selectedSession.remoteAudioReadiness != "waiting"
                 && selectedSession.remoteWakeCapabilityKind == "wake-capable"
                 && backendRuntime.signalingJoinRecoveryTask == nil
         default:

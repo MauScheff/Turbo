@@ -1002,6 +1002,7 @@ struct ConversationDerivationContext: Equatable {
     let directMediaPathActive: Bool
     let firstTalkStartupProfile: FirstTalkStartupProfile
     let incomingWakeActivationState: IncomingWakeActivationState?
+    let backendSignalingJoinRecoveryActive: Bool
     let hadConnectedSessionContinuity: Bool
     let channel: ChannelReadinessSnapshot?
 
@@ -1033,6 +1034,7 @@ struct ConversationDerivationContext: Equatable {
         directMediaPathActive: Bool = false,
         firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm,
         incomingWakeActivationState: IncomingWakeActivationState? = nil,
+        backendSignalingJoinRecoveryActive: Bool = false,
         hadConnectedSessionContinuity: Bool = false,
         channel: ChannelReadinessSnapshot?
     ) {
@@ -1065,6 +1067,7 @@ struct ConversationDerivationContext: Equatable {
         self.directMediaPathActive = directMediaPathActive
         self.firstTalkStartupProfile = firstTalkStartupProfile
         self.incomingWakeActivationState = incomingWakeActivationState
+        self.backendSignalingJoinRecoveryActive = backendSignalingJoinRecoveryActive
         self.hadConnectedSessionContinuity = hadConnectedSessionContinuity
         self.channel = channel
     }
@@ -1664,12 +1667,12 @@ enum ConversationStateMachine {
     ) -> String {
         switch conversationState {
         case .incomingRequest:
-            return "Join Request"
+            return "Connect"
         case .requested:
             if let requestCooldownRemaining {
-                return "Request again in \(requestCooldownRemaining)s"
+                return "Ask again in \(requestCooldownRemaining)s"
             }
-            return "Request Again"
+            return "Ask Again"
         case .waitingForPeer:
             return "Waiting for Peer"
         case .transmitting:
@@ -1679,7 +1682,7 @@ enum ConversationStateMachine {
         case .ready:
             return "Hold To Talk"
         case .idle, .none:
-            return isSelectedChannelJoined ? "Waiting for Peer" : "Request"
+            return isSelectedChannelJoined ? "Waiting for Peer" : "Ask to Talk"
         }
     }
 
@@ -2106,6 +2109,9 @@ private extension ConversationDerivationContext {
         if sessionTransmitReady && peerSignalIsTransmitting {
             return .receiving
         }
+        if backendSignalingJoinRecoveryActive {
+            return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
+        }
 
         if shouldPreferWakeReadyDespiteStalePeerConnectivity {
             guard directMediaPathActive || localRelayTransportReady else {
@@ -2270,6 +2276,7 @@ private extension ConversationDerivationContext {
         guard selectedContactID == contactID,
               localSessionReadiness == .aligned,
               localTransmit == .idle,
+              !backendSignalingJoinRecoveryActive,
               case .both(_, let canTransmit, _) = backendChannelReadiness,
               effectivePeerDeviceConnectedForTransmit else {
             return false

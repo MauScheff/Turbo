@@ -439,6 +439,12 @@ extension PTTViewModel {
         if isDirectQuicAutoUpgradeDisabledForDebug {
             return "auto-upgrade-disabled"
         }
+        if backendRuntime.signalingJoinRecoveryTask != nil {
+            return "signaling-join-recovery-active"
+        }
+        if sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
+            return "leave-in-flight"
+        }
         if !backendAdvertisesDirectQuicUpgrade,
            !shouldAllowDirectQuicDebugBypassForAutomaticProbe() {
             return "backend-capability-disabled"

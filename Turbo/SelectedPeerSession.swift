@@ -43,6 +43,7 @@ struct SelectedPeerSessionState: Equatable {
     var directMediaPathActive = false
     var firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm
     var incomingWakeActivationState: IncomingWakeActivationState?
+    var backendSignalingJoinRecoveryActive = false
     var hadConnectedSessionContinuity = false
     var durableSessionProjection: DurableSessionProjection = .inactive
     var connectedExecutionProjection: ConnectedExecutionProjection?
@@ -72,6 +73,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
     let directMediaPathActive: Bool
     let firstTalkStartupProfile: FirstTalkStartupProfile
     let incomingWakeActivationState: IncomingWakeActivationState?
+    let backendSignalingJoinRecoveryActive: Bool
     let localJoinFailure: PTTJoinFailure?
 
     init(
@@ -93,6 +95,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
         directMediaPathActive: Bool,
         firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm,
         incomingWakeActivationState: IncomingWakeActivationState?,
+        backendSignalingJoinRecoveryActive: Bool = false,
         localJoinFailure: PTTJoinFailure?
     ) {
         self.selection = selection
@@ -113,6 +116,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
         self.directMediaPathActive = directMediaPathActive
         self.firstTalkStartupProfile = firstTalkStartupProfile
         self.incomingWakeActivationState = incomingWakeActivationState
+        self.backendSignalingJoinRecoveryActive = backendSignalingJoinRecoveryActive
         self.localJoinFailure = localJoinFailure
     }
 }
@@ -197,6 +201,7 @@ enum SelectedPeerReducer {
             nextState.directMediaPathActive = snapshot.directMediaPathActive
             nextState.firstTalkStartupProfile = snapshot.firstTalkStartupProfile
             nextState.incomingWakeActivationState = snapshot.incomingWakeActivationState
+            nextState.backendSignalingJoinRecoveryActive = snapshot.backendSignalingJoinRecoveryActive
         case .selectedContactChanged(let selection):
             switch selection {
             case .none:
@@ -371,6 +376,7 @@ enum SelectedPeerReducer {
             directMediaPathActive: state.directMediaPathActive,
             firstTalkStartupProfile: state.firstTalkStartupProfile,
             incomingWakeActivationState: state.incomingWakeActivationState,
+            backendSignalingJoinRecoveryActive: state.backendSignalingJoinRecoveryActive,
             hadConnectedSessionContinuity: hadConnectedSessionContinuity,
             channel: state.channel
         )

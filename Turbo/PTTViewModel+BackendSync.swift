@@ -469,6 +469,32 @@ extension PTTViewModel {
         return pttCoordinator.state.systemChannelUUID == channelUUID && !pttCoordinator.state.isTransmitting
     }
 
+    func shouldIgnoreForegroundDirectQuicTransmitControlSignal(
+        _ envelope: TurboSignalEnvelope,
+        for contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState == .active else { return false }
+        guard envelope.type == .transmitStart || envelope.type == .transmitStop else { return false }
+        guard isJoined, activeChannelId == contactID else { return false }
+        guard !isTransmitting, !pttCoordinator.state.isTransmitting else { return false }
+        guard shouldUseDirectQuicTransport(for: contactID) else { return false }
+        guard !pttWakeRuntime.hasPendingWake(for: contactID) else { return false }
+
+        let activityState = receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]
+        switch envelope.type {
+        case .transmitStart:
+            guard envelope.payload == "ptt-begin" else { return false }
+            return activityState?.hasReceivedAudioChunk == true
+                || activityState?.isPeerTransmitting == false
+                || (activityState == nil && mediaSessionContactID == contactID && mediaConnectionState == .connected)
+        case .transmitStop:
+            return activityState == nil || activityState?.isPeerTransmitting == false
+        case .offer, .answer, .iceCandidate, .hangup, .audioChunk, .receiverReady, .receiverNotReady:
+            return false
+        }
+    }
+
     private func shouldBufferDeferredBackgroundAudioAsWakeCandidate(
         for contactID: UUID,
         applicationState: UIApplication.State
@@ -1904,12 +1930,34 @@ extension PTTViewModel {
             return
         }
 
+        let applicationState = currentApplicationState()
+        if shouldIgnoreForegroundDirectQuicTransmitControlSignal(
+            envelope,
+            for: contactID,
+            applicationState: applicationState
+        ) {
+            diagnostics.record(
+                .websocket,
+                message: "Ignored redundant foreground Direct QUIC transmit control signal",
+                metadata: [
+                    "type": envelope.type.rawValue,
+                    "channelId": envelope.channelId,
+                    "contactId": contactID.uuidString,
+                    "payload": envelope.payload,
+                ]
+            )
+            if selectedContactId == contactID {
+                updateStatusForSelectedContact()
+                captureDiagnosticsState("backend-signal:redundant-direct-quic-\(envelope.type.rawValue)")
+            }
+            return
+        }
+
         switch envelope.type {
         case .transmitStart where envelope.payload == "ptt-prepare":
             pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
             mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
             mediaRuntime.resetMediaEncryptionReceiveSequence(for: contactID)
-            let applicationState = currentApplicationState()
             if shouldTreatIncomingControlSignalAsWakeCandidate(
                 for: contactID,
                 applicationState: applicationState
@@ -1968,7 +2016,6 @@ extension PTTViewModel {
                 pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
                 mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
                 mediaRuntime.resetMediaEncryptionReceiveSequence(for: contactID)
-                let applicationState = currentApplicationState()
                 let shouldArmWakeCandidate = shouldTreatIncomingControlSignalAsWakeCandidate(
                     for: contactID,
                     applicationState: applicationState
