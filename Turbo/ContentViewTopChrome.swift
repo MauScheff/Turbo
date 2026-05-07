@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct TurboHeaderView: View {
-    let statusMessage: String
+    let statusMessage: String?
     let transportPathState: MediaTransportPathState?
     let transportPathTint: Color
     let latestErrorText: String?
@@ -31,12 +31,14 @@ struct TurboHeaderView: View {
 
         VStack(spacing: 8) {
             ZStack {
-                Text(statusMessage)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                    .padding(.horizontal, sideWidth + 16)
+                if let statusMessage {
+                    Text(statusMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                        .padding(.horizontal, sideWidth + 16)
+                }
 
                 HStack(spacing: 12) {
                     Button(action: onShowProfile) {
@@ -264,7 +266,34 @@ struct TurboEmptyContactsView: View {
     }
 }
 
-struct TurboSplashView: View {
+struct TurboLaunchSplashView: View {
+    let wordmarkName: String
+
+    var body: some View {
+        GeometryReader { geometry in
+            let topInset = max(geometry.size.height * 0.42, 180)
+
+            VStack(spacing: 0) {
+                Spacer()
+                    .frame(height: topInset)
+
+                Image(wordmarkName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: 42)
+                    .frame(maxWidth: TurboLayout.contentMaxWidth)
+                    .accessibilityLabel("BeepBeep")
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, TurboLayout.horizontalPadding)
+    }
+}
+
+struct TurboStartView: View {
     let wordmarkName: String
     let hasCompletedOnboarding: Bool
     let hasContacts: Bool

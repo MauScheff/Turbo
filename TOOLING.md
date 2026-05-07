@@ -124,6 +124,8 @@ For deploys, the distinction is:
 - if no interactive `ucm` process is already occupying the local codebase, use `just deploy`
 - if you are already working inside a live `ucm` session, `just deploy` can block on that codebase lock; in that case keep using the existing codebase session and run `turbo.deploy` there via MCP/UCM
 
+`just deploy` first runs `just backend-schema-drift-test`, which executes `turbo.schemaDrift.check`. This is the lightweight guard against accidentally changing the shape of values stored in Unison Cloud tables without an explicit migration/reset decision. If the guard fails, do not bypass it with an environment rotation as a normal workflow; follow [`MIGRATIONS.md`](/Users/mau/Development/Turbo/MIGRATIONS.md), then either revert the persisted type change, write and prove the migration/repair path, or deliberately approve the new baseline in `turbo.schemaDrift.expectedHashes` in the same change.
+
 In either case, if you changed backend behavior in the local Unison codebase, that change is not live on `https://beepbeep.to` until `turbo.deploy` has actually run.
 
 For APNs credentials, keep the `.p8` file outside the repo and expose either `TURBO_APNS_PRIVATE_KEY_PATH` or `TURBO_APNS_PRIVATE_KEY` in the local deploy environment. `turbo.deploy` resolves the path locally when present and stores the PEM text in cloud config as `TURBO_APNS_PRIVATE_KEY`, so deployed backend code should never depend on filesystem access.

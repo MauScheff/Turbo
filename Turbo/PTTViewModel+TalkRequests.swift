@@ -7,7 +7,9 @@ extension PTTViewModel {
     }
 
     func reconcileTalkRequestSurface(
-        applicationState: UIApplication.State? = nil
+        applicationState: UIApplication.State? = nil,
+        allowsSelectedContact: Bool = false,
+        allowsAlreadySurfacedInvite: Bool = false
     ) {
         let resolvedApplicationState = applicationState ?? currentApplicationState()
         let candidates: [IncomingTalkRequestCandidate] = contacts.compactMap { contact in
@@ -21,7 +23,9 @@ extension PTTViewModel {
             event: .invitesUpdated(
                 candidates: candidates,
                 selectedContactID: selectedContactId,
-                applicationIsActive: resolvedApplicationState == .active
+                applicationIsActive: resolvedApplicationState == .active,
+                allowsSelectedContact: allowsSelectedContact,
+                allowsAlreadySurfacedInvite: allowsAlreadySurfacedInvite
             )
         )
     }
@@ -47,6 +51,10 @@ extension PTTViewModel {
             return
         }
         selectContact(contact)
+        guard contact.isOnline else {
+            return
+        }
+        requestExpandedCall(for: contact)
         requestBackendJoin(for: contact)
     }
 

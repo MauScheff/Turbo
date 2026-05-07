@@ -62,14 +62,18 @@ For the repo-wide workflow and architectural intent behind these scenarios, read
   - one participant reconnects the full backend control plane while already `ready`; both sides must refresh, reconcile, and recover the same ready session without drifting off the backend `readiness` or `audioReadiness` contract
 - `restart_ready_session_recovery`
   - one participant restarts after a ready session is established, reopens the peer, refreshes control-plane state, and must restore the ready local session deterministically with backend `audioReadiness` back at `ready`
+- `restart_ready_session_recovery_with_offline_repair`
+  - local-only fuzz regression promoted from seed 124: the recipient restarts from a ready session, the pair transmits with delayed receiver signaling, then a background/foreground disconnect must converge without `presence.offline_retained_connected_session`
+- `disconnect_clears_stale_peer_presence_during_state_refresh`
+  - local-only fuzz regression promoted from seed 123: a receiver disconnect races with repeated channel-state refreshes; backend stale-presence repair must clear raw active-channel pointers and strict merged diagnostics must stay clean
 - `restart_partial_join_recovery`
-  - the requester restarts during the partial-join window; refresh and reconciliation must restore the requester to `peerReady`, preserve the recipient in `waitingForPeer`, and still allow the second join to converge to `ready`
+  - the requester restarts during the partial-join window where backend channel membership is already present but the requester's local PTT session is not joined; refresh and reconciliation must restore the requester to `peerReady`, preserve the recipient in `waitingForPeer`, and still allow the second join to converge to `ready`
 - `websocket_ready_session_recovery`
-  - one participant loses only the websocket transport while already `ready`; the disconnected side must remain locally usable, while the remote side degrades to `wakeReady` because `peerDeviceConnected` dropped and backend peer `audioReadiness` falls back, and an explicit websocket reconnect plus refresh must restore full readiness convergence
+  - one participant loses only the websocket transport while already `ready`; the disconnected side must preserve its joined local PTT session but may block transmit readiness while the backend marks its active device/readiness stale, the remote side degrades to `wakeReady` because `peerDeviceConnected` dropped and backend peer `audioReadiness` falls back, and an explicit websocket reconnect plus refresh must restore full readiness convergence
 
 Use `websocket_ready_session_recovery` and `backend_reconnect_ready_session_recovery` to prove two different invariants:
 
-- websocket transport loss does not tear down the local session, but it can still degrade the remote side's derived readiness through `peerDeviceConnected`
+- websocket transport loss does not tear down the local session, but it can still block local transmit readiness and degrade the remote side's derived readiness through `peerDeviceConnected`
 - full backend/control-plane reconnect must still reassert and recover the ready session deterministically
 - `request_cancel_before_accept`
   - caller withdraws before the peer accepts
@@ -215,6 +219,9 @@ Each seed directory stores:
 Promotion is explicit: inspect the minimized scenario and diagnostics, fix the
 authoritative subsystem, then copy a stable regression into `scenarios/` with a
 clear name and README entry.
+
+For the full generator, artifact, replay, shrink, and promotion workflow, read
+[`SIMULATOR_FUZZING.md`](/Users/mau/Development/Turbo/SIMULATOR_FUZZING.md).
 
 ## Local backend loop
 

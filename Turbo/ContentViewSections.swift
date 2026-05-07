@@ -35,7 +35,7 @@ struct TurboIncomingTalkRequestBanner: View {
             Button("Not now", action: onDismiss)
                 .buttonStyle(.bordered)
 
-            Button("Accept", action: onAccept)
+            Button(primaryActionTitle, action: onAccept)
                 .buttonStyle(.borderedProminent)
         }
         .padding(14)
@@ -54,6 +54,10 @@ struct TurboIncomingTalkRequestBanner: View {
             return "\(request.contactHandle) has asked \(request.requestCount) times."
         }
         return "\(request.contactHandle) sent you a talk request."
+    }
+
+    private var primaryActionTitle: String {
+        request.contactIsOnline ? "Open" : "View"
     }
 }
 
@@ -363,7 +367,7 @@ struct TurboTalkControlsView: View {
         case .accent:
             return .blue
         case .active:
-            return .red
+            return .blue
         case .muted:
             return .gray
         }

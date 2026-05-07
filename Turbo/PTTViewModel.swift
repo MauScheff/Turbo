@@ -147,6 +147,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var localNetworkPreflightStatus: LocalNetworkPreflightStatus = .loadStored()
     var audioOutputPreference: AudioOutputPreference = .loadStored()
     var pendingTalkRequestNotificationHandle: String?
+    var pendingTalkRequestNotificationShouldJoin: Bool = false
+    var requestedExpandedCallContactID: UUID?
+    var requestedExpandedCallSequence: Int = 0
     var directQuicProvisioningStatus: String = "not-started"
     var directQuicRegisteredFingerprint: String?
     var mediaEncryptionProvisioningStatus: String = "not-started"
@@ -820,8 +823,34 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         return "\(latestError.subsystem.rawValue): \(latestError.message)"
     }
 
+    var topChromeStatusMessage: String? {
+        if developerIdentityControlsEnabled {
+            return statusMessage
+        }
+        guard shouldSurfaceConnectionProblemInTopChrome else { return nil }
+        return "Offline"
+    }
+
     var usesLocalHTTPBackend: Bool {
         backendRuntime.mode == "local-http"
+    }
+
+    private var shouldSurfaceConnectionProblemInTopChrome: Bool {
+        if backendRuntime.bootstrapRetryTask != nil { return true }
+        if !backendRuntime.isReady, backendRuntime.hasClient { return true }
+
+        let normalizedBackendStatus = backendStatusMessage.lowercased()
+        if normalizedBackendStatus.contains("unavailable")
+            || normalizedBackendStatus.contains("connection failed")
+            || normalizedBackendStatus.contains("disconnected")
+            || normalizedBackendStatus.contains("reconnecting") {
+            return true
+        }
+
+        let normalizedPrimaryStatus = statusMessage.lowercased()
+        return normalizedPrimaryStatus.contains("unavailable")
+            || normalizedPrimaryStatus.contains("connection failed")
+            || normalizedPrimaryStatus.contains("reconnecting")
     }
 
     private func shouldSurfaceTopChromeDiagnosticsError(_ entry: DiagnosticsEntry) -> Bool {
@@ -1247,6 +1276,18 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func receiveRemoteAudioChunk(_ payload: String) async {
         await mediaServices.session()?.receiveRemoteAudioChunk(payload)
+    }
+
+    func receiveRemoteAudioChunk(
+        _ payload: String,
+        incomingAudioTransport: IncomingAudioPayloadTransport
+    ) async {
+        let playbackProfile: MediaSessionPlaybackProfile =
+            incomingAudioTransport == .relayWebSocket ? .relayJitterBuffered : .lowLatency
+        await mediaServices.session()?.receiveRemoteAudioChunk(
+            payload,
+            playbackProfile: playbackProfile
+        )
     }
 
     func refreshMicrophonePermission() {

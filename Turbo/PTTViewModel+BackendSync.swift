@@ -20,6 +20,10 @@ private enum PendingPlaybackDrainDecision {
 }
 
 extension PTTViewModel {
+    private var encryptedAudioRecoveryMaxBufferedPayloads: Int { 16 }
+    private var encryptedAudioRecoveryAttempts: Int { 6 }
+    private var encryptedAudioRecoveryRetryNanoseconds: UInt64 { 250_000_000 }
+
     private func remoteAudioTimeoutNanoseconds(for phase: RemoteReceiveTimeoutPhase) -> UInt64 {
         switch phase {
         case .awaitingFirstAudioChunk:
@@ -746,6 +750,27 @@ extension PTTViewModel {
 
         guard mediaSessionContactID == contactID, !isTransmitting else { return }
 
+        if shouldKeepInteractiveMediaWarmAfterReceiveEnd(
+            for: contactID,
+            closeMessage: closeMessage
+        ) {
+            diagnostics.record(
+                .media,
+                message: "Kept receive media session warm after remote audio ended",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "closeMessage": closeMessage,
+                ]
+            )
+            Task {
+                await syncLocalReceiverAudioReadinessSignal(
+                    for: contactID,
+                    reason: "remote-audio-ended-keepalive"
+                )
+            }
+            return
+        }
+
         closeMediaSession(
             preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
         )
@@ -765,6 +790,33 @@ extension PTTViewModel {
                 metadata: ["contactId": contactID.uuidString]
             )
         }
+    }
+
+    private func shouldKeepInteractiveMediaWarmAfterReceiveEnd(
+        for contactID: UUID,
+        closeMessage: String
+    ) -> Bool {
+        guard closeMessage == "Closed receive media session after remote audio silence timeout" else {
+            return false
+        }
+        guard foregroundAppManagedInteractiveAudioPrewarmEnabled else { return false }
+        guard currentApplicationState() == .active else { return false }
+        guard selectedContactId == contactID else { return false }
+        guard isJoined, activeChannelId == contactID else { return false }
+        guard systemSessionMatches(contactID) else { return false }
+        guard !isTransmitting else { return false }
+        guard !transmitCoordinator.state.isPressingTalk else { return false }
+        guard !isPTTAudioSessionActive else { return false }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
+        guard mediaSessionContactID == contactID else { return false }
+        guard mediaConnectionState == .connected else { return false }
+        guard let channelSnapshot = selectedChannelSnapshot(for: contactID) else { return false }
+        guard channelSnapshot.status == .ready else { return false }
+        guard channelSnapshot.membership.hasLocalMembership else { return false }
+        guard channelSnapshot.membership.hasPeerMembership else { return false }
+        guard channelSnapshot.canTransmit else { return false }
+        guard channelReadinessByContactID[contactID]?.statusView == .ready else { return false }
+        return true
     }
 
     func clearSystemRemoteParticipantIfNeededAfterRemoteAudioEnded(for contactID: UUID) {
@@ -1131,6 +1183,38 @@ extension PTTViewModel {
         return message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "not a channel member"
     }
 
+    func shouldHonorAuthoritativeChannelReadinessMembershipLoss(
+        contactID: UUID,
+        existing: TurboChannelStateResponse?,
+        incoming: TurboChannelStateResponse
+    ) -> Bool {
+        if sessionCoordinator.pendingAction.pendingConnectContactID == contactID {
+            return false
+        }
+        if sessionCoordinator.pendingAction.pendingJoinContactID == contactID {
+            return false
+        }
+        if sessionCoordinator.pendingConnectAcceptedIncomingRequestContactID == contactID {
+            return false
+        }
+        if hasChannelMatchedUnattributedSystemSession(contactID: contactID) {
+            return false
+        }
+        if let existingRelationship = existing?.requestRelationship,
+           existingRelationship != .none {
+            return false
+        }
+        if incoming.requestRelationship != .none {
+            return false
+        }
+        return true
+    }
+
+    func hasChannelMatchedUnattributedSystemSession(contactID: UUID) -> Bool {
+        guard case .mismatched(let systemChannelUUID) = systemSessionState else { return false }
+        return channelUUID(for: contactID) == systemChannelUUID
+    }
+
     func runBackendSyncEffect(_ effect: BackendSyncEffect) async {
         switch effect {
         case .bootstrapIfNeeded:
@@ -1495,6 +1579,22 @@ extension PTTViewModel {
             channelID: channelID,
             peerDeviceID: fromDeviceID
         )
+        if shouldDeferIncomingEncryptedMediaUntilSessionReady(
+            payload,
+            channelID: channelID,
+            fromDeviceID: fromDeviceID,
+            contactID: contactID
+        ) {
+            deferIncomingEncryptedAudioPayloadUntilMediaEncryptionReady(
+                payload,
+                channelID: channelID,
+                fromUserID: fromUserID,
+                fromDeviceID: fromDeviceID,
+                contactID: contactID,
+                incomingAudioTransport: incomingAudioTransport
+            )
+            return
+        }
         let audioPayload: String
         do {
             guard let openedPayload = try openIncomingMediaPayloadIfPossible(
@@ -1637,7 +1737,7 @@ extension PTTViewModel {
             return
         }
         if mediaSessionContactID == contactID, mediaConnectionState == .preparing {
-            await receiveRemoteAudioChunk(audioPayload)
+            await receiveRemoteAudioChunk(audioPayload, incomingAudioTransport: incomingAudioTransport)
             return
         }
         let receiveActivationMode: MediaSessionActivationMode =
@@ -1651,7 +1751,115 @@ extension PTTViewModel {
             activationMode: receiveActivationMode,
             startupMode: .playbackOnly
         )
-        await receiveRemoteAudioChunk(audioPayload)
+        await receiveRemoteAudioChunk(audioPayload, incomingAudioTransport: incomingAudioTransport)
+    }
+
+    func deferIncomingEncryptedAudioPayloadUntilMediaEncryptionReady(
+        _ payload: String,
+        channelID: String,
+        fromUserID: String,
+        fromDeviceID: String,
+        contactID: UUID,
+        incomingAudioTransport: IncomingAudioPayloadTransport
+    ) {
+        let queuedCount = mediaRuntime.enqueuePendingEncryptedAudioPayload(
+            PendingEncryptedAudioPayload(
+                payload: payload,
+                channelID: channelID,
+                fromUserID: fromUserID,
+                fromDeviceID: fromDeviceID,
+                transport: incomingAudioTransport,
+                receivedAt: Date()
+            ),
+            for: contactID,
+            maxCount: encryptedAudioRecoveryMaxBufferedPayloads
+        )
+        diagnostics.record(
+            .media,
+            message: "Buffered encrypted media payload until E2EE session is configured",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": channelID,
+                "fromDeviceId": fromDeviceID,
+                "transport": String(describing: incomingAudioTransport),
+                "queuedPayloadCount": String(queuedCount),
+            ]
+        )
+
+        guard !mediaRuntime.hasEncryptedAudioRecoveryTask(for: contactID) else {
+            return
+        }
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.recoverPendingEncryptedAudioPayloadsIfPossible(for: contactID)
+        }
+        mediaRuntime.replaceEncryptedAudioRecoveryTask(for: contactID, with: task)
+    }
+
+    func recoverPendingEncryptedAudioPayloadsIfPossible(for contactID: UUID) async {
+        defer {
+            mediaRuntime.clearEncryptedAudioRecoveryTask(for: contactID)
+        }
+
+        for attempt in 1...encryptedAudioRecoveryAttempts {
+            guard !Task.isCancelled else { return }
+
+            let pending = mediaRuntime.pendingEncryptedAudioPayloads(for: contactID)
+            guard let first = pending.first else { return }
+
+            await refreshChannelState(for: contactID)
+            configureMediaEncryptionSessionIfPossible(
+                contactID: contactID,
+                channelID: first.channelID,
+                peerDeviceID: first.fromDeviceID
+            )
+
+            if !shouldDeferIncomingEncryptedMediaUntilSessionReady(
+                first.payload,
+                channelID: first.channelID,
+                fromDeviceID: first.fromDeviceID,
+                contactID: contactID
+            ) {
+                diagnostics.record(
+                    .media,
+                    message: "Recovered media E2EE session; draining buffered encrypted audio",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": first.channelID,
+                        "fromDeviceId": first.fromDeviceID,
+                        "attempt": String(attempt),
+                        "payloadCount": String(pending.count),
+                    ]
+                )
+                let pending = mediaRuntime.drainPendingEncryptedAudioPayloads(for: contactID)
+                mediaRuntime.clearEncryptedAudioRecoveryTask(for: contactID)
+                for buffered in pending {
+                    await handleIncomingAudioPayload(
+                        buffered.payload,
+                        channelID: buffered.channelID,
+                        fromUserID: buffered.fromUserID,
+                        fromDeviceID: buffered.fromDeviceID,
+                        contactID: contactID,
+                        incomingAudioTransport: buffered.transport
+                    )
+                }
+                continue
+            }
+
+            try? await Task.sleep(nanoseconds: encryptedAudioRecoveryRetryNanoseconds)
+        }
+
+        let droppedCount = mediaRuntime.discardPendingEncryptedAudioPayloads(for: contactID)
+        diagnostics.record(
+            .media,
+            level: .error,
+            message: "Dropped buffered encrypted media payloads because E2EE session did not recover",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "droppedPayloadCount": String(droppedCount),
+            ]
+        )
     }
 
     private func recordIncomingWebSocketAudioChunkDiagnosticIfNeeded(
@@ -2189,9 +2397,16 @@ extension PTTViewModel {
                 channelReadinessFailure = error
             }
 
-            let authoritativeMembershipLoss =
-                channelReadinessFailure.map(shouldTreatChannelReadinessMembershipLossAsAuthoritative) ?? false
             let existingChannelState = backendSyncCoordinator.state.syncState.channelStates[contactID]
+            let readinessMembershipLoss =
+                channelReadinessFailure.map(shouldTreatChannelReadinessMembershipLossAsAuthoritative) ?? false
+            let authoritativeMembershipLoss =
+                readinessMembershipLoss
+                && shouldHonorAuthoritativeChannelReadinessMembershipLoss(
+                    contactID: contactID,
+                    existing: existingChannelState,
+                    incoming: channelState
+                )
             let effectiveChannelState = effectiveChannelStatePreservingLiveMembership(
                 contactID: contactID,
                 existing: existingChannelState,

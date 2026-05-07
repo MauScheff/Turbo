@@ -16,7 +16,10 @@ serve-local-http:
 serve-local:
   sh -c 'cd {{justfile_directory()}} && direnv exec . ucm run turbo/main:.turbo.serveLocal'
 
-deploy:
+backend-schema-drift-test:
+  sh -c 'cd {{justfile_directory()}} && direnv exec . ucm run turbo/main:.turbo.schemaDrift.check'
+
+deploy: backend-schema-drift-test
   sh -c 'cd {{justfile_directory()}} && direnv exec . ucm run turbo/main:.turbo.deploy'
 
 bump-deploy-stamp:
@@ -179,12 +182,12 @@ simulator-scenario-local scenario="" base="http://localhost:8090/s/turbo" handle
     --handle-b "{{handle_b}}"
 
 simulator-scenario-merge-local base="http://localhost:8090/s/turbo" handle_a="@avery" handle_b="@blake":
-  python3 scripts/merged_diagnostics.py --base-url "{{base}}" \
+  python3 scripts/merged_diagnostics.py --base-url "{{base}}" --no-telemetry \
     --device "{{handle_a}}=sim-scenario-avery" \
     --device "{{handle_b}}=sim-scenario-blake"
 
 simulator-scenario-merge-local-strict base="http://localhost:8090/s/turbo" handle_a="@avery" handle_b="@blake":
-  python3 scripts/merged_diagnostics.py --base-url "{{base}}" --fail-on-violations \
+  python3 scripts/merged_diagnostics.py --base-url "{{base}}" --no-telemetry --fail-on-violations \
     --device "{{handle_a}}=sim-scenario-avery" \
     --device "{{handle_b}}=sim-scenario-blake"
 

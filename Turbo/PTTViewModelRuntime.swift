@@ -611,6 +611,15 @@ enum IncomingRelayAudioDiagnosticDisposition: Equatable {
     case suppressed
 }
 
+struct PendingEncryptedAudioPayload: Equatable {
+    let payload: String
+    let channelID: String
+    let fromUserID: String
+    let fromDeviceID: String
+    let transport: IncomingAudioPayloadTransport
+    let receivedAt: Date
+}
+
 struct FirstTalkDirectQuicGrace: Equatable {
     let channelID: String
     let startedAt: Date
@@ -662,13 +671,17 @@ final class MediaRuntimeState {
     private var outboundReceiverPrewarmRequestIDByContactID: [UUID: String] = [:]
     private var handledReceiverPrewarmRequestIDs: Set<String> = []
     private(set) var receiverPrewarmAckRequestIDByContactID: [UUID: String] = [:]
+    private var receiverPrewarmAckReceivedAtByContactID: [UUID: Date] = [:]
     private(set) var directQuicWarmPongIDByContactID: [UUID: String] = [:]
+    private var directQuicWarmPongReceivedAtByContactID: [UUID: Date] = [:]
     private var incomingRelayAudioDetailedReportsRemainingByContactID: [UUID: Int] = [:]
     private var incomingRelayAudioSuppressionReportedContactIDs: Set<UUID> = []
     private var mediaEncryptionSessionsByContactID: [UUID: MediaEncryptionSession] = [:]
     private var mediaEncryptionSendSequenceByContactID: [UUID: UInt64] = [:]
     private var mediaEncryptionReceiveSequenceByContactID: [UUID: UInt64] = [:]
     private var mediaEncryptionPlaintextFallbackLogKeys: Set<String> = []
+    private var pendingEncryptedAudioPayloadsByContactID: [UUID: [PendingEncryptedAudioPayload]] = [:]
+    private var encryptedAudioRecoveryTasksByContactID: [UUID: Task<Void, Never>] = [:]
 
     var hasSession: Bool {
         session != nil
@@ -769,16 +782,21 @@ final class MediaRuntimeState {
         if !preserveDirectQuic {
             transportPathState = .relay
             directQuicUpgrade.reset()
+            outboundReceiverPrewarmRequestIDByContactID = [:]
+            handledReceiverPrewarmRequestIDs = []
+            receiverPrewarmAckRequestIDByContactID = [:]
+            receiverPrewarmAckReceivedAtByContactID = [:]
+            directQuicWarmPongIDByContactID = [:]
+            directQuicWarmPongReceivedAtByContactID = [:]
         }
         firstTalkDirectQuicGraceEntries = []
-        outboundReceiverPrewarmRequestIDByContactID = [:]
-        handledReceiverPrewarmRequestIDs = []
-        receiverPrewarmAckRequestIDByContactID = [:]
-        directQuicWarmPongIDByContactID = [:]
         incomingRelayAudioDetailedReportsRemainingByContactID = [:]
         incomingRelayAudioSuppressionReportedContactIDs = []
         sendAudioChunk = nil
         startupState = .idle
+        pendingEncryptedAudioPayloadsByContactID = [:]
+        encryptedAudioRecoveryTasksByContactID.values.forEach { $0.cancel() }
+        encryptedAudioRecoveryTasksByContactID = [:]
     }
 
     func resetIncomingRelayAudioDiagnostics(
@@ -923,12 +941,31 @@ final class MediaRuntimeState {
         return requestID
     }
 
-    func receiverPrewarmRequestIsAcknowledged(for contactID: UUID) -> Bool {
+    func replaceReceiverPrewarmRequestID(for contactID: UUID, requestID: String) {
+        outboundReceiverPrewarmRequestIDByContactID[contactID] = requestID
+        receiverPrewarmAckRequestIDByContactID[contactID] = nil
+        receiverPrewarmAckReceivedAtByContactID[contactID] = nil
+        directQuicWarmPongIDByContactID[contactID] = nil
+        directQuicWarmPongReceivedAtByContactID[contactID] = nil
+    }
+
+    func receiverPrewarmRequestIsAcknowledged(
+        for contactID: UUID,
+        maximumAge: TimeInterval? = nil,
+        now: Date = Date()
+    ) -> Bool {
         guard let requestID = outboundReceiverPrewarmRequestIDByContactID[contactID],
               let ackRequestID = receiverPrewarmAckRequestIDByContactID[contactID] else {
             return false
         }
-        return requestID == ackRequestID
+        guard requestID == ackRequestID else { return false }
+        if let maximumAge {
+            guard let receivedAt = receiverPrewarmAckReceivedAtByContactID[contactID] else {
+                return false
+            }
+            return now.timeIntervalSince(receivedAt) <= maximumAge
+        }
+        return true
     }
 
     func hasReceiverPrewarmRequest(for contactID: UUID) -> Bool {
@@ -939,18 +976,42 @@ final class MediaRuntimeState {
         handledReceiverPrewarmRequestIDs.insert(requestID).inserted
     }
 
-    func markReceiverPrewarmAckReceived(contactID: UUID, requestID: String) {
+    func markReceiverPrewarmAckReceived(
+        contactID: UUID,
+        requestID: String,
+        receivedAt: Date = Date()
+    ) {
         receiverPrewarmAckRequestIDByContactID[contactID] = requestID
+        receiverPrewarmAckReceivedAtByContactID[contactID] = receivedAt
     }
 
-    func markDirectQuicWarmPongReceived(contactID: UUID, pingID: String?) {
+    func markDirectQuicWarmPongReceived(
+        contactID: UUID,
+        pingID: String?,
+        receivedAt: Date = Date()
+    ) {
         directQuicWarmPongIDByContactID[contactID] = pingID ?? ""
+        directQuicWarmPongReceivedAtByContactID[contactID] = receivedAt
+    }
+
+    func directQuicWarmPongIsFresh(
+        for contactID: UUID,
+        maximumAge: TimeInterval,
+        now: Date = Date()
+    ) -> Bool {
+        guard directQuicWarmPongIDByContactID[contactID] != nil,
+              let receivedAt = directQuicWarmPongReceivedAtByContactID[contactID] else {
+            return false
+        }
+        return now.timeIntervalSince(receivedAt) <= maximumAge
     }
 
     func clearReceiverPrewarmState(for contactID: UUID) {
         outboundReceiverPrewarmRequestIDByContactID[contactID] = nil
         receiverPrewarmAckRequestIDByContactID[contactID] = nil
+        receiverPrewarmAckReceivedAtByContactID[contactID] = nil
         directQuicWarmPongIDByContactID[contactID] = nil
+        directQuicWarmPongReceivedAtByContactID[contactID] = nil
     }
 
     func setMediaEncryptionSession(_ session: MediaEncryptionSession?, for contactID: UUID) {
@@ -968,6 +1029,9 @@ final class MediaRuntimeState {
         mediaEncryptionSendSequenceByContactID = [:]
         mediaEncryptionReceiveSequenceByContactID = [:]
         mediaEncryptionPlaintextFallbackLogKeys = []
+        pendingEncryptedAudioPayloadsByContactID = [:]
+        encryptedAudioRecoveryTasksByContactID.values.forEach { $0.cancel() }
+        encryptedAudioRecoveryTasksByContactID = [:]
     }
 
     func takeShouldLogMediaEncryptionPlaintextFallback(
@@ -998,6 +1062,52 @@ final class MediaRuntimeState {
         guard sequenceNumber > lastSequence else { return false }
         mediaEncryptionReceiveSequenceByContactID[contactID] = sequenceNumber
         return true
+    }
+
+    func enqueuePendingEncryptedAudioPayload(
+        _ payload: PendingEncryptedAudioPayload,
+        for contactID: UUID,
+        maxCount: Int
+    ) -> Int {
+        var pending = pendingEncryptedAudioPayloadsByContactID[contactID] ?? []
+        pending.append(payload)
+        if pending.count > maxCount {
+            pending.removeFirst(pending.count - maxCount)
+        }
+        pendingEncryptedAudioPayloadsByContactID[contactID] = pending
+        return pending.count
+    }
+
+    func drainPendingEncryptedAudioPayloads(for contactID: UUID) -> [PendingEncryptedAudioPayload] {
+        let pending = pendingEncryptedAudioPayloadsByContactID[contactID] ?? []
+        pendingEncryptedAudioPayloadsByContactID[contactID] = nil
+        return pending
+    }
+
+    func pendingEncryptedAudioPayloads(for contactID: UUID) -> [PendingEncryptedAudioPayload] {
+        pendingEncryptedAudioPayloadsByContactID[contactID] ?? []
+    }
+
+    func discardPendingEncryptedAudioPayloads(for contactID: UUID) -> Int {
+        let count = pendingEncryptedAudioPayloadsByContactID[contactID]?.count ?? 0
+        pendingEncryptedAudioPayloadsByContactID[contactID] = nil
+        return count
+    }
+
+    func hasEncryptedAudioRecoveryTask(for contactID: UUID) -> Bool {
+        encryptedAudioRecoveryTasksByContactID[contactID] != nil
+    }
+
+    func replaceEncryptedAudioRecoveryTask(
+        for contactID: UUID,
+        with task: Task<Void, Never>?
+    ) {
+        encryptedAudioRecoveryTasksByContactID[contactID]?.cancel()
+        encryptedAudioRecoveryTasksByContactID[contactID] = task
+    }
+
+    func clearEncryptedAudioRecoveryTask(for contactID: UUID) {
+        encryptedAudioRecoveryTasksByContactID[contactID] = nil
     }
 }
 

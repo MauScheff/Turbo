@@ -19,6 +19,11 @@ enum MediaSessionStartupMode: Equatable {
     case playbackOnly
 }
 
+enum MediaSessionPlaybackProfile: Equatable {
+    case lowLatency
+    case relayJitterBuffered
+}
+
 struct MediaSessionAudioConfiguration: Equatable {
     let category: AVAudioSession.Category
     let mode: AVAudioSession.Mode
@@ -80,13 +85,20 @@ protocol MediaSession: AnyObject {
     func startSendingAudio() async throws
     func stopSendingAudio() async throws
     func abortSendingAudio() async
-    func receiveRemoteAudioChunk(_ payload: String) async
+    func receiveRemoteAudioChunk(
+        _ payload: String,
+        playbackProfile: MediaSessionPlaybackProfile
+    ) async
     func audioRouteDidChange() async
     func hasPendingPlayback() -> Bool
     func close(deactivateAudioSession: Bool)
 }
 
 extension MediaSession {
+    func receiveRemoteAudioChunk(_ payload: String) async {
+        await receiveRemoteAudioChunk(payload, playbackProfile: .lowLatency)
+    }
+
     func close() {
         close(deactivateAudioSession: true)
     }
@@ -146,7 +158,10 @@ final class StubRelayMediaSession: MediaSession {
 
     func abortSendingAudio() async {}
 
-    func receiveRemoteAudioChunk(_ payload: String) async {}
+    func receiveRemoteAudioChunk(
+        _ payload: String,
+        playbackProfile _: MediaSessionPlaybackProfile
+    ) async {}
 
     func audioRouteDidChange() async {}
 

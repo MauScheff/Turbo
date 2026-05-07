@@ -52,6 +52,7 @@ The backend is a control plane, not a media plane. It owns identity, channels, i
 | `turbo.crypto.bytes` | Byte/base64url helpers used by APNs/JWT code. |
 | `turbo.crypto.integer` | Integer math helpers for crypto support such as modular arithmetic. |
 | `turbo.deploy.internal` | Env lookup and APNs private-key resolution/sync helpers used during deploy. |
+| `turbo.schemaDrift` | Pre-deploy persisted-value fixture hashes and deserialize checks for Unison Cloud storage schema drift. |
 
 ### Domain model
 
@@ -188,4 +189,3 @@ A few structural facts stand out from the current MCP snapshot:
 - contact summaries are backend-derived, not a dumb directory listing
 - wake behavior is split between direct APNs helpers and a worker-backed path
 - the same combined web service is used for local and deployed environments
-

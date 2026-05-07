@@ -1,0 +1,312 @@
+turbo.schemaDrift.fixture.userId : UserId
+turbo.schemaDrift.fixture.userId =
+  UserId.fromText "user-schema-avery"
+
+turbo.schemaDrift.fixture.peerUserId : UserId
+turbo.schemaDrift.fixture.peerUserId =
+  UserId.fromText "user-schema-blake"
+
+turbo.schemaDrift.fixture.deviceId : DeviceId
+turbo.schemaDrift.fixture.deviceId =
+  DeviceId.fromText "device-schema-ios-a"
+
+turbo.schemaDrift.fixture.peerDeviceId : DeviceId
+turbo.schemaDrift.fixture.peerDeviceId =
+  DeviceId.fromText "device-schema-ios-b"
+
+turbo.schemaDrift.fixture.channelId : ChannelId
+turbo.schemaDrift.fixture.channelId =
+  ChannelId.fromText "channel-schema-direct"
+
+turbo.schemaDrift.fixture.inviteId : InviteId
+turbo.schemaDrift.fixture.inviteId =
+  InviteId.fromText "invite-schema-direct"
+
+turbo.schemaDrift.fixture.instant : Instant
+turbo.schemaDrift.fixture.instant =
+  Instant.fromEpochSeconds +1712345678
+
+turbo.schemaDrift.fixture.laterInstant : Instant
+turbo.schemaDrift.fixture.laterInstant =
+  Instant.fromEpochSeconds +1712345689
+
+turbo.schemaDrift.internal.hash : a -> Nat
+turbo.schemaDrift.internal.hash value =
+  Universal.murmurHashTyped value
+
+turbo.schemaDrift.internal.serializedValueCanDeserialize : a -> Boolean
+turbo.schemaDrift.internal.serializedValueCanDeserialize value =
+  match Value.deserialize.impl (Value.serialize_v4 (Value.value value)) with
+    Left _ -> false
+    Right _ -> true
+
+turbo.schemaDrift.fixtures.user : User
+turbo.schemaDrift.fixtures.user =
+  User
+    turbo.schemaDrift.fixture.userId
+    "@schema-avery"
+    "Schema Avery"
+    turbo.schemaDrift.fixture.instant
+    turbo.schemaDrift.fixture.laterInstant
+
+turbo.schemaDrift.fixtures.device : Device
+turbo.schemaDrift.fixtures.device =
+  Device
+    turbo.schemaDrift.fixture.deviceId
+    turbo.schemaDrift.fixture.userId
+    IOS
+    (Some "ios-alert-token")
+    (Some "com.rounded.Turbo")
+    turbo.schemaDrift.fixture.instant
+    turbo.schemaDrift.fixture.laterInstant
+
+turbo.schemaDrift.fixtures.directChannel : DirectChannel
+turbo.schemaDrift.fixtures.directChannel =
+  DirectChannel
+    turbo.schemaDrift.fixture.channelId
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.peerUserId
+    turbo.schemaDrift.fixture.instant
+
+turbo.schemaDrift.fixtures.channelMembership : ChannelMembership
+turbo.schemaDrift.fixtures.channelMembership =
+  ChannelMembership
+    turbo.schemaDrift.fixture.channelId
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.instant
+
+turbo.schemaDrift.fixtures.invite : Invite
+turbo.schemaDrift.fixtures.invite =
+  Invite
+    turbo.schemaDrift.fixture.inviteId
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.peerUserId
+    turbo.schemaDrift.fixture.channelId
+    Pending
+    2
+    turbo.schemaDrift.fixture.instant
+    (Some turbo.schemaDrift.fixture.laterInstant)
+
+turbo.schemaDrift.fixtures.ephemeralToken : EphemeralToken
+turbo.schemaDrift.fixtures.ephemeralToken =
+  EphemeralToken
+    turbo.schemaDrift.fixture.channelId
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.deviceId
+    "ptt-token-fixture"
+    turbo.schemaDrift.fixture.instant
+
+turbo.schemaDrift.fixtures.devicePresence : DevicePresence
+turbo.schemaDrift.fixtures.devicePresence =
+  DevicePresence
+    turbo.schemaDrift.fixture.deviceId
+    turbo.schemaDrift.fixture.userId
+    Online
+    (Some turbo.schemaDrift.fixture.channelId)
+    turbo.schemaDrift.fixture.instant
+
+turbo.schemaDrift.fixtures.transmitState : TransmitState
+turbo.schemaDrift.fixtures.transmitState =
+  TransmitState
+    turbo.schemaDrift.fixture.channelId
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.deviceId
+    turbo.schemaDrift.fixture.peerUserId
+    turbo.schemaDrift.fixture.peerDeviceId
+    turbo.schemaDrift.fixture.instant
+    turbo.schemaDrift.fixture.laterInstant
+
+turbo.schemaDrift.fixtures.receiverAudioReadiness : ReceiverAudioReadinessRecord
+turbo.schemaDrift.fixtures.receiverAudioReadiness =
+  ReceiverAudioReadinessRecord
+    turbo.schemaDrift.fixture.channelId
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.deviceId
+    "session-schema-1"
+    AudioReadinessReady
+    turbo.schemaDrift.fixture.instant
+
+turbo.schemaDrift.fixtures.directQuicIdentity : DirectQuicDeviceIdentity
+turbo.schemaDrift.fixtures.directQuicIdentity =
+  DirectQuicDeviceIdentity
+    "direct-quic-public-key-fixture"
+    turbo.schemaDrift.fixture.instant
+    turbo.schemaDrift.fixture.laterInstant
+
+turbo.schemaDrift.fixtures.mediaEncryptionIdentity : MediaEncryptionDeviceIdentity
+turbo.schemaDrift.fixtures.mediaEncryptionIdentity =
+  MediaEncryptionDeviceIdentity
+    "media-encryption-public-key-fixture"
+    "identity-signature-fixture"
+    "identity-signing-public-key-fixture"
+    turbo.schemaDrift.fixture.instant
+    turbo.schemaDrift.fixture.laterInstant
+
+turbo.schemaDrift.fixtures.devDiagnosticsReport : DevDiagnosticsReport
+turbo.schemaDrift.fixtures.devDiagnosticsReport =
+  DevDiagnosticsReport
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.deviceId
+    "diagnostics body"
+    "debug"
+    (Some "snapshot body")
+    "Turbo/1"
+    "iOS 17"
+    turbo.schemaDrift.fixture.instant
+
+turbo.schemaDrift.fixtures.devWakeEvent : DevWakeEvent
+turbo.schemaDrift.fixtures.devWakeEvent =
+  DevWakeEvent
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.channelId
+    turbo.schemaDrift.fixture.deviceId
+    "wake-start"
+    turbo.schemaDrift.fixture.peerUserId
+    turbo.schemaDrift.fixture.peerDeviceId
+    "sent"
+    "apns"
+    "wake accepted"
+    (Some "metadata")
+    turbo.schemaDrift.fixture.instant
+
+turbo.schemaDrift.fixtures.wakeJobKey : WakeJobKey
+turbo.schemaDrift.fixtures.wakeJobKey =
+  WakeJobKey
+    turbo.schemaDrift.fixture.channelId
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.deviceId
+    turbo.schemaDrift.fixture.peerDeviceId
+    "wake-job-schema"
+
+turbo.schemaDrift.fixtures.wakeJob : WakeJob
+turbo.schemaDrift.fixtures.wakeJob =
+  WakeJob
+    turbo.schemaDrift.fixtures.wakeJobKey
+    "wake-start"
+    "production"
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.deviceId
+    "ptt-token-fixture"
+    turbo.schemaDrift.fixture.peerUserId
+    turbo.schemaDrift.fixture.peerDeviceId
+    "bundle-id"
+    "payload-fixture"
+    turbo.schemaDrift.fixture.instant
+
+turbo.schemaDrift.fixtures.apnsEnvironment : ApnsEnvironment
+turbo.schemaDrift.fixtures.apnsEnvironment =
+  Production
+
+turbo.schemaDrift.currentHashes : [(Text, Nat)]
+turbo.schemaDrift.currentHashes =
+  [ ("User", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.user)
+  , ("Device", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.device)
+  , ("DirectChannel", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.directChannel)
+  , ("ChannelMembership", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.channelMembership)
+  , ("Invite", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.invite)
+  , ("EphemeralToken", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.ephemeralToken)
+  , ("DevicePresence", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.devicePresence)
+  , ("TransmitState", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.transmitState)
+  , ("ReceiverAudioReadinessRecord", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.receiverAudioReadiness)
+  , ("DirectQuicDeviceIdentity", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.directQuicIdentity)
+  , ("MediaEncryptionDeviceIdentity", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.mediaEncryptionIdentity)
+  , ("DevDiagnosticsReport", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.devDiagnosticsReport)
+  , ("DevWakeEvent", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.devWakeEvent)
+  , ("WakeJobKey", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.wakeJobKey)
+  , ("WakeJob", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.wakeJob)
+  , ("ApnsEnvironment", turbo.schemaDrift.internal.hash turbo.schemaDrift.fixtures.apnsEnvironment)
+  ]
+
+turbo.schemaDrift.expectedHashes : [(Text, Nat)]
+turbo.schemaDrift.expectedHashes =
+  [ ("User", 18405457429807675968)
+  , ("Device", 7731537327862444920)
+  , ("DirectChannel", 8424395335897091453)
+  , ("ChannelMembership", 10052281121105448336)
+  , ("Invite", 2875659550947466548)
+  , ("EphemeralToken", 18390580796399364664)
+  , ("DevicePresence", 17260273128971024046)
+  , ("TransmitState", 13627689098987215502)
+  , ("ReceiverAudioReadinessRecord", 18072129648974993835)
+  , ("DirectQuicDeviceIdentity", 14164950114523141883)
+  , ("MediaEncryptionDeviceIdentity", 3397794674441907854)
+  , ("DevDiagnosticsReport", 6695540840048643011)
+  , ("DevWakeEvent", 10622054063331164239)
+  , ("WakeJobKey", 3763014053017301332)
+  , ("WakeJob", 12579299559049869083)
+  , ("ApnsEnvironment", 5679781561595473831)
+  ]
+
+turbo.schemaDrift.currentDeserializeChecks : [(Text, Boolean)]
+turbo.schemaDrift.currentDeserializeChecks =
+  [ ("User", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.user)
+  , ("Device", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.device)
+  , ("DirectChannel", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.directChannel)
+  , ("ChannelMembership", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.channelMembership)
+  , ("Invite", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.invite)
+  , ("EphemeralToken", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.ephemeralToken)
+  , ("DevicePresence", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.devicePresence)
+  , ("TransmitState", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.transmitState)
+  , ("ReceiverAudioReadinessRecord", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.receiverAudioReadiness)
+  , ("DirectQuicDeviceIdentity", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.directQuicIdentity)
+  , ("MediaEncryptionDeviceIdentity", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.mediaEncryptionIdentity)
+  , ("DevDiagnosticsReport", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.devDiagnosticsReport)
+  , ("DevWakeEvent", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.devWakeEvent)
+  , ("WakeJobKey", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.wakeJobKey)
+  , ("WakeJob", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.wakeJob)
+  , ("ApnsEnvironment", turbo.schemaDrift.internal.serializedValueCanDeserialize turbo.schemaDrift.fixtures.apnsEnvironment)
+  ]
+
+turbo.schemaDrift.expectedDeserializeChecks : [(Text, Boolean)]
+turbo.schemaDrift.expectedDeserializeChecks =
+  [ ("User", true)
+  , ("Device", true)
+  , ("DirectChannel", true)
+  , ("ChannelMembership", true)
+  , ("Invite", true)
+  , ("EphemeralToken", true)
+  , ("DevicePresence", true)
+  , ("TransmitState", true)
+  , ("ReceiverAudioReadinessRecord", true)
+  , ("DirectQuicDeviceIdentity", true)
+  , ("MediaEncryptionDeviceIdentity", true)
+  , ("DevDiagnosticsReport", true)
+  , ("DevWakeEvent", true)
+  , ("WakeJobKey", true)
+  , ("WakeJob", true)
+  , ("ApnsEnvironment", true)
+  ]
+
+turbo.schemaDrift.tests.persistedValueShapesAreStable : [Result]
+turbo.schemaDrift.tests.persistedValueShapesAreStable = test.verify do
+  labeled "persisted value typed hashes match the approved schema baseline" do
+    ensureEqual turbo.schemaDrift.expectedHashes turbo.schemaDrift.currentHashes
+  labeled "persisted fixture values serialize to bytes that deserialize" do
+    ensureEqual
+      turbo.schemaDrift.expectedDeserializeChecks
+      turbo.schemaDrift.currentDeserializeChecks
+
+turbo.schemaDrift.check : '{Exception} ()
+turbo.schemaDrift.check = do
+  hashesMatch =
+    Universal.eq turbo.schemaDrift.currentHashes turbo.schemaDrift.expectedHashes
+  deserializeChecksPass =
+    Universal.eq turbo.schemaDrift.currentDeserializeChecks turbo.schemaDrift.expectedDeserializeChecks
+  if hashesMatch && deserializeChecksPass then
+    ()
+  else
+    Exception.raiseGeneric
+      "persisted backend value schema drift detected; approve a migration and update turbo.schemaDrift.expectedHashes"
+      ( turbo.schemaDrift.expectedHashes
+      , turbo.schemaDrift.currentHashes
+      , turbo.schemaDrift.currentDeserializeChecks)
+
+turbo.schemaDrift.doc : Doc
+turbo.schemaDrift.doc =
+  {{
+  `turbo.schemaDrift` is the pre-deploy guard against accidental changes to backend values stored in Unison Cloud `OrderedTable`s.
+  
+  Each fixture is a known value for one persisted domain record. {{ docLink (docEmbedTermLink do turbo.schemaDrift.currentHashes) }} hashes those values with typed universal hashing, and {{ docLink (docEmbedTermLink do turbo.schemaDrift.expectedHashes) }} records the approved baseline. The guard also serializes each fixture to reflection bytes and verifies that those bytes deserialize. If a persisted type changes, {{ docLink (docEmbedTermLink do turbo.schemaDrift.check) }} fails before deploy.
+  
+  A failure means either the change must be reverted, the production data must be migrated or safely reset, or the new shape must be deliberately approved by updating `expectedHashes` in the same change. Runtime-only tables that store live refs or websockets are excluded because they are not ordinary portable durable values.
+  }}

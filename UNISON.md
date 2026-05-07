@@ -94,6 +94,26 @@ Important:
 - `deploy-force` only counts if it updates `turbo.service.deployStamp` in
   `turbo/main`, not `scratch/main`.
 
+## Persisted storage schema changes
+
+When changing a type stored in Unison Cloud storage, follow
+[`MIGRATIONS.md`](/Users/mau/Development/Turbo/MIGRATIONS.md).
+
+Short version:
+
+- decide whether the data is `preserve`, `reset`, or `revert`
+- prefer versioned persisted types/table names for evolving storage shapes
+- do not write mixed value versions into the same typed table
+- add or update `turbo.schemaDrift` fixtures for persisted value types
+- update `turbo.schemaDrift.expectedHashes` only when the migration/reset
+  decision is intentional and documented
+- run `turbo.schemaDrift.tests.persistedValueShapesAreStable` and
+  `turbo.schemaDrift.check`
+
+`just deploy` runs `turbo.schemaDrift.check` first through
+`just backend-schema-drift-test`. If this fails, treat it as a blocked deploy
+until the migration, reset, or revert path is explicit.
+
 ## Design maxims (Functional Programming)
 
 * Model the domain with types first

@@ -994,7 +994,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         guard let connection else {
             throw DirectQuicProbeError.connectionFailed("direct QUIC media path is unavailable")
         }
-        try await send(message: .audioChunk(payload), on: connection)
+        try sendLiveAudio(message: .audioChunk(payload), on: connection)
     }
 
     func sendReceiverPrewarmRequest(_ payload: DirectQuicReceiverPrewarmPayload) async throws {
@@ -1626,6 +1626,25 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
                 }
             })
         }
+    }
+
+    private func sendLiveAudio(
+        message: DirectQuicWireMessage,
+        on connection: NWConnection
+    ) throws {
+        let content = try DirectQuicWireCodec.encode(message)
+        connection.send(content: content, completion: .contentProcessed { [weak self] error in
+            guard let error else { return }
+            Task {
+                await self?.report(
+                    "Direct QUIC live audio send completion failed",
+                    metadata: [
+                        "error": error.localizedDescription,
+                        "payloadLength": String(content.count),
+                    ]
+                )
+            }
+        })
     }
 
     private func activeControlConnection() throws -> NWConnection {

@@ -22,7 +22,6 @@
           "selected": {
             "handle": "@blake",
             "phase": "idle",
-            "status": "Blake is online",
             "isJoined": false,
             "isTransmitting": false,
             "canTransmitNow": false

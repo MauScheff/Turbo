@@ -271,15 +271,20 @@ enum PTTSystemPolicyReducer {
 
         case .backendChannelReady(let backendChannelID):
             if let latestTokenHex = state.tokenRegistration.latestTokenHex {
-                nextState.tokenRegistration = .tokenKnown(
-                    tokenHex: latestTokenHex,
-                    backendChannelID: backendChannelID
-                )
-                if let request = uploadRequestIfNeeded(
-                    latestTokenHex: latestTokenHex,
+                let request = PTTTokenUploadRequest(
                     backendChannelID: backendChannelID,
-                    tokenRegistration: state.tokenRegistration
-                ) {
+                    tokenHex: latestTokenHex
+                )
+                switch state.tokenRegistration {
+                case .uploadPending(let pendingRequest) where pendingRequest == request:
+                    nextState.tokenRegistration = state.tokenRegistration
+                case .registered(let registeredRequest) where registeredRequest == request:
+                    nextState.tokenRegistration = state.tokenRegistration
+                default:
+                    nextState.tokenRegistration = .tokenKnown(
+                        tokenHex: latestTokenHex,
+                        backendChannelID: backendChannelID
+                    )
                     nextState.tokenRegistration = .uploadPending(request)
                     effects.append(.uploadEphemeralToken(request))
                 }

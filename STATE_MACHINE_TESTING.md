@@ -122,23 +122,10 @@ Each new reproducible distributed bug should produce:
 Turbo also has a deterministic simulator fuzz lane for finding distributed
 state-machine regressions before there is a human-written scenario.
 
-- `just simulator-fuzz-local <seed> <count>`
-  - generates model-based scenario JSON under `/tmp/turbo-scenario-fuzz/<run-id>/`
-  - runs each generated scenario through the existing simulator scenario XCTest
-    harness against `http://localhost:8090/s/turbo`
-  - saves generated JSON, XCTest output, merged diagnostics text, merged
-    diagnostics JSON, metadata, and replay commands per seed
-- `just simulator-fuzz-local-overnight <seed> <count>`
-  - same lane, but stops on the first failure by default
-- `just simulator-fuzz-replay <artifact-dir>`
-  - replays the saved `scenario.json` or `minimized.json`
-- `just simulator-fuzz-shrink <artifact-dir>`
-  - tries whole-step removal, action removal, and simple fault-parameter
-    reduction while preserving the same oracle
-
-Generated scenarios are not copied into `scenarios/` automatically. They use the
-same DSL as checked-in scenarios through the runner's `scenarioFile` /
-`scenarioDirectory` runtime config path.
+The dedicated reference is
+[`SIMULATOR_FUZZING.md`](/Users/mau/Development/Turbo/SIMULATOR_FUZZING.md).
+It covers generator shape, local commands, artifact layout, replay, shrinking,
+oracles, and promotion from fuzz failure to checked-in regression.
 
 ### Fuzz Failure To Regression
 

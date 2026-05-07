@@ -5,6 +5,7 @@ struct IncomingTalkRequestSurface: Equatable, Identifiable {
     let inviteID: String
     let contactName: String
     let contactHandle: String
+    let contactIsOnline: Bool
     let requestCount: Int
     let recencyKey: String
 
@@ -20,6 +21,7 @@ struct IncomingTalkRequestCandidate: Equatable {
             inviteID: invite.inviteId,
             contactName: contact.name,
             contactHandle: contact.handle,
+            contactIsOnline: contact.isOnline,
             requestCount: invite.requestCount,
             recencyKey: invite.updatedAt ?? invite.createdAt
         )
@@ -35,7 +37,9 @@ enum TalkRequestSurfaceEvent: Equatable {
     case invitesUpdated(
         candidates: [IncomingTalkRequestCandidate],
         selectedContactID: UUID?,
-        applicationIsActive: Bool
+        applicationIsActive: Bool,
+        allowsSelectedContact: Bool = false,
+        allowsAlreadySurfacedInvite: Bool = false
     )
     case incomingRequestDismissed
     case contactOpened(contactID: UUID, inviteID: String?)
@@ -49,7 +53,13 @@ enum TalkRequestSurfaceReducer {
         var nextState = state
 
         switch event {
-        case .invitesUpdated(let candidates, let selectedContactID, let applicationIsActive):
+        case .invitesUpdated(
+            let candidates,
+            let selectedContactID,
+            let applicationIsActive,
+            let allowsSelectedContact,
+            let allowsAlreadySurfacedInvite
+        ):
             let activeInviteIDs = Set(candidates.map(\.surface.inviteID))
             nextState.surfacedInviteIDs.formIntersection(activeInviteIDs)
 
@@ -71,8 +81,11 @@ enum TalkRequestSurfaceReducer {
                     lhs.surface.recencyKey > rhs.surface.recencyKey
                 }
                 .first { candidate in
-                    candidate.surface.contactID != selectedContactID
-                        && !nextState.surfacedInviteIDs.contains(candidate.surface.inviteID)
+                    (allowsSelectedContact || candidate.surface.contactID != selectedContactID)
+                        && (
+                            allowsAlreadySurfacedInvite
+                                || !nextState.surfacedInviteIDs.contains(candidate.surface.inviteID)
+                        )
                 }
 
             if let candidate {

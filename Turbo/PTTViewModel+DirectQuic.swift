@@ -8,6 +8,7 @@ extension PTTViewModel {
     private var foregroundDirectQuicInitialConnectivityRetryBackoffMilliseconds: Int { 1_000 }
     private var foregroundDirectQuicInitialConnectivityRetryLimit: Int { 2 }
     var directQuicFirstTalkGraceMilliseconds: Int { 5_000 }
+    var directQuicAudioFreshnessMilliseconds: Int { 30_000 }
 
     func directQuicAttemptRole(
         localDeviceID: String,
@@ -30,6 +31,18 @@ extension PTTViewModel {
     func shouldUseDirectQuicTransport(for contactID: UUID) -> Bool {
         guard mediaRuntime.directQuicProbeController != nil else { return false }
         return mediaRuntime.directQuicUpgrade.attempt(for: contactID)?.isDirectActive == true
+    }
+
+    func shouldUseDirectQuicAudioTransport(for contactID: UUID) -> Bool {
+        guard shouldUseDirectQuicTransport(for: contactID) else { return false }
+        let maximumAge = TimeInterval(directQuicAudioFreshnessMilliseconds) / 1_000
+        return mediaRuntime.receiverPrewarmRequestIsAcknowledged(
+            for: contactID,
+            maximumAge: maximumAge
+        ) || mediaRuntime.directQuicWarmPongIsFresh(
+            for: contactID,
+            maximumAge: maximumAge
+        )
     }
 
     func hasActiveBackgroundPTTFlowOwningDirectQuic(for contactID: UUID) -> Bool {
@@ -1153,7 +1166,8 @@ extension PTTViewModel {
         for contactID: UUID,
         reason: String
     ) async {
-        if mediaRuntime.hasReceiverPrewarmRequest(for: contactID) {
+        if mediaRuntime.hasReceiverPrewarmRequest(for: contactID),
+           mediaRuntime.receiverPrewarmRequestIsAcknowledged(for: contactID) {
             diagnostics.record(
                 .media,
                 message: "Skipping duplicate Direct QUIC receiver prewarm request",
@@ -1182,7 +1196,8 @@ extension PTTViewModel {
     func sendDirectQuicReceiverPrewarmRequest(
         for contactID: UUID,
         reason: String,
-        requestID: String? = nil
+        requestID: String? = nil,
+        recordOutboundRequestID: Bool = false
     ) async -> Bool {
         guard let backend = backendServices,
               let contact = contacts.first(where: { $0.id == contactID }),
@@ -1194,6 +1209,12 @@ extension PTTViewModel {
         }
 
         let requestID = requestID ?? mediaRuntime.receiverPrewarmRequestID(for: contactID)
+        if recordOutboundRequestID {
+            mediaRuntime.replaceReceiverPrewarmRequestID(
+                for: contactID,
+                requestID: requestID
+            )
+        }
         let payload = DirectQuicReceiverPrewarmPayload(
             requestId: requestID,
             channelId: channelID,
@@ -1266,16 +1287,18 @@ extension PTTViewModel {
     @discardableResult
     func sendDirectQuicReceiverTransmitPrepareIfPossible(
         for contactID: UUID,
-        reason: String
+        reason: String,
+        sendWarmPing: Bool = true
     ) async -> Bool {
         let requestID = UUID().uuidString.lowercased()
         let transmitPrepareReason = "transmit-\(reason)"
         let sent = await sendDirectQuicReceiverPrewarmRequest(
             for: contactID,
             reason: transmitPrepareReason,
-            requestID: requestID
+            requestID: requestID,
+            recordOutboundRequestID: true
         )
-        if sent {
+        if sent, sendWarmPing {
             await sendDirectQuicWarmPingIfPossible(for: contactID, reason: transmitPrepareReason)
         }
         return sent

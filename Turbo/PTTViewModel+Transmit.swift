@@ -146,6 +146,8 @@ extension PTTViewModel {
             "system-audio-session-activated",
             "backend-lease-requested",
             "backend-lease-granted",
+            "direct-quic-transmit-prepare-requested",
+            "direct-quic-transmit-prepare-sent",
             "media-session-start-requested",
             "media-session-start-completed",
             "early-media-session-start-requested",
@@ -517,6 +519,27 @@ extension PTTViewModel {
     func desiredLocalReceiverAudioReadiness(for contactID: UUID) -> Bool {
         guard mediaSessionContactID == contactID else { return false }
         guard mediaConnectionState == .connected else { return false }
+        guard let contact = contacts.first(where: { $0.id == contactID }) else { return false }
+        let peerDeviceID =
+            channelReadinessByContactID[contactID]?.peerTargetDeviceId
+            ?? directQuicPeerDeviceID(for: contactID)
+        guard localReceiverMediaEncryptionReadyForLiveMedia(
+            contactID: contactID,
+            channelID: contact.backendChannelId,
+            peerDeviceID: peerDeviceID
+        ) else {
+            diagnostics.record(
+                .media,
+                message: "Withholding receiver-ready until media E2EE session is configured",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": contact.backendChannelId ?? "none",
+                    "peerDeviceId": peerDeviceID ?? "none",
+                    "peerIdentityAdvertised": String(mediaEncryptionIsRequired(for: contactID)),
+                ]
+            )
+            return false
+        }
 
         switch pttWakeRuntime.incomingWakeActivationState(for: contactID) {
         case .systemActivated, .appManagedFallback:
@@ -729,7 +752,7 @@ extension PTTViewModel {
 
     func firstTalkStartupProfile(
         for contactID: UUID,
-        startGraceIfNeeded: Bool = true
+        startGraceIfNeeded: Bool = false
     ) -> FirstTalkStartupProfile {
         if shouldUseDirectQuicTransport(for: contactID) {
             if startGraceIfNeeded {
@@ -740,6 +763,12 @@ extension PTTViewModel {
 
         let relayReadiness = firstTalkReadiness(for: contactID)
         let relayProfile: FirstTalkStartupProfile = relayReadiness.isReady ? .relayWarm : .relayWarming
+        guard !relayReadiness.isReady else {
+            if startGraceIfNeeded {
+                kickDirectQuicFirstTalkWarmupProbeIfNeeded(for: contactID)
+            }
+            return .relayWarm
+        }
 
         guard let contact = contacts.first(where: { $0.id == contactID }),
               let channelID = contact.backendChannelId else {
@@ -1133,6 +1162,11 @@ extension PTTViewModel {
         transmitSnapshot: TransmitDomainSnapshot
     ) -> Bool {
         backendShowsLocalTransmit && !transmitSnapshot.explicitStopRequested
+    }
+
+    func hasActiveTransmitPressIntent() -> Bool {
+        !transmitRuntime.explicitStopRequested
+            && (transmitRuntime.isPressingTalk || transmitCoordinator.state.isPressingTalk)
     }
 
     func beginTransmit() {
@@ -1625,7 +1659,6 @@ extension PTTViewModel {
                 channelUUID: request.channelUUID,
                 channelID: request.backendChannelID
             )
-            try await requestSystemTransmitHandoffIfNeeded(for: request)
             if request.backendSupportsWebSocket {
                 recordTransmitStartupTiming(
                     stage: "websocket-resume-requested",
@@ -1641,6 +1674,7 @@ extension PTTViewModel {
                     reason: "begin-transmit"
                 )
             }
+            try await requestSystemTransmitHandoffIfNeeded(for: request)
             if await reassertBackendJoinAfterWakeIfNeeded(for: request.contactID) {
                 await refreshChannelState(for: request.contactID)
             }
@@ -2195,6 +2229,33 @@ extension PTTViewModel {
     ) async throws {
         guard !request.usesLocalHTTPBackend else { return }
         guard let channelUUID = request.channelUUID else { return }
+        recordTransmitStartupTiming(
+            stage: "direct-quic-transmit-prepare-requested",
+            contactID: request.contactID,
+            channelUUID: channelUUID,
+            channelID: request.backendChannelID,
+            subsystem: .media
+        )
+        let didSendDirectQuicTransmitPrepare = await sendDirectQuicReceiverTransmitPrepareIfPossible(
+            for: request.contactID,
+            reason: "system-transmit-handoff",
+            sendWarmPing: false
+        )
+        if didSendDirectQuicTransmitPrepare {
+            recordTransmitStartupTiming(
+                stage: "direct-quic-transmit-prepare-sent",
+                contactID: request.contactID,
+                channelUUID: channelUUID,
+                channelID: request.backendChannelID,
+                subsystem: .media
+            )
+            Task { @MainActor [weak self] in
+                await self?.sendDirectQuicWarmPingIfPossible(
+                    for: request.contactID,
+                    reason: "transmit-system-transmit-handoff"
+                )
+            }
+        }
         guard !pttCoordinator.state.isTransmitting || pttCoordinator.state.systemChannelUUID != channelUUID else { return }
         guard !transmitRuntime.isSystemTransmitBeginPending(channelUUID: channelUUID) else { return }
 
@@ -2210,10 +2271,6 @@ extension PTTViewModel {
             channelUUID: channelUUID,
             reason: "before-system-transmit-handoff",
             timeoutNanoseconds: remoteParticipantClearBeforeTransmitTimeoutNanoseconds
-        )
-        await sendDirectQuicReceiverTransmitPrepareIfPossible(
-            for: request.contactID,
-            reason: "system-transmit-handoff"
         )
 
         let usesSpeculativeForegroundWarmDirectTransmit =
@@ -2636,8 +2693,7 @@ extension PTTViewModel {
     ) async -> Bool {
         guard !request.usesLocalHTTPBackend else { return false }
         guard request.channelUUID != nil else { return false }
-        guard transmitRuntime.isPressingTalk else { return false }
-        guard transmitCoordinator.state.isPressingTalk else { return false }
+        guard hasActiveTransmitPressIntent() else { return false }
         guard shouldBridgePrewarmedDirectMediaDuringSystemTransmit(for: request.contactID) else {
             return false
         }
@@ -2852,10 +2908,8 @@ extension PTTViewModel {
         let reason: String?
         if transmitRuntime.explicitStopRequested {
             reason = "explicit-stop-requested"
-        } else if !transmitRuntime.isPressingTalk {
+        } else if !hasActiveTransmitPressIntent() {
             reason = "press-ended"
-        } else if !transmitCoordinator.state.isPressingTalk {
-            reason = "coordinator-not-pressing"
         } else if pttCoordinator.state.systemChannelUUID != channelUUID {
             reason = "system-channel-mismatch"
         } else if activeTarget != target {
@@ -2909,10 +2963,8 @@ extension PTTViewModel {
         let reason: String?
         if transmitRuntime.explicitStopRequested {
             reason = "explicit-stop-requested"
-        } else if !transmitRuntime.isPressingTalk {
+        } else if !hasActiveTransmitPressIntent() {
             reason = "press-ended"
-        } else if !transmitCoordinator.state.isPressingTalk {
-            reason = "coordinator-not-pressing"
         } else if pttCoordinator.state.systemChannelUUID != request.channelUUID {
             reason = "system-channel-mismatch"
         } else if !requestStillCurrent {
@@ -2979,10 +3031,8 @@ extension PTTViewModel {
         let reason: String?
         if transmitRuntime.explicitStopRequested {
             reason = "explicit-stop-requested"
-        } else if !transmitRuntime.isPressingTalk {
+        } else if !hasActiveTransmitPressIntent() {
             reason = "press-ended"
-        } else if !transmitCoordinator.state.isPressingTalk {
-            reason = "coordinator-not-pressing"
         } else if !requestStillCurrent {
             reason = "request-not-current"
         } else {
@@ -3520,8 +3570,7 @@ extension PTTViewModel {
         trigger: String
     ) async {
         guard !usesLocalHTTPBackend else { return }
-        guard transmitRuntime.isPressingTalk else { return }
-        guard transmitCoordinator.state.isPressingTalk else { return }
+        guard hasActiveTransmitPressIntent() else { return }
         guard let request = transmitCoordinator.state.pendingRequest else { return }
         guard request.channelUUID == channelUUID else { return }
         guard pttCoordinator.state.systemChannelUUID == channelUUID else { return }
@@ -4225,7 +4274,7 @@ extension PTTViewModel {
 
             if let self {
                 let directTransport = await MainActor.run { () -> DirectQuicProbeController? in
-                    guard self.shouldUseDirectQuicTransport(for: target.contactID) else {
+                    guard self.shouldUseDirectQuicAudioTransport(for: target.contactID) else {
                         return nil
                     }
                     return self.mediaRuntime.directQuicProbeController
@@ -4264,7 +4313,8 @@ extension PTTViewModel {
                 "contactId": target.contactID.uuidString,
                 "channelId": target.channelID,
                 "deviceId": target.deviceID,
-                "transport": shouldUseDirectQuicTransport(for: target.contactID) ? "direct-quic" : "relay-websocket",
+                "transport": shouldUseDirectQuicAudioTransport(for: target.contactID) ? "direct-quic" : "relay-websocket",
+                "directQuicActive": String(shouldUseDirectQuicTransport(for: target.contactID)),
                 "selection": "dynamic",
             ]
         )

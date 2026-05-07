@@ -27,6 +27,8 @@ struct TurboCallPrototypeView: View {
 
     @State private var holdToTalkGestureState = HoldToTalkGestureState()
     @State private var transmitPressBeganAt: Date?
+    @State private var pendingHoldToTalkTask: Task<Void, Never>?
+    @State private var holdToTalkDidBeginTransmit = false
 
     @MainActor
     static func prewarmDefaultTexture() {
@@ -39,40 +41,51 @@ struct TurboCallPrototypeView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color(red: 0.18, green: 0.18, blue: 0.19)
-                .ignoresSafeArea()
+        GeometryReader { proxy in
+            let usesWideLayout = proxy.size.width >= 700
 
-            VStack(spacing: 0) {
-                topBar
-                    .padding(.bottom, 74)
+            ZStack {
+                Color(red: 0.18, green: 0.18, blue: 0.19)
+                    .ignoresSafeArea()
 
-                identityRow
+                VStack(spacing: 0) {
+                    topBar
+                        .padding(.bottom, usesWideLayout ? 52 : 44)
 
-                Spacer(minLength: 0)
+                    identityRow(usesWideLayout: usesWideLayout)
 
-                actionButtons
+                    Spacer(minLength: 0)
+
+                    actionButtons
+                        .frame(maxWidth: usesWideLayout ? 520 : .infinity)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, usesWideLayout ? 44 : 28)
+                .padding(.top, 18)
+                .padding(.bottom, 58)
             }
-            .padding(.horizontal, 28)
-            .padding(.top, 18)
-            .padding(.bottom, 58)
         }
         .onChange(of: isTransmitPressActive) { _, isActive in
             holdToTalkGestureState.handleMachinePressChanged(isActive: isActive)
             if isActive {
                 transmitPressBeganAt = transmitPressBeganAt ?? Date()
             } else {
+                pendingHoldToTalkTask?.cancel()
+                pendingHoldToTalkTask = nil
+                holdToTalkDidBeginTransmit = false
                 transmitPressBeganAt = nil
             }
         }
         .onChange(of: contact.id) { _, _ in
-            if holdToTalkGestureState.cancel() {
+            let didBeginTransmit = cancelPendingHoldToTalk()
+            if didBeginTransmit {
                 onEndTransmit()
             }
             transmitPressBeganAt = nil
         }
         .onDisappear {
-            if holdToTalkGestureState.cancel() {
+            let didBeginTransmit = cancelPendingHoldToTalk()
+            if didBeginTransmit {
                 onEndTransmit()
             }
             transmitPressBeganAt = nil
@@ -81,67 +94,81 @@ struct TurboCallPrototypeView: View {
 
     private var topBar: some View {
         HStack {
+            Spacer()
+
             Button(action: onClose) {
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 42, height: 42)
-                    .background(
-                        Circle()
-                            .fill(Color.white.opacity(0.14))
-                    )
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(TurboCallControlButtonStyle())
             .accessibilityLabel("Minimize")
-
-            Spacer()
         }
     }
 
-    private var identityRow: some View {
-        HStack(alignment: .center, spacing: 24) {
-            Circle()
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.73, green: 0.80, blue: 0.98),
-                            Color(red: 0.45, green: 0.49, blue: 0.72)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: 76, height: 76)
-                .overlay(
-                    Text(initials(for: contact.name))
-                        .font(.system(size: 28, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                )
+    @ViewBuilder
+    private func identityRow(usesWideLayout: Bool) -> some View {
+        if usesWideLayout {
+            VStack(alignment: .center, spacing: 14) {
+                callAvatar
+                    .frame(width: 82, height: 82)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Chat with \(contact.name)")
-                    .font(.system(size: 34, weight: .regular, design: .default))
+                identityText(alignment: .center)
+                    .frame(width: 360, alignment: .center)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        } else {
+            HStack(alignment: .center, spacing: 24) {
+                callAvatar
+                    .frame(width: 76, height: 76)
+
+                identityText(alignment: .leading)
+
+                Spacer()
+            }
+            .padding(.horizontal, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var callAvatar: some View {
+        Circle()
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.73, green: 0.80, blue: 0.98),
+                        Color(red: 0.45, green: 0.49, blue: 0.72)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay(
+                Text(initials(for: contact.name))
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.58)
+            )
+    }
 
-                HStack(spacing: 8) {
-                    TimelineView(.periodic(from: .now, by: 0.2)) { timeline in
-                        Text(callStatusText(now: timeline.date))
-                    }
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 27, weight: .regular))
-                        .offset(y: 1)
-                }
-                .font(.system(size: 28, weight: .regular, design: .default))
+    private func identityText(alignment: HorizontalAlignment) -> some View {
+        VStack(alignment: alignment, spacing: 6) {
+            Text(contact.name)
+                .font(.system(size: 34, weight: .regular, design: .default))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.58)
+
+            let status = callStatusText(now: Date())
+            Text(status)
+                .font(.system(size: 23, weight: .regular, design: .default))
                 .foregroundStyle(.white.opacity(0.48))
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
-            }
-
-            Spacer()
+                .multilineTextAlignment(alignment == .center ? .center : .leading)
+                .animation(.easeInOut(duration: 0.18), value: status)
         }
-        .padding(.horizontal, 4)
     }
 
     private var actionButtons: some View {
@@ -161,6 +188,7 @@ struct TurboCallPrototypeView: View {
                 symbolName: "waveform",
                 tint: talkButtonTint,
                 isEnabled: talkButtonIsEnabled,
+                isActive: isTalkButtonActive,
                 action: talkButtonTap
             )
             .simultaneousGesture(talkGesture)
@@ -173,15 +201,25 @@ struct TurboCallPrototypeView: View {
     }
 
     private var talkButtonTint: Color {
-        if isTransmitPressActive || selectedPeerState.phase == .transmitting {
-            return Color(red: 0.96, green: 0.28, blue: 0.24)
-        }
         return Color(red: 0.25, green: 0.52, blue: 0.93)
+    }
+
+    private var isTalkButtonActive: Bool {
+        isTransmitPressActive || selectedPeerState.phase == .transmitting
     }
 
     private func talkButtonTap() {
         guard primaryAction.kind == .connect else { return }
         onJoin()
+    }
+
+    private func cancelPendingHoldToTalk() -> Bool {
+        pendingHoldToTalkTask?.cancel()
+        pendingHoldToTalkTask = nil
+        let didBeginTransmit = holdToTalkDidBeginTransmit
+        holdToTalkDidBeginTransmit = false
+        _ = holdToTalkGestureState.cancel()
+        return didBeginTransmit
     }
 
     private var talkGesture: some Gesture {
@@ -190,47 +228,71 @@ struct TurboCallPrototypeView: View {
                 guard primaryAction.kind == .holdToTalk else { return }
                 guard holdToTalkGestureState.beginIfAllowed(isEnabled: primaryAction.isEnabled) else { return }
                 transmitPressBeganAt = Date()
-                onBeginTransmit()
+                holdToTalkDidBeginTransmit = false
+                pendingHoldToTalkTask?.cancel()
+                pendingHoldToTalkTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 180_000_000)
+                    guard !Task.isCancelled else { return }
+                    guard holdToTalkGestureState.isTrackingTouch else { return }
+                    guard primaryAction.kind == .holdToTalk, primaryAction.isEnabled else { return }
+                    holdToTalkDidBeginTransmit = true
+                    onBeginTransmit()
+                }
             }
             .onEnded { _ in
                 guard primaryAction.kind == .holdToTalk else { return }
-                onTransmitTouchReleased()
-                guard holdToTalkGestureState.endTouch() else { return }
+                pendingHoldToTalkTask?.cancel()
+                pendingHoldToTalkTask = nil
+                let didBeginTransmit = holdToTalkDidBeginTransmit
+                holdToTalkDidBeginTransmit = false
+                _ = holdToTalkGestureState.endTouch()
                 transmitPressBeganAt = nil
+                guard didBeginTransmit else { return }
+                onTransmitTouchReleased()
                 onEndTransmit()
             }
     }
 
     private func callStatusText(now: Date) -> String {
+        if isTransmitPressActive, primaryAction.kind == .holdToTalk {
+            if localTransmitAudioIsReady || selectedPeerState.detail == .transmitting {
+                return transmitReadyStatusText(now: now)
+            }
+            return transmitStartupStatusText(now: now)
+        }
+
         switch selectedPeerState.detail {
         case .transmitting:
-            return localTransmitAudioIsReady ? "Listening" : "Getting ready"
+            return readyStatusText
         case .receiving:
             return "Talking"
         case .ready:
-            return "Ready"
+            return readyStatusText
         case .startingTransmit:
-            return shouldShowTransmitWarmup(now: now) ? "Getting ready" : "Ready"
+            return readyStatusText
         case .wakeReady:
-            return "Ready"
+            return readyStatusText
         case .waitingForPeer(let reason):
             switch reason {
             case .disconnecting:
-                return "Disconnecting"
+                return "Disconnecting..."
             case .releaseRequiredAfterInterruptedTransmit:
                 return "Release to retry"
             case .pendingJoin, .backendSessionTransition, .localSessionTransition,
                  .peerReadyToConnect:
-                return "Connecting"
+                return "Connecting..."
             case .remoteWakeUnavailable:
                 return "Waiting"
             case .systemWakeActivation, .wakePlaybackDeferredUntilForeground,
                  .localAudioPrewarm, .localTransportWarmup, .remoteAudioPrewarm:
-                return "Getting ready"
+                return passiveWarmupStatusText(now: now)
             }
         case .peerReady:
-            return "Ready"
+            return readyStatusText
         case .incomingRequest:
+            if primaryAction.kind == .connect {
+                return "Connecting..."
+            }
             return "Wants to talk"
         case .requested:
             return "Waiting"
@@ -239,22 +301,38 @@ struct TurboCallPrototypeView: View {
         case .blockedByOtherSession:
             return "Busy"
         case .systemMismatch:
-            return "Reconnecting"
+            return "Reconnecting..."
         case .idle(let isOnline):
-            return isOnline ? "Ready" : "Unavailable"
+            return isOnline ? readyStatusText : "Unavailable"
         }
+    }
+
+    private var readyStatusText: String {
+        guard primaryAction.kind == .holdToTalk else {
+            return "Connecting..."
+        }
+        return talkButtonIsEnabled ? "Ready" : "Connecting..."
+    }
+
+    private func transmitStartupStatusText(now: Date) -> String {
+        return "Starting..."
+    }
+
+    private func transmitReadyStatusText(now: Date) -> String {
+        return "Listening"
+    }
+
+    private func passiveWarmupStatusText(now: Date) -> String {
+        guard isTransmitPressActive else {
+            return "Connecting..."
+        }
+        return transmitStartupStatusText(now: now)
     }
 
     private var localTransmitAudioIsReady: Bool {
         mediaSessionContactID == contact.id
             && isPTTAudioSessionActive
             && mediaConnectionState == .connected
-    }
-
-    private func shouldShowTransmitWarmup(now: Date) -> Bool {
-        guard isTransmitPressActive else { return false }
-        guard let transmitPressBeganAt else { return false }
-        return now.timeIntervalSince(transmitPressBeganAt) >= 0.45
     }
 
     private func initials(for name: String) -> String {
@@ -272,29 +350,32 @@ private struct TurboCallActionButton: View {
     let symbolName: String
     let tint: Color
     let isEnabled: Bool
+    var isActive: Bool = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             VStack(spacing: 14) {
                 Circle()
-                    .fill(tint.opacity(isEnabled ? 1 : 0.45))
-                    .frame(width: 92, height: 92)
+                    .fill(isEnabled ? tint : Color.white.opacity(0.13))
+                    .frame(width: 82, height: 82)
+                    .scaleEffect(isActive ? 1.08 : 1)
                     .overlay(
                         Image(systemName: symbolName)
-                            .font(.system(size: 36, weight: .regular))
-                            .foregroundStyle(.white)
+                            .font(.system(size: 32, weight: .regular))
+                            .foregroundStyle(.white.opacity(isEnabled ? 1 : 0.28))
                     )
 
                 Text(title)
-                    .font(.system(size: 19, weight: .regular, design: .default))
-                    .foregroundStyle(.white.opacity(isEnabled ? 0.92 : 0.48))
+                    .font(.system(size: 17, weight: .regular, design: .default))
+                    .foregroundStyle(.white.opacity(isEnabled ? 0.92 : 0.34))
             }
             .padding(.vertical, 8)
         }
         .buttonStyle(TurboCallControlButtonStyle())
         .disabled(!isEnabled)
         .accessibilityLabel(title)
+        .animation(.interactiveSpring(response: 0.34, dampingFraction: 0.82, blendDuration: 0.08), value: isActive)
     }
 }
 
@@ -530,8 +611,8 @@ private struct HatTilingBackground: View {
 }
 
 #Preview("Call Prototype") {
-    TurboCallPrototypeView(
-        contact: Contact(id: UUID(), name: "Mellow Claude", handle: "@mellow", isOnline: true, channelId: UUID()),
+        TurboCallPrototypeView(
+            contact: Contact(id: UUID(), name: "Mellow Claude", handle: "@mellow", isOnline: true, channelId: UUID()),
         selectedPeerState: SelectedPeerState(
             relationship: .none,
             detail: .ready,

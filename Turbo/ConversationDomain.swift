@@ -868,6 +868,8 @@ struct ChannelReadinessSnapshot: Equatable {
     let status: ConversationState?
     let readinessStatus: TurboChannelReadinessStatus?
     let activeTransmitterUserId: String?
+    let localHasActiveDevice: Bool
+    let localAudioReadiness: RemoteAudioReadinessState
     let remoteAudioReadiness: RemoteAudioReadinessState
     let remoteWakeCapability: RemoteWakeCapabilityState
 
@@ -877,6 +879,8 @@ struct ChannelReadinessSnapshot: Equatable {
     ) {
         membership = channelState.membership
         requestRelationship = channelState.requestRelationship
+        localHasActiveDevice = readiness?.selfHasActiveDevice ?? false
+        localAudioReadiness = readiness?.localAudioReadiness ?? .unknown
         self.remoteAudioReadiness = readiness?.remoteAudioReadiness ?? .unknown
         self.remoteWakeCapability = readiness?.remoteWakeCapability ?? .unavailable
         if let readiness {
@@ -1129,6 +1133,28 @@ struct ConversationDerivationContext: Equatable {
         return channel.readinessStatus == .inactive
     }
 
+    var channelHasRequestRelationship: Bool {
+        guard let relationship = channel?.requestRelationship else { return false }
+        return relationship != .none
+    }
+
+    var pendingJoinHasTerminalBackendMembershipLoss: Bool {
+        guard pendingAction.pendingJoinContactID == contactID else { return false }
+        guard localSessionReadiness != .none else { return false }
+        guard let channel else { return false }
+        guard channel.membership == .absent else { return false }
+        guard channel.requestRelationship == .none else { return false }
+        guard !explicitLeaveRequested else { return false }
+        guard !peerSignalIsTransmitting else { return false }
+        if channel.readinessStatus == .inactive {
+            return true
+        }
+        if channel.status == .idle {
+            return true
+        }
+        return !channel.canTransmit
+    }
+
     var remoteAudioRecoveryAvailable: Bool {
         switch remoteAudioReadinessState {
         case .wakeCapable, .ready:
@@ -1150,6 +1176,13 @@ struct ConversationDerivationContext: Equatable {
     var shouldTreatSystemMismatchAsRecoverable: Bool {
         guard case .mismatched = systemSessionState else { return false }
         guard !explicitLeaveRequested else { return false }
+        if systemMismatchChannelMatchesContact {
+            return true
+        }
+        if unattributedJoinedSystemMismatch,
+           !backendExplicitlyInactiveWithoutMembership {
+            return true
+        }
         if hadConnectedSessionContinuity {
             return true
         }
@@ -1157,6 +1190,9 @@ struct ConversationDerivationContext: Equatable {
             return true
         }
         if localSessionReadiness != .none {
+            if channelHasRequestRelationship {
+                return true
+            }
             switch backendChannelReadiness {
             case .selfOnly, .both:
                 return true
@@ -1165,6 +1201,16 @@ struct ConversationDerivationContext: Equatable {
             }
         }
         return false
+    }
+
+    var systemMismatchChannelMatchesContact: Bool {
+        guard case .mismatched = systemSessionState else { return false }
+        return systemSessionMatchesContact
+    }
+
+    var unattributedJoinedSystemMismatch: Bool {
+        guard case .mismatched = systemSessionState else { return false }
+        return isJoined && activeChannelID == nil
     }
 
     var pendingJoinIsStaleWithoutLocalSessionEvidence: Bool {
@@ -1213,7 +1259,21 @@ struct ConversationDerivationContext: Equatable {
         if pendingAction.pendingJoinContactID == contactID {
             return true
         }
+        if backendReadyMembershipHasCurrentDeviceEvidence {
+            return true
+        }
         return hadConnectedSessionContinuity
+    }
+
+    var backendReadyMembershipHasCurrentDeviceEvidence: Bool {
+        guard let channel else { return false }
+        guard channel.localHasActiveDevice else { return false }
+        guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness,
+              peerDeviceConnected,
+              readinessStatus == .ready else {
+            return false
+        }
+        return true
     }
 }
 
@@ -1770,6 +1830,7 @@ enum ConversationStateMachine {
         }
 
         if context.pendingAction.pendingJoinContactID == context.contactID,
+           !context.pendingJoinHasTerminalBackendMembershipLoss,
            !context.pendingJoinIsStaleWithoutLocalSessionEvidence {
             return .none
         }
@@ -1817,6 +1878,9 @@ enum ConversationStateMachine {
         case .absent:
             if localSessionActive,
                context.channel != nil,
+               !context.systemMismatchChannelMatchesContact,
+               !context.unattributedJoinedSystemMismatch,
+               !context.channelHasRequestRelationship,
                !context.peerSignalIsTransmitting,
                !explicitLeaveRequested {
                 return .teardownSelectedSession(contactID: context.contactID)
@@ -1935,12 +1999,16 @@ private extension ConversationDerivationContext {
             return .localJoinFailed(recoveryMessage: localJoinFailure.reason.recoveryMessage)
         }
 
-        if pendingAction.pendingJoinContactID == contactID {
-            return .pendingJoin
-        }
-
         if pendingAction.isLeaveInFlight(for: contactID) {
             return .disconnecting
+        }
+
+        if pendingJoinHasTerminalBackendMembershipLoss {
+            return .disconnecting
+        }
+
+        if pendingAction.pendingJoinContactID == contactID {
+            return .pendingJoin
         }
 
         if backendExplicitlyInactiveWithoutMembership,
@@ -2248,7 +2316,7 @@ private extension ConversationDerivationContext {
 
         switch remoteWakeCapabilityState {
         case .wakeCapable:
-            return true
+            return remoteAudioReadinessState != .waiting
         case .unavailable:
             return remoteAudioReadinessState == .ready
         }

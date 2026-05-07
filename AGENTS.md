@@ -10,6 +10,7 @@ Detailed guidance lives in:
 - [`SWIFT.md`](/Users/mau/Development/Turbo/SWIFT.md): app/client architecture and client-side working rules
 - [`SWIFT_DEBUGGING.md`](/Users/mau/Development/Turbo/SWIFT_DEBUGGING.md): simulator/device/PTT/audio debugging loops
 - [`BACKEND.md`](/Users/mau/Development/Turbo/BACKEND.md): backend/control-plane/storage/query guidance
+- [`MIGRATIONS.md`](/Users/mau/Development/Turbo/MIGRATIONS.md): Unison Cloud storage schema changes, drift guard, migration/reset workflow
 - [`SELF_HEALING.md`](/Users/mau/Development/Turbo/SELF_HEALING.md): recoverable bad-state taxonomy and repair rules
 - [`PRODUCT_BRIEF.md`](/Users/mau/Development/Turbo/PRODUCT_BRIEF.md): product framing, positioning, and audience-facing narrative
 - [`journal/README.md`](/Users/mau/Development/Turbo/journal/README.md): engineering journal conventions for dense design/debugging notes
@@ -27,6 +28,7 @@ Detailed guidance lives in:
 - Investigate first and fix problems at their source—never patch backend issues in the frontend.
 - For distributed, shared-state, or app/backend contract bugs, identify which subsystem owns the broken fact before editing code. Do not stop at the client seam if backend truth may be wrong.
 - Client changes may add guardrails, diagnostics, or better projection, but they do not replace a backend fix when the backend owns the incorrect state.
+- For Unison Cloud storage schema changes, follow [`MIGRATIONS.md`](/Users/mau/Development/Turbo/MIGRATIONS.md): decide preserve/reset/revert, update `turbo.schemaDrift` deliberately, and never treat an expected-hash update as a migration by itself.
 
 
 # How To Work

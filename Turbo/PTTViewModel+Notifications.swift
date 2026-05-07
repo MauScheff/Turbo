@@ -126,6 +126,11 @@ extension PTTViewModel {
             metadata: talkRequestNotificationDiagnostics(userInfo: userInfo)
         )
         await refreshRequestStateAfterTalkRequestNotification(userInfo: userInfo, reason: "foreground-notification")
+        reconcileTalkRequestSurface(
+            applicationState: .active,
+            allowsSelectedContact: true,
+            allowsAlreadySurfacedInvite: true
+        )
     }
 
     func handleTalkRequestNotificationResponse(userInfo: [AnyHashable: Any]) async {
@@ -135,19 +140,31 @@ extension PTTViewModel {
             message: "Talk request notification opened",
             metadata: metadata
         )
-        await refreshRequestStateAfterTalkRequestNotification(userInfo: userInfo, reason: "notification-open")
         guard let handle = talkRequestNotificationHandle(from: userInfo) else { return }
-        selectContactMatchingNotificationHandle(handle, reason: "notification-open")
+        let immediateContact = openCachedTalkRequestContactFromNotification(
+            handle: handle,
+            reason: "notification-open-immediate"
+        )
+        await refreshRequestStateAfterTalkRequestNotification(userInfo: userInfo, reason: "notification-open")
+        let shouldJoin = openTalkRequestFromNotification(
+            handle: handle,
+            reason: "notification-open",
+            allowsJoin: backendServices != nil,
+            cachedContact: immediateContact
+        )
         if backendServices == nil {
             pendingTalkRequestNotificationHandle = handle
+            pendingTalkRequestNotificationShouldJoin = true
             diagnostics.record(
                 .pushToTalk,
                 message: "Queued talk request notification open until backend is ready",
-                metadata: ["handle": handle]
+                metadata: ["handle": handle, "shouldJoin": "true"]
             )
             return
         }
-        await openContact(reference: handle)
+        if !shouldJoin {
+            await openContact(reference: handle)
+        }
     }
 
     func refreshRequestStateAfterTalkRequestNotification(
@@ -246,8 +263,20 @@ extension PTTViewModel {
     func openPendingTalkRequestNotificationIfNeeded() async {
         guard let handle = pendingTalkRequestNotificationHandle else { return }
         pendingTalkRequestNotificationHandle = nil
-        selectContactMatchingNotificationHandle(handle, reason: "pending-notification-open")
-        await openContact(reference: handle)
+        let shouldJoin = pendingTalkRequestNotificationShouldJoin
+        pendingTalkRequestNotificationShouldJoin = false
+        await refreshRequestStateAfterTalkRequestNotification(
+            userInfo: ["event": "talk-request", "fromHandle": handle],
+            reason: "pending-notification-open"
+        )
+        let didJoin = openTalkRequestFromNotification(
+            handle: handle,
+            reason: "pending-notification-open",
+            allowsJoin: shouldJoin
+        )
+        if !didJoin {
+            await openContact(reference: handle)
+        }
     }
 
     func refreshDeviceRegistrationWithAlertPushTokenIfPossible() async {
@@ -296,6 +325,67 @@ extension PTTViewModel {
 
     private func talkRequestNotificationHandle(from userInfo: [AnyHashable: Any]) -> String? {
         userInfo["fromHandle"] as? String
+    }
+
+    @discardableResult
+    private func openTalkRequestFromNotification(
+        handle: String,
+        reason: String,
+        allowsJoin: Bool = true,
+        cachedContact: Contact? = nil
+    ) -> Bool {
+        guard let contact = contactMatchingNormalizedHandle(handle) ?? cachedContact else {
+            return false
+        }
+
+        if cachedContact == nil {
+            openCachedTalkRequestContact(contact, reason: reason)
+        } else if contact.isOnline, requestedExpandedCallContactID != contact.id {
+            requestExpandedCall(for: contact)
+        }
+
+        guard allowsJoin,
+              contact.isOnline,
+              relationshipState(for: contact.id).isIncomingRequest else {
+            return false
+        }
+
+        diagnostics.record(
+            .pushToTalk,
+            message: "Auto-joining from talk request notification",
+            metadata: ["handle": contact.handle, "reason": reason]
+        )
+        requestBackendJoin(for: contact)
+        return true
+    }
+
+    @discardableResult
+    private func openCachedTalkRequestContactFromNotification(
+        handle: String,
+        reason: String
+    ) -> Contact? {
+        guard let contact = contactMatchingNormalizedHandle(handle) else {
+            return nil
+        }
+        openCachedTalkRequestContact(contact, reason: reason)
+        return contact
+    }
+
+    private func openCachedTalkRequestContact(_ contact: Contact, reason: String) {
+        diagnostics.record(
+            .pushToTalk,
+            message: "Selected contact from talk request notification",
+            metadata: ["handle": contact.handle, "reason": reason]
+        )
+        selectContact(contact)
+        if contact.isOnline {
+            requestExpandedCall(for: contact)
+        }
+    }
+
+    func requestExpandedCall(for contact: Contact) {
+        requestedExpandedCallContactID = contact.id
+        requestedExpandedCallSequence += 1
     }
 
     private func talkRequestNotificationDiagnostics(userInfo: [AnyHashable: Any]) -> [String: String] {

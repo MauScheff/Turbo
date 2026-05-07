@@ -509,6 +509,16 @@ extension PTTViewModel {
         let disconnectContactID = selectedContactId
         let disconnectChannelUUID = activeChannelId.flatMap { channelUUID(for: $0) }
         let disconnectBackendChannelID = selectedContact?.backendChannelId
+        let immediateBackendLeaveRequest: BackendLeaveRequest? = {
+            guard let disconnectContactID,
+                  let disconnectBackendChannelID else {
+                return nil
+            }
+            return BackendLeaveRequest(
+                contactID: disconnectContactID,
+                backendChannelID: disconnectBackendChannelID
+            )
+        }()
         sessionCoordinator.markExplicitLeave(contactID: disconnectContactID)
         scheduleDisconnectRecovery(
             contactID: disconnectContactID,
@@ -517,6 +527,12 @@ extension PTTViewModel {
         )
         if let disconnectContactID {
             clearRemoteAudioActivity(for: disconnectContactID)
+            _ = retireDirectQuicPathImmediately(
+                for: disconnectContactID,
+                reason: "explicit-disconnect",
+                sendHangup: true,
+                configureActiveRoute: false
+            )
         }
         resetTransmitRuntimeOnly()
         closeMediaSession()
@@ -539,6 +555,20 @@ extension PTTViewModel {
                 captureDiagnosticsState("session-disconnect:local-finished")
             }
             return
+        }
+
+        if let immediateBackendLeaveRequest {
+            diagnostics.record(
+                .backend,
+                message: "Backend leave requested immediately for explicit disconnect",
+                metadata: [
+                    "contactId": immediateBackendLeaveRequest.contactID.uuidString,
+                    "channelId": immediateBackendLeaveRequest.backendChannelID,
+                ]
+            )
+            Task {
+                await backendCommandCoordinator.handle(.leaveRequested(immediateBackendLeaveRequest))
+            }
         }
 
         guard let activeChannelId,
@@ -738,7 +768,7 @@ extension PTTViewModel {
             tearDownTransmitRuntime(resetCoordinator: true)
             closeMediaSession()
             let shouldPropagateBackendLeave =
-                autoRejoinContactID != nil
+                (autoRejoinContactID != nil && autoRejoinContactID != contactID)
                 || (contactID.map { sessionCoordinator.pendingAction.isLeaveInFlight(for: $0) } ?? false)
 
             if shouldPropagateBackendLeave,

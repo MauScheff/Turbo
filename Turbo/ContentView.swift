@@ -6,18 +6,22 @@
 //
 
 import SwiftUI
+import AVFAudio
+import UIKit
 
-private enum ContentRoute {
-    case splash
+private enum ContentRoute: Equatable {
+    case launchSplash
+    case start
     case accountChoice
     case profileSetup
     case handleSetup
+    case permissionSetup(TurboOnboardingPermissionKind)
     case live
 }
 
 struct ContentView: View {
     @State private var viewModel: PTTViewModel
-    @State private var route: ContentRoute = .splash
+    @State private var route: ContentRoute = .launchSplash
     @State private var isShowingAddContactSheet: Bool = false
     @State private var isShowingProfileSheet: Bool = false
     @State private var isShowingDevIdentitySheet: Bool = false
@@ -59,14 +63,18 @@ struct ContentView: View {
     var body: some View {
         Group {
             switch route {
-            case .splash:
-                splashView
+            case .launchSplash:
+                launchSplashView
+            case .start:
+                startView
             case .accountChoice:
                 accountChoiceView
             case .profileSetup:
                 profileSetupView
             case .handleSetup:
                 handleSetupView
+            case .permissionSetup(let permission):
+                permissionSetupView(permission)
             case .live:
                 mainView
             }
@@ -76,8 +84,8 @@ struct ContentView: View {
             if draftProfileName.isEmpty {
                 draftProfileName = viewModel.currentProfileName
             }
-            if route == .splash, viewModel.hasCompletedIdentityOnboarding {
-                route = .live
+            if route == .launchSplash {
+                route = viewModel.hasCompletedIdentityOnboarding ? .live : .start
             }
         }
         .overlay(alignment: .top) {
@@ -88,7 +96,7 @@ struct ContentView: View {
                     onAccept: viewModel.acceptActiveIncomingTalkRequest
                 )
                 .padding(.horizontal)
-                .padding(.top, route == .splash ? 18 : 10)
+                .padding(.top, route == .launchSplash ? 18 : 10)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
@@ -119,6 +127,10 @@ struct ContentView: View {
             if newValue == nil {
                 minimizedCallContactID = nil
             }
+        }
+        .onChange(of: viewModel.requestedExpandedCallSequence) { _, _ in
+            guard let requestedContactID = viewModel.requestedExpandedCallContactID else { return }
+            minimizedCallContactID = minimizedCallContactID == requestedContactID ? nil : minimizedCallContactID
         }
         .onChange(of: viewModel.currentProfileName) { _, newValue in
             if !isSavingProfileName && !isShowingProfileSheet {
@@ -260,7 +272,10 @@ struct ContentView: View {
                     contact: contact,
                     selectedPeerState: viewModel.selectedPeerState(for: contact.id),
                     primaryAction: callScreenPrimaryAction(for: contact),
-                    onClose: { minimizedCallContactID = contact.id }
+                    onClose: {
+                        viewModel.requestedExpandedCallContactID = nil
+                        minimizedCallContactID = contact.id
+                    }
                 )
             }
         }
@@ -278,20 +293,20 @@ struct ContentView: View {
 
         return VStack(spacing: 16) {
             TurboHeaderView(
-                statusMessage: viewModel.statusMessage,
+                statusMessage: viewModel.topChromeStatusMessage,
                 transportPathState: transportPathBadgeState,
                 transportPathTint: transportPathTint(
                     for: transportPathBadgeState ?? viewModel.mediaTransportPathState
                 ),
                 latestErrorText: latestDiagnosticsErrorText,
                 microphonePermissionStatus: viewModel.microphonePermissionStatusText,
-                needsMicrophonePermission: viewModel.needsMicrophonePermission,
+                needsMicrophonePermission: false,
                 notificationPermissionStatus: viewModel.alertNotificationAuthorizationStatusText,
                 needsNotificationPermission: viewModel.needsAlertNotificationPermission,
                 localNetworkPermissionStatus: localNetworkPermissionButtonTitle,
                 showsLocalNetworkPermissionControl: viewModel.localNetworkPreflightStatus.shouldShowMainSurfaceControl,
-                showsResolvedMicrophoneStatus: viewModel.developerIdentityControlsEnabled,
-                showsDebugPermissionControls: viewModel.developerIdentityControlsEnabled,
+                showsResolvedMicrophoneStatus: false,
+                showsDebugPermissionControls: false,
                 showsAddContactButton: !viewModel.contacts.isEmpty,
                 showsAudioRoutePicker: viewModel.isJoined,
                 onAddContact: {
@@ -308,6 +323,13 @@ struct ContentView: View {
                 onRequestLocalNetworkPermission: requestLocalNetworkPermission,
                 onRequestNotificationPermission: requestNotificationPermission
             )
+            if let permissionPrompt = missingPermissionPrompt {
+                TurboPermissionNoticeBanner(
+                    prompt: permissionPrompt,
+                    isRequesting: isRequestingPermission(permissionPrompt.kind),
+                    onEnable: { handleMainPermissionPrompt(permissionPrompt.kind) }
+                )
+            }
             if viewModel.contacts.isEmpty, viewModel.activeConversationContact == nil {
                 TurboEmptyContactsView(onAddContact: {
                     isShowingAddContactSheet = true
@@ -360,8 +382,12 @@ struct ContentView: View {
         }
     }
 
-    private var splashView: some View {
-        TurboSplashView(
+    private var launchSplashView: some View {
+        TurboLaunchSplashView(wordmarkName: wordmarkName)
+    }
+
+    private var startView: some View {
+        TurboStartView(
             wordmarkName: wordmarkName,
             hasCompletedOnboarding: viewModel.hasCompletedIdentityOnboarding,
             hasContacts: !viewModel.contacts.isEmpty,
@@ -414,6 +440,16 @@ struct ContentView: View {
             isSaving: isCreatingIdentity,
             errorMessage: handleSetupError,
             onContinue: createIdentityAndContinue
+        )
+    }
+
+    private func permissionSetupView(_ permission: TurboOnboardingPermissionKind) -> some View {
+        TurboPermissionOnboardingView(
+            wordmarkName: wordmarkName,
+            permission: permission,
+            isRequesting: isRequestingPermission(permission),
+            onAllow: { requestOnboardingPermissionAndContinue(permission) },
+            onSkip: { route = routeAfterPermission(permission) }
         )
     }
 
@@ -510,6 +546,7 @@ struct ContentView: View {
             mediaSessionContactID: viewModel.mediaSessionContactID,
             onClose: onClose,
             onLeave: {
+                onClose()
                 ensureCallContactSelected(contact)
                 viewModel.disconnect()
             },
@@ -527,7 +564,16 @@ struct ContentView: View {
     }
 
     private func shouldShowCallScreen(for contact: Contact) -> Bool {
-        switch viewModel.selectedPeerState(for: contact.id).phase {
+        let selectedPeerState = viewModel.selectedPeerState(for: contact.id)
+        if selectedPeerState.detail == .waitingForPeer(reason: .disconnecting) {
+            return false
+        }
+
+        if viewModel.requestedExpandedCallContactID == contact.id {
+            return true
+        }
+
+        switch selectedPeerState.phase {
         case .waitingForPeer, .localJoinFailed, .ready, .wakeReady,
              .startingTransmit, .transmitting, .receiving,
              .blockedByOtherSession, .systemMismatch:
@@ -705,6 +751,142 @@ struct ContentView: View {
         }
     }
 
+    private func requestOnboardingPermissionAndContinue(_ permission: TurboOnboardingPermissionKind) {
+        Task {
+            await performPermissionRequest(permission)
+            await MainActor.run {
+                route = routeAfterPermission(permission)
+            }
+        }
+    }
+
+    private func handleMainPermissionPrompt(_ permission: TurboOnboardingPermissionKind) {
+        switch permission {
+        case .microphone where viewModel.microphonePermission == .denied:
+            openAppSettings()
+        case .notifications where viewModel.notificationAuthorizationStatus == .denied:
+            openAppSettings()
+        case .localNetwork:
+            requestLocalNetworkPermission()
+        case .microphone:
+            requestMicrophonePermission()
+        case .notifications:
+            requestNotificationPermission()
+        }
+    }
+
+    private func performPermissionRequest(_ permission: TurboOnboardingPermissionKind) async {
+        await MainActor.run {
+            setPermissionRequesting(true, for: permission)
+        }
+
+        switch permission {
+        case .localNetwork:
+            await viewModel.requestLocalNetworkPermissionPreflight()
+        case .microphone:
+            await viewModel.requestMicrophonePermission()
+        case .notifications:
+            await viewModel.requestAlertNotificationPermissionPreflight()
+        }
+
+        await MainActor.run {
+            setPermissionRequesting(false, for: permission)
+        }
+    }
+
+    private func setPermissionRequesting(_ isRequesting: Bool, for permission: TurboOnboardingPermissionKind) {
+        switch permission {
+        case .localNetwork:
+            isRequestingLocalNetworkPermission = isRequesting
+        case .microphone:
+            isRequestingMicrophonePermission = isRequesting
+        case .notifications:
+            isRequestingNotificationPermission = isRequesting
+        }
+    }
+
+    private func isRequestingPermission(_ permission: TurboOnboardingPermissionKind) -> Bool {
+        switch permission {
+        case .localNetwork:
+            return isRequestingLocalNetworkPermission
+        case .microphone:
+            return isRequestingMicrophonePermission
+        case .notifications:
+            return isRequestingNotificationPermission
+        }
+    }
+
+    private func routeAfterPermission(_ permission: TurboOnboardingPermissionKind) -> ContentRoute {
+        let following: [TurboOnboardingPermissionKind]
+        switch permission {
+        case .localNetwork:
+            following = [.microphone, .notifications]
+        case .microphone:
+            following = [.notifications]
+        case .notifications:
+            following = []
+        }
+        return firstPermissionRoute(in: following)
+    }
+
+    private func firstPermissionRoute(in permissions: [TurboOnboardingPermissionKind]) -> ContentRoute {
+        for permission in permissions where permissionNeedsAttention(permission) {
+            return .permissionSetup(permission)
+        }
+        return .live
+    }
+
+    private func permissionNeedsAttention(_ permission: TurboOnboardingPermissionKind) -> Bool {
+        switch permission {
+        case .localNetwork:
+            return viewModel.localNetworkPreflightStatus.shouldShowMainSurfaceControl
+        case .microphone:
+            return viewModel.needsMicrophonePermission
+        case .notifications:
+            return viewModel.needsAlertNotificationPermission
+        }
+    }
+
+    private var missingPermissionPrompt: TurboPermissionNoticePrompt? {
+        if viewModel.needsMicrophonePermission {
+            return TurboPermissionNoticePrompt(
+                kind: .microphone,
+                title: "Microphone access needed",
+                message: viewModel.microphonePermission == .denied
+                    ? "Turn it on in Settings to talk."
+                    : "Allow microphone access to talk.",
+                actionTitle: viewModel.microphonePermission == .denied ? "Open Settings" : "Allow"
+            )
+        }
+
+        if viewModel.localNetworkPreflightStatus.shouldShowMainSurfaceControl {
+            return TurboPermissionNoticePrompt(
+                kind: .localNetwork,
+                title: "Local Network helps calls start faster",
+                message: "Allow it so nearby devices can connect directly.",
+                actionTitle: localNetworkPermissionButtonTitle
+            )
+        }
+
+        if viewModel.needsAlertNotificationPermission {
+            return TurboPermissionNoticePrompt(
+                kind: .notifications,
+                title: "Notifications are off",
+                message: viewModel.notificationAuthorizationStatus == .denied
+                    ? "Turn them on in Settings to receive talk requests."
+                    : "Allow notifications to receive talk requests.",
+                actionTitle: viewModel.notificationAuthorizationStatus == .denied ? "Open Settings" : "Allow"
+            )
+        }
+
+        return nil
+    }
+
+    private func openAppSettings() {
+        guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(settingsURL)
+    }
+
     private var localNetworkPermissionButtonTitle: String {
         if isRequestingLocalNetworkPermission {
             return "Checking local network..."
@@ -844,7 +1026,7 @@ struct ContentView: View {
                     draftProfileName = viewModel.currentProfileName
                     draftHandleBody = TurboHandle.normalizedEditableBody(viewModel.currentIdentityHandle)
                     draftExistingIdentityReference = ""
-                    route = .live
+                    route = firstPermissionRoute(in: [.localNetwork, .microphone, .notifications])
                 } else {
                     identityRestoreError = "Couldn’t restore that handle."
                 }
@@ -878,7 +1060,7 @@ struct ContentView: View {
                 if created {
                     draftProfileName = viewModel.currentProfileName
                     draftHandleBody = handleBody
-                    route = .live
+                    route = firstPermissionRoute(in: [.localNetwork, .microphone, .notifications])
                 } else {
                     handleSetupError =
                         viewModel.backendStatusMessage.isEmpty
@@ -914,7 +1096,7 @@ struct ContentView: View {
                 draftHandleBody = TurboHandle.suggestedEditableBody(from: draftProfileName)
                 identityRestoreError = nil
                 handleSetupError = nil
-                route = .splash
+                route = .start
             }
         }
     }

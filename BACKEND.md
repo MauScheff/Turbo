@@ -44,6 +44,24 @@ When changing backend storage or query paths in this repo:
 
 If a hosted failure looks like an intermittent server error, check transaction shape and table-scan behavior before blaming the platform.
 
+## Persisted schema changes
+
+Unison Cloud table values are serialized using the Unison value/type shape. If a durable value type changes, existing rows may no longer deserialize. Treat that as a schema migration, not as a harmless refactor.
+
+Use [`MIGRATIONS.md`](/Users/mau/Development/Turbo/MIGRATIONS.md) for the full Turbo workflow.
+
+When changing any type stored in an `OrderedTable`:
+
+1. Identify every table that stores the type, including secondary projections and dev/diagnostics tables.
+2. Decide whether production data must be preserved, migrated, or can be intentionally reset.
+3. If data must be preserved, keep enough old definitions available to read the old rows and write the new rows, or create a versioned table/type path such as a `_v2` table name.
+4. Update reset/dev-cleanup paths in the same change.
+5. Update `turbo.schemaDrift` fixtures for any new persisted value type.
+6. Update `turbo.schemaDrift.expectedHashes` only when the migration/reset decision is deliberate and reviewed.
+7. Run `turbo.schemaDrift.check` before deploy. `just deploy` does this automatically via `just backend-schema-drift-test`.
+
+If production is already in the bad state, the usual recovery path is to redeploy code that can deserialize the existing rows, migrate or delete the affected rows intentionally, then deploy the new schema. Rotating the environment/database is a last-resort reset, not the normal fix.
+
 ## Backend invariants
 
 Yes, the backend needs the same invariant discipline for backend-owned truth, but not a separate invariant system.

@@ -554,9 +554,17 @@ extension PTTViewModel {
                     channelUUID: channelUUID,
                     contactID: contactID,
                     reason: reason
-                )
+                ),
+                afterStateUpdate: { [weak self] in
+                    guard let self else { return }
+                    self.syncPTTState()
+                    if let contactID {
+                        Task { [weak self] in
+                            await self?.prewarmLocalMediaIfNeeded(for: contactID)
+                        }
+                    }
+                }
             )
-            syncPTTState()
             syncPTTSystemChannelDescriptor(channelUUID, reason: "did-join")
             syncPTTTransmissionMode(reason: "did-join")
             syncPTTServiceStatus(reason: "did-join")
@@ -566,9 +574,6 @@ extension PTTViewModel {
                 message: "Joined channel",
                 metadata: ["channelUUID": channelUUID.uuidString, "reason": reason]
             )
-            if let contactID {
-                await prewarmLocalMediaIfNeeded(for: contactID)
-            }
             captureDiagnosticsState("ptt-callback:joined")
         }
     }

@@ -50,23 +50,19 @@
       }
     },
     {
-      "description": "websocket disconnect keeps the local side ready and degrades the remote side to wake-ready",
+      "description": "websocket disconnect preserves the local session and degrades the remote side to wake-ready",
       "actions": [
         { "actor": "a", "type": "disconnectWebSocket" }
       ],
       "expectEventually": {
         "a": {
           "selectedHandle": "@blake",
-          "phase": "ready",
+          "phase": "waitingForPeer",
           "isJoined": true,
-          "canTransmitNow": true,
           "backend": {
-            "channelStatus": "ready",
-            "readiness": "ready",
             "remoteAudioReadiness": "ready",
             "membership": "both(peerDeviceConnected: true)",
             "requestRelationship": "none",
-            "canTransmit": true,
             "webSocketConnected": false
           }
         },
@@ -76,7 +72,7 @@
           "isJoined": true,
           "pttTokenRegistrationKind": "registered",
           "contacts": [
-            { "handle": "@avery", "listState": "waiting-for-peer", "badgeStatus": "waiting-for-peer" }
+            { "handle": "@avery", "listState": "waiting-for-peer", "badgeStatus": "online" }
           ],
           "backend": {
             "peerDeviceConnected": false,

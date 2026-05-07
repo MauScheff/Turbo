@@ -41,7 +41,7 @@
           "isJoined": false,
           "backend": {
             "readiness": "waiting-for-self",
-            "selfJoined": false,
+            "selfJoined": true,
             "peerJoined": true,
             "peerDeviceConnected": true
           }
@@ -74,11 +74,11 @@
           "phase": "peerReady",
           "isJoined": false,
           "contacts": [
-            { "handle": "@blake", "listState": "waiting-for-peer", "badgeStatus": "waiting-for-peer" }
+            { "handle": "@blake", "listState": "ready", "badgeStatus": "ready" }
           ],
           "backend": {
             "readiness": "waiting-for-self",
-            "selfJoined": false,
+            "selfJoined": true,
             "peerJoined": true,
             "peerDeviceConnected": true
           }

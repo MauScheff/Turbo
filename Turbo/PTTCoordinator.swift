@@ -160,9 +160,13 @@ final class PTTCoordinator {
         state = PTTReducer.reduce(state: state, event: event).state
     }
 
-    func handle(_ event: PTTEvent) async {
+    func handle(
+        _ event: PTTEvent,
+        afterStateUpdate: (() -> Void)? = nil
+    ) async {
         let transition = PTTReducer.reduce(state: state, event: event)
         state = transition.state
+        afterStateUpdate?()
         for effect in transition.effects {
             await effectHandler?(effect)
         }

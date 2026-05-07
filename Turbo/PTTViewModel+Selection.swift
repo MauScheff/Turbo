@@ -113,7 +113,9 @@ extension PTTViewModel {
         switch systemSessionState {
         case .active(let activeContactID, let channelUUID):
             return activeContactID == contactID && contact.channelId == channelUUID
-        case .none, .mismatched:
+        case .mismatched(let channelUUID):
+            return contact.channelId == channelUUID
+        case .none:
             return false
         }
     }
@@ -142,7 +144,7 @@ extension PTTViewModel {
             localMediaWarmupState: localMediaWarmupState(for: contact.id),
             localRelayTransportReady: localRelayTransportReadyForTransmit(for: contact.id),
             directMediaPathActive: shouldUseDirectQuicTransport(for: contact.id),
-            firstTalkStartupProfile: firstTalkStartupProfile(for: contact.id),
+            firstTalkStartupProfile: firstTalkStartupProfile(for: contact.id, startGraceIfNeeded: false),
             incomingWakeActivationState: pttWakeRuntime.incomingWakeActivationState(for: contact.id),
             hadConnectedSessionContinuity: selectedContactId == contact.id
                 ? selectedPeerCoordinator.state.hadConnectedSessionContinuity
@@ -219,7 +221,7 @@ extension PTTViewModel {
                     mediaState: mediaConnectionState,
                     localRelayTransportReady: localRelayTransportReadyForTransmit(for: contact.id),
                     directMediaPathActive: shouldUseDirectQuicTransport(for: contact.id),
-                    firstTalkStartupProfile: firstTalkStartupProfile(for: contact.id),
+                    firstTalkStartupProfile: firstTalkStartupProfile(for: contact.id, startGraceIfNeeded: false),
                     incomingWakeActivationState:
                         pttWakeRuntime.incomingWakeActivationState(for: contact.id),
                     localJoinFailure: pttCoordinator.state.lastJoinFailure

@@ -8,6 +8,11 @@ enum PlaybackBufferReceivePlan: Equatable {
     case scheduleOnly
 }
 
+private struct PendingRemoteAudioChunk {
+    let data: Data
+    let playbackProfile: MediaSessionPlaybackProfile
+}
+
 actor AudioChunkSender {
     private var sendChunk: (@Sendable (String) async throws -> Void)?
     private let reportFailure: @Sendable (String) async -> Void
@@ -493,13 +498,18 @@ final class PCMWebSocketMediaSession: MediaSession {
     private var captureSendCancellationGeneration: UInt64 = 0
     private var inputTapInstalled = false
     private var pendingPlaybackBuffers: [AVAudioPCMBuffer] = []
-    private var pendingRemoteAudioChunks: [Data] = []
+    private var pendingRemoteAudioChunks: [PendingRemoteAudioChunk] = []
     private var scheduledPlaybackBufferCount = 0
     private var playbackStartTask: Task<Void, Never>?
+    private var playbackCushionTask: Task<Void, Never>?
     private var playbackNodeStartupReassertionTask: Task<Void, Never>?
     private var startTask: Task<Void, Error>?
     private let maximumPendingPlaybackBuffers = 24
     private let maximumPendingRemoteAudioChunks = 24
+    private let playbackStartupCushionBufferCount = 2
+    private let playbackStartupCushionNanoseconds: UInt64 = 45_000_000
+    private let relayPlaybackStartupCushionBufferCount = 2
+    private let relayPlaybackStartupCushionNanoseconds: UInt64 = 120_000_000
     private let initialSendAudioChunk: (@Sendable (String) async throws -> Void)?
     private var currentSendAudioChunk: (@Sendable (String) async throws -> Void)?
     private var capturedBufferReportBudget = 3
@@ -682,7 +692,10 @@ final class PCMWebSocketMediaSession: MediaSession {
         )
     }
 
-    func receiveRemoteAudioChunk(_ payload: String) async {
+    func receiveRemoteAudioChunk(
+        _ payload: String,
+        playbackProfile: MediaSessionPlaybackProfile
+    ) async {
         let payloads = AudioChunkPayloadCodec.decode(payload)
         guard !payloads.isEmpty else { return }
 
@@ -704,12 +717,12 @@ final class PCMWebSocketMediaSession: MediaSession {
             try withReceivePlaybackLock {
                 if !isPlaybackReady {
                     for chunk in decodedChunks {
-                        enqueuePendingRemoteAudioChunk(chunk)
+                        enqueuePendingRemoteAudioChunk(chunk, playbackProfile: playbackProfile)
                     }
                     queuedPendingChunkCount = pendingRemoteAudioChunkCount()
                 } else {
                     for chunk in decodedChunks {
-                        try schedulePlayback(for: chunk)
+                        try schedulePlayback(for: chunk, playbackProfile: playbackProfile)
                     }
                 }
             }
@@ -776,6 +789,8 @@ final class PCMWebSocketMediaSession: MediaSession {
         startTask = nil
         playbackStartTask?.cancel()
         playbackStartTask = nil
+        playbackCushionTask?.cancel()
+        playbackCushionTask = nil
         playbackNodeStartupReassertionTask?.cancel()
         playbackNodeStartupReassertionTask = nil
         pendingPlaybackBuffers.removeAll(keepingCapacity: false)
@@ -1140,7 +1155,10 @@ final class PCMWebSocketMediaSession: MediaSession {
         return bytes.base64EncodedString()
     }
 
-    private func schedulePlayback(for data: Data) throws {
+    private func schedulePlayback(
+        for data: Data,
+        playbackProfile: MediaSessionPlaybackProfile
+    ) throws {
         let frameCount = data.count / MemoryLayout<Int16>.size
         guard frameCount > 0 else { return }
 
@@ -1161,10 +1179,11 @@ final class PCMWebSocketMediaSession: MediaSession {
 
         let playbackBuffer = try makePlaybackBuffer(from: sourceBuffer)
         try startPlaybackEngineIfNeeded()
-        switch Self.playbackBufferReceivePlan(
+        let receivePlan = Self.playbackBufferReceivePlan(
             isPlayerNodePlaying: playerNode.isPlaying,
             playbackIOCycleAvailable: playbackIOCycleAvailable
-        ) {
+        )
+        switch receivePlan {
         case .deferUntilIOCycle:
             enqueuePendingPlaybackBuffer(playbackBuffer)
             requestPlaybackStartWhenReady()
@@ -1176,10 +1195,32 @@ final class PCMWebSocketMediaSession: MediaSession {
             }
             return
         case .scheduleAndStartNode:
+            if shouldBufferForPlaybackCushion(
+                playbackProfile: playbackProfile,
+                receivePlan: receivePlan
+            ) {
+                bufferPlaybackForCushion(
+                    playbackBuffer,
+                    playbackProfile: playbackProfile,
+                    receivePlan: receivePlan
+                )
+                return
+            }
             schedulePlaybackBuffer(playbackBuffer)
             startPlaybackNode()
             drainPendingPlaybackBuffers()
         case .scheduleOnly:
+            if shouldBufferForPlaybackCushion(
+                playbackProfile: playbackProfile,
+                receivePlan: receivePlan
+            ) {
+                bufferPlaybackForCushion(
+                    playbackBuffer,
+                    playbackProfile: playbackProfile,
+                    receivePlan: receivePlan
+                )
+                return
+            }
             schedulePlaybackBuffer(playbackBuffer)
         }
     }
@@ -1304,6 +1345,8 @@ final class PCMWebSocketMediaSession: MediaSession {
     private func resetPlaybackForTransmit() {
         playbackStartTask?.cancel()
         playbackStartTask = nil
+        playbackCushionTask?.cancel()
+        playbackCushionTask = nil
         playbackNodeStartupReassertionTask?.cancel()
         playbackNodeStartupReassertionTask = nil
         pendingPlaybackBuffers.removeAll(keepingCapacity: false)
@@ -1346,8 +1389,13 @@ final class PCMWebSocketMediaSession: MediaSession {
         pendingPlaybackBuffers.count
     }
 
-    private func enqueuePendingRemoteAudioChunk(_ data: Data) {
-        pendingRemoteAudioChunks.append(data)
+    private func enqueuePendingRemoteAudioChunk(
+        _ data: Data,
+        playbackProfile: MediaSessionPlaybackProfile
+    ) {
+        pendingRemoteAudioChunks.append(
+            PendingRemoteAudioChunk(data: data, playbackProfile: playbackProfile)
+        )
         if pendingRemoteAudioChunks.count > maximumPendingRemoteAudioChunks {
             pendingRemoteAudioChunks.removeFirst(
                 pendingRemoteAudioChunks.count - maximumPendingRemoteAudioChunks
@@ -1365,7 +1413,7 @@ final class PCMWebSocketMediaSession: MediaSession {
         let chunks = pendingRemoteAudioChunks
         pendingRemoteAudioChunks.removeAll(keepingCapacity: false)
         for chunk in chunks {
-            try schedulePlayback(for: chunk)
+            try schedulePlayback(for: chunk.data, playbackProfile: chunk.playbackProfile)
         }
     }
 
@@ -1419,6 +1467,113 @@ final class PCMWebSocketMediaSession: MediaSession {
         return pendingPlaybackBufferCount > 0 || scheduledPlaybackBufferCount > 0
     }
 
+    static func shouldBufferForPlaybackCushion(
+        playbackProfile: MediaSessionPlaybackProfile,
+        receivePlan: PlaybackBufferReceivePlan,
+        isPlayerNodePlaying: Bool,
+        pendingPlaybackBufferCount: Int,
+        scheduledPlaybackBufferCount: Int,
+        minimumCushionBufferCount: Int
+    ) -> Bool {
+        guard scheduledPlaybackBufferCount == 0,
+              pendingPlaybackBufferCount < minimumCushionBufferCount else {
+            return false
+        }
+        switch playbackProfile {
+        case .lowLatency:
+            return isPlayerNodePlaying && receivePlan == .scheduleOnly
+        case .relayJitterBuffered:
+            return receivePlan == .scheduleAndStartNode
+                || (isPlayerNodePlaying && receivePlan == .scheduleOnly)
+        }
+    }
+
+    private func playbackCushionConfiguration(
+        for playbackProfile: MediaSessionPlaybackProfile
+    ) -> (minimumBufferCount: Int, timeoutNanoseconds: UInt64) {
+        switch playbackProfile {
+        case .lowLatency:
+            return (
+                minimumBufferCount: playbackStartupCushionBufferCount,
+                timeoutNanoseconds: playbackStartupCushionNanoseconds
+            )
+        case .relayJitterBuffered:
+            return (
+                minimumBufferCount: relayPlaybackStartupCushionBufferCount,
+                timeoutNanoseconds: relayPlaybackStartupCushionNanoseconds
+            )
+        }
+    }
+
+    private func shouldBufferForPlaybackCushion(
+        playbackProfile: MediaSessionPlaybackProfile,
+        receivePlan: PlaybackBufferReceivePlan
+    ) -> Bool {
+        let configuration = playbackCushionConfiguration(for: playbackProfile)
+        return Self.shouldBufferForPlaybackCushion(
+            playbackProfile: playbackProfile,
+            receivePlan: receivePlan,
+            isPlayerNodePlaying: playerNode.isPlaying,
+            pendingPlaybackBufferCount: pendingPlaybackBufferCount(),
+            scheduledPlaybackBufferCount: scheduledPlaybackBufferCountSnapshot(),
+            minimumCushionBufferCount: configuration.minimumBufferCount
+        )
+    }
+
+    private func bufferPlaybackForCushion(
+        _ playbackBuffer: AVAudioPCMBuffer,
+        playbackProfile: MediaSessionPlaybackProfile,
+        receivePlan: PlaybackBufferReceivePlan
+    ) {
+        enqueuePendingPlaybackBuffer(playbackBuffer)
+        let pendingBufferCount = pendingPlaybackBufferCount()
+        let configuration = playbackCushionConfiguration(for: playbackProfile)
+        if pendingBufferCount >= configuration.minimumBufferCount {
+            playbackCushionTask?.cancel()
+            playbackCushionTask = nil
+            startBufferedPlaybackAfterCushion(reason: "buffer-count")
+            Task {
+                await report(
+                    "Started playback after playout cushion",
+                    metadata: [
+                        "pendingBufferCount": String(pendingBufferCount),
+                        "reason": "buffer-count",
+                        "playbackProfile": String(describing: playbackProfile),
+                        "receivePlan": String(describing: receivePlan),
+                    ]
+                )
+            }
+        } else {
+            requestPlaybackCushionDrainWhenReady(playbackProfile: playbackProfile)
+            Task {
+                await report(
+                    "Buffered playback buffer for playout cushion",
+                    metadata: [
+                        "pendingBufferCount": String(pendingBufferCount),
+                        "scheduledBufferCount": String(scheduledPlaybackBufferCountSnapshot()),
+                        "playbackProfile": String(describing: playbackProfile),
+                        "receivePlan": String(describing: receivePlan),
+                        "minimumCushionBufferCount": String(configuration.minimumBufferCount),
+                        "timeoutMilliseconds": String(configuration.timeoutNanoseconds / 1_000_000),
+                    ]
+                )
+            }
+        }
+    }
+
+    private func startBufferedPlaybackAfterCushion(reason: String) {
+        if playerNode.isPlaying {
+            drainPendingPlaybackBuffers()
+            return
+        }
+        let buffers = pendingPlaybackBuffers
+        pendingPlaybackBuffers.removeAll(keepingCapacity: false)
+        for buffer in buffers {
+            schedulePlaybackBuffer(buffer)
+        }
+        startPlaybackNode(reason: "playout-cushion-\(reason)")
+    }
+
     private func scheduledPlaybackBufferCountSnapshot() -> Int {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -1435,6 +1590,33 @@ final class PCMWebSocketMediaSession: MediaSession {
             self.reassertPlaybackNodeIfNeeded(
                 reason: reason,
                 message: "Playback node startup reasserted"
+            )
+        }
+    }
+
+    private func requestPlaybackCushionDrainWhenReady(
+        playbackProfile: MediaSessionPlaybackProfile
+    ) {
+        guard playbackCushionTask == nil else { return }
+        let timeoutNanoseconds = playbackCushionConfiguration(for: playbackProfile).timeoutNanoseconds
+        playbackCushionTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.playbackCushionTask = nil }
+            try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+            guard !Task.isCancelled else { return }
+            let drainedBufferCount = self.withReceivePlaybackLock { () -> Int in
+                let pendingBufferCount = self.pendingPlaybackBufferCount()
+                self.startBufferedPlaybackAfterCushion(reason: "timeout")
+                return pendingBufferCount
+            }
+            await self.report(
+                "Started playback after playout cushion",
+                metadata: [
+                    "pendingBufferCount": String(drainedBufferCount),
+                    "reason": "timeout",
+                    "playbackProfile": String(describing: playbackProfile),
+                    "timeoutMilliseconds": String(timeoutNanoseconds / 1_000_000),
+                ]
             )
         }
     }

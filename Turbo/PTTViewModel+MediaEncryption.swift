@@ -62,7 +62,40 @@ extension PTTViewModel {
         }
         guard let peerDeviceID,
               let peerIdentity = channelReadinessByContactID[contactID]?.peerMediaEncryptionRegistration else {
+            if let existing = compatibleMediaEncryptionSession(
+                contactID: contactID,
+                channelID: channelID,
+                peerDeviceID: peerDeviceID
+            ) {
+                diagnostics.record(
+                    .media,
+                    message: "Preserved existing media E2EE session while peer identity is transiently unavailable",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelID,
+                        "peerDeviceId": existing.peerDeviceID,
+                    ]
+                )
+                return
+            }
             mediaRuntime.setMediaEncryptionSession(nil, for: contactID)
+            return
+        }
+        if let existing = compatibleMediaEncryptionSession(
+            contactID: contactID,
+            channelID: channelID,
+            peerDeviceID: peerDeviceID
+        ) {
+            diagnostics.record(
+                .media,
+                message: "Preserved existing media E2EE session for stable channel peer",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "peerDeviceId": existing.peerDeviceID,
+                    "keyId": existing.keyID,
+                ]
+            )
             return
         }
         let session = MediaEncryptionSession(
@@ -92,7 +125,11 @@ extension PTTViewModel {
         _ payload: String,
         target: TransmitTarget
     ) throws -> String {
-        var session = mediaRuntime.mediaEncryptionSession(for: target.contactID)
+        var session = matchingMediaEncryptionSession(
+            contactID: target.contactID,
+            channelID: target.channelID,
+            peerDeviceID: target.deviceID
+        )
         if session == nil, isMediaEncryptionRequired(for: target.contactID) {
             configureMediaEncryptionSessionIfPossible(
                 contactID: target.contactID,
@@ -181,6 +218,22 @@ extension PTTViewModel {
             )
             return nil
         }
+        guard session.channelID == channelID,
+              session.peerDeviceID == fromDeviceID else {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Encrypted media payload matched a stale E2EE session",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "fromDeviceId": fromDeviceID,
+                    "sessionChannelId": session.channelID,
+                    "sessionPeerDeviceId": session.peerDeviceID,
+                ]
+            )
+            return nil
+        }
         let packet = try MediaEndToEndEncryption.decodePacket(payload)
         let context = session.context(
             senderDeviceID: session.peerDeviceID,
@@ -216,7 +269,83 @@ extension PTTViewModel {
         return opened
     }
 
-    private func isMediaEncryptionRequired(for contactID: UUID) -> Bool {
+    func mediaEncryptionIsRequired(for contactID: UUID) -> Bool {
         channelReadinessByContactID[contactID]?.peerMediaEncryptionRegistration != nil
+    }
+
+    func localReceiverMediaEncryptionReadyForLiveMedia(
+        contactID: UUID,
+        channelID: String?,
+        peerDeviceID: String?
+    ) -> Bool {
+        guard mediaEncryptionIsRequired(for: contactID) else { return true }
+        guard let channelID,
+              let peerDeviceID else {
+            return false
+        }
+        if matchingMediaEncryptionSession(
+            contactID: contactID,
+            channelID: channelID,
+            peerDeviceID: peerDeviceID
+        ) != nil {
+            return true
+        }
+        configureMediaEncryptionSessionIfPossible(
+            contactID: contactID,
+            channelID: channelID,
+            peerDeviceID: peerDeviceID
+        )
+        return matchingMediaEncryptionSession(
+            contactID: contactID,
+            channelID: channelID,
+            peerDeviceID: peerDeviceID
+        ) != nil
+    }
+
+    func shouldDeferIncomingEncryptedMediaUntilSessionReady(
+        _ payload: String,
+        channelID: String,
+        fromDeviceID: String,
+        contactID: UUID
+    ) -> Bool {
+        guard MediaEncryptedAudioPacket.isEncodedPacket(payload) else { return false }
+        return matchingMediaEncryptionSession(
+            contactID: contactID,
+            channelID: channelID,
+            peerDeviceID: fromDeviceID
+        ) == nil
+    }
+
+    private func matchingMediaEncryptionSession(
+        contactID: UUID,
+        channelID: String,
+        peerDeviceID: String?
+    ) -> MediaEncryptionSession? {
+        guard let peerDeviceID,
+              let session = mediaRuntime.mediaEncryptionSession(for: contactID),
+              session.channelID == channelID,
+              session.peerDeviceID == peerDeviceID else {
+            return nil
+        }
+        return session
+    }
+
+    private func compatibleMediaEncryptionSession(
+        contactID: UUID,
+        channelID: String,
+        peerDeviceID: String?
+    ) -> MediaEncryptionSession? {
+        guard let session = mediaRuntime.mediaEncryptionSession(for: contactID),
+              session.channelID == channelID else {
+            return nil
+        }
+        if let peerDeviceID, session.peerDeviceID != peerDeviceID {
+            return nil
+        }
+        return session
+    }
+
+    private func isMediaEncryptionRequired(for contactID: UUID) -> Bool {
+        mediaEncryptionIsRequired(for: contactID)
     }
 }

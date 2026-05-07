@@ -32,6 +32,33 @@ SIGNAL_KINDS = [
     "receiver-ready",
     "receiver-not-ready",
 ]
+CORE_SCENARIO_ACTION_TYPES = {
+    "openPeer",
+    "connect",
+    "beginTransmit",
+    "endTransmit",
+    "backgroundApp",
+    "foregroundApp",
+    "disconnect",
+    "restartApp",
+}
+INVALID_SCENARIO_FAILURE_MARKERS = [
+    "Caught error: Scenario references unknown actor",
+    "Caught error: openPeer requires",
+    "Caught error: ensureDirectChannel requires",
+    "Caught error: heartbeatPresence requires",
+    "Caught error: refreshChannelState requires",
+    "Caught error: setHTTPDelay requires",
+    "Caught error: setWebSocketSignalDelay requires",
+    "Caught error: dropNextWebSocketSignals requires",
+    "Caught error: duplicateNextWebSocketSignals requires",
+    "Caught error: reorderNextWebSocketSignals requires",
+    "Caught error: reconnectWebSocket requires",
+    "Caught error: restartApp requires",
+    "Caught error: wait requires",
+    "Caught error: Unknown scenario action type",
+    "Caught error: Scenario action ",
+]
 
 
 @dataclass(frozen=True)
@@ -154,6 +181,14 @@ def run_batch(config: FuzzRunConfig) -> int:
 def replay(artifact_dir: Path) -> int:
     require_artifact(artifact_dir)
     result = run_artifact_scenario(artifact_dir)
+    write_json(
+        artifact_dir / "result.json",
+        {
+            "failed": result.failed,
+            "scenarioExitCode": result.scenario_exit_code,
+            "strictDiagnosticsExitCode": result.strict_diagnostics_exit_code,
+        },
+    )
     return 1 if result.failed else 0
 
 
@@ -173,7 +208,19 @@ def shrink(artifact_dir: Path, max_candidates: int) -> int:
             candidate_dir.mkdir(parents=True, exist_ok=True)
             write_scenario_artifacts(candidate_dir, candidate, metadata(artifact_dir)["seed"], metadata(artifact_dir)["baseURL"])
             result = run_artifact_scenario(candidate_dir)
+            write_json(
+                candidate_dir / "result.json",
+                {
+                    "failed": result.failed,
+                    "scenarioExitCode": result.scenario_exit_code,
+                    "strictDiagnosticsExitCode": result.strict_diagnostics_exit_code,
+                    "invalidScenarioProgram": invalid_scenario_program_failure(candidate_dir, result),
+                },
+            )
             if result.failed:
+                if invalid_scenario_program_failure(candidate_dir, result):
+                    print(f"rejected invalid shrink candidate {candidates_run}", flush=True)
+                    continue
                 current = candidate
                 write_json(artifact_dir / "minimized.json", current)
                 shutil.copy2(candidate_dir / "xcode-output.txt", artifact_dir / "minimized-xcode-output.txt")
@@ -260,12 +307,23 @@ def run_artifact_scenario(artifact_dir: Path) -> ScenarioRunResult:
     )
 
 
+def invalid_scenario_program_failure(artifact_dir: Path, result: ScenarioRunResult) -> bool:
+    if result.scenario_exit_code == 0:
+        return False
+    output_path = artifact_dir / "xcode-output.txt"
+    if not output_path.exists():
+        return False
+    output = output_path.read_text(encoding="utf-8", errors="replace")
+    return any(marker in output for marker in INVALID_SCENARIO_FAILURE_MARKERS)
+
+
 def diagnostics_command(meta: dict[str, Any], *, json_output: bool, fail_on_violations: bool) -> list[str]:
     command = [
         "python3",
         "scripts/merged_diagnostics.py",
         "--base-url",
         meta["baseURL"],
+        "--no-telemetry",
         "--device",
         f"{meta['handleA']}={meta['deviceIDA']}",
         "--device",
@@ -530,14 +588,18 @@ def shrink_candidates(scenario: dict[str, Any]) -> list[dict[str, Any]]:
     for index, step_payload in enumerate(steps):
         if len(steps) <= 1:
             break
+        if not removable_step_for_shrink(step_payload):
+            continue
         candidate = clone_json(scenario)
         del candidate["steps"][index]
         candidates.append(candidate)
 
     for step_index, step_payload in enumerate(steps):
         actions = step_payload.get("actions", [])
-        for action_index, _ in enumerate(actions):
+        for action_index, action in enumerate(actions):
             if len(actions) <= 1:
+                continue
+            if not removable_action_for_shrink(action):
                 continue
             candidate = clone_json(scenario)
             del candidate["steps"][step_index]["actions"][action_index]
@@ -552,6 +614,16 @@ def shrink_candidates(scenario: dict[str, Any]) -> list[dict[str, Any]]:
                 candidates.append(candidate)
 
     return candidates
+
+
+def removable_step_for_shrink(step_payload: dict[str, Any]) -> bool:
+    if step_payload.get("expectEventually") is not None:
+        return False
+    return all(removable_action_for_shrink(action) for action in step_payload.get("actions", []))
+
+
+def removable_action_for_shrink(action: dict[str, Any]) -> bool:
+    return action.get("type") not in CORE_SCENARIO_ACTION_TYPES
 
 
 def simplify_action(action: dict[str, Any]) -> dict[str, Any]:

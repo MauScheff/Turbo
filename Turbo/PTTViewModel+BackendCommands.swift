@@ -222,6 +222,7 @@ extension PTTViewModel {
             await refreshInvites()
             await refreshChannelState(for: contact.id)
             await refreshContactSummaries()
+            selectedPeerCoordinator.send(.requesterAutoJoinCancelled(contactID: contact.id))
             diagnostics.record(.backend, message: "Cancelled outgoing request", metadata: ["handle": contact.handle])
             captureDiagnosticsState("selected-peer:cancel-request")
             updateStatusForSelectedContact()

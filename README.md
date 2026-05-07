@@ -15,8 +15,10 @@ The app side currently proves out Apple's PushToTalk framework integration. The 
 - `APP_STATE.md`: app-side state machines, session phases, and successful PTT flow examples.
 - `SWIFT_DEBUGGING.md`: simulator/device/PTT/audio debugging guidance.
 - `BACKEND.md`: backend/control-plane/storage/query guidance.
+- `MIGRATIONS.md`: Unison Cloud storage schema changes, drift guard, migration/reset workflow.
 - `TOOLING.md`: tooling, operational entrypoints, and infrastructure overview.
 - `STATE_MACHINE_TESTING.md`: canonical scenario-driven state-machine testing workflow.
+- `SIMULATOR_FUZZING.md`: deterministic simulator fuzzing, artifacts, replay, shrinking, and promotion workflow.
 - `INVARIANTS.md`: invariant rule catalog and diagnostics-backed regression guidance.
 - `SELF_HEALING.md`: recoverable bad-state taxonomy, repair rules, and proof checklist.
 - `PRODUCTION_TELEMETRY.md`: production telemetry architecture, deployment, alerting, and query workflow.
@@ -45,8 +47,12 @@ Use these docs as the primary authority for their respective concerns:
   - client-only handshake UX shortcuts and how to disable them during debugging
 - `BACKEND.md`
   - backend/control-plane scope, storage/query rules, and backend operational guidance
+- `MIGRATIONS.md`
+  - Unison Cloud `OrderedTable` schema changes, `turbo.schemaDrift`, migration/reset/revert workflow, and deploy guard expectations
 - `STATE_MACHINE_TESTING.md`
   - the default distributed bug reproduction, proof, and regression-testing model
+- `SIMULATOR_FUZZING.md`
+  - seeded simulator fuzzing workflow, local commands, artifacts, replay, shrinking, and failure promotion
 - `INVARIANTS.md`
   - how invariant IDs, typed violation logging, merged diagnostics checks, and regression expectations are encoded
 - `SELF_HEALING.md`
