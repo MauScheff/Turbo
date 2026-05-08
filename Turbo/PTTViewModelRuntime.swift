@@ -1177,6 +1177,7 @@ struct ReceiverAudioReadinessPublication: Equatable {
     let isReady: Bool
     let peerWasRoutable: Bool
     let basis: ReceiverAudioReadinessPublicationBasis
+    let telemetry: CallPeerTelemetry?
 }
 
 struct BackendServices {

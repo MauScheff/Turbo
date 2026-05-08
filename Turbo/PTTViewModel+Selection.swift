@@ -265,17 +265,28 @@ extension PTTViewModel {
             }
             return selectedChannelSnapshot(for: contactID)
         }()
-        guard let selectedChannel else { return }
-        guard !selectedChannel.membership.hasLocalMembership else { return }
-        guard selectedChannel.requestRelationship == .none else { return }
+        guard selectedChannel?.membership.hasLocalMembership != true else { return }
+        let requestRelationshipIsNone =
+            selectedChannel.map { $0.requestRelationship == .none }
+            ?? (relationshipState(for: contactID) == .none)
+        guard requestRelationshipIsNone else { return }
+
+        let contactBackendChannelID = contacts.first(where: { $0.id == contactID })?.backendChannelId
+        let summaryBackendChannelID = contactSummaryByContactID[contactID]?.channelId
+        let backendChannelReferenceAbsent =
+            selectedChannel != nil
+            || ((contactBackendChannelID?.isEmpty ?? true)
+                && (summaryBackendChannelID?.isEmpty ?? true))
 
         let localSessionTouchesContact =
             systemSessionMatches(contactID)
             || (isJoined && activeChannelId == contactID)
         guard !localSessionTouchesContact else { return }
 
-        let pendingJoinIsStale = sessionCoordinator.pendingJoinContactID == contactID
-        let pendingLeaveIsComplete = sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
+        let pendingJoinIsStale = selectedChannel != nil && sessionCoordinator.pendingJoinContactID == contactID
+        let pendingLeaveIsComplete =
+            backendChannelReferenceAbsent
+            && sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
         guard pendingJoinIsStale || pendingLeaveIsComplete else { return }
 
         sessionCoordinator.clearPendingJoin(for: contactID)
@@ -288,9 +299,10 @@ extension PTTViewModel {
                 "contactId": contactID.uuidString,
                 "pendingJoinWasStale": String(pendingJoinIsStale),
                 "pendingLeaveWasComplete": String(pendingLeaveIsComplete),
-                "backendMembership": String(describing: selectedChannel.membership),
+                "backendMembership": selectedChannel.map { String(describing: $0.membership) } ?? "none",
             ]
         )
+        updateStatusForSelectedContact()
         captureDiagnosticsState("session-recovery:backend-membership-absent")
     }
 
@@ -801,7 +813,9 @@ extension PTTViewModel {
         if selectedContact != nil {
             syncSelectedPeerSession()
             statusMessage = selectedPeerCoordinator.state.selectedPeerState.statusMessage
+            reconcileSelectedConnectionAttemptTimeout()
         } else {
+            cancelSelectedConnectionAttemptTimeout()
             statusMessage = ConversationStateMachine.statusMessage(
                 for: ConversationDerivationContext(
                     contactID: UUID(),
@@ -821,6 +835,68 @@ extension PTTViewModel {
             )
         }
         captureDiagnosticsState("selected-status-refresh")
+    }
+
+    func reconcileSelectedConnectionAttemptTimeout() {
+        guard let contactID = selectedContactId else {
+            cancelSelectedConnectionAttemptTimeout()
+            return
+        }
+        let selectedPeerState = selectedPeerCoordinator.state.selectedPeerState
+        guard selectedPeerState.contactID == contactID,
+              shouldTimeoutSelectedConnectionAttempt(selectedPeerState) else {
+            cancelSelectedConnectionAttemptTimeout()
+            return
+        }
+
+        let key = "\(contactID.uuidString)|\(selectedPeerState.detail)"
+        guard selectedConnectionAttemptTimeoutKey != key else { return }
+        cancelSelectedConnectionAttemptTimeout()
+        selectedConnectionAttemptTimeoutKey = key
+        selectedConnectionAttemptTimeoutTask = Task { [weak self] in
+            let timeout = await MainActor.run {
+                self?.selectedConnectionAttemptTimeoutNanoseconds ?? 15_000_000_000
+            }
+            try? await Task.sleep(nanoseconds: timeout)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                guard self.selectedConnectionAttemptTimeoutKey == key else { return }
+                self.selectedPeerCoordinator.send(.connectionAttemptTimedOut(contactID: contactID))
+                self.statusMessage = self.selectedPeerCoordinator.state.selectedPeerState.statusMessage
+                self.diagnostics.record(
+                    .state,
+                    level: .notice,
+                    message: "Selected connection attempt timed out",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "selectedPeerPhase": String(describing: self.selectedPeerCoordinator.state.selectedPeerState.phase),
+                    ]
+                )
+                self.captureDiagnosticsState("selected-connection-attempt:timed-out")
+                self.cancelSelectedConnectionAttemptTimeout()
+            }
+        }
+    }
+
+    func cancelSelectedConnectionAttemptTimeout() {
+        selectedConnectionAttemptTimeoutTask?.cancel()
+        selectedConnectionAttemptTimeoutTask = nil
+        selectedConnectionAttemptTimeoutKey = nil
+    }
+
+    func shouldTimeoutSelectedConnectionAttempt(_ selectedPeerState: SelectedPeerState) -> Bool {
+        switch selectedPeerState.detail {
+        case .waitingForPeer(reason: .pendingJoin),
+             .waitingForPeer(reason: .backendSessionTransition),
+             .waitingForPeer(reason: .localSessionTransition),
+             .waitingForPeer(reason: .peerReadyToConnect):
+            return true
+        case .idle, .requested, .incomingRequest, .peerReady, .wakeReady,
+             .waitingForPeer, .localJoinFailed, .ready, .startingTransmit,
+             .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+            return false
+        }
     }
 
     func localMediaWarmupState(for contactID: UUID) -> LocalMediaWarmupState {

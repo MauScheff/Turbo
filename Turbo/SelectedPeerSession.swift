@@ -50,6 +50,7 @@ struct SelectedPeerSessionState: Equatable {
     var connectedControlPlaneProjection: ConnectedControlPlaneProjection = .unavailable
     var selectedPeerState: SelectedPeerState = .initial
     var reconciliationAction: SessionReconciliationAction = .none
+    var interruptedConnectionAttemptContactID: UUID?
 
     static let initial = SelectedPeerSessionState()
 }
@@ -141,6 +142,7 @@ enum SelectedPeerEvent: Equatable {
     case mediaStateUpdated(MediaConnectionState)
     case incomingWakeActivationStateUpdated(IncomingWakeActivationState?)
     case requesterAutoJoinCancelled(contactID: UUID)
+    case connectionAttemptTimedOut(contactID: UUID)
     case joinRequested
     case disconnectRequested
     case reconcileRequested
@@ -258,9 +260,18 @@ enum SelectedPeerReducer {
                 nextState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = false
                 nextState.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest = false
             }
+        case .connectionAttemptTimedOut(let contactID):
+            guard nextState.selection?.contactID == contactID,
+                  isInterruptibleConnectionAttempt(nextState.selectedPeerState) else {
+                return SelectedPeerTransition(state: nextState)
+            }
+            nextState.interruptedConnectionAttemptContactID = contactID
+            recomputeDerivedState(&nextState)
+            return SelectedPeerTransition(state: nextState)
         case .joinRequested:
             recomputeDerivedState(&nextState)
             if let effect = joinEffect(for: nextState) {
+                nextState.interruptedConnectionAttemptContactID = nil
                 if shouldArmRequesterAutoJoinShortcut(state: nextState, effect: effect) {
                     nextState.requesterAutoJoinOnPeerAcceptanceArmed = true
                     nextState.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest = false
@@ -272,6 +283,7 @@ enum SelectedPeerReducer {
             }
             return SelectedPeerTransition(state: nextState, effects: effects)
         case .disconnectRequested:
+            nextState.interruptedConnectionAttemptContactID = nil
             recomputeDerivedState(&nextState)
             if let effect = disconnectEffect(for: nextState) {
                 effects.append(effect)
@@ -396,6 +408,7 @@ enum SelectedPeerReducer {
         state.selectedPeerState = projection.selectedPeerState
         state.reconciliationAction = projection.reconciliationAction
         clearCompletedLocalRestoreDispatchIfNeeded(&state)
+        clearCompletedInterruptedConnectionAttemptIfNeeded(&state)
 
         if shouldProjectWakeReadyForConnectedDegradation(
             state: state,
@@ -408,6 +421,19 @@ enum SelectedPeerReducer {
                 relationship: state.relationship,
                 detail: .wakeReady,
                 statusMessage: "Hold to talk to wake \(selection.contactName)",
+                canTransmitNow: false
+            )
+        }
+
+        if let interruptedContactID = state.interruptedConnectionAttemptContactID,
+           interruptedContactID == selection.contactID,
+           shouldProjectInterruptedConnectionAttempt(state) {
+            state.selectedPeerState = SelectedPeerState(
+                contactID: selection.contactID,
+                contactName: selection.contactName,
+                relationship: state.relationship,
+                detail: .localJoinFailed(recoveryMessage: "Connection interrupted"),
+                statusMessage: "Connection interrupted",
                 canTransmitNow: false
             )
         }
@@ -427,6 +453,7 @@ enum SelectedPeerReducer {
         state.pendingConnectAcceptedIncomingRequest = pendingConnectAcceptedIncomingRequest
         state.localJoinFailure = localJoinFailure
         if isJoined || activeChannelID != nil {
+            state.interruptedConnectionAttemptContactID = nil
             state.requesterAutoJoinOnPeerAcceptanceArmed = false
             state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = false
             state.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest = false
@@ -457,6 +484,33 @@ enum SelectedPeerReducer {
               actionContactID == contactID else {
             state.localRestoreDispatchInFlightContactID = nil
             return
+        }
+    }
+
+    private static func clearCompletedInterruptedConnectionAttemptIfNeeded(
+        _ state: inout SelectedPeerSessionState
+    ) {
+        guard let contactID = state.interruptedConnectionAttemptContactID else { return }
+        guard state.selection?.contactID == contactID else {
+            state.interruptedConnectionAttemptContactID = nil
+            return
+        }
+
+        if state.isJoined
+            || state.activeChannelID == contactID
+            || state.systemSessionMatchesContact
+            || state.durableSessionProjection == .connected {
+            state.interruptedConnectionAttemptContactID = nil
+            return
+        }
+
+        switch state.selectedPeerState.phase {
+        case .idle, .requested, .incomingRequest, .peerReady, .wakeReady, .ready,
+             .startingTransmit, .transmitting, .receiving, .blockedByOtherSession,
+             .systemMismatch:
+            state.interruptedConnectionAttemptContactID = nil
+        case .waitingForPeer, .localJoinFailed:
+            break
         }
     }
 
@@ -560,6 +614,13 @@ enum SelectedPeerReducer {
     private static func joinEffect(for state: SelectedPeerSessionState) -> SelectedPeerEffect? {
         guard let contactID = state.selection?.contactID else { return nil }
 
+        if state.interruptedConnectionAttemptContactID == contactID {
+            if state.channel?.membership.hasPeerMembership == true {
+                return .joinReadyPeer(contactID: contactID)
+            }
+            return .requestConnection(contactID: contactID)
+        }
+
         switch (state.durableSessionProjection, state.selectedPeerState.phase) {
         case (.inactive, .idle), (.inactive, .requested), (.inactive, .incomingRequest):
             return .requestConnection(contactID: contactID)
@@ -567,6 +628,44 @@ enum SelectedPeerReducer {
             return .joinReadyPeer(contactID: contactID)
         case (.transitioning, _), (.connected, _), (.blockedByOtherSession, _), (.systemMismatch, _), (.localJoinFailed, _), (.pendingJoin, _), (.disconnecting, _), (.inactive, _):
             return nil
+        }
+    }
+
+    private static func isInterruptibleConnectionAttempt(
+        _ selectedPeerState: SelectedPeerState
+    ) -> Bool {
+        switch selectedPeerState.detail {
+        case .waitingForPeer(reason: .pendingJoin),
+             .waitingForPeer(reason: .backendSessionTransition),
+             .waitingForPeer(reason: .localSessionTransition),
+             .waitingForPeer(reason: .peerReadyToConnect):
+            return true
+        case .idle, .requested, .incomingRequest, .peerReady, .wakeReady,
+             .waitingForPeer, .localJoinFailed, .ready, .startingTransmit,
+             .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+            return false
+        }
+    }
+
+    private static func shouldProjectInterruptedConnectionAttempt(
+        _ state: SelectedPeerSessionState
+    ) -> Bool {
+        guard let contactID = state.selection?.contactID else { return false }
+        guard state.interruptedConnectionAttemptContactID == contactID else { return false }
+        guard !state.isJoined, state.activeChannelID == nil else { return false }
+        guard state.systemSessionState == .none else { return false }
+        switch state.selectedPeerState.detail {
+        case .waitingForPeer(reason: .pendingJoin),
+             .waitingForPeer(reason: .backendSessionTransition),
+             .waitingForPeer(reason: .localSessionTransition),
+             .waitingForPeer(reason: .peerReadyToConnect):
+            return true
+        case .localJoinFailed:
+            return true
+        case .idle, .requested, .incomingRequest, .peerReady, .wakeReady,
+             .waitingForPeer, .ready, .startingTransmit, .transmitting,
+             .receiving, .blockedByOtherSession, .systemMismatch:
+            return false
         }
     }
 

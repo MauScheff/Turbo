@@ -1083,6 +1083,15 @@ struct ConversationDerivationContext: Equatable {
         }
     }
 
+    var connectionAttemptStatusMessage: String {
+        switch contactPresence {
+        case .offline:
+            return "Waiting for \(contactName) to reconnect"
+        case .connected, .reachable:
+            return "Connecting..."
+        }
+    }
+
     var remoteAudioReadinessState: RemoteAudioReadinessState {
         channel?.remoteAudioReadiness ?? .unknown
     }
@@ -1255,11 +1264,29 @@ struct ConversationDerivationContext: Equatable {
         return readinessStatus == .inactive
     }
 
+    var backendMembershipCanRestoreMissingLocalSession: Bool {
+        guard localSessionReadiness == .none else { return false }
+        guard systemSessionState == .none else { return false }
+        guard activeChannelID == nil else { return false }
+        guard pendingAction == .none else { return false }
+        guard !explicitLeaveRequested else { return false }
+        guard channel?.requestRelationship == TurboRequestRelationship.none else { return false }
+        guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness,
+              peerDeviceConnected,
+              readinessStatus == .waitingForSelf else {
+            return false
+        }
+        return true
+    }
+
     var backendReadyAutoRestoreAllowed: Bool {
         if pendingBackendConnectIsReadyForLocalRestore {
             return true
         }
         if pendingAction.pendingJoinContactID == contactID {
+            return true
+        }
+        if backendMembershipCanRestoreMissingLocalSession {
             return true
         }
         if backendReadyMembershipHasCurrentDeviceEvidence {
@@ -1398,7 +1425,11 @@ enum ConversationStateMachine {
             let localSessionActive = durableSession.localSessionPresent
 
             if !localSessionActive, context.pendingConnectAcceptedIncomingRequest {
-                return makeState(.waitingForPeer(reason: .pendingJoin), "Connecting...", false)
+                return makeState(
+                    .waitingForPeer(reason: .pendingJoin),
+                    context.connectionAttemptStatusMessage,
+                    false
+                )
             }
 
             switch context.backendChannelReadiness {
@@ -1412,7 +1443,11 @@ enum ConversationStateMachine {
                         context.backendChannelReadiness.hasLocalMembership
                             && context.backendReadyAutoRestoreAllowed
                     ) {
-                    return makeState(.waitingForPeer(reason: .backendSessionTransition), "Connecting...", false)
+                    return makeState(
+                        .waitingForPeer(reason: .backendSessionTransition),
+                        context.connectionAttemptStatusMessage,
+                        false
+                    )
                 }
             case .both:
                 if localSessionActive
@@ -1424,7 +1459,11 @@ enum ConversationStateMachine {
                         context.backendChannelReadiness.hasLocalMembership
                         ? .peerReadyToConnect
                         : .backendSessionTransition
-                    return makeState(.waitingForPeer(reason: reason), "Connecting...", false)
+                    return makeState(
+                        .waitingForPeer(reason: reason),
+                        context.connectionAttemptStatusMessage,
+                        false
+                    )
                 }
             case .absent:
                 break
@@ -1435,6 +1474,7 @@ enum ConversationStateMachine {
             // repopulated. Treat that as a connectable recovery state instead of
             // falling all the way back to idle/requested.
             if !localSessionActive,
+               !context.backendChannelReadiness.hasLocalMembership,
                context.channel?.readinessStatus == .waitingForSelf {
                 return makeState(.peerReady, "\(context.contactName) is ready to connect", false)
             }
@@ -1454,14 +1494,22 @@ enum ConversationStateMachine {
                     if !localSessionActive {
                         return makeState(.peerReady, "\(context.contactName) is ready to connect", false)
                     }
-                    return makeState(.waitingForPeer(reason: .backendSessionTransition), "Connecting...", false)
+                    return makeState(
+                        .waitingForPeer(reason: .backendSessionTransition),
+                        context.connectionAttemptStatusMessage,
+                        false
+                    )
                 case .idle, .requested, .incomingRequest:
                     break
                 }
             }
 
             if localSessionActive {
-                return makeState(.waitingForPeer(reason: .localSessionTransition), "Connecting...", false)
+                return makeState(
+                    .waitingForPeer(reason: .localSessionTransition),
+                    context.connectionAttemptStatusMessage,
+                    false
+                )
             }
 
             switch relationship {
@@ -1499,7 +1547,11 @@ enum ConversationStateMachine {
                     false
                 )
             case .pendingJoin:
-                return makeState(.waitingForPeer(reason: .pendingJoin), "Connecting...", false)
+                return makeState(
+                    .waitingForPeer(reason: .pendingJoin),
+                    context.connectionAttemptStatusMessage,
+                    false
+                )
             case .disconnecting:
                 return makeState(.waitingForPeer(reason: .disconnecting), "Disconnecting...", false)
             case .connected:
@@ -1667,7 +1719,7 @@ enum ConversationStateMachine {
     ) -> String {
         switch conversationState {
         case .incomingRequest:
-            return "Connect"
+            return "Accept"
         case .requested:
             if let requestCooldownRemaining {
                 return "Ask again in \(requestCooldownRemaining)s"
@@ -1771,6 +1823,13 @@ enum ConversationStateMachine {
                 isEnabled: selectedPeerState.allowsHoldToTalk,
                 style: .accent
             )
+        case .localJoinFailed:
+            return ConversationPrimaryAction(
+                kind: .connect,
+                label: "Try Again",
+                isEnabled: true,
+                style: .accent
+            )
         case .waitingForPeer:
             if case .waitingForPeer(reason: .localAudioPrewarm) = selectedPeerState.detail {
                 return ConversationPrimaryAction(
@@ -1810,7 +1869,7 @@ enum ConversationStateMachine {
                 isEnabled: selectedPeerState.allowsHoldToTalk,
                 style: .accent
             )
-        case .idle, .requested, .incomingRequest, .localJoinFailed, .startingTransmit, .transmitting, .receiving:
+        case .idle, .requested, .incomingRequest, .startingTransmit, .transmitting, .receiving:
             return primaryAction(
                 conversationState: selectedPeerState.conversationState,
                 isSelectedChannelJoined: isSelectedChannelJoined,

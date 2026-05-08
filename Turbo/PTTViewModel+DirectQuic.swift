@@ -2,7 +2,7 @@ import Foundation
 import UIKit
 
 extension PTTViewModel {
-    private var defaultDirectQuicPromotionTimeoutMilliseconds: Int { 5_000 }
+    private var defaultDirectQuicPromotionTimeoutMilliseconds: Int { 15_000 }
     private var defaultDirectQuicRetryBackoffMilliseconds: Int { 15_000 }
     private var foregroundDirectQuicPathLostRetryBackoffMilliseconds: Int { 1_000 }
     private var foregroundDirectQuicInitialConnectivityRetryBackoffMilliseconds: Int { 1_000 }
@@ -69,6 +69,11 @@ extension PTTViewModel {
         applicationState: UIApplication.State
     ) -> Bool {
         guard applicationState != .active else { return false }
+        guard !shouldPreserveLiveCallForProximityInactiveTransition(
+            applicationState: applicationState
+        ) else {
+            return false
+        }
         guard shouldUseDirectQuicTransport(for: contactID) else { return false }
         return !hasActiveBackgroundPTTFlowOwningDirectQuic(for: contactID)
     }
@@ -239,12 +244,14 @@ extension PTTViewModel {
     func directQuicRetryBackoffRequest(
         reason: String,
         attemptID: String? = nil,
-        preferredMilliseconds: Int? = nil
+        preferredMilliseconds: Int? = nil,
+        priorFailureCount: Int = 0
     ) -> DirectQuicRetryBackoffRequest? {
         let baseMilliseconds = directQuicRetryBackoffMilliseconds()
         let resolvedMilliseconds = DirectQuicRetryBackoffPolicy.milliseconds(
             baseMilliseconds: baseMilliseconds,
-            reason: reason
+            reason: reason,
+            priorFailureCount: priorFailureCount
         )
         let milliseconds = preferredMilliseconds.map { min(max($0, 0), resolvedMilliseconds) }
             ?? resolvedMilliseconds
@@ -287,6 +294,19 @@ extension PTTViewModel {
             && selectedContactId == contactID
         let isConnectivityFailure =
             DirectQuicRetryBackoffPolicy.category(for: reason) == .connectivity
+        let priorFailureCount =
+            isConnectivityFailure
+            ? max(
+                mediaRuntime.directQuicUpgrade.retryFailureCount(
+                    for: contactID,
+                    category: .connectivity
+                ) - (isForegroundSelectedPath ? foregroundDirectQuicInitialConnectivityRetryLimit : 0),
+                0
+            )
+            : mediaRuntime.directQuicUpgrade.retryFailureCount(
+                for: contactID,
+                category: DirectQuicRetryBackoffPolicy.category(for: reason)
+            )
         let fastRetryNumber =
             (isForegroundSelectedPath && isConnectivityFailure)
             ? mediaRuntime.directQuicUpgrade.consumeFastConnectivityRetry(
@@ -314,12 +334,13 @@ extension PTTViewModel {
         return directQuicRetryBackoffRequest(
             reason: reason,
             attemptID: attemptID,
-            preferredMilliseconds: preferredMilliseconds
+            preferredMilliseconds: preferredMilliseconds,
+            priorFailureCount: priorFailureCount
         )
     }
 
     func directQuicStunServers() -> [TurboDirectQuicStunServer] {
-        backendServices?.directQuicPolicy?.stunServers ?? []
+        backendServices?.directQuicPolicy?.effectiveStunServers ?? []
     }
 
     func preferredDirectQuicIdentityLabel() -> String {
@@ -358,6 +379,16 @@ extension PTTViewModel {
             )
         } catch {
             directQuicProvisioningStatus = "failed"
+            let statusAfterFailure = DirectQuicIdentityConfiguration.status()
+            pendingDirectQuicIdentityProvisioningFailureTelemetry = [
+                "label": label,
+                "deviceId": deviceID,
+                "error": error.localizedDescription,
+                "identityStatus": statusAfterFailure.diagnosticsText,
+                "identitySource": statusAfterFailure.source.rawValue,
+                "fingerprint": statusAfterFailure.fingerprint ?? "none",
+                "provisioningStatus": directQuicProvisioningStatus,
+            ]
             diagnostics.record(
                 .media,
                 level: .error,
@@ -366,8 +397,11 @@ extension PTTViewModel {
                     "label": label,
                     "deviceId": deviceID,
                     "error": error.localizedDescription,
+                    "identityStatus": statusAfterFailure.diagnosticsText,
+                    "identitySource": statusAfterFailure.source.rawValue,
                 ]
             )
+            flushPendingDirectQuicIdentityProvisioningFailureTelemetry(reason: "provisioning-failed")
             return nil
         }
     }
@@ -375,6 +409,93 @@ extension PTTViewModel {
     func currentDirectQuicIdentityRegistrationMetadata() -> DirectQuicIdentityRegistrationMetadata? {
         let label = preferredDirectQuicIdentityLabel()
         return DirectQuicIdentityConfiguration.productionIdentityRegistrationMetadata(label: label)
+    }
+
+    func repairDirectQuicProductionIdentityRegistrationIfPossible(
+        contactID: UUID,
+        channelID: String,
+        reason: String
+    ) async -> Bool {
+        guard let backend = backendServices else { return false }
+        let status = DirectQuicIdentityConfiguration.status()
+        if status.source == .production,
+           let fingerprint = status.fingerprint,
+           fingerprint == directQuicRegisteredFingerprint || directQuicRegisteredFingerprint == nil {
+            return true
+        }
+        guard !directQuicIdentityRepairAttemptedDeviceIDs.contains(backend.deviceID) else {
+            return false
+        }
+        directQuicIdentityRepairAttemptedDeviceIDs.insert(backend.deviceID)
+        diagnostics.record(
+            .media,
+            message: "Repairing Direct QUIC production identity registration",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": channelID,
+                "deviceId": backend.deviceID,
+                "reason": reason,
+                "identityStatus": status.diagnosticsText,
+                "provisioningStatus": directQuicProvisioningStatus,
+                "registeredFingerprint": directQuicRegisteredFingerprint ?? "none",
+            ]
+        )
+        guard let identity = provisionDirectQuicProductionIdentityForRegistration(
+            deviceID: backend.deviceID
+        ) else {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Direct QUIC production identity repair failed during provisioning",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "deviceId": backend.deviceID,
+                    "reason": reason,
+                ]
+            )
+            return false
+        }
+        do {
+            _ = try await backend.registerDevice(
+                label: UIDevice.current.name,
+                alertPushToken: alertPushTokenHex.isEmpty ? nil : alertPushTokenHex,
+                alertPushEnvironment: alertPushTokenHex.isEmpty
+                    ? nil
+                    : TurboAPNSEnvironmentResolver.current(),
+                directQuicIdentity: identity,
+                mediaEncryptionIdentity: currentMediaEncryptionIdentityRegistrationMetadata()
+            )
+            directQuicRegisteredFingerprint = identity.fingerprint
+            diagnostics.record(
+                .media,
+                message: "Direct QUIC production identity registration repaired",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "deviceId": backend.deviceID,
+                    "fingerprint": identity.fingerprint,
+                    "reason": reason,
+                ]
+            )
+            await refreshContactSummaries()
+            return true
+        } catch {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Direct QUIC production identity repair registration failed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "deviceId": backend.deviceID,
+                    "fingerprint": identity.fingerprint,
+                    "reason": reason,
+                    "error": error.localizedDescription,
+                ]
+            )
+            return false
+        }
     }
 
     func backendPeerDirectQuicFingerprint(for contactID: UUID) -> String? {
@@ -961,6 +1082,22 @@ extension PTTViewModel {
     ) async {
         guard let activeAttempt = mediaRuntime.directQuicUpgrade.attempt(for: contactID),
               activeAttempt.attemptId == attemptID else {
+            return
+        }
+        let elapsedSinceProgressMilliseconds = Int(Date().timeIntervalSince(activeAttempt.lastUpdatedAt) * 1_000)
+        if elapsedSinceProgressMilliseconds < max(timeoutMilliseconds - 250, 0) {
+            diagnostics.record(
+                .media,
+                message: "Direct QUIC promotion timeout extended after recent progress",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": activeAttempt.channelID,
+                    "attemptId": attemptID,
+                    "timeoutMilliseconds": "\(timeoutMilliseconds)",
+                    "elapsedSinceProgressMilliseconds": "\(elapsedSinceProgressMilliseconds)",
+                ]
+            )
+            scheduleDirectQuicPromotionTimeout(contactID: contactID, attemptID: attemptID)
             return
         }
 
@@ -1803,7 +1940,7 @@ extension PTTViewModel {
                 }
                 diagnostics.record(
                     .media,
-                    level: outcome.disposition == .batchExhausted ? .error : .info,
+                    level: .info,
                     message: message,
                     metadata: metadata
                 )
@@ -1911,24 +2048,45 @@ extension PTTViewModel {
 
         if !allowDebugBypassWithoutBackendAdvertisement {
             let localIdentityStatus = DirectQuicIdentityConfiguration.status()
-            guard localIdentityStatus.source == .production,
-                  let localFingerprint = localIdentityStatus.fingerprint,
-                  localFingerprint == directQuicRegisteredFingerprint
-                    || directQuicRegisteredFingerprint == nil else {
+            let identityIsRegistered =
+                localIdentityStatus.source == .production
+                    && localIdentityStatus.fingerprint != nil
+                    && (
+                        localIdentityStatus.fingerprint == directQuicRegisteredFingerprint
+                            || directQuicRegisteredFingerprint == nil
+                    )
+            if !identityIsRegistered {
+                let repaired = await repairDirectQuicProductionIdentityRegistrationIfPossible(
+                    contactID: contactID,
+                    channelID: channelID,
+                    reason: "direct-quic-probe"
+                )
+                guard repaired else {
+                    diagnostics.record(
+                        .media,
+                        level: .error,
+                        message: "Skipped direct QUIC probe because production identity is not registered",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "channelId": channelID,
+                            "identitySource": localIdentityStatus.source.rawValue,
+                            "identityStatus": localIdentityStatus.diagnosticsText,
+                            "provisioningStatus": directQuicProvisioningStatus,
+                            "fingerprint": localIdentityStatus.fingerprint ?? "none",
+                            "registeredFingerprint": directQuicRegisteredFingerprint ?? "none",
+                        ]
+                    )
+                    return
+                }
                 diagnostics.record(
                     .media,
-                    level: .error,
-                    message: "Skipped direct QUIC probe because production identity is not registered",
+                    message: "Continuing Direct QUIC probe after repairing production identity registration",
                     metadata: [
                         "contactId": contactID.uuidString,
                         "channelId": channelID,
-                        "identitySource": localIdentityStatus.source.rawValue,
-                        "provisioningStatus": directQuicProvisioningStatus,
-                        "fingerprint": localIdentityStatus.fingerprint ?? "none",
                         "registeredFingerprint": directQuicRegisteredFingerprint ?? "none",
                     ]
                 )
-                return
             }
             guard backendPeerDirectQuicFingerprint(for: contactID) != nil else {
                 diagnostics.record(
@@ -2056,6 +2214,12 @@ extension PTTViewModel {
                 for: attempt,
                 payload: payload
             )
+            if !attempt.isDirectActive {
+                scheduleDirectQuicPromotionTimeout(
+                    contactID: contactID,
+                    attemptID: payload.attemptId
+                )
+            }
             await continueDirectQuicPromotionIfNeeded(
                 for: contactID,
                 attemptID: payload.attemptId,
@@ -2129,45 +2293,31 @@ extension PTTViewModel {
         }
 
         let answerPayload: TurboDirectQuicAnswerPayload
-        let directPathEstablished: Bool
+        var shouldProbeRemoteCandidates = false
         do {
-            let preparedConnection = try await directQuicProbeController().connect(
+            let preparedAnswer = try await directQuicProbeController().prepareDialerAnswer(
                 using: offer,
                 stunServers: directQuicStunServers()
             )
-            directPathEstablished = preparedConnection.didEstablishPath
             answerPayload = TurboDirectQuicAnswerPayload(
                 attemptId: offer.attemptId,
                 accepted: true,
-                certificateFingerprint: preparedConnection.certificateFingerprint,
-                candidates: preparedConnection.candidates
+                certificateFingerprint: preparedAnswer.certificateFingerprint,
+                candidates: preparedAnswer.candidates
             )
-            if preparedConnection.didEstablishPath {
-                diagnostics.record(
-                    .media,
-                    message: "Direct QUIC proof established; promoting media path",
-                    metadata: [
-                        "contactId": contactID.uuidString,
-                        "channelId": envelope.channelId,
-                        "attemptId": offer.attemptId,
-                        "localCandidateCount": "\(preparedConnection.candidates.count)",
-                    ]
-                )
-            } else {
-                diagnostics.record(
-                    .media,
-                    message: "Direct QUIC initial dial failed; awaiting late offerer candidates",
-                    metadata: [
-                        "contactId": contactID.uuidString,
-                        "channelId": envelope.channelId,
-                        "attemptId": offer.attemptId,
-                        "localCandidateCount": "\(preparedConnection.candidates.count)",
-                        "error": preparedConnection.lastFailureReason ?? "unknown",
-                    ]
-                )
-            }
+            shouldProbeRemoteCandidates = true
+            diagnostics.record(
+                .media,
+                message: "Direct QUIC answer prepared; sending candidates before probing",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": envelope.channelId,
+                    "attemptId": offer.attemptId,
+                    "localCandidateCount": "\(preparedAnswer.candidates.count)",
+                    "remoteCandidateCount": "\(offer.candidates.count)",
+                ]
+            )
         } catch {
-            directPathEstablished = false
             answerPayload = TurboDirectQuicAnswerPayload(
                 attemptId: offer.attemptId,
                 accepted: false,
@@ -2228,15 +2378,17 @@ extension PTTViewModel {
                     candidates: answerPayload.candidates,
                     endOfCandidates: true
                 )
-                if directPathEstablished {
-                    await activateDirectQuicMediaPath(
+                scheduleDirectQuicPromotionTimeout(
+                    contactID: contactID,
+                    attemptID: offer.attemptId
+                )
+                if shouldProbeRemoteCandidates {
+                    await continueDirectQuicPromotionIfNeeded(
                         for: contactID,
-                        attemptID: offer.attemptId
-                    )
-                } else {
-                    scheduleDirectQuicPromotionTimeout(
-                        contactID: contactID,
-                        attemptID: offer.attemptId
+                        attemptID: offer.attemptId,
+                        expectedPeerCertificateFingerprint: offer.certificateFingerprint,
+                        candidates: offer.candidates,
+                        trigger: "received-offer"
                     )
                 }
             } else {

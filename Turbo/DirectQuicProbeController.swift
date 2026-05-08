@@ -448,6 +448,12 @@ nonisolated struct DirectQuicPreparedDialerConnection: Equatable {
     let lastFailureReason: String?
 }
 
+nonisolated struct DirectQuicPreparedDialerAnswer: Equatable {
+    let attemptId: String
+    let certificateFingerprint: String
+    let candidates: [TurboDirectQuicCandidate]
+}
+
 nonisolated private struct DirectQuicIdentityMaterial {
     let label: String
     let identity: SecIdentity
@@ -459,6 +465,7 @@ nonisolated private struct DirectQuicPreparedDialerAttempt: Equatable {
     let attemptId: String
     let quicAlpn: String
     let localPort: UInt16
+    let candidates: [TurboDirectQuicCandidate]
 }
 
 nonisolated enum DirectQuicCandidateProbeDisposition: String, Equatable {
@@ -868,17 +875,11 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
             preparedDialerAttempt = DirectQuicPreparedDialerAttempt(
                 attemptId: offer.attemptId,
                 quicAlpn: offer.quicAlpn,
-                localPort: localPort
+                localPort: localPort,
+                candidates: localCandidates
             )
             nominatedPath = nil
         }
-
-        let parameters = makeOutboundParameters(
-            quicAlpn: offer.quicAlpn,
-            expectedPeerCertificateFingerprint: offer.certificateFingerprint,
-            identityMaterial: identityMaterial,
-            localPort: localPort
-        )
 
         guard !viableCandidates.isEmpty else {
             await report(
@@ -900,6 +901,13 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
 
         var lastError: Error?
         for candidate in viableCandidates {
+            let parameters = makeOutboundParameters(
+                quicAlpn: offer.quicAlpn,
+                expectedPeerCertificateFingerprint: offer.certificateFingerprint,
+                identityMaterial: identityMaterial,
+                localPort: localPort,
+                remoteAddress: candidate.address
+            )
             do {
                 try await attemptOutboundProof(
                     to: candidate,
@@ -948,6 +956,50 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
             didEstablishPath: false,
             lastFailureReason: lastError?.localizedDescription
                 ?? DirectQuicProbeError.noViableCandidate.localizedDescription
+        )
+    }
+
+    func prepareDialerAnswer(
+        using offer: TurboDirectQuicOfferPayload,
+        stunServers: [TurboDirectQuicStunServer] = []
+    ) async throws -> DirectQuicPreparedDialerAnswer {
+        let identityMaterial = try resolvedIdentityMaterial()
+        let localPort = try allocateLocalUDPPort()
+        let localCandidates = await localCandidates(
+            localPort: localPort,
+            stunServers: stunServers
+        )
+
+        let previousOutboundConnection = withLockedState { () -> NWConnection? in
+            let existing = outboundConnection
+            outboundConnection = nil
+            return existing
+        }
+        previousOutboundConnection?.cancel()
+        withLockedState {
+            preparedDialerAttempt = DirectQuicPreparedDialerAttempt(
+                attemptId: offer.attemptId,
+                quicAlpn: offer.quicAlpn,
+                localPort: localPort,
+                candidates: localCandidates
+            )
+            nominatedPath = nil
+        }
+
+        await report(
+            "Prepared direct QUIC dialer answer",
+            metadata: [
+                "attemptId": offer.attemptId,
+                "candidateCount": String(localCandidates.count),
+                "localPort": String(localPort),
+                "identityLabel": identityMaterial.label,
+            ]
+        )
+
+        return DirectQuicPreparedDialerAnswer(
+            attemptId: offer.attemptId,
+            certificateFingerprint: identityMaterial.certificateFingerprint,
+            candidates: localCandidates
         )
     }
 
@@ -1045,10 +1097,13 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
 
     func preparedLocalCandidates(matching attemptId: String) -> [TurboDirectQuicCandidate] {
         withLockedState {
-            guard let preparedOffer, preparedOffer.attemptId == attemptId else {
-                return []
+            if let preparedOffer, preparedOffer.attemptId == attemptId {
+                return preparedOffer.candidates
             }
-            return preparedOffer.candidates
+            if let preparedDialerAttempt, preparedDialerAttempt.attemptId == attemptId {
+                return preparedDialerAttempt.candidates
+            }
+            return []
         }
     }
 
@@ -1240,13 +1295,6 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         }
 
         let identityMaterial = try resolvedIdentityMaterial()
-        let parameters = makeOutboundParameters(
-            quicAlpn: localProbeContext.quicAlpn,
-            expectedPeerCertificateFingerprint: expectedPeerCertificateFingerprint,
-            identityMaterial: identityMaterial,
-            localPort: localProbeContext.localPort
-        )
-
         var lastError: Error?
         for candidate in candidatesToProbe {
             if try verifyConnectedPeerCertificateFingerprintIfAvailable(
@@ -1261,6 +1309,13 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
                 )
             }
 
+            let parameters = makeOutboundParameters(
+                quicAlpn: localProbeContext.quicAlpn,
+                expectedPeerCertificateFingerprint: expectedPeerCertificateFingerprint,
+                identityMaterial: identityMaterial,
+                localPort: localProbeContext.localPort,
+                remoteAddress: candidate.address
+            )
             do {
                 try await attemptOutboundProof(
                     to: candidate,
@@ -2062,7 +2117,8 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         quicAlpn: String,
         expectedPeerCertificateFingerprint: String,
         identityMaterial: DirectQuicIdentityMaterial,
-        localPort: UInt16
+        localPort: UInt16,
+        remoteAddress: String? = nil
     ) -> NWParameters {
         let quicOptions = NWProtocolQUIC.Options(alpn: [quicAlpn])
         sec_protocol_options_set_min_tls_protocol_version(
@@ -2084,8 +2140,9 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         let parameters = NWParameters(quic: quicOptions)
         parameters.includePeerToPeer = false
         parameters.allowLocalEndpointReuse = true
+        let localHost = remoteAddress.map(Self.isIPv6Address) == true ? "::" : "0.0.0.0"
         parameters.requiredLocalEndpoint = .hostPort(
-            host: NWEndpoint.Host("0.0.0.0"),
+            host: NWEndpoint.Host(localHost),
             port: NWEndpoint.Port(rawValue: localPort) ?? .any
         )
         return parameters
@@ -2149,24 +2206,60 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
                     && $0.transport.caseInsensitiveCompare("udp") == .orderedSame
                     && $0.port > 0
                     && $0.port <= Int(UInt16.max)
-                    && !$0.address.hasPrefix("fe80:")
-                    && $0.address != "::1"
-                    && !$0.address.contains(":")
+                    && !isIPv6LoopbackOrLinkLocal($0.address)
             }
             .sorted { lhs, rhs in
-                candidateSortRank(lhs.kind) < candidateSortRank(rhs.kind)
+                let lhsRank = candidateSortRank(lhs)
+                let rhsRank = candidateSortRank(rhs)
+                if lhsRank != rhsRank {
+                    return lhsRank < rhsRank
+                }
+                return lhs.priority > rhs.priority
             }
     }
 
-    private static func candidateSortRank(_ kind: TurboDirectQuicCandidateKind) -> Int {
-        switch kind {
-        case .serverReflexive:
+    private static func candidateSortRank(_ candidate: TurboDirectQuicCandidate) -> Int {
+        switch candidate.kind {
+        case .serverReflexive where isIPv6Address(candidate.address):
             return 0
-        case .host:
+        case .serverReflexive:
             return 1
-        case .relay:
+        case .host where isGlobalIPv6Address(candidate.address):
             return 2
+        case .host where isPrivateOrLoopbackIPv4Address(candidate.address):
+            return 4
+        case .host:
+            return 3
+        case .relay:
+            return 5
         }
+    }
+
+    private static func isIPv6Address(_ address: String) -> Bool {
+        address.contains(":")
+    }
+
+    private static func isGlobalIPv6Address(_ address: String) -> Bool {
+        isIPv6Address(address) && !isIPv6LoopbackOrLinkLocal(address)
+    }
+
+    private static func isIPv6LoopbackOrLinkLocal(_ address: String) -> Bool {
+        let normalized = address.lowercased()
+        return normalized == "::1"
+            || normalized.hasPrefix("fe80:")
+            || normalized.hasPrefix("fe80::")
+    }
+
+    private static func isPrivateOrLoopbackIPv4Address(_ address: String) -> Bool {
+        let parts = address.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return false }
+        let first = parts[0]
+        let second = parts[1]
+        return first == 10
+            || first == 127
+            || (first == 172 && (16 ... 31).contains(second))
+            || (first == 192 && second == 168)
+            || (first == 169 && second == 254)
     }
 
     private func startConsentLoop(on connection: NWConnection) {

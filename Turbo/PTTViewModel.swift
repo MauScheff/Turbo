@@ -9,6 +9,7 @@ import Foundation
 import Observation
 import PushToTalk
 import AVFAudio
+import Network
 import UIKit
 import UserNotifications
 
@@ -47,28 +48,65 @@ enum AudioOutputPreference: String, Equatable {
 }
 
 struct AudioOutputRouteOverridePlan: Equatable {
-    let shouldApplySpeakerOverride: Bool
+    enum Action: Equatable {
+        case none
+        case speaker
+        case clearSpeakerOverride
+    }
+
+    let action: Action
+
+    var shouldApplySpeakerOverride: Bool {
+        action == .speaker
+    }
+
+    var shouldClearSpeakerOverride: Bool {
+        action == .clearSpeakerOverride
+    }
 
     static func forCurrentRoute(
         preference: AudioOutputPreference,
         category: AVAudioSession.Category,
         outputPortTypes: [AVAudioSession.Port]
     ) -> AudioOutputRouteOverridePlan {
-        guard preference == .speaker else {
-            return AudioOutputRouteOverridePlan(shouldApplySpeakerOverride: false)
-        }
         guard category == .playAndRecord else {
-            return AudioOutputRouteOverridePlan(shouldApplySpeakerOverride: false)
+            return AudioOutputRouteOverridePlan(action: .none)
         }
 
-        guard outputPortTypes.contains(.builtInReceiver) else {
-            return AudioOutputRouteOverridePlan(shouldApplySpeakerOverride: false)
+        if outputPortTypes.contains(where: \.isExternalAudioOutput) {
+            return AudioOutputRouteOverridePlan(action: .none)
         }
 
-        let speakerAlreadyActive = outputPortTypes.contains(.builtInSpeaker)
-        return AudioOutputRouteOverridePlan(
-            shouldApplySpeakerOverride: !speakerAlreadyActive
-        )
+        switch preference {
+        case .speaker:
+            guard outputPortTypes.contains(.builtInReceiver) else {
+                return AudioOutputRouteOverridePlan(action: .none)
+            }
+
+            let speakerAlreadyActive = outputPortTypes.contains(.builtInSpeaker)
+            return AudioOutputRouteOverridePlan(
+                action: speakerAlreadyActive ? .none : .speaker
+            )
+        case .phone:
+            guard outputPortTypes.contains(.builtInSpeaker) else {
+                return AudioOutputRouteOverridePlan(action: .none)
+            }
+            return AudioOutputRouteOverridePlan(action: .clearSpeakerOverride)
+        }
+    }
+}
+
+private extension AVAudioSession.Port {
+    var isExternalAudioOutput: Bool {
+        self == .bluetoothA2DP
+            || self == .bluetoothHFP
+            || self == .bluetoothLE
+            || self == .headphones
+            || self == .usbAudio
+            || self == .carAudio
+            || self == .airPlay
+            || self == .HDMI
+            || self == .lineOut
     }
 }
 
@@ -150,8 +188,13 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var pendingTalkRequestNotificationShouldJoin: Bool = false
     var requestedExpandedCallContactID: UUID?
     var requestedExpandedCallSequence: Int = 0
+    var selectedConnectionAttemptTimeoutTask: Task<Void, Never>?
+    var selectedConnectionAttemptTimeoutKey: String?
+    var selectedConnectionAttemptTimeoutNanoseconds: UInt64 = 15_000_000_000
     var directQuicProvisioningStatus: String = "not-started"
     var directQuicRegisteredFingerprint: String?
+    var directQuicIdentityRepairAttemptedDeviceIDs: Set<String> = []
+    var pendingDirectQuicIdentityProvisioningFailureTelemetry: [String: String]?
     var mediaEncryptionProvisioningStatus: String = "not-started"
     var mediaEncryptionLocalIdentity: MediaEncryptionLocalIdentity?
     @ObservationIgnored
@@ -180,6 +223,24 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var clearDeliveredNotifications: @MainActor () -> Void = {
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
     }
+    @ObservationIgnored
+    var callTelemetryNetworkMonitor: NWPathMonitor?
+    @ObservationIgnored
+    let callTelemetryNetworkQueue = DispatchQueue(label: "Turbo.CallTelemetryNetworkMonitor")
+    @ObservationIgnored
+    var callTelemetryPollTask: Task<Void, Never>?
+    @ObservationIgnored
+    var proximityMonitoringIsActive = false
+    @ObservationIgnored
+    var isPhoneNearEar = false
+    @ObservationIgnored
+    var automaticAudioRouteBasePreference: AudioOutputPreference?
+    @ObservationIgnored
+    var automaticAudioRouteSwitchingEnabled = true
+
+    var localCallNetworkInterface: CallNetworkInterface = .unknown
+    var localCallTelemetry: CallPeerTelemetry?
+    var callPeerTelemetryByContactID: [UUID: CallPeerTelemetry] = [:]
 
     var localReceiverAudioReadinessPublications: [UUID: ReceiverAudioReadinessPublication] {
         get { controlPlaneCoordinator.state.localReceiverAudioReadinessPublications }
@@ -245,6 +306,11 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         }
         registerAudioSessionObservers()
         registerApplicationLifecycleObservers()
+        registerProximityObserver()
+        if !Self.isRunningAutomatedTests {
+            startCallTelemetryNetworkMonitor()
+            startCallTelemetryPolling()
+        }
         if let defaults = pttSystemPolicyDefaults {
             let restoredPolicyState = PTTSystemPolicyPersistence.load(from: defaults)
             if restoredPolicyState != .initial {
@@ -256,6 +322,11 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        callTelemetryPollTask?.cancel()
+        callTelemetryNetworkMonitor?.cancel()
+        Task { @MainActor in
+            UIDevice.current.isProximityMonitoringEnabled = false
+        }
     }
 
     func currentApplicationState() -> UIApplication.State {
@@ -343,6 +414,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         activeChannelId = pttCoordinator.state.activeContactID
         isJoined = pttCoordinator.state.isJoined
         isTransmitting = pttCoordinator.state.isTransmitting
+        updateAutomaticAudioRouteMonitoring(reason: "ptt-sync")
         captureDiagnosticsState("ptt-sync")
         let readinessContactIDs = Set(
             [previousActiveChannelID, activeChannelId, mediaSessionContactID].compactMap { $0 }
@@ -645,7 +717,13 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             retryAttemptID: retryBackoff?.attemptId,
             retryRemainingMilliseconds: retryRemainingMilliseconds,
             retryBackoffMilliseconds: retryBackoff?.milliseconds,
-            stunServerCount: directQuicPolicy?.stunServers?.count ?? 0,
+            stunServerCount: directQuicPolicy?.effectiveStunServers.count ?? 0,
+            stunProviderNames: directQuicPolicy?.enabledStunProviderNames ?? [],
+            turnEnabled: directQuicPolicy?.turnEnabled == true,
+            turnProvider: directQuicPolicy?.turnProvider,
+            turnPolicyPath: directQuicPolicy?.turnPolicyPath,
+            turnCredentialTtlSeconds: directQuicPolicy?.turnCredentialTtlSeconds,
+            transportExperimentBucket: directQuicPolicy?.transportExperimentBucket,
             promotionTimeoutMilliseconds: directQuicPromotionTimeoutMilliseconds(),
             retryBackoffBaseMilliseconds: directQuicRetryBackoffMilliseconds(),
             probeControllerReady: mediaRuntime.directQuicProbeController != nil
@@ -825,10 +903,17 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     var topChromeStatusMessage: String? {
         if developerIdentityControlsEnabled {
+            guard !isRedundantSelectedPresenceStatus(statusMessage) else { return nil }
             return statusMessage
         }
         guard shouldSurfaceConnectionProblemInTopChrome else { return nil }
         return "Offline"
+    }
+
+    private func isRedundantSelectedPresenceStatus(_ message: String) -> Bool {
+        guard let selectedContact else { return false }
+        return message == "\(selectedContact.name) is online"
+            || message == "\(selectedContact.handle) is online"
     }
 
     var usesLocalHTTPBackend: Bool {
@@ -878,6 +963,18 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                     && selectedSession.remoteAudioReadiness != "waiting"
                     && selectedSession.remoteWakeCapabilityKind == "wake-capable"
                     && backendRuntime.signalingJoinRecoveryTask == nil
+            case "selected.backend_absent_pending_local_action_without_session":
+                let pendingAction = selectedSession.pendingAction
+                guard selectedSession.selectedPhase == "waitingForPeer",
+                      selectedSession.relationship == "none",
+                      !selectedSession.isJoined,
+                      selectedSession.systemSession == "none",
+                      selectedSession.backendSelfJoined != true,
+                      selectedSession.backendPeerJoined != true else {
+                    return false
+                }
+                return pendingAction.contains("joiningLocal(")
+                    || pendingAction.contains(".joiningLocal(")
             default:
                 break
             }
@@ -886,6 +983,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         switch (entry.subsystem, entry.message) {
         case (.backend, "Backend connection failed"):
             return shouldProjectBackendConnectivityInPrimaryStatus
+                && shouldSurfaceConnectionProblemInTopChrome
+        case (.channel, "Channel state refresh failed"),
+             (.channel, "Channel state refresh failed; preserving local session"):
+            return shouldSurfaceConnectionProblemInTopChrome
         case (.pushToTalk, "PTT init failed"):
             return !pttSystemClient.isReady
         case (.media, "Direct QUIC media path lost"):
@@ -1101,6 +1202,12 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "directQuicRetryRemainingMs": directQuic.retryRemainingMilliseconds.map(String.init) ?? "none",
             "directQuicRetryBackoffMs": directQuic.retryBackoffMilliseconds.map(String.init) ?? "none",
             "directQuicStunServerCount": String(directQuic.stunServerCount),
+            "directQuicStunProviders": directQuic.stunProviderNames.joined(separator: ","),
+            "directQuicTurnEnabled": String(directQuic.turnEnabled),
+            "directQuicTurnProvider": directQuic.turnProvider ?? "none",
+            "directQuicTurnPolicyPath": directQuic.turnPolicyPath ?? "none",
+            "directQuicTurnCredentialTtlSeconds": directQuic.turnCredentialTtlSeconds.map(String.init) ?? "none",
+            "directQuicTransportExperimentBucket": directQuic.transportExperimentBucket ?? "none",
             "directQuicPromotionTimeoutMs": String(directQuic.promotionTimeoutMilliseconds),
             "directQuicRetryBackoffBaseMs": String(directQuic.retryBackoffBaseMilliseconds),
             "directQuicProbeControllerReady": String(directQuic.probeControllerReady),
@@ -1395,6 +1502,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         applyPreferredAudioOutputRouteIfPossible()
         Task { @MainActor [weak self] in
             await self?.mediaServices.session()?.audioRouteDidChange()
+            await self?.syncActiveCallTelemetryIfNeeded(reason: "audio-route-change")
         }
         diagnostics.record(
             .media,
@@ -1429,6 +1537,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func handleApplicationDidBecomeActive() async {
         backendServices?.resumeWebSocket()
+        updateAutomaticAudioRouteMonitoring(reason: "application-became-active")
         clearTalkRequestNotifications()
         reconcileTalkRequestSurface(applicationState: .active)
         await resumeBufferedWakePlaybackIfNeeded(
@@ -1555,8 +1664,21 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         diagnostics.record(
             .app,
             message: "Application will resign active",
-            metadata: [:]
+                metadata: [:]
         )
+        if shouldPreserveLiveCallForProximityInactiveTransition(applicationState: .inactive) {
+            diagnostics.record(
+                .media,
+                message: "Preserving live call during proximity inactive transition",
+                metadata: [
+                    "activeChannelId": activeChannelId?.uuidString ?? "none",
+                    "isNearEar": String(isPhoneNearEar || UIDevice.current.proximityState),
+                    "proximityMonitoring": String(proximityMonitoringIsActive),
+                ]
+            )
+            return
+        }
+        stopAutomaticAudioRouteMonitoring(reason: "application-will-resign-active")
         retireIdleDirectQuicForBackgroundTransitionImmediately(
             reason: "application-will-resign-active",
             applicationState: .inactive
@@ -1569,8 +1691,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         diagnostics.record(
             .app,
             message: "Application entered background",
-            metadata: [:]
+                metadata: [:]
         )
+        stopAutomaticAudioRouteMonitoring(reason: "application-did-enter-background")
         retireIdleDirectQuicForBackgroundTransitionImmediately(
             reason: "application-did-enter-background",
             applicationState: .background

@@ -14,7 +14,6 @@ struct TurboHeaderView: View {
     let showsResolvedMicrophoneStatus: Bool
     let showsDebugPermissionControls: Bool
     let showsAddContactButton: Bool
-    let showsAudioRoutePicker: Bool
     let onAddContact: () -> Void
     let onShowProfile: () -> Void
     let onShowTransportPathInfo: () -> Void
@@ -25,7 +24,7 @@ struct TurboHeaderView: View {
     private let navigationButtonWidth: CGFloat = 32
 
     var body: some View {
-        let trailingButtonCount = (showsAudioRoutePicker ? 1 : 0) + (showsAddContactButton ? 1 : 0)
+        let trailingButtonCount = showsAddContactButton ? 1 : 0
         let sideWidth = navigationButtonWidth * CGFloat(max(1, trailingButtonCount))
             + 12 * CGFloat(max(0, trailingButtonCount - 1))
 
@@ -50,12 +49,6 @@ struct TurboHeaderView: View {
                     .frame(width: navigationButtonWidth, height: navigationButtonWidth)
 
                     Spacer(minLength: 0)
-
-                    if showsAudioRoutePicker {
-                        AudioRoutePickerButton(style: .icon)
-                            .foregroundStyle(.primary)
-                            .frame(width: navigationButtonWidth, height: navigationButtonWidth)
-                    }
 
                     if showsAddContactButton {
                         Button(action: onAddContact) {

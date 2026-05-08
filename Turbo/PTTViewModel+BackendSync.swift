@@ -2115,12 +2115,19 @@ extension PTTViewModel {
             }
         case .receiverReady, .receiverNotReady:
             let applicationState = currentApplicationState()
+            let readinessPayload = ReceiverAudioReadinessSignalPayload.decode(from: envelope.payload)
+            let readinessReason = readinessPayload.reason
+            applyPeerCallTelemetry(
+                readinessPayload.telemetry,
+                for: contactID,
+                source: envelope.type.rawValue
+            )
             let readiness: RemoteAudioReadinessState = {
                 switch envelope.type {
                 case .receiverReady:
                     return .ready
                 case .receiverNotReady:
-                    return envelope.payload == "app-background-media-closed" ? .wakeCapable : .waiting
+                    return readinessReason == "app-background-media-closed" ? .wakeCapable : .waiting
                 default:
                     return .unknown
                 }
@@ -2128,10 +2135,10 @@ extension PTTViewModel {
             if envelope.type == .receiverNotReady {
                 releaseLocalInteractivePrewarmForRemoteBackgrounding(
                     contactID: contactID,
-                    readinessSignalPayload: envelope.payload,
+                    readinessSignalPayload: readinessReason,
                     applicationState: applicationState
                 )
-                if envelope.payload == "app-background-media-closed" {
+                if readinessReason == "app-background-media-closed" {
                     if let attempt = directQuicAttempt(for: contactID) {
                         diagnostics.record(
                             .media,
@@ -2150,7 +2157,7 @@ extension PTTViewModel {
                 let updatedReadiness: TurboChannelReadinessResponse = {
                     var next = existing.settingRemoteAudioReadiness(readiness)
                     if envelope.type == .receiverNotReady,
-                       envelope.payload == "app-background-media-closed" {
+                       readinessReason == "app-background-media-closed" {
                         next = next.settingRemoteWakeCapability(
                             .wakeCapable(targetDeviceId: envelope.fromDeviceId)
                         )
@@ -2172,6 +2179,8 @@ extension PTTViewModel {
                     "channelId": envelope.channelId,
                     "contactId": contactID.uuidString,
                     "payload": envelope.payload,
+                    "reason": readinessReason,
+                    "hasTelemetry": String(readinessPayload.telemetry != nil),
                 ]
             )
             if backendStatusMessage.hasPrefix("signaling ") {
@@ -2604,6 +2613,10 @@ extension PTTViewModel {
                 await reconcileSelectedSessionIfNeeded()
                 return
             }
+            let shouldPreserveLocalSession =
+                selectedContactId == contactID
+                && shouldPreserveLocalSessionAfterChannelRefreshFailure(contactID: contactID)
+
             backendSyncCoordinator.send(
                 .channelStateFailed(
                     contactID: contactID,
@@ -2611,15 +2624,17 @@ extension PTTViewModel {
                 )
             )
             if selectedContactId == contactID {
-                if !shouldPreserveLocalSessionAfterChannelRefreshFailure(contactID: contactID) {
+                if !shouldPreserveLocalSession {
                     resetTransmitSession(closeMediaSession: true)
                 }
                 updateStatusForSelectedContact()
             }
             diagnostics.record(
                 .channel,
-                level: .error,
-                message: "Channel state refresh failed",
+                level: shouldPreserveLocalSession ? .info : .error,
+                message: shouldPreserveLocalSession
+                    ? "Channel state refresh failed; preserving local session"
+                    : "Channel state refresh failed",
                 metadata: ["contactId": contactID.uuidString, "error": error.localizedDescription]
             )
             captureDiagnosticsState("backend-sync:channel-failed")

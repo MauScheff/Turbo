@@ -10,6 +10,17 @@ import PushToTalk
 import AVFAudio
 import UIKit
 
+private enum OutgoingAudioSendError: LocalizedError, Sendable {
+    case remoteReceiverAudioNotReady
+
+    var errorDescription: String? {
+        switch self {
+        case .remoteReceiverAudioNotReady:
+            return "remote receiver audio was not ready"
+        }
+    }
+}
+
 private actor RemoteParticipantClearResultBox {
     private var result: Result<Void, Error>?
 
@@ -411,6 +422,11 @@ extension PTTViewModel {
         applicationState: UIApplication.State
     ) -> Bool {
         guard applicationState != .active else { return false }
+        guard !shouldPreserveLiveCallForProximityInactiveTransition(
+            applicationState: applicationState
+        ) else {
+            return false
+        }
         guard mediaServices.hasSession() else { return false }
         guard let contactID = mediaSessionContactID else { return false }
         guard !isTransmitting else { return false }
@@ -454,6 +470,11 @@ extension PTTViewModel {
         applicationState: UIApplication.State
     ) -> Bool {
         guard applicationState != .active else { return false }
+        guard !shouldPreserveLiveCallForProximityInactiveTransition(
+            applicationState: applicationState
+        ) else {
+            return false
+        }
         return !hasActiveBackgroundPTTFlowOwningDirectQuic(for: contactID)
     }
 
@@ -463,6 +484,16 @@ extension PTTViewModel {
         applicationState: UIApplication.State
     ) -> Bool {
         guard applicationState != .active else { return false }
+        guard !shouldPreserveLiveCallForProximityInactiveTransition(
+            applicationState: applicationState
+        ) else {
+            diagnostics.record(
+                .media,
+                message: "Preserving Direct QUIC during proximity inactive transition",
+                metadata: ["reason": reason]
+            )
+            return false
+        }
 
         var didUpdateTransport = false
         for contactID in backgroundTransitionTransportContactIDs() {
@@ -490,6 +521,16 @@ extension PTTViewModel {
         applicationState: UIApplication.State
     ) async {
         guard applicationState != .active else { return }
+        guard !shouldPreserveLiveCallForProximityInactiveTransition(
+            applicationState: applicationState
+        ) else {
+            diagnostics.record(
+                .media,
+                message: "Skipped background transport reconciliation during proximity inactive transition",
+                metadata: ["reason": reason]
+            )
+            return
+        }
 
         var didUpdateTransport = false
         for contactID in backgroundTransitionTransportContactIDs() {
@@ -3958,18 +3999,35 @@ extension PTTViewModel {
     }
 
     func setAudioOutputPreference(_ preference: AudioOutputPreference) {
-        guard preference == .speaker else { return }
+        setAudioOutputPreference(preference, persist: true, reason: "manual")
+    }
+
+    func setAudioOutputPreference(
+        _ preference: AudioOutputPreference,
+        persist: Bool,
+        reason: String
+    ) {
         guard audioOutputPreference != preference else {
             applyPreferredAudioOutputRouteIfPossible()
             return
         }
         audioOutputPreference = preference
-        UserDefaults.standard.set(preference.rawValue, forKey: AudioOutputPreference.storageKey)
+        if persist {
+            UserDefaults.standard.set(preference.rawValue, forKey: AudioOutputPreference.storageKey)
+        }
         applyPreferredAudioOutputRouteIfPossible()
+        _ = currentLocalCallTelemetry(includeAudio: activeChannelId != nil)
+        Task { @MainActor [weak self] in
+            await self?.syncActiveCallTelemetryIfNeeded(reason: "audio-route-preference:\(reason)")
+        }
         diagnostics.record(
             .media,
             message: "Audio output preference updated",
-            metadata: ["preference": preference.rawValue]
+            metadata: [
+                "preference": preference.rawValue,
+                "persisted": String(persist),
+                "reason": reason,
+            ]
         )
         captureDiagnosticsState("audio-route:updated")
     }
@@ -3980,6 +4038,32 @@ extension PTTViewModel {
             category: audioSession.category,
             outputPortTypes: audioSession.currentRoute.outputs.map(\.portType)
         )
+        if overridePlan.shouldClearSpeakerOverride {
+            do {
+                try audioSession.overrideOutputAudioPort(.none)
+                diagnostics.record(
+                    .media,
+                    message: "Cleared preferred speaker audio route",
+                    metadata: audioSessionDiagnostics(audioSession).merging(
+                        ["preference": audioOutputPreference.rawValue]
+                    ) { _, new in new }
+                )
+            } catch {
+                diagnostics.record(
+                    .media,
+                    level: .error,
+                    message: "Failed to clear preferred speaker audio route",
+                    metadata: [
+                        "error": error.localizedDescription,
+                        "preference": audioOutputPreference.rawValue,
+                        "category": audioSession.category.rawValue,
+                        "mode": audioSession.mode.rawValue,
+                    ]
+                )
+            }
+            return
+        }
+
         guard overridePlan.shouldApplySpeakerOverride else {
             guard audioSession.category != .playAndRecord else { return }
             diagnostics.record(
@@ -4245,9 +4329,12 @@ extension PTTViewModel {
         let sendAudioChunk: @Sendable (String) async throws -> Void = { [weak self] payload in
             if let self,
                await self.takeShouldAwaitInitialOutboundAudioSendGate() {
-                _ = await self.waitForRemoteReceiverAudioReadinessBeforeSendingIfNeeded(
+                let receiverBecameReady = await self.waitForRemoteReceiverAudioReadinessBeforeSendingIfNeeded(
                     target: target
                 )
+                guard receiverBecameReady else {
+                    throw OutgoingAudioSendError.remoteReceiverAudioNotReady
+                }
             }
 
             let transportPayload: String
@@ -4412,7 +4499,7 @@ extension PTTViewModel {
                 diagnostics.record(
                     .media,
                     level: .error,
-                    message: "Timed out waiting for remote receiver audio readiness; sending anyway",
+                    message: "Timed out waiting for remote receiver audio readiness; not sending outbound audio",
                     metadata: [
                         "contactId": target.contactID.uuidString,
                         "channelId": target.channelID,

@@ -62,6 +62,9 @@ The current implementation sends these classes of events:
 - iOS high-signal diagnostics:
   - `ios.error.<subsystem>`
   - `ios.invariant.violation`
+- iOS user-triggered reports:
+  - `ios.problem_report.shake`
+  - `ios.problem_report.shake_upload_failed`
 - backend channel lifecycle:
   - `backend.channel.joined`
   - `backend.channel.left`
@@ -244,6 +247,38 @@ The practical split is:
 - merged diagnostics answers "how do both devices' facts line up?"
 
 Do not move full debug transcripts, audio packet logs, or complete local state dumps into Cloudflare telemetry. Those belong in backend latest diagnostics. Telemetry events should stay compact, queryable, and alert-friendly.
+
+## Shake Reports
+
+Development, TestFlight, and production-like builds support shake-to-report. When a user shakes the phone, the app creates a local `incidentId`, records a `Shake report requested` marker in diagnostics, captures the current state projection, uploads the full latest diagnostics transcript to the backend, then emits `ios.problem_report.shake` with `alert=true` when telemetry is enabled.
+
+The user-facing UI stays generic. Operators should use these fields to inspect the report:
+
+- `incidentId`: correlates the telemetry alert with the diagnostic transcript marker.
+- `userHandle` and `deviceId`: identify the reporting device.
+- `uploadedAt`: identifies the report time.
+- `diagnosticsLatestURL`: points at the backend latest-diagnostics route for the reporting device.
+- `channelId` and `peerHandle`: present when the user had selected or active conversation context.
+
+From a Discord alert, first open or copy the `diagnosticsLatestURL` from the message. If auth headers are needed, fetch the same report with:
+
+```bash
+just diagnostics-latest <device_id> https://beepbeep.to <user_handle>
+```
+
+For behavioral debugging, prefer merged diagnostics around the alert time:
+
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 2 --telemetry-limit 500 --full-metadata <user_handle>
+```
+
+If the alert includes `peerHandle`, include both handles:
+
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 2 --telemetry-limit 500 --full-metadata <user_handle> <peer_handle>
+```
+
+V1 limitation: `diagnosticsLatestURL` is a latest-snapshot pointer, not an immutable report URL. Use `incidentId` and `uploadedAt` to confirm that the transcript you are reading is the shake report. A later incident-backed backend route should make `incidentId` the stable fetch key and allow peer-device reports to attach to the same incident automatically.
 
 ## Alerts
 

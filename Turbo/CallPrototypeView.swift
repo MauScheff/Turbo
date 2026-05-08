@@ -18,6 +18,10 @@ struct TurboCallPrototypeView: View {
     let isPTTAudioSessionActive: Bool
     let mediaConnectionState: MediaConnectionState
     let mediaSessionContactID: UUID?
+    let transportPathState: MediaTransportPathState?
+    let localTelemetry: CallPeerTelemetry?
+    let peerTelemetry: CallPeerTelemetry?
+    var requestSubject: String? = nil
     let onClose: () -> Void
     let onLeave: () -> Void
     let onJoin: () -> Void
@@ -45,7 +49,7 @@ struct TurboCallPrototypeView: View {
             let usesWideLayout = proxy.size.width >= 700
 
             ZStack {
-                Color(red: 0.18, green: 0.18, blue: 0.19)
+                Color(red: 48.0 / 255.0, green: 48.0 / 255.0, blue: 46.0 / 255.0)
                     .ignoresSafeArea()
 
                 VStack(spacing: 0) {
@@ -110,71 +114,222 @@ struct TurboCallPrototypeView: View {
 
     @ViewBuilder
     private func identityRow(usesWideLayout: Bool) -> some View {
-        if usesWideLayout {
-            VStack(alignment: .center, spacing: 14) {
-                callAvatar
-                    .frame(width: 82, height: 82)
+        HStack(alignment: .center, spacing: usesWideLayout ? 22 : 18) {
+            identityText
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                identityText(alignment: .center)
-                    .frame(width: 360, alignment: .center)
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
-        } else {
-            HStack(alignment: .center, spacing: 24) {
-                callAvatar
-                    .frame(width: 76, height: 76)
-
-                identityText(alignment: .leading)
-
-                Spacer()
-            }
-            .padding(.horizontal, 4)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            callAvatar
+                .frame(width: usesWideLayout ? 84 : 76, height: usesWideLayout ? 84 : 76)
         }
+        .frame(maxWidth: 360, alignment: .center)
+        .padding(.top, usesWideLayout ? 6 : 8)
     }
 
     private var callAvatar: some View {
         Circle()
-            .fill(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.73, green: 0.80, blue: 0.98),
-                        Color(red: 0.45, green: 0.49, blue: 0.72)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
+            .fill(callAvatarColor)
             .overlay(
                 Text(initials(for: contact.name))
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 26, weight: .medium, design: .default))
+                    .foregroundStyle(Color(red: 0.96, green: 0.95, blue: 0.91))
+                    .tracking(0.8)
+            )
+            .overlay(
+                Circle()
+                    .strokeBorder(.white.opacity(0.08), lineWidth: 1)
             )
     }
 
-    private func identityText(alignment: HorizontalAlignment) -> some View {
-        VStack(alignment: alignment, spacing: 6) {
+    private var callAvatarColor: Color {
+        let palette = [
+            Color(red: 0.45, green: 0.49, blue: 0.41),
+            Color(red: 0.50, green: 0.42, blue: 0.38),
+            Color(red: 0.42, green: 0.48, blue: 0.52),
+            Color(red: 0.52, green: 0.47, blue: 0.36),
+            Color(red: 0.44, green: 0.42, blue: 0.50)
+        ]
+        let hash = contact.id.uuidString.unicodeScalars.reduce(UInt32(2_166_136_261)) { partial, scalar in
+            (partial ^ UInt32(scalar.value)) &* 16_777_619
+        }
+        return palette[Int(hash % UInt32(palette.count))]
+    }
+
+    private var identityText: some View {
+        VStack(alignment: .leading, spacing: 8) {
             Text(contact.name)
-                .font(.system(size: 34, weight: .regular, design: .default))
+                .font(.system(size: 31, weight: .medium, design: .default))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .minimumScaleFactor(0.58)
+                .multilineTextAlignment(.leading)
 
             let status = callStatusText(now: Date())
             Text(status)
-                .font(.system(size: 23, weight: .regular, design: .default))
+                .font(.system(size: 20, weight: .regular, design: .default))
                 .foregroundStyle(.white.opacity(0.48))
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
-                .multilineTextAlignment(alignment == .center ? .center : .leading)
+                .multilineTextAlignment(.leading)
                 .animation(.easeInOut(duration: 0.18), value: status)
+
+            if hasVisibleCallContext {
+                callContextRows
+                    .padding(.top, 14)
+            }
+
+            if let requestSubjectText {
+                Text(requestSubjectText)
+                    .font(.system(size: 16, weight: .medium, design: .default))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.78)
+                    .multilineTextAlignment(.leading)
+                    .padding(.top, 14)
+            }
         }
+    }
+
+    private var requestSubjectText: String? {
+        guard let subject = requestSubject?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !subject.isEmpty,
+              !isGenericRequestSubject(subject) else {
+            return nil
+        }
+        return subject
+    }
+
+    private func isGenericRequestSubject(_ subject: String) -> Bool {
+        let normalized = subject
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".!"))
+
+        return [
+            "generic",
+            "talk",
+            "talk request",
+            "want to talk",
+            "wants to talk",
+            "want to talk?",
+            "wants to talk?",
+            "someone wants to talk",
+            "someone wants to talk with you",
+            "someone wants to talk to you"
+        ].contains(normalized)
+    }
+
+    private var callContextRows: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let localVolumeWarningText {
+                Text(localVolumeWarningText)
+                    .font(.system(size: 15, weight: .medium, design: .default))
+                    .foregroundStyle(localVolumeWarningColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .accessibilityLabel(localVolumeWarningAccessibilityLabel)
+            }
+
+            if let audio = peerTelemetry?.audio {
+                Text(peerAudioStatusText(for: audio))
+                    .font(.system(size: 15, weight: .regular, design: .default))
+                    .foregroundStyle(peerAudioStatusColor(for: audio))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .accessibilityLabel(peerAudioStatusAccessibilityLabel(for: audio))
+            }
+
+            if let connectionName = peerTelemetry?.connection?.displayName {
+                Text("\(contactShortName)’s connection · \(connectionName)")
+                    .font(.system(size: 14, weight: .regular, design: .default))
+                    .foregroundStyle(callContextColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .accessibilityLabel("\(contactShortName)’s connection, \(connectionName)")
+            }
+        }
+    }
+
+    private var hasVisibleCallContext: Bool {
+        localVolumeWarningText != nil || peerTelemetry?.hasVisibleContext == true
+    }
+
+    private var callContextColor: Color {
+        .white.opacity(0.52)
+    }
+
+    private var lowVolumeAttentionColor: Color {
+        Color(red: 0.92, green: 0.67, blue: 0.42)
+    }
+
+    private var localVolumeWarningColor: Color {
+        guard let percent = localTelemetry?.audio?.volumePercent else {
+            return callContextColor
+        }
+        return isVolumeOff(percent) ? lowVolumeAttentionColor : .white.opacity(0.68)
+    }
+
+    private var localVolumeWarningText: String? {
+        guard let percent = localTelemetry?.audio?.volumePercent else { return nil }
+        if isVolumeOff(percent) {
+            return "Turn up volume to hear \(contactShortName)"
+        }
+        if isVolumeVeryLow(percent) {
+            return "Volume is very low"
+        }
+        return nil
+    }
+
+    private var localVolumeWarningAccessibilityLabel: String {
+        guard let percent = localTelemetry?.audio?.volumePercent else {
+            return ""
+        }
+        if isVolumeOff(percent) {
+            return "Your volume is off. Turn up volume to hear \(contact.name)."
+        }
+        return "Your volume is very low. You may not hear \(contact.name)."
+    }
+
+    private func peerAudioStatusText(for audio: CallPeerTelemetry.Audio) -> String {
+        if isVolumeOff(audio.volumePercent) {
+            return "\(contactShortName)’s volume is off"
+        }
+        if isVolumeVeryLow(audio.volumePercent) {
+            return "\(contactShortName)’s volume is very low"
+        }
+        return "\(contactShortName)’s audio · \(audio.routeName) · \(audio.volumePercent)%"
+    }
+
+    private func peerAudioStatusColor(for audio: CallPeerTelemetry.Audio) -> Color {
+        isVolumeVeryLow(audio.volumePercent) ? lowVolumeAttentionColor.opacity(0.9) : callContextColor
+    }
+
+    private func peerAudioStatusAccessibilityLabel(for audio: CallPeerTelemetry.Audio) -> String {
+        if isVolumeOff(audio.volumePercent) {
+            return "\(contact.name)'s volume is off. They may not hear you."
+        }
+        if isVolumeVeryLow(audio.volumePercent) {
+            return "\(contact.name)'s volume is very low. They may not hear you."
+        }
+        return "\(contactShortName)’s audio, \(audio.routeName), volume \(audio.volumePercent) percent"
+    }
+
+    private func isVolumeOff(_ percent: Int) -> Bool {
+        percent <= 1
+    }
+
+    private func isVolumeVeryLow(_ percent: Int) -> Bool {
+        percent <= 5
+    }
+
+    private var contactShortName: String {
+        contact.name.split(separator: " ").first.map(String.init) ?? contact.name
     }
 
     private var actionButtons: some View {
         HStack(alignment: .top) {
             TurboCallActionButton(
-                title: "Leave",
+                title: "End",
                 symbolName: "xmark",
                 tint: Color(red: 0.96, green: 0.28, blue: 0.24),
                 isEnabled: true,
@@ -280,7 +435,7 @@ struct TurboCallPrototypeView: View {
                 return "Release to retry"
             case .pendingJoin, .backendSessionTransition, .localSessionTransition,
                  .peerReadyToConnect:
-                return "Connecting..."
+                return selectedPeerState.statusMessage
             case .remoteWakeUnavailable:
                 return "Waiting"
             case .systemWakeActivation, .wakePlaybackDeferredUntilForeground,
@@ -297,7 +452,7 @@ struct TurboCallPrototypeView: View {
         case .requested:
             return "Waiting"
         case .localJoinFailed:
-            return "Could not connect"
+            return selectedPeerState.statusMessage
         case .blockedByOtherSession:
             return "Busy"
         case .systemMismatch:
@@ -309,7 +464,7 @@ struct TurboCallPrototypeView: View {
 
     private var readyStatusText: String {
         guard primaryAction.kind == .holdToTalk else {
-            return "Connecting..."
+            return selectedPeerState.statusMessage
         }
         return talkButtonIsEnabled ? "Ready" : "Connecting..."
     }
@@ -629,6 +784,15 @@ private struct HatTilingBackground: View {
         isPTTAudioSessionActive: true,
         mediaConnectionState: .connected,
         mediaSessionContactID: nil,
+        transportPathState: .direct,
+        localTelemetry: CallPeerTelemetry(
+            audio: .init(routeName: "Speaker", volumePercent: 45),
+            connection: .init(interface: .wifi)
+        ),
+        peerTelemetry: CallPeerTelemetry(
+            audio: .init(routeName: "Speaker", volumePercent: 70),
+            connection: .init(interface: .cellular)
+        ),
         onClose: {},
         onLeave: {},
         onJoin: {},

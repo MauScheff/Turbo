@@ -1102,6 +1102,150 @@ async def main() -> int:
         require(accept_payload.get("pendingJoin") is True, f"accept route did not report pending join: {accept_payload}")
         accepted_channel_id = accept_payload["channelId"]
 
+        stale_original = run_check(
+            results,
+            "invite-create:stale-accept-original",
+            lambda: request(
+                args.base_url,
+                "/v1/invites",
+                caller["handle"],
+                method="POST",
+                body={"otherHandle": callee["handle"]},
+                insecure=args.insecure,
+            ),
+        )
+        _ = run_check(
+            results,
+            "invite-cancel:stale-accept-original",
+            lambda: request(
+                args.base_url,
+                f"/v1/invites/{stale_original['inviteId']}/cancel",
+                caller["handle"],
+                method="POST",
+                insecure=args.insecure,
+            ),
+        )
+        stale_replacement = run_check(
+            results,
+            "invite-create:stale-accept-replacement",
+            lambda: request(
+                args.base_url,
+                "/v1/invites",
+                caller["handle"],
+                method="POST",
+                body={"otherHandle": callee["handle"]},
+                insecure=args.insecure,
+            ),
+        )
+        stale_accept_payload = run_check(
+            results,
+            "invite-accept:stale-id-accepts-replacement",
+            lambda: request(
+                args.base_url,
+                f"/v1/invites/{stale_original['inviteId']}/accept",
+                callee["handle"],
+                method="POST",
+                insecure=args.insecure,
+            ),
+        )
+        require(
+            stale_accept_payload.get("inviteId") == stale_replacement["inviteId"],
+            f"stale accept did not resolve to replacement invite: accepted={stale_accept_payload} replacement={stale_replacement}",
+        )
+        require(
+            stale_accept_payload.get("pendingJoin") is True,
+            f"stale accept did not report pending join for replacement invite: {stale_accept_payload}",
+        )
+        stale_caller_outgoing = run_check(
+            results,
+            "invite-outgoing:stale-accept-cleared-caller",
+            lambda: request(args.base_url, "/v1/invites/outgoing", caller["handle"], insecure=args.insecure),
+        )
+        stale_callee_incoming = run_check(
+            results,
+            "invite-incoming:stale-accept-cleared-callee",
+            lambda: request(args.base_url, "/v1/invites/incoming", callee["handle"], insecure=args.insecure),
+        )
+        for label, invites in [
+            ("caller outgoing", stale_caller_outgoing),
+            ("callee incoming", stale_callee_incoming),
+        ]:
+            require(
+                all(invite.get("inviteId") != stale_replacement["inviteId"] for invite in invites),
+                f"stale accept left replacement pending in {label}: {invites}",
+            )
+
+        mutual_caller_invite = run_check(
+            results,
+            "invite-create:mutual-caller",
+            lambda: request(
+                args.base_url,
+                "/v1/invites",
+                caller["handle"],
+                method="POST",
+                body={"otherHandle": callee["handle"]},
+                insecure=args.insecure,
+            ),
+        )
+        mutual_callee_invite = run_check(
+            results,
+            "invite-create:mutual-callee",
+            lambda: request(
+                args.base_url,
+                "/v1/invites",
+                callee["handle"],
+                method="POST",
+                body={"otherHandle": caller["handle"]},
+                insecure=args.insecure,
+            ),
+        )
+        mutual_channel_id = mutual_callee_invite["channelId"]
+        mutual_accept_payload = run_check(
+            results,
+            "invite-accept:mutual-clears-both-directions",
+            lambda: request(
+                args.base_url,
+                f"/v1/invites/{mutual_callee_invite['inviteId']}/accept",
+                caller["handle"],
+                method="POST",
+                insecure=args.insecure,
+            ),
+        )
+        require(
+            mutual_accept_payload.get("accepted") is True,
+            f"mutual accept route did not mark invite accepted: {mutual_accept_payload}",
+        )
+        caller_outgoing_after_mutual_accept = run_check(
+            results,
+            "invite-outgoing:mutual-cleared-caller",
+            lambda: request(args.base_url, "/v1/invites/outgoing", caller["handle"], insecure=args.insecure),
+        )
+        callee_outgoing_after_mutual_accept = run_check(
+            results,
+            "invite-outgoing:mutual-cleared-callee",
+            lambda: request(args.base_url, "/v1/invites/outgoing", callee["handle"], insecure=args.insecure),
+        )
+        caller_incoming_after_mutual_accept = run_check(
+            results,
+            "invite-incoming:mutual-cleared-caller",
+            lambda: request(args.base_url, "/v1/invites/incoming", caller["handle"], insecure=args.insecure),
+        )
+        callee_incoming_after_mutual_accept = run_check(
+            results,
+            "invite-incoming:mutual-cleared-callee",
+            lambda: request(args.base_url, "/v1/invites/incoming", callee["handle"], insecure=args.insecure),
+        )
+        for label, invites in [
+            ("caller outgoing", caller_outgoing_after_mutual_accept),
+            ("callee outgoing", callee_outgoing_after_mutual_accept),
+            ("caller incoming", caller_incoming_after_mutual_accept),
+            ("callee incoming", callee_incoming_after_mutual_accept),
+        ]:
+            require(
+                all(invite.get("channelId") != mutual_channel_id for invite in invites),
+                f"mutual accept left a pending {label} invite on channel {mutual_channel_id}: {invites}",
+            )
+
         direct = run_check(
             results,
             "channel-direct",

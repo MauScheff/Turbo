@@ -519,6 +519,7 @@ extension PTTViewModel {
                 backendChannelID: disconnectBackendChannelID
             )
         }()
+        stopAutomaticAudioRouteMonitoring(reason: "disconnect")
         sessionCoordinator.markExplicitLeave(contactID: disconnectContactID)
         scheduleDisconnectRecovery(
             contactID: disconnectContactID,
@@ -681,12 +682,14 @@ extension PTTViewModel {
     }
 
     func requestJoinSelectedPeer() async {
+        cancelSelectedConnectionAttemptTimeout()
         syncSelectedPeerSession()
         captureDiagnosticsState("selected-peer:join-requested")
         await selectedPeerCoordinator.handle(.joinRequested)
     }
 
     func requestDisconnectSelectedPeer() async {
+        cancelSelectedConnectionAttemptTimeout()
         syncSelectedPeerSession()
         captureDiagnosticsState("selected-peer:disconnect-requested")
         await selectedPeerCoordinator.handle(.disconnectRequested)

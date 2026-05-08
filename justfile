@@ -45,6 +45,9 @@ backend-stability-probe base="https://beepbeep.to" handle="@mau" iterations="10"
 direct-quic-provisioning-probe:
   .venv/bin/python scripts/direct_quic_provisioning_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
 
+turn-policy-probe require_enabled="":
+  .venv/bin/python scripts/turn_policy_probe.py --base-url https://beepbeep.to --handle @quinn --insecure {{require_enabled}}
+
 route-probe-local base="http://localhost:8090/s/turbo" caller="@avery" callee="@blake":
   .venv/bin/python scripts/route_probe.py --base-url "{{base}}" --caller "{{caller}}" --callee "{{callee}}"
 

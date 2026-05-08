@@ -331,6 +331,7 @@ extension PTTViewModel {
         sessionCoordinator.clearAfterSuccessfulJoin(for: contact.id)
         activeChannelId = contact.id
         isJoined = true
+        updateAutomaticAudioRouteMonitoring(reason: "backend-join-complete")
         updateStatusForSelectedContact()
     }
 
@@ -370,6 +371,26 @@ extension PTTViewModel {
             requestCooldownRemaining: requestCooldownRemaining(for: contact.id),
             usesLocalHTTPBackend: usesLocalHTTPBackend
         )
+        if case .leave(let contactID) = backendCommandCoordinator.state.activeOperation,
+           contactID == contact.id {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Skipped backend join reassertion while leave is active",
+                metadata: ["contactId": contact.id.uuidString, "handle": contact.handle]
+            )
+            return
+        }
+        if case .join(let activeRequest) = backendCommandCoordinator.state.activeOperation,
+           activeRequest.contactID == contact.id {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Forcing backend join reassertion past in-flight join",
+                metadata: ["contactId": contact.id.uuidString, "handle": contact.handle]
+            )
+            backendCommandCoordinator.send(.reset)
+        }
         await backendCommandCoordinator.handle(.joinRequested(request))
     }
 
@@ -510,17 +531,153 @@ extension PTTViewModel {
         return false
     }
 
+    func isPendingInvite(_ invite: TurboInviteResponse) -> Bool {
+        invite.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "pending"
+    }
+
+    func freshestMatchingIncomingInvite(
+        for request: BackendJoinRequest,
+        cachedInvite: TurboInviteResponse?,
+        fetchedInvites: [TurboInviteResponse],
+        excludingInviteIDs: Set<String> = []
+    ) -> TurboInviteResponse? {
+        let fetched = fetchedInvites
+            .filter { invite in
+                !excludingInviteIDs.contains(invite.inviteId)
+                    && isPendingInvite(invite)
+                    && inviteMatchesJoinRequest(invite, request: request, direction: "incoming")
+            }
+            .sorted { lhs, rhs in
+                (lhs.updatedAt ?? lhs.createdAt) > (rhs.updatedAt ?? rhs.createdAt)
+            }
+            .first
+        if let fetched {
+            return fetched
+        }
+
+        guard let cachedInvite,
+              !excludingInviteIDs.contains(cachedInvite.inviteId),
+              isPendingInvite(cachedInvite),
+              inviteMatchesJoinRequest(cachedInvite, request: request, direction: "incoming") else {
+            return nil
+        }
+        return cachedInvite
+    }
+
     private func resolveIncomingInvite(
         for request: BackendJoinRequest,
+        backend: BackendServices,
+        excludingInviteIDs: Set<String> = []
+    ) async throws -> TurboInviteResponse? {
+        guard request.relationship.isIncomingRequest else { return nil }
+
+        do {
+            let incomingInvites = try await backend.incomingInvites()
+            let invite = freshestMatchingIncomingInvite(
+                for: request,
+                cachedInvite: request.incomingInvite,
+                fetchedInvites: incomingInvites,
+                excludingInviteIDs: excludingInviteIDs
+            )
+            if let cachedInvite = request.incomingInvite,
+               let invite,
+               cachedInvite.inviteId != invite.inviteId {
+                diagnostics.record(
+                    .backend,
+                    message: "Using fresher incoming invite instead of cached invite",
+                    metadata: [
+                        "contactId": request.contactID.uuidString,
+                        "handle": request.handle,
+                        "cachedInviteId": cachedInvite.inviteId,
+                        "freshInviteId": invite.inviteId,
+                    ]
+                )
+            }
+            return invite
+        } catch {
+            guard let cachedInvite = freshestMatchingIncomingInvite(
+                for: request,
+                cachedInvite: request.incomingInvite,
+                fetchedInvites: [],
+                excludingInviteIDs: excludingInviteIDs
+            ) else {
+                throw error
+            }
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Falling back to cached incoming invite after refresh failed",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "handle": request.handle,
+                    "inviteId": cachedInvite.inviteId,
+                    "error": error.localizedDescription,
+                ]
+            )
+            return cachedInvite
+        }
+    }
+
+    private func acceptIncomingInviteForJoinRequest(
+        _ request: BackendJoinRequest,
         backend: BackendServices
     ) async throws -> TurboInviteResponse? {
         guard request.relationship.isIncomingRequest else { return nil }
-        if let invite = request.incomingInvite {
-            return invite
+        var attemptedInviteIDs: Set<String> = []
+
+        for _ in 0 ..< 2 {
+            guard let invite = try await resolveIncomingInvite(
+                for: request,
+                backend: backend,
+                excludingInviteIDs: attemptedInviteIDs
+            ) else {
+                return nil
+            }
+            attemptedInviteIDs.insert(invite.inviteId)
+
+            let acceptedInvite: TurboInviteResponse
+            do {
+                acceptedInvite = try await backend.acceptInvite(inviteId: invite.inviteId)
+            } catch {
+                guard shouldIgnoreIncomingInviteAcceptFailure(error) else {
+                    throw error
+                }
+                diagnostics.record(
+                    .backend,
+                    level: .notice,
+                    message: "Ignoring stale incoming invite accept failure; retrying with current pending invite",
+                    metadata: [
+                        "contactId": request.contactID.uuidString,
+                        "handle": request.handle,
+                        "inviteId": invite.inviteId,
+                        "error": error.localizedDescription,
+                    ]
+                )
+                continue
+            }
+            if acceptedInvite.pendingJoin != false {
+                await waitForAcceptedIncomingInviteToDisappear(
+                    acceptedInvite,
+                    request: request,
+                    backend: backend
+                )
+                return acceptedInvite
+            }
+
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Accepted stale incoming invite; retrying with current pending invite",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "handle": request.handle,
+                    "inviteId": invite.inviteId,
+                    "status": acceptedInvite.status,
+                ]
+            )
         }
 
-        let incomingInvites = try await backend.incomingInvites()
-        return incomingInvites.first { inviteMatchesJoinRequest($0, request: request, direction: "incoming") }
+        return nil
     }
 
     private func resolveOutgoingInvite(
@@ -621,24 +778,7 @@ extension PTTViewModel {
             }
         }
 
-        if let invite = try await resolveIncomingInvite(for: request, backend: backend) {
-            do {
-                let acceptedInvite = try await backend.acceptInvite(inviteId: invite.inviteId)
-                await waitForAcceptedIncomingInviteToDisappear(
-                    acceptedInvite,
-                    request: request,
-                    backend: backend
-                )
-            } catch {
-                guard shouldIgnoreIncomingInviteAcceptFailure(error) else {
-                    throw error
-                }
-                diagnostics.record(
-                    .backend,
-                    message: "Ignoring stale incoming invite accept failure",
-                    metadata: ["contactId": request.contactID.uuidString, "handle": request.handle]
-                )
-            }
+        if let invite = try await acceptIncomingInviteForJoinRequest(request, backend: backend) {
             applyInviteMetadata(invite, to: &contact)
         } else if request.relationship.isIncomingRequest {
             diagnostics.record(

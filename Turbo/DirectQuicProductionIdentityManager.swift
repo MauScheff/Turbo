@@ -163,25 +163,25 @@ nonisolated enum DirectQuicProductionIdentityManager {
     }
 
     private static func createPrivateKey(label: String, useSecureEnclave: Bool) throws -> SecKey {
-        var accessControlError: Unmanaged<CFError>?
-        let flags: SecAccessControlCreateFlags = [.privateKeyUsage]
-        guard let accessControl = SecAccessControlCreateWithFlags(
-            nil,
-            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            flags,
-            &accessControlError
-        ) else {
-            throw DirectQuicProductionIdentityError.keyGenerationFailed(errSecParam)
-        }
-
         var privateAttributes: [CFString: Any] = [
             kSecAttrIsPermanent: true,
             kSecAttrApplicationTag: keyApplicationTag(label),
             kSecAttrLabel: label,
-            kSecAttrAccessControl: accessControl,
         ]
         if useSecureEnclave {
+            var accessControlError: Unmanaged<CFError>?
+            guard let accessControl = SecAccessControlCreateWithFlags(
+                nil,
+                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                [.privateKeyUsage],
+                &accessControlError
+            ) else {
+                throw DirectQuicProductionIdentityError.keyGenerationFailed(errSecParam)
+            }
+            privateAttributes[kSecAttrAccessControl] = accessControl
             privateAttributes[kSecAttrTokenID] = kSecAttrTokenIDSecureEnclave
+        } else {
+            privateAttributes[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         }
 
         let attributes: [CFString: Any] = [

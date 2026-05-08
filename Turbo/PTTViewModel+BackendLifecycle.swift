@@ -495,6 +495,7 @@ extension PTTViewModel {
                     "localRelayOnlyOverride": String(localRelayOnlyOverride),
                 ]
             )
+            flushPendingDirectQuicIdentityProvisioningFailureTelemetry(reason: "backend-connected")
             if runtimeConfig.supportsDirectQuicUpgrade, localRelayOnlyOverride {
                 diagnostics.record(
                     .media,

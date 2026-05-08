@@ -28,8 +28,8 @@ struct TurboTests {
         #expect(AudioOutputPreference.phone.buttonLabel == "Phone")
     }
 
-    @Test func mediaAudioRouteOptionsAllowCallAndStereoBluetooth() {
-        #expect(MediaSessionAudioPolicy.routeCapableOptions.contains(.defaultToSpeaker))
+    @Test func mediaAudioRouteOptionsAllowBluetoothWithoutForcingSpeaker() {
+        #expect(!MediaSessionAudioPolicy.routeCapableOptions.contains(.defaultToSpeaker))
         #expect(MediaSessionAudioPolicy.routeCapableOptions.contains(.allowBluetoothHFP))
         #expect(MediaSessionAudioPolicy.routeCapableOptions.contains(.allowBluetoothA2DP))
     }
@@ -850,10 +850,31 @@ struct TurboTests {
           "supportsDirectQuicProvisioning": true,
           "supportsMediaEndToEndEncryption": true,
           "directQuicPolicy": {
+            "stunProviders": [
+              {
+                "name": "cloudflare",
+                "enabled": true,
+                "servers": [
+                  { "host": "stun.cloudflare.com", "port": 3478 }
+                ]
+              },
+              {
+                "name": "google",
+                "enabled": false,
+                "servers": [
+                  { "host": "stun.l.google.com", "port": 19302 }
+                ]
+              }
+            ],
             "stunServers": [
               { "host": "stun1.example.com", "port": 3478 },
               { "host": "stun2.example.com" }
             ],
+            "turnEnabled": true,
+            "turnProvider": "cloudflare",
+            "turnPolicyPath": "/v1/direct-quic/ice-servers",
+            "turnCredentialTtlSeconds": 3600,
+            "transportExperimentBucket": "cloudflare-turn-v1",
             "promotionTimeoutMs": 2500,
             "retryBackoffMs": 15000
           }
@@ -878,9 +899,112 @@ struct TurboTests {
                         TurboDirectQuicStunServer(host: "stun1.example.com", port: 3478),
                         TurboDirectQuicStunServer(host: "stun2.example.com", port: nil),
                     ],
+                    stunProviders: [
+                        TurboDirectQuicStunProvider(
+                            name: "cloudflare",
+                            enabled: true,
+                            servers: [
+                                TurboDirectQuicStunServer(host: "stun.cloudflare.com", port: 3478),
+                            ]
+                        ),
+                        TurboDirectQuicStunProvider(
+                            name: "google",
+                            enabled: false,
+                            servers: [
+                                TurboDirectQuicStunServer(host: "stun.l.google.com", port: 19302),
+                            ]
+                        ),
+                    ],
+                    turnEnabled: true,
+                    turnProvider: "cloudflare",
+                    turnPolicyPath: "/v1/direct-quic/ice-servers",
+                    turnCredentialTtlSeconds: 3600,
+                    transportExperimentBucket: "cloudflare-turn-v1",
                     promotionTimeoutMs: 2500,
                     retryBackoffMs: 15000
                 )
+        )
+        #expect(config.directQuicPolicy?.effectiveStunServers == [
+            TurboDirectQuicStunServer(host: "stun.cloudflare.com", port: 3478),
+        ])
+        #expect(config.directQuicPolicy?.enabledStunProviderNames == ["cloudflare"])
+    }
+
+    @Test func directQuicIceServerPolicyDecodesCloudflareTurnCredentials() throws {
+        let json = """
+        {
+          "iceServers": [
+            {
+              "urls": [
+                "stun:stun.cloudflare.com:3478",
+                "stun:stun.cloudflare.com:53"
+              ]
+            },
+            {
+              "urls": [
+                "turn:turn.cloudflare.com:3478?transport=udp",
+                "turns:turn.cloudflare.com:443?transport=tcp"
+              ],
+              "username": "user",
+              "credential": "credential"
+            }
+          ]
+        }
+        """
+
+        let policy = try JSONDecoder().decode(
+            TurboDirectQuicIceServerPolicy.self,
+            from: Data(json.utf8)
+        )
+
+        #expect(
+            policy.iceServers
+                == [
+                    TurboDirectQuicIceServer(
+                        urls: [
+                            "stun:stun.cloudflare.com:3478",
+                            "stun:stun.cloudflare.com:53",
+                        ]
+                    ),
+                    TurboDirectQuicIceServer(
+                        urls: [
+                            "turn:turn.cloudflare.com:3478?transport=udp",
+                            "turns:turn.cloudflare.com:443?transport=tcp",
+                        ],
+                        username: "user",
+                        credential: "credential"
+                    ),
+                ]
+        )
+    }
+
+    @Test func directQuicIceServerPolicyDecodesSingleUrlShape() throws {
+        let json = """
+        {
+          "iceServers": [
+            {
+              "urls": "turn:turn.cloudflare.com:3478?transport=udp",
+              "username": "user",
+              "credential": "credential"
+            }
+          ]
+        }
+        """
+
+        let policy = try JSONDecoder().decode(
+            TurboDirectQuicIceServerPolicy.self,
+            from: Data(json.utf8)
+        )
+
+        #expect(
+            policy.iceServers
+                == [
+                    TurboDirectQuicIceServer(
+                        urls: ["turn:turn.cloudflare.com:3478?transport=udp"],
+                        username: "user",
+                        credential: "credential"
+                    ),
+                ]
         )
     }
 
@@ -1257,7 +1381,7 @@ struct TurboTests {
     @Test func directQuicPromotionTimeoutDefaultToleratesBackgroundWakeRoundTrip() {
         let viewModel = PTTViewModel()
 
-        #expect(viewModel.directQuicPromotionTimeoutMilliseconds() == 5_000)
+        #expect(viewModel.directQuicPromotionTimeoutMilliseconds() == 15_000)
     }
 
     @MainActor
@@ -1283,7 +1407,7 @@ struct TurboTests {
             telemetryEnabled: true
         )
 
-        #expect(viewModel.directQuicPromotionTimeoutMilliseconds() == 5_000)
+        #expect(viewModel.directQuicPromotionTimeoutMilliseconds() == 15_000)
     }
 
     @MainActor
@@ -1492,6 +1616,99 @@ struct TurboTests {
             )
         ))
         #expect(ready == .ready([viableCandidate], viableCandidateCount: 1))
+    }
+
+    @Test func directQuicProbeBatchSelectionPrefersRoutableAndIPv6Candidates() {
+        let privateHost = TurboDirectQuicCandidate(
+            foundation: "host-private",
+            component: "media",
+            transport: "udp",
+            priority: 1_000_000,
+            kind: .host,
+            address: "192.168.1.12",
+            port: 4433,
+            relatedAddress: nil,
+            relatedPort: nil
+        )
+        let publicHost = TurboDirectQuicCandidate(
+            foundation: "host-public",
+            component: "media",
+            transport: "udp",
+            priority: 800_000,
+            kind: .host,
+            address: "198.51.100.22",
+            port: 4433,
+            relatedAddress: nil,
+            relatedPort: nil
+        )
+        let ipv6Host = TurboDirectQuicCandidate(
+            foundation: "host-ipv6",
+            component: "media",
+            transport: "udp",
+            priority: 700_000,
+            kind: .host,
+            address: "2001:db8::12",
+            port: 4433,
+            relatedAddress: nil,
+            relatedPort: nil
+        )
+        let ipv4ServerReflexive = TurboDirectQuicCandidate(
+            foundation: "srflx-ipv4",
+            component: "media",
+            transport: "udp",
+            priority: 600_000,
+            kind: .serverReflexive,
+            address: "203.0.113.8",
+            port: 4433,
+            relatedAddress: "192.168.1.12",
+            relatedPort: 4433
+        )
+        let ipv6ServerReflexive = TurboDirectQuicCandidate(
+            foundation: "srflx-ipv6",
+            component: "media",
+            transport: "udp",
+            priority: 500_000,
+            kind: .serverReflexive,
+            address: "2001:db8::8",
+            port: 4433,
+            relatedAddress: "2001:db8::12",
+            relatedPort: 4433
+        )
+        let linkLocalIPv6 = TurboDirectQuicCandidate(
+            foundation: "host-link-local",
+            component: "media",
+            transport: "udp",
+            priority: 900_000,
+            kind: .host,
+            address: "fe80::1",
+            port: 4433,
+            relatedAddress: nil,
+            relatedPort: nil
+        )
+
+        let selection = DirectQuicProbeController.selectCandidatesForProbeBatch(
+            inputCandidates: [
+                privateHost,
+                publicHost,
+                linkLocalIPv6,
+                ipv6Host,
+                ipv4ServerReflexive,
+                ipv6ServerReflexive,
+            ],
+            attemptedCandidateKeys: [],
+            probeInFlight: false
+        )
+
+        #expect(selection == .ready(
+            [
+                ipv6ServerReflexive,
+                ipv4ServerReflexive,
+                ipv6Host,
+                publicHost,
+                privateHost,
+            ],
+            viableCandidateCount: 5
+        ))
     }
 
     @Test func directQuicOfferEnvelopeRoundTripsTypedPayload() throws {
@@ -2238,6 +2455,20 @@ struct TurboTests {
         #expect(
             DirectQuicRetryBackoffPolicy.milliseconds(
                 baseMilliseconds: 15_000,
+                reason: "promotion-timeout",
+                priorFailureCount: 1
+            ) == 30_000
+        )
+        #expect(
+            DirectQuicRetryBackoffPolicy.milliseconds(
+                baseMilliseconds: 15_000,
+                reason: "promotion-timeout",
+                priorFailureCount: 8
+            ) == 300_000
+        )
+        #expect(
+            DirectQuicRetryBackoffPolicy.milliseconds(
+                baseMilliseconds: 15_000,
                 reason: "promotion-timeout"
             ) == 15_000
         )
@@ -2545,6 +2776,47 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func directQuicPromotionConnectivityBackoffBecomesExponentialAfterFastRetries() {
+        let contactID = UUID()
+        let viewModel = PTTViewModel()
+
+        viewModel.applicationStateOverride = .active
+        viewModel.selectedContactId = contactID
+
+        let first = viewModel.directQuicPromotionRetryBackoffRequest(
+            for: contactID,
+            reason: "promotion-timeout",
+            attemptID: "attempt-1"
+        )
+        viewModel.mediaRuntime.directQuicUpgrade.applyRetryBackoff(for: contactID, request: first)
+
+        let second = viewModel.directQuicPromotionRetryBackoffRequest(
+            for: contactID,
+            reason: "promotion-timeout",
+            attemptID: "attempt-2"
+        )
+        viewModel.mediaRuntime.directQuicUpgrade.applyRetryBackoff(for: contactID, request: second)
+
+        let third = viewModel.directQuicPromotionRetryBackoffRequest(
+            for: contactID,
+            reason: "promotion-timeout",
+            attemptID: "attempt-3"
+        )
+        viewModel.mediaRuntime.directQuicUpgrade.applyRetryBackoff(for: contactID, request: third)
+
+        let fourth = viewModel.directQuicPromotionRetryBackoffRequest(
+            for: contactID,
+            reason: "promotion-timeout",
+            attemptID: "attempt-4"
+        )
+
+        #expect(first?.milliseconds == 1_000)
+        #expect(second?.milliseconds == 1_000)
+        #expect(third?.milliseconds == 15_000)
+        #expect(fourth?.milliseconds == 30_000)
+    }
+
+    @MainActor
     @Test func directQuicPromotionTimeoutSchedulesAutomaticReprobeAfterBackoff() async {
         let contactID = UUID()
         let viewModel = PTTViewModel()
@@ -2562,7 +2834,7 @@ struct TurboTests {
         await viewModel.handleDirectQuicPromotionTimeout(
             contactID: contactID,
             attemptID: "attempt-1",
-            timeoutMilliseconds: 5_000
+            timeoutMilliseconds: 15_000
         )
 
         #expect(viewModel.mediaRuntime.directQuicUpgrade.attempt(for: contactID) == nil)
@@ -3331,6 +3603,28 @@ struct TurboTests {
         #expect(plan.shouldApplySpeakerOverride)
     }
 
+    @Test func phoneOverridePlanClearsSpeakerOverrideWhenSpeakerIsActive() {
+        let plan = AudioOutputRouteOverridePlan.forCurrentRoute(
+            preference: .phone,
+            category: .playAndRecord,
+            outputPortTypes: [.builtInSpeaker]
+        )
+
+        #expect(!plan.shouldApplySpeakerOverride)
+        #expect(plan.shouldClearSpeakerOverride)
+    }
+
+    @Test func phoneOverridePlanPreservesReceiverRoute() {
+        let plan = AudioOutputRouteOverridePlan.forCurrentRoute(
+            preference: .phone,
+            category: .playAndRecord,
+            outputPortTypes: [.builtInReceiver]
+        )
+
+        #expect(!plan.shouldApplySpeakerOverride)
+        #expect(!plan.shouldClearSpeakerOverride)
+    }
+
     @Test func speakerOverridePlanPreservesBluetoothRoute() {
         let hfpPlan = AudioOutputRouteOverridePlan.forCurrentRoute(
             preference: .speaker,
@@ -3345,6 +3639,17 @@ struct TurboTests {
 
         #expect(!hfpPlan.shouldApplySpeakerOverride)
         #expect(!a2dpPlan.shouldApplySpeakerOverride)
+    }
+
+    @Test func phoneOverridePlanPreservesBluetoothRoute() {
+        let plan = AudioOutputRouteOverridePlan.forCurrentRoute(
+            preference: .phone,
+            category: .playAndRecord,
+            outputPortTypes: [.bluetoothHFP]
+        )
+
+        #expect(!plan.shouldApplySpeakerOverride)
+        #expect(!plan.shouldClearSpeakerOverride)
     }
 
     @Test func explicitLeaveBlocksAutoRejoin() {
@@ -3484,6 +3789,39 @@ struct TurboTests {
         )
 
         #expect(coordinator == SessionCoordinatorState())
+    }
+
+    @MainActor
+    @Test func selectedSyncClearsDetachedExplicitLeaveAfterBackendMembershipIsGone() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: nil,
+                remoteUserId: "user-blake"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.isJoined = false
+        viewModel.activeChannelId = nil
+        viewModel.sessionCoordinator.markExplicitLeave(contactID: contactID)
+        viewModel.statusMessage = "Disconnecting..."
+
+        viewModel.syncSelectedPeerSession()
+
+        #expect(viewModel.sessionCoordinator.pendingAction == .none)
+        #expect(viewModel.selectedPeerState(for: contactID).phase != .waitingForPeer)
+        #expect(viewModel.statusMessage != "Disconnecting...")
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Recovered local session state after backend membership became absent"
+            )
+        )
     }
 
     @Test func nonJoinedChannelRefreshClearsStalePendingJoin() {
@@ -4578,7 +4916,8 @@ struct TurboTests {
         viewModel.localReceiverAudioReadinessPublications[contactID] = ReceiverAudioReadinessPublication(
             isReady: true,
             peerWasRoutable: true,
-            basis: .lifecycle
+            basis: .lifecycle,
+            telemetry: nil
         )
 
         viewModel.handleIncomingSignal(
@@ -4597,22 +4936,21 @@ struct TurboTests {
         await Task.yield()
         await Task.yield()
 
-        #expect(
-            capturedEffects.contains(
-                .publishReceiverAudioReadiness(
-                    ReceiverAudioReadinessIntent(
-                        contactID: contactID,
-                        contactHandle: "@blake",
-                        backendChannelID: "channel-123",
-                        remoteUserID: "peer-user",
-                        currentUserID: "self-user",
-                        deviceID: client.deviceID,
-                        isReady: true,
-                        reason: "channel-refresh"
-                    )
-                )
-            )
-        )
+        let channelRefreshPublish = capturedEffects.compactMap { effect -> ReceiverAudioReadinessIntent? in
+            guard case .publishReceiverAudioReadiness(let intent) = effect,
+                  intent.contactID == contactID,
+                  intent.reason == "channel-refresh" else {
+                return nil
+            }
+            return intent
+        }.first
+        #expect(channelRefreshPublish?.contactHandle == "@blake")
+        #expect(channelRefreshPublish?.backendChannelID == "channel-123")
+        #expect(channelRefreshPublish?.remoteUserID == "peer-user")
+        #expect(channelRefreshPublish?.currentUserID == "self-user")
+        #expect(channelRefreshPublish?.deviceID == client.deviceID)
+        #expect(channelRefreshPublish?.isReady == true)
+        #expect(channelRefreshPublish?.telemetry?.audio != nil)
     }
 
     @Test func fetchedWaitingReadinessPreservesExistingWakeCapableRemoteState() {
@@ -5057,6 +5395,50 @@ struct TurboTests {
         )
 
         #expect(ConversationStateMachine.reconciliationAction(for: context) == .none)
+    }
+
+    @Test func backendWaitingForSelfWithMembershipRestoresMissingLocalSession() {
+        let contactID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .idle,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: false,
+            activeChannelID: nil,
+            systemSessionMatchesContact: false,
+            systemSessionState: .none,
+            pendingAction: .none,
+            localJoinFailure: nil,
+            channel: ChannelReadinessSnapshot(
+                channelState: makeChannelState(
+                    status: .waitingForPeer,
+                    canTransmit: false,
+                    selfJoined: true,
+                    peerJoined: true,
+                    peerDeviceConnected: true
+                ),
+                readiness: makeChannelReadiness(
+                    status: .waitingForSelf,
+                    selfHasActiveDevice: false,
+                    peerHasActiveDevice: true
+                )
+            )
+        )
+
+        let projection = ConversationStateMachine.projection(for: context, relationship: .none)
+
+        #expect(projection.selectedPeerState.phase == .waitingForPeer)
+        #expect(
+            projection.selectedPeerState.detail
+                == .waitingForPeer(reason: .peerReadyToConnect)
+        )
+        #expect(projection.selectedPeerState.statusMessage == "Connecting...")
+        #expect(
+            projection.reconciliationAction
+                == .restoreLocalSession(contactID: contactID)
+        )
     }
 
     @Test func staleLocalSessionWithoutBackendMembershipTearsDownEvenWhenWakeRecoveryRemainsAvailable() {
@@ -7241,6 +7623,80 @@ struct TurboTests {
         #expect(state.selectedPeerState.statusMessage == "Connecting...")
     }
 
+    @Test func selectedPeerReducerShowsReconnectCopyWhenPeerDropsDuringPendingJoin() {
+        let contactID = UUID()
+        let selection = SelectedPeerSelection(
+            contactID: contactID,
+            contactName: "Avery",
+            contactIsOnline: false,
+            contactPresence: .offline
+        )
+
+        let state = reduceSelectedPeerState([
+            .selectedContactChanged(selection),
+            .relationshipUpdated(.none),
+            .baseStateUpdated(.idle),
+            .channelUpdated(nil),
+            .localSessionUpdated(
+                isJoined: false,
+                activeChannelID: nil,
+                pendingAction: .connect(.joiningLocal(contactID: contactID)),
+                pendingConnectAcceptedIncomingRequest: false,
+                localJoinFailure: nil
+            ),
+            .systemSessionUpdated(.none, matchesSelectedContact: false)
+        ])
+
+        #expect(state.selectedPeerState.phase == .waitingForPeer)
+        #expect(state.selectedPeerState.statusMessage == "Waiting for Avery to reconnect")
+    }
+
+    @Test func selectedPeerReducerTimesOutConnectionAttemptToRecoverableRetry() {
+        let contactID = UUID()
+        let selection = SelectedPeerSelection(
+            contactID: contactID,
+            contactName: "Avery",
+            contactIsOnline: false,
+            contactPresence: .offline
+        )
+
+        let connectingState = reduceSelectedPeerState([
+            .selectedContactChanged(selection),
+            .relationshipUpdated(.incomingRequest(requestCount: 1)),
+            .baseStateUpdated(.incomingRequest),
+            .channelUpdated(nil),
+            .localSessionUpdated(
+                isJoined: false,
+                activeChannelID: nil,
+                pendingAction: .connect(.joiningLocal(contactID: contactID)),
+                pendingConnectAcceptedIncomingRequest: true,
+                localJoinFailure: nil
+            ),
+            .systemSessionUpdated(.none, matchesSelectedContact: false)
+        ])
+
+        let timedOut = SelectedPeerReducer.reduce(
+            state: connectingState,
+            event: .connectionAttemptTimedOut(contactID: contactID)
+        ).state
+
+        #expect(timedOut.selectedPeerState.phase == .localJoinFailed)
+        #expect(timedOut.selectedPeerState.statusMessage == "Connection interrupted")
+
+        let primaryAction = ConversationStateMachine.primaryAction(
+            selectedPeerState: timedOut.selectedPeerState,
+            isSelectedChannelJoined: false,
+            isTransmitting: false,
+            requestCooldownRemaining: nil
+        )
+        #expect(primaryAction.kind == .connect)
+        #expect(primaryAction.label == "Try Again")
+        #expect(primaryAction.isEnabled)
+
+        let retry = SelectedPeerReducer.reduce(state: timedOut, event: .joinRequested)
+        #expect(retry.effects == [.requestConnection(contactID: contactID)])
+    }
+
     @Test func selectedPeerReducerUsesBackendReadyOnlyAfterLocalAlignment() {
         let contactID = UUID()
         let selection = SelectedPeerSelection(
@@ -9309,6 +9765,25 @@ struct TurboTests {
         #expect(action.style == .accent)
     }
 
+    @Test func incomingRequestPrimaryActionUsesAcceptLabel() {
+        let action = ConversationStateMachine.primaryAction(
+            selectedPeerState: SelectedPeerState(
+                relationship: .incomingRequest(requestCount: 1),
+                phase: .incomingRequest,
+                statusMessage: "Blake wants to talk",
+                canTransmitNow: false
+            ),
+            isSelectedChannelJoined: false,
+            isTransmitting: false,
+            requestCooldownRemaining: nil
+        )
+
+        #expect(action.kind == .connect)
+        #expect(action.label == "Accept")
+        #expect(action.isEnabled)
+        #expect(action.style == .accent)
+    }
+
     @Test func idleSelectedPeerPrimaryActionUsesRequestLabel() {
         let action = ConversationStateMachine.primaryAction(
             selectedPeerState: SelectedPeerState(
@@ -9328,12 +9803,12 @@ struct TurboTests {
         #expect(action.style == .accent)
     }
 
-    @Test func localJoinFailedPrimaryActionStaysDisabled() {
+    @Test func localJoinFailedPrimaryActionRetriesConnection() {
         let action = ConversationStateMachine.primaryAction(
             selectedPeerState: SelectedPeerState(
                 relationship: .none,
                 phase: .localJoinFailed,
-                statusMessage: "Reconnect failed. End session and retry.",
+                statusMessage: "Connection interrupted",
                 canTransmitNow: false
             ),
             isSelectedChannelJoined: false,
@@ -9342,8 +9817,9 @@ struct TurboTests {
         )
 
         #expect(action.kind == .connect)
-        #expect(action.isEnabled == false)
-        #expect(action.style == .muted)
+        #expect(action.label == "Try Again")
+        #expect(action.isEnabled)
+        #expect(action.style == .accent)
     }
 
     @Test func blockedRequestedPrimaryActionAllowsRequestAgainAfterCooldownExpires() {
@@ -19982,6 +20458,57 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func proximityInactiveTransitionPreservesLiveForegroundMediaSession() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.proximityMonitoringIsActive = true
+        viewModel.isPhoneNearEar = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+
+        await viewModel.ensureMediaSession(
+            for: contactID,
+            activationMode: .appManaged,
+            startupMode: .interactive
+        )
+
+        #expect(
+            viewModel.shouldSuspendForegroundMediaForBackgroundTransition(
+                applicationState: .inactive
+            ) == false
+        )
+
+        await viewModel.suspendForegroundMediaForBackgroundTransition(
+            reason: "application-will-resign-active",
+            applicationState: .inactive
+        )
+
+        #expect(viewModel.mediaSessionContactID == contactID)
+        #expect(viewModel.mediaConnectionState == .connected)
+        #expect(
+            !viewModel.diagnosticsTranscript.contains(
+                "Suspending foreground media for background transition"
+            )
+        )
+    }
+
+    @MainActor
     @Test func idleBackgroundTransitionRetiresDirectQuicAndPublishesNotReady() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -20109,6 +20636,57 @@ struct TurboTests {
             reason: "application-did-enter-background",
             applicationState: .background
         ))
+    }
+
+    @MainActor
+    @Test func proximityInactiveTransitionPreservesDirectQuicSynchronously() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.proximityMonitoringIsActive = true
+        viewModel.isPhoneNearEar = true
+        _ = viewModel.directQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-123",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        if let direct = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        ) {
+            viewModel.applyDirectQuicUpgradeTransition(direct, for: contactID)
+        }
+
+        let didRetire = viewModel.retireIdleDirectQuicForBackgroundTransitionImmediately(
+            reason: "application-will-resign-active",
+            applicationState: .inactive
+        )
+
+        #expect(!didRetire)
+        #expect(viewModel.shouldUseDirectQuicTransport(for: contactID))
+        #expect(viewModel.mediaRuntime.directQuicProbeController != nil)
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Preserving Direct QUIC during proximity inactive transition"
+            )
+        )
     }
 
     @MainActor
@@ -21932,6 +22510,28 @@ struct TurboTests {
         #expect(transition.effects.isEmpty)
     }
 
+    @Test func receiverAudioReadinessSignalPayloadPreservesLegacyReasonPayloads() throws {
+        let payload = ReceiverAudioReadinessSignalPayload.decode(from: "app-background-media-closed")
+
+        #expect(payload.reason == "app-background-media-closed")
+        #expect(payload.telemetry == nil)
+    }
+
+    @Test func receiverAudioReadinessSignalPayloadRoundTripsTelemetry() throws {
+        let telemetry = CallPeerTelemetry(
+            audio: .init(routeName: "Speaker", volumePercent: 70),
+            connection: .init(interface: .cellular)
+        )
+        let payload = ReceiverAudioReadinessSignalPayload(
+            reason: "channel-refresh",
+            telemetry: telemetry
+        )
+
+        let decoded = ReceiverAudioReadinessSignalPayload.decode(from: payload.wirePayload())
+
+        #expect(decoded == payload)
+    }
+
     @Test func controlPlaneReducerDefersReceiverAudioReadinessUntilReconnect() {
         let contactID = UUID()
         let intent = ReceiverAudioReadinessIntent(
@@ -21942,7 +22542,8 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "channel-refresh"
+            reason: "channel-refresh",
+            telemetry: nil
         )
 
         let transition = ControlPlaneReducer.reduce(
@@ -21976,7 +22577,8 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "channel-refresh"
+            reason: "channel-refresh",
+            telemetry: nil
         )
 
         let firstTransition = ControlPlaneReducer.reduce(
@@ -22016,7 +22618,8 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: false,
-            reason: "app-background-media-closed"
+            reason: "app-background-media-closed",
+            telemetry: nil
         )
 
         let transition = ControlPlaneReducer.reduce(
@@ -22047,7 +22650,8 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "media-connected"
+            reason: "media-connected",
+            telemetry: nil
         )
         let refreshIntent = ReceiverAudioReadinessIntent(
             contactID: contactID,
@@ -22057,7 +22661,8 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "channel-refresh"
+            reason: "channel-refresh",
+            telemetry: nil
         )
 
         let transition = ControlPlaneReducer.reduce(
@@ -22086,7 +22691,8 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "channel-refresh"
+            reason: "channel-refresh",
+            telemetry: nil
         )
 
         let transition = ControlPlaneReducer.reduce(
@@ -22103,6 +22709,55 @@ struct TurboTests {
         )
 
         #expect(transition.effects.isEmpty)
+    }
+
+    @Test func controlPlaneReducerRepublishesWhenReceiverTelemetryChanges() {
+        let contactID = UUID()
+        let firstTelemetry = CallPeerTelemetry(
+            audio: .init(routeName: "Speaker", volumePercent: 70),
+            connection: .init(interface: .wifi)
+        )
+        let changedTelemetry = CallPeerTelemetry(
+            audio: .init(routeName: "Speaker", volumePercent: 71),
+            connection: .init(interface: .wifi)
+        )
+        let firstIntent = ReceiverAudioReadinessIntent(
+            contactID: contactID,
+            contactHandle: "@blake",
+            backendChannelID: "channel",
+            remoteUserID: "peer-user",
+            currentUserID: "self-user",
+            deviceID: "self-device",
+            isReady: true,
+            reason: "channel-refresh",
+            telemetry: firstTelemetry
+        )
+        let changedIntent = ReceiverAudioReadinessIntent(
+            contactID: contactID,
+            contactHandle: "@blake",
+            backendChannelID: "channel",
+            remoteUserID: "peer-user",
+            currentUserID: "self-user",
+            deviceID: "self-device",
+            isReady: true,
+            reason: "channel-refresh",
+            telemetry: changedTelemetry
+        )
+
+        let transition = ControlPlaneReducer.reduce(
+            state: ControlPlaneSessionState(
+                receiverAudioReadinessStates: [
+                    contactID: .published(firstIntent.publishedState)
+                ]
+            ),
+            event: .receiverAudioReadinessSyncRequested(
+                changedIntent,
+                peerIsRoutable: true,
+                webSocketConnected: true
+            )
+        )
+
+        #expect(transition.effects == [.publishReceiverAudioReadiness(changedIntent)])
     }
 
     @Test func controlPlaneReducerRunsPostWakeRepairAtMostOncePerContact() {
@@ -23944,7 +24599,7 @@ struct TurboTests {
         #expect(!didBecomeReady)
         #expect(
             viewModel.diagnosticsTranscript.contains(
-                "Timed out waiting for remote receiver audio readiness; sending anyway"
+                "Timed out waiting for remote receiver audio readiness; not sending outbound audio"
             )
         )
         #expect(
@@ -24052,7 +24707,7 @@ struct TurboTests {
         )
         #expect(
             !viewModel.diagnosticsTranscript.contains(
-                "Timed out waiting for remote receiver audio readiness; sending anyway"
+                "Timed out waiting for remote receiver audio readiness; not sending outbound audio"
             )
         )
     }
@@ -24146,7 +24801,7 @@ struct TurboTests {
         )
         #expect(
             !viewModel.diagnosticsTranscript.contains(
-                "Timed out waiting for remote receiver audio readiness; sending anyway"
+                "Timed out waiting for remote receiver audio readiness; not sending outbound audio"
             )
         )
     }
@@ -24225,7 +24880,7 @@ struct TurboTests {
         )
         #expect(
             !viewModel.diagnosticsTranscript.contains(
-                "Timed out waiting for remote receiver audio readiness; sending anyway"
+                "Timed out waiting for remote receiver audio readiness; not sending outbound audio"
             )
         )
     }
@@ -24301,7 +24956,7 @@ struct TurboTests {
         )
         #expect(
             !viewModel.diagnosticsTranscript.contains(
-                "Timed out waiting for remote receiver audio readiness; sending anyway"
+                "Timed out waiting for remote receiver audio readiness; not sending outbound audio"
             )
         )
     }
@@ -24400,7 +25055,7 @@ struct TurboTests {
         )
         #expect(
             !viewModel.diagnosticsTranscript.contains(
-                "Timed out waiting for remote receiver audio readiness; sending anyway"
+                "Timed out waiting for remote receiver audio readiness; not sending outbound audio"
             )
         )
     }
@@ -24521,14 +25176,11 @@ struct TurboTests {
 
         await viewModel.syncLocalReceiverAudioReadinessSignal(for: contactID, reason: "channel-refresh")
 
-        #expect(
-            viewModel.localReceiverAudioReadinessPublications[contactID]
-                == ReceiverAudioReadinessPublication(
-                    isReady: true,
-                    peerWasRoutable: false,
-                    basis: .channelRefresh
-                )
-        )
+        let publication = viewModel.localReceiverAudioReadinessPublications[contactID]
+        #expect(publication?.isReady == true)
+        #expect(publication?.peerWasRoutable == false)
+        #expect(publication?.basis == .channelRefresh)
+        #expect(publication?.telemetry?.audio != nil)
     }
 
     @MainActor
@@ -24644,7 +25296,8 @@ struct TurboTests {
         viewModel.localReceiverAudioReadinessPublications[contactID] = ReceiverAudioReadinessPublication(
             isReady: true,
             peerWasRoutable: true,
-            basis: .lifecycle
+            basis: .lifecycle,
+            telemetry: nil
         )
 
         await viewModel.reassertBackendJoinAfterWakeIfNeeded(for: contactID)
@@ -24683,7 +25336,8 @@ struct TurboTests {
         viewModel.localReceiverAudioReadinessPublications[contactID] = ReceiverAudioReadinessPublication(
             isReady: true,
             peerWasRoutable: true,
-            basis: .lifecycle
+            basis: .lifecycle,
+            telemetry: nil
         )
 
         var capturedEffects: [BackendCommandEffect] = []
@@ -24938,6 +25592,63 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func signalingJoinDriftNoticeForcesJoinPastInFlightJoinForSameContact() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: channelUUID,
+            backendChannelId: "channel",
+            remoteUserId: "peer-user"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.syncPTTState()
+
+        let inFlightRequest = BackendJoinRequest(
+            contactID: contactID,
+            handle: "@blake",
+            intent: .joinReadyPeer,
+            relationship: .none,
+            existingRemoteUserID: "peer-user",
+            existingBackendChannelID: "channel",
+            incomingInvite: nil,
+            outgoingInvite: nil,
+            requestCooldownRemaining: nil,
+            usesLocalHTTPBackend: false
+        )
+        viewModel.backendCommandCoordinator.send(.joinRequested(inFlightRequest))
+
+        var capturedEffects: [BackendCommandEffect] = []
+        viewModel.backendCommandCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        viewModel.handleBackendServerNotice("signaling sender device is not joined to this channel")
+
+        await Task.yield()
+        await Task.yield()
+
+        #expect(capturedEffects == [.join(inFlightRequest)])
+        #expect(viewModel.diagnosticsTranscript.contains("Forcing backend join reassertion past in-flight join"))
+    }
+
+    @MainActor
     @Test func signalingPrefixedJoinDriftNoticeDoesNotReassertBackendJoinInBackground() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -25056,7 +25767,8 @@ struct TurboTests {
         viewModel.localReceiverAudioReadinessPublications[contactID] = ReceiverAudioReadinessPublication(
             isReady: true,
             peerWasRoutable: true,
-            basis: .lifecycle
+            basis: .lifecycle,
+            telemetry: nil
         )
 
         viewModel.handleWebSocketStateChange(.idle)
@@ -25823,6 +26535,82 @@ struct TurboTests {
 
         #expect(viewModel.shouldIgnoreIncomingInviteAcceptFailure(TurboBackendError.server("invite not found")))
         #expect(viewModel.shouldIgnoreIncomingInviteAcceptFailure(TurboBackendError.server(" Invite Not Found ")) )
+    }
+
+    @MainActor
+    @Test func incomingInviteResolutionPrefersFreshPendingInviteOverCachedStaleInvite() {
+        let viewModel = PTTViewModel()
+        let request = BackendJoinRequest(
+            contactID: UUID(),
+            handle: "@avery",
+            intent: .requestConnection,
+            relationship: .incomingRequest(requestCount: 1),
+            existingRemoteUserID: "user-avery",
+            existingBackendChannelID: "channel-1",
+            incomingInvite: makeInvite(
+                direction: "incoming",
+                inviteId: "old-cached",
+                fromHandle: "@avery",
+                toHandle: "@self",
+                createdAt: "2026-04-08T00:00:00Z"
+            ),
+            outgoingInvite: nil,
+            requestCooldownRemaining: nil,
+            usesLocalHTTPBackend: false
+        )
+        let freshInvite = makeInvite(
+            direction: "incoming",
+            inviteId: "fresh-pending",
+            fromHandle: "@avery",
+            toHandle: "@self",
+            createdAt: "2026-04-08T00:00:02Z"
+        )
+
+        let selectedInvite = viewModel.freshestMatchingIncomingInvite(
+            for: request,
+            cachedInvite: request.incomingInvite,
+            fetchedInvites: [freshInvite]
+        )
+
+        #expect(selectedInvite?.inviteId == "fresh-pending")
+    }
+
+    @MainActor
+    @Test func incomingInviteResolutionIgnoresAcceptedFetchedInviteAndFallsBackToPendingCachedInvite() {
+        let viewModel = PTTViewModel()
+        let cachedInvite = makeInvite(
+            direction: "incoming",
+            inviteId: "cached-pending",
+            fromHandle: "@avery",
+            toHandle: "@self"
+        )
+        let request = BackendJoinRequest(
+            contactID: UUID(),
+            handle: "@avery",
+            intent: .requestConnection,
+            relationship: .incomingRequest(requestCount: 1),
+            existingRemoteUserID: "user-avery",
+            existingBackendChannelID: "channel-1",
+            incomingInvite: cachedInvite,
+            outgoingInvite: nil,
+            requestCooldownRemaining: nil,
+            usesLocalHTTPBackend: false
+        )
+        let acceptedInvite = makeInvite(
+            direction: "incoming",
+            inviteId: "accepted",
+            fromHandle: "@avery",
+            toHandle: "@self",
+            status: "connected"
+        )
+
+        let selectedInvite = viewModel.freshestMatchingIncomingInvite(
+            for: request,
+            cachedInvite: cachedInvite,
+            fetchedInvites: [acceptedInvite]
+        )
+
+        #expect(selectedInvite?.inviteId == "cached-pending")
     }
 
     @MainActor
@@ -28006,10 +28794,39 @@ struct TurboTests {
     @Test func activeSessionBackendConnectionFailureSurfacesInTopChrome() {
         let viewModel = PTTViewModel()
         viewModel.activeChannelId = UUID()
+        viewModel.backendStatusMessage = "Backend unavailable"
         viewModel.diagnostics.clear()
         viewModel.diagnostics.record(.backend, level: .error, message: "Backend connection failed")
 
         #expect(viewModel.topChromeDiagnosticsErrorText == "backend: Backend connection failed")
+    }
+
+    @MainActor
+    @Test func recoveredActiveSessionBackendConnectionFailureDoesNotSurfaceInTopChrome() {
+        let viewModel = PTTViewModel()
+        viewModel.activeChannelId = UUID()
+        viewModel.backendRuntime.isReady = true
+        viewModel.backendStatusMessage = "Connected"
+        viewModel.statusMessage = "Connected"
+        viewModel.diagnostics.clear()
+        viewModel.diagnostics.record(.backend, level: .error, message: "Backend connection failed")
+
+        #expect(viewModel.diagnostics.latestError?.message == "Backend connection failed")
+        #expect(viewModel.topChromeDiagnosticsErrorText == nil)
+    }
+
+    @MainActor
+    @Test func recoveredActiveSessionChannelRefreshFailureDoesNotSurfaceInTopChrome() {
+        let viewModel = PTTViewModel()
+        viewModel.activeChannelId = UUID()
+        viewModel.backendRuntime.isReady = true
+        viewModel.backendStatusMessage = "Connected"
+        viewModel.statusMessage = "Connected"
+        viewModel.diagnostics.clear()
+        viewModel.diagnostics.record(.channel, level: .error, message: "Channel state refresh failed")
+
+        #expect(viewModel.diagnostics.latestError?.message == "Channel state refresh failed")
+        #expect(viewModel.topChromeDiagnosticsErrorText == nil)
     }
 
     @MainActor
@@ -28094,10 +28911,10 @@ struct TurboTests {
                 "isTransmitting": "false",
                 "systemSession": "none",
                 "backendChannelStatus": "waiting-for-peer",
-                "backendReadiness": "inactive",
+                "backendReadiness": "waiting-for-self",
                 "backendSelfJoined": "true",
                 "backendPeerJoined": "true",
-                "backendPeerDeviceConnected": "false",
+                "backendPeerDeviceConnected": "true",
                 "selectedPeerStatus": "Blake is ready to connect"
             ]
         )
@@ -28182,6 +28999,38 @@ struct TurboTests {
 
         #expect(
             !store.invariantViolations.contains {
+                $0.invariantID == "selected.backend_absent_pending_local_action_without_session"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsIncludesBackendAbsentPendingLeaveInvariantWhenBackendFieldsAreUnknown() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        store.captureState(
+            reason: "selected-status-refresh",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "waitingForPeer",
+                "selectedPeerPhaseDetail": "waitingForPeer(reason: BeepBeep.SelectedPeerWaitingReason.disconnecting)",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "leave(BeepBeep.PendingLeaveAction.explicit(contactID: Optional(123)))",
+                "isJoined": "false",
+                "isTransmitting": "false",
+                "systemSession": "none",
+                "backendChannelStatus": "none",
+                "backendReadiness": "none",
+                "backendSelfJoined": "none",
+                "backendPeerJoined": "none",
+                "backendPeerDeviceConnected": "none",
+                "selectedPeerStatus": "Disconnecting..."
+            ]
+        )
+
+        #expect(
+            store.invariantViolations.contains {
                 $0.invariantID == "selected.backend_absent_pending_local_action_without_session"
             }
         )
@@ -28795,6 +29644,73 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func recoveredBackendAbsentPendingLeaveInvariantDoesNotSurfaceInTopChrome() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: nil,
+                remoteUserId: "user-avery"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.diagnostics.clear()
+
+        viewModel.diagnostics.record(
+            .invariant,
+            level: .error,
+            message: "backend membership is absent, but the selected peer still has a pending local session action without local session evidence",
+            metadata: [
+                "invariantID": "selected.backend_absent_pending_local_action_without_session",
+                "pendingAction": "leave(BeepBeep.PendingLeaveAction.explicit(contactID: Optional(123)))",
+            ]
+        )
+
+        #expect(viewModel.topChromeDiagnosticsErrorText == nil)
+    }
+
+    @MainActor
+    @Test func backendAbsentPendingLocalJoinInvariantSurfacesWhileStillCurrent() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: nil,
+                remoteUserId: "user-avery"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.sessionCoordinator.queueJoin(contactID: contactID)
+        viewModel.syncSelectedPeerSession()
+        viewModel.diagnostics.clear()
+
+        viewModel.diagnostics.record(
+            .invariant,
+            level: .error,
+            message: "backend membership is absent, but the selected peer still has a pending local session action without local session evidence",
+            metadata: [
+                "invariantID": "selected.backend_absent_pending_local_action_without_session",
+                "pendingAction": "connect(BeepBeep.PendingConnectAction.joiningLocal(contactID: 123))",
+            ]
+        )
+
+        #expect(
+            viewModel.topChromeDiagnosticsErrorText
+                == "invariant: backend membership is absent, but the selected peer still has a pending local session action without local session evidence"
+        )
+    }
+
+    @MainActor
     @Test func diagnosticsStoreAcceptsBackgroundRecordCalls() async {
         let store = DiagnosticsStore()
         store.clear()
@@ -28908,6 +29824,39 @@ struct TurboTests {
 
         #expect(client.joinRequests == [channelUUID])
         #expect(viewModel.pendingJoinContactId == contactID)
+    }
+
+    @MainActor
+    @Test func didJoinChannelClearsPendingLocalJoinBeforeBackendRefreshCompletes() async {
+        let client = RecordingPTTSystemClient()
+        let viewModel = PTTViewModel(pttSystemClient: client)
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.sessionCoordinator.queueJoin(contactID: contactID)
+
+        viewModel.handleDidJoinChannel(channelUUID, reason: "test")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(viewModel.pendingJoinContactId == nil)
+        #expect(viewModel.pttCoordinator.state.isJoined)
+        #expect(viewModel.isJoined)
+        #expect(
+            viewModel.diagnostics.entries.contains {
+                $0.message == "Cleared pending local join after PTT join callback"
+            }
+        )
     }
 
     @MainActor
@@ -31460,6 +32409,7 @@ private func makeInvite(
     inviteId: String = UUID().uuidString,
     fromHandle: String = "@self",
     toHandle: String = "@avery",
+    status: String = "pending",
     requestCount: Int = 1,
     createdAt: String = "2026-04-08T00:00:00Z",
     updatedAt: String? = nil
@@ -31471,7 +32421,7 @@ private func makeInvite(
         toUserId: "user-peer",
         toHandle: toHandle,
         channelId: "channel-1",
-        status: "pending",
+        status: status,
         direction: direction,
         requestCount: requestCount,
         createdAt: createdAt,

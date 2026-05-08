@@ -1,0 +1,132 @@
+turbo.config.seedKeys : [Text]
+turbo.config.seedKeys =
+  [ "TURBO_APNS_WORKER_SECRET"
+  , "TURBO_APNS_WORKER_BASE_URL"
+  , "TURBO_APNS_TEAM_ID"
+  , "TURBO_APNS_KEY_ID"
+  , "TURBO_APNS_BUNDLE_ID"
+  , "TURBO_APNS_USE_SANDBOX"
+  , "TURBO_TELEMETRY_WORKER_SECRET"
+  , "TURBO_TELEMETRY_WORKER_BASE_URL"
+  , "TURBO_TELEMETRY_DEV_HANDLES"
+  , "TURBO_CLOUDFLARE_TURN_KEY_ID"
+  , "TURBO_CLOUDFLARE_TURN_API_TOKEN"
+  ]
+
+type turbo.cloudflare.turn.CredentialConfig = CredentialConfig Text Text Nat
+
+turbo.cloudflare.turn.defaultCredentialTtlSeconds : Nat
+turbo.cloudflare.turn.defaultCredentialTtlSeconds = 3600
+
+turbo.cloudflare.turn.config : '{Config} Either Text turbo.cloudflare.turn.CredentialConfig
+turbo.cloudflare.turn.config = do
+  use Config lookup
+  keyId = lookup "TURBO_CLOUDFLARE_TURN_KEY_ID"
+  apiToken = lookup "TURBO_CLOUDFLARE_TURN_API_TOKEN"
+  match (keyId, apiToken) with
+    (Some keyIdText, Some apiTokenText) ->
+      Right (CredentialConfig keyIdText apiTokenText turbo.cloudflare.turn.defaultCredentialTtlSeconds)
+    _ -> Left "missing Cloudflare TURN config"
+
+turbo.cloudflare.turn.isConfigured : '{Config} Boolean
+turbo.cloudflare.turn.isConfigured = do
+  match turbo.cloudflare.turn.config() with
+    Right _ -> true
+    Left _  -> false
+
+turbo.cloudflare.turn.credentialsUri : Text -> URI
+turbo.cloudflare.turn.credentialsUri keyId =
+  URI.parse ("https://rtc.live.cloudflare.com/v1/turn/keys/" ++ keyId ++ "/credentials/generate-ice-servers")
+
+turbo.cloudflare.turn.generateIceServers : '{Config, Exception, Http} Either Text Text
+turbo.cloudflare.turn.generateIceServers = do
+  use HttpRequest addHeader
+  use Nat < >=
+  use Text ++
+  match turbo.cloudflare.turn.config() with
+    Left err -> Left err
+    Right (CredentialConfig keyId apiToken ttlSeconds) ->
+      payloadBodyText = Json.toText (object.empty |> object.addNat "ttl" ttlSeconds)
+      req0 = HttpRequest.post (turbo.cloudflare.turn.credentialsUri keyId) (Body.fromText payloadBodyText)
+      req = req0 |> addHeader "Authorization" ("Bearer " ++ apiToken) |> addHeader "Content-Type" "application/json"
+      match catch do Http.request req with
+        Left _ -> Left "Cloudflare TURN credential request crashed"
+        Right response ->
+          statusCode = HttpResponse.status response |> code
+          responseBody = bodyText response
+          if statusCode >= 200 && statusCode < 300 then
+            Right responseBody
+          else
+            Left ("Cloudflare TURN credential request failed: " ++ Nat.toText statusCode ++ " " ++ responseBody)
+
+turbo.service.directQuic.iceServers : Database -> '{Route, Config, Exception, Http, Storage, Remote} ()
+turbo.service.directQuic.iceServers db = do
+  use Parser /
+  use object empty
+  noCapture POST (s "v1" / s "direct-quic" / s "ice-servers")
+  match auth.requireUser db () with
+    Left err -> unauthorized.json (empty |> addText "error" err)
+    Right _ ->
+      match turbo.cloudflare.turn.generateIceServers() with
+        Left err -> badRequest.json (empty |> addText "error" err)
+        Right responseBody ->
+          Route.response.headers.add Route.constants.ContentType Route.contentTypes.jsonUtf8
+          ok.text responseBody
+
+turbo.service.config : Text -> Boolean -> '{Route, Config} ()
+turbo.service.config mode supportsWebSocket = do
+  use List ++
+  use Parser /
+  use object empty
+  noCapture GET (s "v1" / s "config")
+  cloudflareStunServers = [empty |> addText "host" "stun.cloudflare.com" |> addNat "port" 3478]
+  googleStunServers = [empty |> addText "host" "stun.l.google.com" |> addNat "port" 19302, empty |> addText "host" "stun1.l.google.com" |> addNat "port" 19302]
+  stunProviders = [empty |> addText "name" "cloudflare" |> addBoolean "enabled" true |> addList "servers" cloudflareStunServers, empty |> addText "name" "google" |> addBoolean "enabled" true |> addList "servers" googleStunServers]
+  stunServers = cloudflareStunServers ++ googleStunServers
+  turnConfigured = turbo.cloudflare.turn.isConfigured()
+  transportExperimentBucket =
+    if turnConfigured then "cloudflare-turn-v1" else "cloudflare-stun-v1"
+  directQuicPolicy = empty |> addList "stunServers" stunServers |> addList "stunProviders" stunProviders |> addBoolean "turnEnabled" turnConfigured |> addText "turnProvider" "cloudflare" |> addText "turnPolicyPath" "/v1/direct-quic/ice-servers" |> addNat "turnCredentialTtlSeconds" turbo.cloudflare.turn.defaultCredentialTtlSeconds |> addText "transportExperimentBucket" transportExperimentBucket |> addNat "promotionTimeoutMs" 2500 |> addNat "retryBackoffMs" 15000
+  ok.json (empty |> addText "mode" mode |> addBoolean "supportsWebSocket" supportsWebSocket |> addBoolean "telemetryEnabled" enabled() |> addBoolean "supportsDirectQuicUpgrade" true |> addBoolean "supportsDirectQuicProvisioning" true |> addBoolean "supportsMediaEndToEndEncryption" true |> object.add "directQuicPolicy" directQuicPolicy)
+
+turbo.service.apiWithConfig : Text -> Boolean -> Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.apiWithConfig mode supportsWebSocket db =
+  use Route or
+  or health (or (service.config mode supportsWebSocket) (or (service.directQuic.iceServers db) (or (uploadEvent db) (or (internal.routes db) (or (dev db) (or (service.presence.heartbeat db) (or (background db) (or (offline db) (or (auth db) (or (users db) (or (invites db) (channels db))))))))))))
+
+turbo.service.dev.deployStamp : Database -> '{Route, Config, Exception, Storage, Remote} ()
+turbo.service.dev.deployStamp db = do
+  use Config lookup
+  use Parser /
+  use object empty
+  noCapture GET (s "v1" / s "dev" / s "deploy-stamp")
+  match requireUser db () with
+    Left err -> unauthorized.json (empty |> addText "error" err)
+    Right _  ->
+      workerBaseUrl = lookup "TURBO_APNS_WORKER_BASE_URL"
+      workerSecret = lookup "TURBO_APNS_WORKER_SECRET"
+      teamId = lookup "TURBO_APNS_TEAM_ID"
+      keyId = lookup "TURBO_APNS_KEY_ID"
+      privateKey = lookup "TURBO_APNS_PRIVATE_KEY"
+      bundleId = lookup "TURBO_APNS_BUNDLE_ID"
+      useSandbox = lookup "TURBO_APNS_USE_SANDBOX"
+      telemetryBaseUrl = lookup "TURBO_TELEMETRY_WORKER_BASE_URL"
+      telemetrySecret = lookup "TURBO_TELEMETRY_WORKER_SECRET"
+      cloudflareTurnKeyId = lookup "TURBO_CLOUDFLARE_TURN_KEY_ID"
+      cloudflareTurnApiToken = lookup "TURBO_CLOUDFLARE_TURN_API_TOKEN"
+      effectiveBundleId = match bundleId with
+        Some configured -> configured
+        None            -> "com.rounded.Turbo"
+      effectiveSandbox = match useSandbox with
+        Some "0"     -> false
+        Some "false" -> false
+        Some "no"    -> false
+        _            -> true
+      payload0 = empty |> addText "deployStamp" service.deployStamp |> addBoolean "hasApnsWorkerBaseUrl" (isSome workerBaseUrl) |> addBoolean "hasApnsWorkerSecret" (isSome workerSecret) |> addBoolean "hasApnsTeamId" (isSome teamId) |> addBoolean "hasApnsKeyId" (isSome keyId) |> addBoolean "hasApnsPrivateKey" (isSome privateKey) |> addBoolean "hasTelemetryWorkerBaseUrl" (isSome telemetryBaseUrl) |> addBoolean "hasTelemetryWorkerSecret" (isSome telemetrySecret) |> addBoolean "hasCloudflareTurnKeyId" (isSome cloudflareTurnKeyId) |> addBoolean "hasCloudflareTurnApiToken" (isSome cloudflareTurnApiToken) |> addBoolean "cloudflareTurnEnabled" (turbo.cloudflare.turn.isConfigured()) |> addBoolean "telemetryEnabled" enabled() |> addText "effectiveBundleId" effectiveBundleId |> addBoolean "effectiveUseSandbox" effectiveSandbox
+      payload1 = match workerBaseUrl with
+        Some baseUrl -> payload0 |> addText "workerBaseUrl" baseUrl
+        None         -> payload0
+      payload = match telemetryBaseUrl with
+        Some baseUrl -> payload1 |> addText "telemetryWorkerBaseUrl" baseUrl
+        None         -> payload1
+      ok.json payload

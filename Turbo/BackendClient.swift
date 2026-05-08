@@ -73,6 +73,13 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         configuration.timeoutIntervalForResource = 10
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
+    private lazy var webSocketSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 7 * 24 * 60 * 60
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
     private var webSocketTask: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -81,7 +88,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     private var webSocketConnectionState: WebSocketConnectionState = .idle
     private var shouldMaintainWebSocket = false
     private var isWebSocketSuspended = false
-    private let webSocketConnectTimeoutNanoseconds: UInt64 = 5_000_000_000
+    private let webSocketConnectTimeoutNanoseconds: UInt64 = 12_000_000_000
 
     var onSignal: (@MainActor (TurboSignalEnvelope) -> Void)?
     var onServerNotice: (@MainActor (String) -> Void)?
@@ -109,6 +116,11 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
 
     func setRuntimeConfigForTesting(_ config: TurboBackendRuntimeConfig) {
         runtimeConfig = config
+    }
+
+    func directQuicIceServers() async throws -> TurboDirectQuicIceServerPolicy {
+        let path = runtimeConfig?.directQuicPolicy?.turnPolicyPath ?? "/v1/direct-quic/ice-servers"
+        return try await request(path: path, method: "POST")
     }
 
     func authenticate() async throws -> TurboAuthSessionResponse {
@@ -362,7 +374,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         var request = URLRequest(url: url)
         request.addValue(config.devUserHandle, forHTTPHeaderField: "x-turbo-user-handle")
         request.addValue("Bearer \(config.devUserHandle)", forHTTPHeaderField: "Authorization")
-        let task = session.webSocketTask(with: request)
+        let task = webSocketSession.webSocketTask(with: request)
         setWebSocketConnectionState(.connecting)
         webSocketTask = task
         scheduleConnectTimeout(for: task)

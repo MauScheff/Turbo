@@ -97,6 +97,12 @@ struct DirectQuicDiagnosticsSummary: Equatable {
     let retryRemainingMilliseconds: Int?
     let retryBackoffMilliseconds: Int?
     let stunServerCount: Int
+    let stunProviderNames: [String]
+    let turnEnabled: Bool
+    let turnProvider: String?
+    let turnPolicyPath: String?
+    let turnCredentialTtlSeconds: Int?
+    let transportExperimentBucket: String?
     let promotionTimeoutMilliseconds: Int
     let retryBackoffBaseMilliseconds: Int
     let probeControllerReady: Bool
@@ -631,9 +637,14 @@ final class DiagnosticsStore {
            pendingAction == "none",
            isJoined == false,
            systemSession == "none",
-           backendReadiness == "inactive",
            backendSelfJoined == true,
-           backendPeerJoined == true {
+           backendPeerJoined == true,
+           [
+               "inactive",
+               "waiting-for-self",
+               "waiting-for-peer",
+               "ready",
+           ].contains(backendReadiness) {
             violations.append(
                 DiagnosticsInvariantViolationCandidate(
                     invariantID: "selected.stale_membership_peer_ready_without_session",
@@ -659,12 +670,15 @@ final class DiagnosticsStore {
             pendingAction.contains("joiningLocal(")
             || pendingAction.contains(".joiningLocal(")
             || pendingAction.contains("leave(")
+        let backendMembershipAbsentForPendingLocalAction =
+            backendSelfJoined != true
+            && backendPeerJoined != true
+            && !["waiting-for-peer", "ready", "self-transmitting", "peer-transmitting"].contains(backendChannelStatus)
         if pendingLocalSessionActionWithoutSession,
            selectedPeerRelationship == "none",
            isJoined == false,
            systemSession == "none",
-           backendSelfJoined == false,
-           backendPeerJoined == false {
+           backendMembershipAbsentForPendingLocalAction {
             violations.append(
                 DiagnosticsInvariantViolationCandidate(
                     invariantID: "selected.backend_absent_pending_local_action_without_session",

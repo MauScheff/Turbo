@@ -69,6 +69,23 @@ For audio bugs, telemetry alone is not enough. The backend latest transcript sho
 
 For production-like reports, the same command still applies when Cloudflare query credentials are present. Telemetry makes production events queryable and alertable; merged diagnostics remains the agent-facing debug view that combines queryable events with the latest full transcript.
 
+### Shake reports
+
+When a development, TestFlight, or production-like user shakes the phone, the app automatically uploads full backend diagnostics and emits an alert telemetry event named `ios.problem_report.shake` when telemetry is enabled.
+
+Inspect it in this order:
+
+1. Read the Discord alert or telemetry event for `incidentId`, `userHandle`, `deviceId`, `uploadedAt`, `diagnosticsLatestURL`, `channelId`, and `peerHandle`.
+2. Fetch the full transcript from the `diagnosticsLatestURL`, or use `just diagnostics-latest <device_id> https://beepbeep.to <user_handle>` if the route needs auth headers.
+3. Verify the transcript contains `Shake report requested` with the same `incidentId`.
+4. Run merged diagnostics around the same time. Include `peerHandle` when the alert has one:
+
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 2 --telemetry-limit 500 --full-metadata <user_handle> <peer_handle>
+```
+
+If there is no peer, run the same command with only the reporting handle. The current report link is a latest-snapshot pointer, so use `incidentId` and `uploadedAt` to avoid reading a later upload by mistake.
+
 ### Audio packet diagnostics policy
 
 The app should not emit every audio packet to production telemetry. Packet-level audio logs are high-volume, hard to query globally, and can increase the overhead of the real-time path. Keep Cloudflare telemetry for compact lifecycle facts, timings, route failures, and invariant violations.

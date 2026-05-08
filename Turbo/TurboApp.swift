@@ -32,6 +32,26 @@ private enum AppAudioSessionBootstrapper {
     }
 }
 
+enum TurboNotificationCategory {
+    static let talkRequest = "TURBO_TALK_REQUEST"
+    static let acceptTalkRequestAction = "TURBO_ACCEPT_TALK_REQUEST"
+
+    static func register(on center: UNUserNotificationCenter = .current()) {
+        let accept = UNNotificationAction(
+            identifier: acceptTalkRequestAction,
+            title: "Accept",
+            options: [.foreground]
+        )
+        let category = UNNotificationCategory(
+            identifier: talkRequest,
+            actions: [accept],
+            intentIdentifiers: [],
+            options: []
+        )
+        center.setNotificationCategories([category])
+    }
+}
+
 final class TurboAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(
         _ application: UIApplication,
@@ -39,6 +59,7 @@ final class TurboAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     ) -> Bool {
         AppAudioSessionBootstrapper.configureCategoryForPushToTalk()
         UNUserNotificationCenter.current().delegate = self
+        TurboNotificationCategory.register()
         Task { @MainActor in
             await PTTViewModel.shared.initializeIfNeeded()
             if !AppRuntimeEnvironment.isRunningAutomatedTests {

@@ -39,6 +39,7 @@ struct DirectQuicRetryBackoffState: Equatable {
 }
 
 enum DirectQuicRetryBackoffPolicy {
+    private static let maxConnectivityBackoffMilliseconds = 300_000
     private static let maxExtendedBackoffMilliseconds = 120_000
     private static let maxElevatedBackoffMilliseconds = 60_000
 
@@ -83,18 +84,27 @@ enum DirectQuicRetryBackoffPolicy {
 
     static func milliseconds(
         baseMilliseconds: Int,
-        reason: String
+        reason: String,
+        priorFailureCount: Int = 0
     ) -> Int {
         guard baseMilliseconds > 0 else { return 0 }
 
+        let base: Int
+        let maximum: Int
         switch category(for: reason) {
         case .connectivity, .unknown:
-            return baseMilliseconds
+            base = baseMilliseconds
+            maximum = maxConnectivityBackoffMilliseconds
         case .signaling, .localEnvironment:
-            return min(baseMilliseconds * 2, maxElevatedBackoffMilliseconds)
+            base = baseMilliseconds * 2
+            maximum = maxElevatedBackoffMilliseconds
         case .security, .peerRejected:
-            return min(baseMilliseconds * 4, maxExtendedBackoffMilliseconds)
+            base = baseMilliseconds * 4
+            maximum = maxExtendedBackoffMilliseconds
         }
+        let exponent = min(max(priorFailureCount, 0), 6)
+        let multiplier = 1 << exponent
+        return min(base * multiplier, maximum)
     }
 }
 
@@ -161,11 +171,13 @@ enum DirectQuicUpgradeTransition: Equatable {
 final class DirectQuicUpgradeRuntimeState {
     private(set) var attemptByContactID: [UUID: DirectQuicUpgradeAttempt] = [:]
     private var retryBackoffStateByContactID: [UUID: DirectQuicRetryBackoffState] = [:]
+    private var retryFailureStateByContactID: [UUID: (category: DirectQuicFailureCategory, count: Int)] = [:]
     private var fastConnectivityRetryCountByContactID: [UUID: Int] = [:]
 
     func reset() {
         attemptByContactID = [:]
         retryBackoffStateByContactID = [:]
+        retryFailureStateByContactID = [:]
         fastConnectivityRetryCountByContactID = [:]
     }
 
@@ -211,6 +223,14 @@ final class DirectQuicUpgradeRuntimeState {
         now: Date = Date()
     ) {
         guard let request, request.milliseconds > 0 else { return }
+        let previousFailure = retryFailureStateByContactID[contactID]
+        let nextFailureCount = previousFailure?.category == request.category
+            ? (previousFailure?.count ?? 0) + 1
+            : 1
+        retryFailureStateByContactID[contactID] = (
+            category: request.category,
+            count: nextFailureCount
+        )
         retryBackoffStateByContactID[contactID] = DirectQuicRetryBackoffState(
             notBefore: now.addingTimeInterval(TimeInterval(request.milliseconds) / 1_000),
             milliseconds: request.milliseconds,
@@ -236,8 +256,20 @@ final class DirectQuicUpgradeRuntimeState {
         fastConnectivityRetryCountByContactID[contactID] ?? 0
     }
 
+    func retryFailureCount(
+        for contactID: UUID,
+        category: DirectQuicFailureCategory
+    ) -> Int {
+        guard let failureState = retryFailureStateByContactID[contactID],
+              failureState.category == category else {
+            return 0
+        }
+        return failureState.count
+    }
+
     func clearRetryBackoff(for contactID: UUID) {
         retryBackoffStateByContactID.removeValue(forKey: contactID)
+        retryFailureStateByContactID.removeValue(forKey: contactID)
     }
 
     func beginLocalAttempt(
@@ -361,6 +393,7 @@ final class DirectQuicUpgradeRuntimeState {
         attempt.nominatedPath = nominatedPath
         attempt.lastUpdatedAt = now
         attemptByContactID[contactID] = attempt
+        retryFailureStateByContactID.removeValue(forKey: contactID)
         fastConnectivityRetryCountByContactID.removeValue(forKey: contactID)
         return .directActivated(attempt)
     }

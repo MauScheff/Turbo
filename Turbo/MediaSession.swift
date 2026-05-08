@@ -34,7 +34,6 @@ struct MediaSessionAudioConfiguration: Equatable {
 
 enum MediaSessionAudioPolicy {
     static let routeCapableOptions: AVAudioSession.CategoryOptions = [
-        .defaultToSpeaker,
         .allowBluetoothHFP,
         .allowBluetoothA2DP,
     ]

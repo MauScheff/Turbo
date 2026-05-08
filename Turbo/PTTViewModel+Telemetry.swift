@@ -2,6 +2,87 @@ import Foundation
 import UIKit
 
 extension PTTViewModel {
+    func submitShakeReport(
+        incidentID: String,
+        requestedAt: Date = .now
+    ) async throws -> ShakeReportResult {
+        let selected = selectedContact
+        let channelID = selected?.backendChannelId
+        let metadata = shakeReportMetadata(
+            incidentID: incidentID,
+            requestedAt: requestedAt,
+            selected: selected,
+            channelID: channelID
+        )
+
+        diagnostics.record(
+            .app,
+            level: .notice,
+            message: "Shake report requested",
+            metadata: metadata
+        )
+        captureDiagnosticsState("shake-report")
+
+        do {
+            let response = try await publishDiagnosticsIfPossible(
+                trigger: "shake-report:\(incidentID)",
+                recordSuccess: true
+            )
+            let diagnosticsLatestURL = latestDiagnosticsURL(
+                baseURLString: response.report.backendBaseURL,
+                deviceID: response.report.deviceId
+            )
+            var reportMetadata = metadata
+            reportMetadata["deviceId"] = response.report.deviceId
+            reportMetadata["uploadedAt"] = response.report.uploadedAt
+            if let diagnosticsLatestURL {
+                reportMetadata["diagnosticsLatestURL"] = diagnosticsLatestURL
+            }
+
+            sendTelemetryEvent(
+                eventName: "ios.problem_report.shake",
+                severity: .notice,
+                reason: "shake-report",
+                message: shakeReportTelemetryMessage(diagnosticsLatestURL: diagnosticsLatestURL),
+                metadata: reportMetadata,
+                alert: true,
+                peerHandle: selected?.handle,
+                channelId: channelID
+            )
+
+            return ShakeReportResult(
+                incidentID: incidentID,
+                deviceID: response.report.deviceId,
+                uploadedAt: response.report.uploadedAt,
+                diagnosticsLatestURL: diagnosticsLatestURL
+            )
+        } catch {
+            diagnostics.record(
+                .app,
+                level: .error,
+                message: "Shake report upload failed",
+                metadata: metadata.merging(
+                    ["error": error.localizedDescription],
+                    uniquingKeysWith: { _, new in new }
+                )
+            )
+            sendTelemetryEvent(
+                eventName: "ios.problem_report.shake_upload_failed",
+                severity: .error,
+                reason: "shake-report",
+                message: "Shake report upload failed",
+                metadata: metadata.merging(
+                    ["error": error.localizedDescription],
+                    uniquingKeysWith: { _, new in new }
+                ),
+                alert: true,
+                peerHandle: selected?.handle,
+                channelId: channelID
+            )
+            throw error
+        }
+    }
+
     func handleHighSignalDiagnosticsEvent(_ event: DiagnosticsHighSignalEvent) {
         switch event {
         case .errorEntry(let entry):
@@ -81,6 +162,25 @@ extension PTTViewModel {
         }
     }
 
+    func flushPendingDirectQuicIdentityProvisioningFailureTelemetry(reason: String) {
+        guard backendServices?.telemetryEnabled == true else {
+            return
+        }
+        guard var metadata = pendingDirectQuicIdentityProvisioningFailureTelemetry else {
+            return
+        }
+        metadata["flushReason"] = reason
+        pendingDirectQuicIdentityProvisioningFailureTelemetry = nil
+        sendTelemetryEvent(
+            eventName: "ios.direct_quic.identity_provisioning_failed",
+            severity: .error,
+            reason: "direct-quic-identity",
+            message: "Direct QUIC production identity provisioning failed",
+            metadata: metadata,
+            alert: true
+        )
+    }
+
     private func baseTelemetryMetadata() -> [String: String] {
         [
             "applicationState": String(describing: currentApplicationState()),
@@ -108,5 +208,49 @@ extension PTTViewModel {
 #else
         backendRuntime.mode != "cloud"
 #endif
+    }
+
+    private func shakeReportMetadata(
+        incidentID: String,
+        requestedAt: Date,
+        selected: Contact?,
+        channelID: String?
+    ) -> [String: String] {
+        let traceWindowStart = requestedAt.addingTimeInterval(-300)
+        return [
+            "incidentId": incidentID,
+            "requestedAt": iso8601String(requestedAt),
+            "traceWindowStart": iso8601String(traceWindowStart),
+            "traceWindowEnd": iso8601String(requestedAt),
+            "traceWindowSeconds": "300",
+            "selectedHandle": selected?.handle ?? "none",
+            "selectedPeerPhase": diagnosticsStateFields["selectedPeerPhase"] ?? "unknown",
+            "selectedPeerRelationship": diagnosticsStateFields["selectedPeerRelationship"] ?? "unknown",
+            "channelId": channelID ?? "none",
+            "isJoined": String(isJoined),
+            "isTransmitting": String(isTransmitting),
+            "backendMode": backendRuntime.mode,
+            "telemetryEnabled": String(backendServices?.telemetryEnabled ?? false),
+        ]
+    }
+
+    private func shakeReportTelemetryMessage(diagnosticsLatestURL: String?) -> String {
+        guard let diagnosticsLatestURL else {
+            return "Shake report uploaded"
+        }
+        return "Shake report uploaded. Latest diagnostics: \(diagnosticsLatestURL)"
+    }
+
+    private func latestDiagnosticsURL(baseURLString: String, deviceID: String) -> String? {
+        guard !baseURLString.isEmpty else { return nil }
+        let trimmedBaseURL = baseURLString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let escapedDeviceID = deviceID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? deviceID
+        return "\(trimmedBaseURL)/v1/dev/diagnostics/latest/\(escapedDeviceID)/"
+    }
+
+    private func iso8601String(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
 }

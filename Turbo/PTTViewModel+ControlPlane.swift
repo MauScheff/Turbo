@@ -43,7 +43,8 @@ extension PTTViewModel {
             currentUserID: backend.currentUserID ?? "",
             deviceID: backend.deviceID,
             isReady: isReady,
-            reason: effectiveReason
+            reason: effectiveReason,
+            telemetry: currentLocalCallTelemetry(includeAudio: isReady)
         )
     }
 
@@ -95,7 +96,10 @@ extension PTTViewModel {
                     fromDeviceId: intent.deviceID,
                     toUserId: intent.remoteUserID,
                     toDeviceId: intent.deviceID,
-                    payload: intent.reason
+                    payload: ReceiverAudioReadinessSignalPayload(
+                        reason: intent.reason,
+                        telemetry: intent.telemetry
+                    ).wirePayload()
                 )
             )
             diagnostics.record(

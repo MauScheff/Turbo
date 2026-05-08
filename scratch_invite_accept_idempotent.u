@@ -1,0 +1,40 @@
+turbo.service.invites.accept : Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.invites.accept db = do
+  use Parser /
+  use Text ==
+  use UserId toText
+  use object empty
+  inviteIdText = route POST (s "v1" / s "invites" / Parser.text / s "accept")
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      inviteId = InviteId.fromText inviteIdText
+      match invites.getById db inviteId () with
+        None        -> notFound.json (empty |> addText "error" "invite not found")
+        Some invite ->
+          (Invite _ fromUserId toUserId channelId status _ _ _) = invite
+          if Boolean.not (toText toUserId == toText currentUserId) then unauthorized.json (empty |> addText "error" "not invite recipient")
+          else
+            (updatedInvite, pendingJoin) = match status with
+              Pending ->
+                accepted = match updateStatus db inviteId Connected () with
+                  Some updated -> updated
+                  None         -> invite
+                _ = markConnectedForChannel db fromUserId toUserId channelId ()
+                (accepted, true)
+              _       ->
+                match pendingFromTo db fromUserId toUserId channelId () with
+                  Some replacement ->
+                    (Invite replacementInviteId _ _ _ _ _ _ _) = replacement
+                    accepted = match updateStatus db replacementInviteId Connected () with
+                      Some updated -> updated
+                      None         -> replacement
+                    _ = markConnectedForChannel db fromUserId toUserId channelId ()
+                    (accepted, true)
+                  None             -> (invite, false)
+            inviteJson = internal.inviteJson db currentUserId updatedInvite ()
+            ok.json
+              (inviteJson |> addBoolean "accepted" true |> addBoolean "pendingJoin" pendingJoin)

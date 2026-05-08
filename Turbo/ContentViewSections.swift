@@ -10,6 +10,8 @@ struct TurboIncomingTalkRequestBanner: View {
     let onDismiss: () -> Void
     let onAccept: () -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
+
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
@@ -17,7 +19,7 @@ struct TurboIncomingTalkRequestBanner: View {
                     .font(.body.weight(.semibold))
                 Text(subtitleText)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(foregroundColor.opacity(0.72))
             }
 
             Spacer(minLength: 12)
@@ -27,26 +29,29 @@ struct TurboIncomingTalkRequestBanner: View {
                     .font(.caption.weight(.semibold))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(Color.orange.opacity(0.14))
-                    .foregroundStyle(.orange)
+                    .background(foregroundColor.opacity(0.14))
+                    .foregroundStyle(foregroundColor)
                     .clipShape(Capsule())
             }
 
             Button("Not now", action: onDismiss)
                 .buttonStyle(.bordered)
+                .tint(foregroundColor)
 
             Button(primaryActionTitle, action: onAccept)
                 .buttonStyle(.borderedProminent)
+                .tint(.blue)
         }
         .padding(14)
         .frame(maxWidth: .infinity)
-        .background(.ultraThinMaterial)
+        .foregroundStyle(foregroundColor)
+        .background(backgroundColor)
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.orange.opacity(0.18), lineWidth: 1)
+                .stroke(foregroundColor.opacity(0.16), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .shadow(color: .black.opacity(0.08), radius: 18, y: 10)
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.32 : 0.18), radius: 18, y: 10)
     }
 
     private var subtitleText: String {
@@ -57,7 +62,17 @@ struct TurboIncomingTalkRequestBanner: View {
     }
 
     private var primaryActionTitle: String {
-        request.contactIsOnline ? "Open" : "View"
+        "Accept"
+    }
+
+    private var backgroundColor: Color {
+        colorScheme == .dark
+            ? Color.white.opacity(0.94)
+            : Color.black.opacity(0.88)
+    }
+
+    private var foregroundColor: Color {
+        colorScheme == .dark ? .black : .white
     }
 }
 

@@ -66,6 +66,65 @@ async def main() -> int:
         isinstance(supports_upgrade, bool),
         f"backend did not report Direct QUIC upgrade capability as a boolean: {config}",
     )
+    direct_quic_policy = config.get("directQuicPolicy")
+    require(
+        isinstance(direct_quic_policy, dict),
+        f"backend did not report Direct QUIC policy as an object: {config}",
+    )
+    stun_servers = direct_quic_policy.get("stunServers")
+    stun_providers = direct_quic_policy.get("stunProviders", [])
+    turn_enabled = direct_quic_policy.get("turnEnabled", False)
+    if supports_upgrade:
+        require(
+            isinstance(stun_servers, list) and len(stun_servers) > 0,
+            f"backend advertises Direct QUIC upgrade without STUN servers: {config}",
+        )
+        for index, stun_server in enumerate(stun_servers):
+            require(
+                isinstance(stun_server, dict)
+                and isinstance(stun_server.get("host"), str)
+                and stun_server.get("host"),
+                f"Direct QUIC STUN server {index} is missing a host: {config}",
+            )
+            port = stun_server.get("port", 3478)
+            require(
+                isinstance(port, int) and 0 < port <= 65535,
+                f"Direct QUIC STUN server {index} has an invalid port: {config}",
+            )
+        require(
+            isinstance(stun_providers, list),
+            f"backend Direct QUIC STUN providers must be a list when present: {config}",
+        )
+        for provider_index, provider in enumerate(stun_providers):
+            require(
+                isinstance(provider, dict)
+                and isinstance(provider.get("name"), str)
+                and provider.get("name"),
+                f"Direct QUIC STUN provider {provider_index} is missing a name: {config}",
+            )
+            provider_servers = provider.get("servers")
+            require(
+                isinstance(provider_servers, list) and len(provider_servers) > 0,
+                f"Direct QUIC STUN provider {provider_index} has no servers: {config}",
+            )
+        require(
+            isinstance(turn_enabled, bool),
+            f"Direct QUIC TURN enabled flag must be a boolean when present: {config}",
+        )
+        if turn_enabled:
+            require(
+                direct_quic_policy.get("turnProvider") == "cloudflare",
+                f"enabled Direct QUIC TURN must name the Cloudflare provider: {config}",
+            )
+            require(
+                direct_quic_policy.get("turnPolicyPath") == "/v1/direct-quic/ice-servers",
+                f"enabled Direct QUIC TURN must expose the ICE server policy path: {config}",
+            )
+            ttl = direct_quic_policy.get("turnCredentialTtlSeconds")
+            require(
+                isinstance(ttl, int) and ttl > 0,
+                f"enabled Direct QUIC TURN must expose a positive credential TTL: {config}",
+            )
 
     request(args.base_url, "/v1/dev/seed", caller["handle"], method="POST", insecure=args.insecure)
     request(args.base_url, "/v1/dev/reset-state", caller["handle"], method="POST", insecure=args.insecure)

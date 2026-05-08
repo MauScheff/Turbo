@@ -50,6 +50,8 @@ struct ContentView: View {
     @State private var isRequestingNotificationPermission: Bool = false
     @State private var isRunningDirectQuicDebugAction: Bool = false
     @State private var diagnosticsUploadStatus: String?
+    @State private var shakeReportPresentation: ShakeReportPresentation?
+    @State private var lastShakeReportStartedAt: Date?
     @State private var identityRestoreError: String?
     @State private var handleSetupError: String?
     @State private var contactDeleteError: String?
@@ -119,6 +121,13 @@ struct ContentView: View {
         }
         .animation(.spring(response: 0.28, dampingFraction: 0.9), value: viewModel.activeIncomingTalkRequest?.id)
         .animation(.spring(response: 0.28, dampingFraction: 0.9), value: isShowingTransportPathInfo)
+        .background {
+            ShakeReportDetector {
+                startShakeReport()
+            }
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+        }
         .onChange(of: viewModel.selectedContactId) { _, _ in
             route = .live
             isShowingAddContactSheet = false
@@ -258,6 +267,31 @@ struct ContentView: View {
                 onCancelDirectQuicAttempt: cancelDirectQuicAttemptFromDiagnostics
             )
         }
+        .sheet(
+            isPresented: Binding(
+                get: { shakeReportPresentation != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        shakeReportPresentation = nil
+                    }
+                }
+            )
+        ) {
+            if let shakeReportPresentation {
+                TurboShakeReportSheet(
+                    presentation: shakeReportPresentation,
+                    onDone: {
+                        self.shakeReportPresentation = nil
+                    },
+                    onRetry: {
+                        submitShakeReport(
+                            incidentID: shakeReportPresentation.incidentID,
+                            requestedAt: Date()
+                        )
+                    }
+                )
+            }
+        }
         .fullScreenCover(isPresented: $isShowingCallPrototype) {
             callScreenView(
                 contact: callPrototypeContact,
@@ -308,7 +342,6 @@ struct ContentView: View {
                 showsResolvedMicrophoneStatus: false,
                 showsDebugPermissionControls: false,
                 showsAddContactButton: !viewModel.contacts.isEmpty,
-                showsAudioRoutePicker: viewModel.isJoined,
                 onAddContact: {
                     isShowingAddContactSheet = true
                 },
@@ -542,6 +575,9 @@ struct ContentView: View {
             isPTTAudioSessionActive: viewModel.isPTTAudioSessionActive,
             mediaConnectionState: viewModel.mediaConnectionState,
             mediaSessionContactID: viewModel.mediaSessionContactID,
+            transportPathState: viewModel.transportPathBadgeState,
+            localTelemetry: viewModel.localCallTelemetry,
+            peerTelemetry: viewModel.callPeerTelemetry(for: contact.id),
             onClose: onClose,
             onLeave: {
                 onClose()
@@ -737,6 +773,52 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func startShakeReport() {
+        let now = Date()
+        if let lastShakeReportStartedAt,
+           now.timeIntervalSince(lastShakeReportStartedAt) < 60 {
+            return
+        }
+        lastShakeReportStartedAt = now
+        submitShakeReport(
+            incidentID: "inc_\(UUID().uuidString.lowercased())",
+            requestedAt: now
+        )
+    }
+
+    private func submitShakeReport(incidentID: String, requestedAt: Date) {
+        shakeReportPresentation = ShakeReportPresentation(
+            incidentID: incidentID,
+            state: .sending
+        )
+        Task { @MainActor in
+            do {
+                let result = try await viewModel.submitShakeReport(
+                    incidentID: incidentID,
+                    requestedAt: requestedAt
+                )
+                updateShakeReportPresentation(incidentID: incidentID, state: .sent(result))
+            } catch {
+                updateShakeReportPresentation(
+                    incidentID: incidentID,
+                    state: .failed("Try again in a moment.")
+                )
+            }
+        }
+    }
+
+    private func updateShakeReportPresentation(
+        incidentID: String,
+        state: ShakeReportPresentation.State
+    ) {
+        guard var presentation = shakeReportPresentation,
+              presentation.incidentID == incidentID else {
+            return
+        }
+        presentation.state = state
+        shakeReportPresentation = presentation
     }
 
     private func requestMicrophonePermission() {

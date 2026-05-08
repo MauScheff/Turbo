@@ -1595,23 +1595,96 @@ struct TurboBackendRuntimeConfig: Decodable {
 
 struct TurboDirectQuicPolicy: Decodable, Equatable {
     let stunServers: [TurboDirectQuicStunServer]?
+    let stunProviders: [TurboDirectQuicStunProvider]?
+    let turnEnabled: Bool?
+    let turnProvider: String?
+    let turnPolicyPath: String?
+    let turnCredentialTtlSeconds: Int?
+    let transportExperimentBucket: String?
     let promotionTimeoutMs: Int?
     let retryBackoffMs: Int?
 
     init(
         stunServers: [TurboDirectQuicStunServer]? = nil,
+        stunProviders: [TurboDirectQuicStunProvider]? = nil,
+        turnEnabled: Bool? = nil,
+        turnProvider: String? = nil,
+        turnPolicyPath: String? = nil,
+        turnCredentialTtlSeconds: Int? = nil,
+        transportExperimentBucket: String? = nil,
         promotionTimeoutMs: Int? = nil,
         retryBackoffMs: Int? = nil
     ) {
         self.stunServers = stunServers
+        self.stunProviders = stunProviders
+        self.turnEnabled = turnEnabled
+        self.turnProvider = turnProvider
+        self.turnPolicyPath = turnPolicyPath
+        self.turnCredentialTtlSeconds = turnCredentialTtlSeconds
+        self.transportExperimentBucket = transportExperimentBucket
         self.promotionTimeoutMs = promotionTimeoutMs
         self.retryBackoffMs = retryBackoffMs
     }
+
+    var effectiveStunServers: [TurboDirectQuicStunServer] {
+        let providerServers = (stunProviders ?? [])
+            .filter { $0.enabled != false }
+            .flatMap(\.servers)
+        if !providerServers.isEmpty {
+            return providerServers
+        }
+        return stunServers ?? []
+    }
+
+    var enabledStunProviderNames: [String] {
+        (stunProviders ?? [])
+            .filter { $0.enabled != false && !$0.servers.isEmpty }
+            .map(\.name)
+    }
+}
+
+nonisolated struct TurboDirectQuicStunProvider: Decodable, Equatable {
+    let name: String
+    let enabled: Bool?
+    let servers: [TurboDirectQuicStunServer]
 }
 
 nonisolated struct TurboDirectQuicStunServer: Decodable, Equatable {
     let host: String
     let port: Int?
+}
+
+struct TurboDirectQuicIceServerPolicy: Decodable, Equatable {
+    let iceServers: [TurboDirectQuicIceServer]
+}
+
+struct TurboDirectQuicIceServer: Decodable, Equatable {
+    let urls: [String]
+    let username: String?
+    let credential: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case urls
+        case username
+        case credential
+    }
+
+    init(urls: [String], username: String? = nil, credential: String? = nil) {
+        self.urls = urls
+        self.username = username
+        self.credential = credential
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let urls = try? container.decode([String].self, forKey: .urls) {
+            self.urls = urls
+        } else {
+            self.urls = [try container.decode(String.self, forKey: .urls)]
+        }
+        username = try container.decodeIfPresent(String.self, forKey: .username)
+        credential = try container.decodeIfPresent(String.self, forKey: .credential)
+    }
 }
 
 struct TurboSeedResponse: Decodable {

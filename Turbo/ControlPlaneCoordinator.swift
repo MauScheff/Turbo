@@ -9,6 +9,7 @@ struct ReceiverAudioReadinessIntent: Equatable {
     let deviceID: String
     let isReady: Bool
     let reason: String
+    let telemetry: CallPeerTelemetry?
 
     var publicationBasis: ReceiverAudioReadinessPublicationBasis {
         reason == "channel-refresh" ? .channelRefresh : .lifecycle
@@ -18,7 +19,8 @@ struct ReceiverAudioReadinessIntent: Equatable {
         ReceiverAudioReadinessPublication(
             isReady: isReady,
             peerWasRoutable: true,
-            basis: publicationBasis
+            basis: publicationBasis,
+            telemetry: telemetry
         )
     }
 
@@ -26,7 +28,8 @@ struct ReceiverAudioReadinessIntent: Equatable {
         ReceiverAudioReadinessPublication(
             isReady: isReady,
             peerWasRoutable: false,
-            basis: publicationBasis
+            basis: publicationBasis,
+            telemetry: telemetry
         )
     }
 }

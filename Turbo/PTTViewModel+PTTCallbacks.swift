@@ -534,6 +534,20 @@ extension PTTViewModel {
         }
 
         if shouldIgnoreDuplicateDidJoinForActiveChannel(channelUUID: channelUUID, contactID: contactID) {
+            if let contactID,
+               sessionCoordinator.pendingJoinContactID == contactID {
+                sessionCoordinator.clearAfterSuccessfulJoin(for: contactID)
+                updateStatusForSelectedContact()
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Cleared pending local join after duplicate PTT join callback",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                        "reason": reason,
+                    ]
+                )
+            }
             diagnostics.record(
                 .pushToTalk,
                 message: "Ignoring duplicate PTT join for active channel",
@@ -559,6 +573,19 @@ extension PTTViewModel {
                     guard let self else { return }
                     self.syncPTTState()
                     if let contactID {
+                        if self.sessionCoordinator.pendingJoinContactID == contactID {
+                            self.sessionCoordinator.clearAfterSuccessfulJoin(for: contactID)
+                            self.updateStatusForSelectedContact()
+                            self.diagnostics.record(
+                                .pushToTalk,
+                                message: "Cleared pending local join after PTT join callback",
+                                metadata: [
+                                    "contactId": contactID.uuidString,
+                                    "channelUUID": channelUUID.uuidString,
+                                    "reason": reason,
+                                ]
+                            )
+                        }
                         Task { [weak self] in
                             await self?.prewarmLocalMediaIfNeeded(for: contactID)
                         }
