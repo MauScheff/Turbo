@@ -191,6 +191,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var selectedConnectionAttemptTimeoutTask: Task<Void, Never>?
     var selectedConnectionAttemptTimeoutKey: String?
     var selectedConnectionAttemptTimeoutNanoseconds: UInt64 = 15_000_000_000
+    var liveCallControlPlaneReconnectGraceStartedAt: Date?
+    var liveCallControlPlaneReconnectGraceSeconds: TimeInterval = 10
     var directQuicProvisioningStatus: String = "not-started"
     var directQuicRegisteredFingerprint: String?
     var directQuicIdentityRepairAttemptedDeviceIDs: Set<String> = []
@@ -1666,6 +1668,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             message: "Application will resign active",
                 metadata: [:]
         )
+        cancelActiveTransmitForLifecycleInterruption(reason: "application-will-resign-active")
         if shouldPreserveLiveCallForProximityInactiveTransition(applicationState: .inactive) {
             diagnostics.record(
                 .media,
@@ -1693,6 +1696,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             message: "Application entered background",
                 metadata: [:]
         )
+        cancelActiveTransmitForLifecycleInterruption(reason: "application-did-enter-background")
         stopAutomaticAudioRouteMonitoring(reason: "application-did-enter-background")
         retireIdleDirectQuicForBackgroundTransitionImmediately(
             reason: "application-did-enter-background",

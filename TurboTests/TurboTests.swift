@@ -3232,6 +3232,7 @@ struct TurboTests {
         viewModel.pttCoordinator.send(
             .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
         )
+        viewModel.syncPTTState()
         viewModel.mediaRuntime.attach(session: RecordingMediaSession(), contactID: contactID)
         viewModel.mediaRuntime.updateConnectionState(.connected)
         viewModel.backendSyncCoordinator.send(
@@ -4099,6 +4100,39 @@ struct TurboTests {
         #expect(state.canTransmitNow == false)
     }
 
+    @Test func selectedPeerStatePreservesReadyDuringConnectedControlPlaneTransition() {
+        let contactID = UUID()
+        let state = ConversationStateMachine.selectedPeerState(
+            for: ConversationDerivationContext(
+                contactID: contactID,
+                selectedContactID: contactID,
+                baseState: .waitingForPeer,
+                contactName: "Blake",
+                contactIsOnline: true,
+                isJoined: true,
+                activeChannelID: contactID,
+                systemSessionMatchesContact: true,
+                systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+                pendingAction: .none,
+                localJoinFailure: nil,
+                mediaState: .connected,
+                localMediaWarmupState: .ready,
+                localRelayTransportReady: true,
+                hadConnectedSessionContinuity: true,
+                channel: ChannelReadinessSnapshot(
+                    channelState: makeChannelState(status: .waitingForPeer, canTransmit: false),
+                    readiness: makeChannelReadiness(status: .waitingForSelf, remoteAudioReadiness: .ready)
+                )
+            ),
+            relationship: .none
+        )
+
+        #expect(state.phase == .ready)
+        #expect(state.statusMessage == "Connected")
+        #expect(state.canTransmitNow == false)
+        #expect(state.allowsHoldToTalk)
+    }
+
     @Test func selectedPeerStateWaitsDuringDirectQuicFirstTalkGrace() {
         let contactID = UUID()
         let state = ConversationStateMachine.selectedPeerState(
@@ -4300,6 +4334,7 @@ struct TurboTests {
         viewModel.pttCoordinator.send(
             .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
         )
+        viewModel.syncPTTState()
         viewModel.mediaRuntime.attach(session: RecordingMediaSession(), contactID: contactID)
         viewModel.mediaRuntime.updateConnectionState(.connected)
         viewModel.backendSyncCoordinator.send(
@@ -4326,6 +4361,69 @@ struct TurboTests {
 
         #expect(warmState.phase == .ready)
         #expect(warmState.canTransmitNow)
+    }
+
+    @MainActor
+    @Test func selectedPeerStateKeepsRelayReadyDuringShortWebSocketReconnectOnEstablishedCall() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: channelUUID,
+            backendChannelId: "channel",
+            remoteUserId: "peer"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "self", mode: "cloud")
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.syncPTTState()
+        viewModel.mediaRuntime.attach(session: RecordingMediaSession(), contactID: contactID)
+        viewModel.mediaRuntime.updateConnectionState(.connected)
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(status: .ready, canTransmit: true)
+            )
+        )
+        viewModel.backendSyncCoordinator.send(
+            .channelReadinessUpdated(
+                contactID: contactID,
+                readiness: makeChannelReadiness(status: .ready, remoteAudioReadiness: .ready)
+            )
+        )
+        client.setWebSocketConnectionStateForTesting(.connected)
+        viewModel.syncSelectedPeerSession()
+
+        #expect(viewModel.selectedPeerCoordinator.state.hadConnectedSessionContinuity)
+
+        client.setWebSocketConnectionStateForTesting(.idle)
+        viewModel.handleWebSocketStateChange(.idle)
+
+        let graceState = viewModel.selectedPeerState(for: contactID)
+
+        #expect(graceState.phase == .ready)
+        #expect(graceState.statusMessage == "Connected")
+        #expect(graceState.allowsHoldToTalk)
+
+        viewModel.liveCallControlPlaneReconnectGraceStartedAt = Date().addingTimeInterval(-11)
+
+        let expiredState = viewModel.selectedPeerState(for: contactID)
+
+        #expect(expiredState.detail == .waitingForPeer(reason: .localTransportWarmup))
+        #expect(expiredState.allowsHoldToTalk == false)
     }
 
     @Test func selectedPeerStateWaitsForRemoteAudioWhenWakeCapabilityIsAvailableButRemoteAudioIsNotReady() {
@@ -4474,7 +4572,7 @@ struct TurboTests {
         )
 
         #expect(state.phase == .waitingForPeer)
-        #expect(state.statusMessage == "Establishing connection...")
+        #expect(state.statusMessage == "Connecting...")
         #expect(state.canTransmitNow == false)
     }
 
@@ -14532,7 +14630,7 @@ struct TurboTests {
         let selectedPeerState = ConversationStateMachine.selectedPeerState(for: context, relationship: .none)
 
         #expect(selectedPeerState.phase == .waitingForPeer)
-        #expect(selectedPeerState.statusMessage == "Establishing connection...")
+        #expect(selectedPeerState.statusMessage == "Connecting...")
         #expect(selectedPeerState.canTransmitNow == false)
         #expect(selectedPeerState.allowsHoldToTalk == false)
     }
@@ -21551,6 +21649,82 @@ struct TurboTests {
         #expect(snapshot.isPressActive == false)
         #expect(snapshot.hasTransmitIntent(for: contactID) == false)
         #expect(snapshot.isStopping(for: contactID))
+    }
+
+    @MainActor
+    @Test func lifecycleInterruptionCancelsActiveHoldToTalkTransmit() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let request = TransmitRequestContext(
+            contactID: contactID,
+            contactHandle: "@avery",
+            backendChannelID: "channel-avery",
+            remoteUserID: "peer-user",
+            channelUUID: channelUUID,
+            usesLocalHTTPBackend: false,
+            backendSupportsWebSocket: true
+        )
+        let target = TransmitTarget(
+            contactID: contactID,
+            userID: "peer-user",
+            deviceID: "peer-device",
+            channelID: "channel-avery"
+        )
+
+        viewModel.transmitCoordinator.effectHandler = nil
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-avery",
+                remoteUserId: "peer-user"
+            )
+        ]
+        await viewModel.pttCoordinator.handle(
+            .didJoinChannel(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "test"
+            )
+        )
+        await viewModel.transmitCoordinator.handle(.pressRequested(request))
+        await viewModel.transmitCoordinator.handle(.beginSucceeded(target, request))
+        viewModel.transmitRuntime.markPressBegan()
+        viewModel.transmitRuntime.syncActiveTarget(target)
+        viewModel.syncPTTState()
+        viewModel.syncTransmitState()
+
+        #expect(viewModel.transmitDomainSnapshot.isPressActive)
+
+        let cancelled = viewModel.cancelActiveTransmitForLifecycleInterruption(
+            reason: "application-will-resign-active"
+        )
+
+        #expect(cancelled)
+        #expect(viewModel.transmitRuntime.isPressingTalk == false)
+        #expect(viewModel.transmitDomainSnapshot.isPressActive == false)
+        #expect(viewModel.transmitDomainSnapshot.hasTransmitIntent(for: contactID) == false)
+
+        try await waitForScenario(
+            "lifecycle interruption drives transmit coordinator toward stop",
+            participants: [viewModel],
+            timeoutNanoseconds: 1_000_000_000,
+            pollNanoseconds: 10_000_000
+        ) {
+            viewModel.transmitCoordinator.state.phase == .stopping(contactID: contactID)
+                && viewModel.transmitCoordinator.state.isPressingTalk == false
+        }
+
+        #expect(
+            viewModel.diagnostics.entries.contains {
+                $0.message == "Cancelling active transmit for lifecycle interruption"
+                    && $0.metadata["reason"] == "application-will-resign-active"
+            }
+        )
     }
 
     @MainActor
@@ -29135,7 +29309,7 @@ struct TurboTests {
                 "backendPeerJoined": "true",
                 "backendPeerDeviceConnected": "true",
                 "remoteWakeCapabilityKind": "unavailable",
-                "selectedPeerStatus": "Establishing connection..."
+                "selectedPeerStatus": "Connecting..."
             ]
         )
 

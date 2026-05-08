@@ -1003,6 +1003,7 @@ struct ConversationDerivationContext: Equatable {
     let firstTalkStartupProfile: FirstTalkStartupProfile
     let incomingWakeActivationState: IncomingWakeActivationState?
     let backendSignalingJoinRecoveryActive: Bool
+    let controlPlaneReconnectGraceActive: Bool
     let hadConnectedSessionContinuity: Bool
     let channel: ChannelReadinessSnapshot?
 
@@ -1035,6 +1036,7 @@ struct ConversationDerivationContext: Equatable {
         firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm,
         incomingWakeActivationState: IncomingWakeActivationState? = nil,
         backendSignalingJoinRecoveryActive: Bool = false,
+        controlPlaneReconnectGraceActive: Bool = false,
         hadConnectedSessionContinuity: Bool = false,
         channel: ChannelReadinessSnapshot?
     ) {
@@ -1068,6 +1070,7 @@ struct ConversationDerivationContext: Equatable {
         self.firstTalkStartupProfile = firstTalkStartupProfile
         self.incomingWakeActivationState = incomingWakeActivationState
         self.backendSignalingJoinRecoveryActive = backendSignalingJoinRecoveryActive
+        self.controlPlaneReconnectGraceActive = controlPlaneReconnectGraceActive
         self.hadConnectedSessionContinuity = hadConnectedSessionContinuity
         self.channel = channel
     }
@@ -2168,7 +2171,8 @@ private extension ConversationDerivationContext {
         if sessionTransmitReady && peerSignalIsTransmitting {
             return .receiving
         }
-        if backendSignalingJoinRecoveryActive {
+        if backendSignalingJoinRecoveryActive,
+           !shouldPreserveConnectedReadinessDuringControlPlaneTransition {
             return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
         }
 
@@ -2180,6 +2184,21 @@ private extension ConversationDerivationContext {
         }
 
         let authoritativeBackendReady = backendReadyAuthoritativelySatisfiesRemoteAudio
+
+        if shouldPreserveConnectedReadinessDuringControlPlaneTransition,
+           controlPlaneReconnectGraceActive {
+            return .ready
+        }
+
+        if shouldPreserveConnectedReadinessDuringControlPlaneTransition,
+           !canTransmit {
+            switch remoteAudioReadinessState {
+            case .ready:
+                return .ready
+            case .wakeCapable, .waiting, .unknown:
+                return .wakeReady
+            }
+        }
 
         if sessionTransmitReady && canTransmit {
             guard directMediaPathActive || localRelayTransportReady else {
@@ -2259,20 +2278,39 @@ private extension ConversationDerivationContext {
         switch readinessStatus {
         case .peerTransmitting:
             guard sessionTransmitReady else {
-                return .waiting(reason: .backendSessionTransition, statusMessage: "Establishing connection...")
+                return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
             }
             return .receiving
         case .selfTransmitting:
             guard sessionTransmitReady else {
-                return .waiting(reason: .backendSessionTransition, statusMessage: "Establishing connection...")
+                return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
             }
             return .transmitting
         case .ready where canTransmit:
             return .ready
         case .waitingForSelf, .waitingForPeer, .ready:
-            return .waiting(reason: .backendSessionTransition, statusMessage: "Establishing connection...")
+            return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
         case .inactive, .unknown:
             return .unavailable
+        }
+    }
+
+    var shouldPreserveConnectedReadinessDuringControlPlaneTransition: Bool {
+        guard hadConnectedSessionContinuity,
+              localSessionReadiness == .aligned,
+              (directMediaPathActive || localRelayTransportReady),
+              case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness,
+              peerDeviceConnected else {
+            return false
+        }
+
+        switch readinessStatus {
+        case .waitingForSelf, .waitingForPeer:
+            return true
+        case .ready:
+            return backendSignalingJoinRecoveryActive || controlPlaneReconnectGraceActive
+        case .inactive, .selfTransmitting, .peerTransmitting, .unknown, .none:
+            return false
         }
     }
 

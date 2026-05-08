@@ -77,7 +77,40 @@ extension PTTViewModel {
         guard !shouldUseDirectQuicTransport(for: contactID) else { return true }
         guard let backend = backendServices else { return usesLocalHTTPBackend }
         guard backend.supportsWebSocket else { return true }
-        return backend.isWebSocketConnected
+        if backend.isWebSocketConnected {
+            return true
+        }
+        return shouldUseLiveCallControlPlaneReconnectGrace(for: contactID)
+    }
+
+    func shouldUseLiveCallControlPlaneReconnectGrace(
+        for contactID: UUID,
+        now: Date = Date()
+    ) -> Bool {
+        guard let startedAt = liveCallControlPlaneReconnectGraceStartedAt else {
+            return false
+        }
+        guard now.timeIntervalSince(startedAt) <= liveCallControlPlaneReconnectGraceSeconds else {
+            return false
+        }
+        guard selectedContactId == contactID,
+              isJoined,
+              activeChannelId == contactID,
+              selectedPeerCoordinator.state.hadConnectedSessionContinuity,
+              selectedSessionSystemSessionMatches(contactID) else {
+            return false
+        }
+        return true
+    }
+
+    func selectedSessionSystemSessionMatches(_ contactID: UUID) -> Bool {
+        if systemSessionMatches(contactID) {
+            return true
+        }
+
+        let state = selectedPeerCoordinator.state
+        return state.selection?.contactID == contactID
+            && state.systemSessionMatchesContact
     }
 
     var contactSummaryByContactID: [UUID: TurboContactSummaryResponse] {
@@ -146,6 +179,7 @@ extension PTTViewModel {
             directMediaPathActive: shouldUseDirectQuicTransport(for: contact.id),
             firstTalkStartupProfile: firstTalkStartupProfile(for: contact.id, startGraceIfNeeded: false),
             incomingWakeActivationState: pttWakeRuntime.incomingWakeActivationState(for: contact.id),
+            controlPlaneReconnectGraceActive: shouldUseLiveCallControlPlaneReconnectGrace(for: contact.id),
             hadConnectedSessionContinuity: selectedContactId == contact.id
                 ? selectedPeerCoordinator.state.hadConnectedSessionContinuity
                 : false,
@@ -226,6 +260,8 @@ extension PTTViewModel {
                         pttWakeRuntime.incomingWakeActivationState(for: contact.id),
                     backendSignalingJoinRecoveryActive:
                         backendRuntime.signalingJoinRecoveryTask != nil,
+                    controlPlaneReconnectGraceActive:
+                        shouldUseLiveCallControlPlaneReconnectGrace(for: contact.id),
                     localJoinFailure: pttCoordinator.state.lastJoinFailure
                 )
             )

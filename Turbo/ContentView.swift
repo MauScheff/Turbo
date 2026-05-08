@@ -393,7 +393,7 @@ struct ContentView: View {
                 joinChannel: viewModel.joinChannel,
                 beginTransmit: viewModel.beginTransmit,
                 noteTransmitTouchReleased: viewModel.noteTransmitTouchReleased,
-                endTransmit: viewModel.endTransmit
+                endTransmit: { viewModel.endTransmit() }
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -593,7 +593,7 @@ struct ContentView: View {
                 viewModel.beginTransmit()
             },
             onTransmitTouchReleased: viewModel.noteTransmitTouchReleased,
-            onEndTransmit: viewModel.endTransmit
+            onEndTransmit: { viewModel.endTransmit() }
         )
     }
 

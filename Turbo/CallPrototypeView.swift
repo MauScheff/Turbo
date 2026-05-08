@@ -239,19 +239,43 @@ struct TurboCallPrototypeView: View {
                     .accessibilityLabel(peerAudioStatusAccessibilityLabel(for: audio))
             }
 
-            if let connectionName = peerTelemetry?.connection?.displayName {
-                Text("\(contactShortName)’s connection · \(connectionName)")
+            if let peerConnectionStatusText {
+                Text(peerConnectionStatusText)
                     .font(.system(size: 14, weight: .regular, design: .default))
                     .foregroundStyle(callContextColor)
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
-                    .accessibilityLabel("\(contactShortName)’s connection, \(connectionName)")
+                    .accessibilityLabel(peerConnectionStatusAccessibilityLabel)
             }
         }
     }
 
     private var hasVisibleCallContext: Bool {
-        localVolumeWarningText != nil || peerTelemetry?.hasVisibleContext == true
+        localVolumeWarningText != nil
+            || peerTelemetry?.hasVisibleContext == true
+            || isDirectTransportActive
+    }
+
+    private var peerConnectionStatusText: String? {
+        let parts = [
+            peerTelemetry?.connection?.displayName,
+            isDirectTransportActive ? "Direct" : nil
+        ].compactMap { $0 }
+        guard !parts.isEmpty else { return nil }
+        return "\(contactShortName)’s connection · \(parts.joined(separator: " · "))"
+    }
+
+    private var peerConnectionStatusAccessibilityLabel: String {
+        let parts = [
+            peerTelemetry?.connection?.displayName,
+            isDirectTransportActive ? "direct" : nil
+        ].compactMap { $0 }
+        guard !parts.isEmpty else { return "\(contact.name)'s connection" }
+        return "\(contact.name)'s connection, \(parts.joined(separator: ", "))"
+    }
+
+    private var isDirectTransportActive: Bool {
+        transportPathState == .direct
     }
 
     private var callContextColor: Color {

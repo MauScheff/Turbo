@@ -835,6 +835,7 @@ extension PTTViewModel {
 
         switch state {
         case .idle:
+            noteLiveCallControlPlaneReconnectGraceIfNeeded(reason: "websocket-idle")
             if shouldForceBackgroundSuspension {
                 backendStatusMessage = "WebSocket suspended"
             } else {
@@ -856,10 +857,12 @@ extension PTTViewModel {
             }
             captureDiagnosticsState("websocket:idle")
         case .connecting:
+            noteLiveCallControlPlaneReconnectGraceIfNeeded(reason: "websocket-connecting")
             backendStatusMessage = "Connecting WebSocket..."
             syncPTTServiceStatus(reason: "websocket-connecting")
             captureDiagnosticsState("websocket:connecting")
         case .connected:
+            clearLiveCallControlPlaneReconnectGrace(reason: "websocket-connected")
             if backendStatusMessage.hasPrefix("WebSocket")
                 || backendStatusMessage == "Connected (retrying sync)" {
                 backendStatusMessage = "Connected"
@@ -885,6 +888,40 @@ extension PTTViewModel {
                 }
             }
         }
+    }
+
+    private func noteLiveCallControlPlaneReconnectGraceIfNeeded(reason: String) {
+        guard let contactID = selectedContactId,
+              isJoined,
+              activeChannelId == contactID,
+              selectedPeerCoordinator.state.hadConnectedSessionContinuity,
+              selectedSessionSystemSessionMatches(contactID) else {
+            liveCallControlPlaneReconnectGraceStartedAt = nil
+            return
+        }
+
+        if liveCallControlPlaneReconnectGraceStartedAt == nil {
+            liveCallControlPlaneReconnectGraceStartedAt = Date()
+            diagnostics.record(
+                .websocket,
+                message: "Started live call control-plane reconnect grace",
+                metadata: [
+                    "reason": reason,
+                    "contactId": contactID.uuidString,
+                    "graceSeconds": String(liveCallControlPlaneReconnectGraceSeconds),
+                ]
+            )
+        }
+    }
+
+    private func clearLiveCallControlPlaneReconnectGrace(reason: String) {
+        guard liveCallControlPlaneReconnectGraceStartedAt != nil else { return }
+        liveCallControlPlaneReconnectGraceStartedAt = nil
+        diagnostics.record(
+            .websocket,
+            message: "Cleared live call control-plane reconnect grace",
+            metadata: ["reason": reason]
+        )
     }
 
     private func performSelfCheck(_ request: DevSelfCheckRequest) async {

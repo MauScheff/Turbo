@@ -44,6 +44,7 @@ struct SelectedPeerSessionState: Equatable {
     var firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm
     var incomingWakeActivationState: IncomingWakeActivationState?
     var backendSignalingJoinRecoveryActive = false
+    var controlPlaneReconnectGraceActive = false
     var hadConnectedSessionContinuity = false
     var durableSessionProjection: DurableSessionProjection = .inactive
     var connectedExecutionProjection: ConnectedExecutionProjection?
@@ -75,6 +76,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
     let firstTalkStartupProfile: FirstTalkStartupProfile
     let incomingWakeActivationState: IncomingWakeActivationState?
     let backendSignalingJoinRecoveryActive: Bool
+    let controlPlaneReconnectGraceActive: Bool
     let localJoinFailure: PTTJoinFailure?
 
     init(
@@ -97,6 +99,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
         firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm,
         incomingWakeActivationState: IncomingWakeActivationState?,
         backendSignalingJoinRecoveryActive: Bool = false,
+        controlPlaneReconnectGraceActive: Bool = false,
         localJoinFailure: PTTJoinFailure?
     ) {
         self.selection = selection
@@ -118,6 +121,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
         self.firstTalkStartupProfile = firstTalkStartupProfile
         self.incomingWakeActivationState = incomingWakeActivationState
         self.backendSignalingJoinRecoveryActive = backendSignalingJoinRecoveryActive
+        self.controlPlaneReconnectGraceActive = controlPlaneReconnectGraceActive
         self.localJoinFailure = localJoinFailure
     }
 }
@@ -204,6 +208,7 @@ enum SelectedPeerReducer {
             nextState.firstTalkStartupProfile = snapshot.firstTalkStartupProfile
             nextState.incomingWakeActivationState = snapshot.incomingWakeActivationState
             nextState.backendSignalingJoinRecoveryActive = snapshot.backendSignalingJoinRecoveryActive
+            nextState.controlPlaneReconnectGraceActive = snapshot.controlPlaneReconnectGraceActive
         case .selectedContactChanged(let selection):
             switch selection {
             case .none:
@@ -389,6 +394,7 @@ enum SelectedPeerReducer {
             firstTalkStartupProfile: state.firstTalkStartupProfile,
             incomingWakeActivationState: state.incomingWakeActivationState,
             backendSignalingJoinRecoveryActive: state.backendSignalingJoinRecoveryActive,
+            controlPlaneReconnectGraceActive: state.controlPlaneReconnectGraceActive,
             hadConnectedSessionContinuity: hadConnectedSessionContinuity,
             channel: state.channel
         )

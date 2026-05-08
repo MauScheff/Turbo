@@ -1423,32 +1423,58 @@ extension PTTViewModel {
         transmitRuntime.noteTouchReleased()
     }
 
-    func endTransmit() {
+    @discardableResult
+    func cancelActiveTransmitForLifecycleInterruption(reason: String) -> Bool {
+        let hasPendingOrActiveTransmit =
+            transmitCoordinator.state.isPressingTalk
+            || transmitRuntime.isPressingTalk
+            || hasPendingBeginOrActiveTransmit
+            || isTransmitting
+        guard hasPendingOrActiveTransmit else { return false }
+
+        diagnostics.record(
+            .media,
+            message: "Cancelling active transmit for lifecycle interruption",
+            metadata: [
+                "reason": reason,
+                "isTransmitting": String(isTransmitting),
+                "runtimePressing": String(transmitRuntime.isPressingTalk),
+                "coordinatorPressing": String(transmitCoordinator.state.isPressingTalk),
+                "coordinatorPhase": String(describing: transmitCoordinator.state.phase),
+            ]
+        )
+        endTransmit(reason: reason)
+        return true
+    }
+
+    func endTransmit(reason: String = "release") {
         transmitRuntime.noteTouchReleased()
         guard isJoined else { return }
         let hasPendingOrActiveTransmit =
             transmitCoordinator.state.isPressingTalk
+            || transmitRuntime.isPressingTalk
             || hasPendingBeginOrActiveTransmit
             || isTransmitting
         guard hasPendingOrActiveTransmit else { return }
-        diagnostics.record(.media, message: "End transmit requested")
+        diagnostics.record(.media, message: "End transmit requested", metadata: ["reason": reason])
         sendTelemetryEvent(
             eventName: "ios.transmit.end_requested",
             severity: .notice,
-            reason: "release",
-            message: "End transmit requested"
+            reason: reason,
+            message: "End transmit requested",
+            metadata: ["reason": reason]
         )
         // Clear the local press latch immediately so a system-end callback racing
         // with release does not look like an unexpected end that should be retried.
         let pendingWarmDirectRequest = transmitCoordinator.state.pendingRequest
         sendForegroundWarmDirectTransmitStopIfNeeded(
             for: pendingWarmDirectRequest,
-            reason: "touch-release"
+            reason: reason
         )
         if let activeTarget = transmitCoordinator.state.activeTarget ?? transmitRuntime.activeTarget {
             sendForegroundWarmDirectTransmitStopIfNeeded(
                 target: activeTarget,
-                reason: "touch-release-active-target"
+                reason: "\(reason)-active-target"
             )
         }
         transmitRuntime.markExplicitStopRequested()
@@ -1461,9 +1487,10 @@ extension PTTViewModel {
             ?? activeChannelId.flatMap { channelUUID(for: $0) }
         cancelRequestedSystemTransmitHandoffIfNeeded(
             channelUUID: systemChannelUUID,
-            reason: "touch-release"
+            reason: reason
         )
         transmitTaskCoordinator.send(.cancelBegin)
+        syncTransmitState()
         Task {
             await transmitCoordinator.handle(.releaseRequested)
             syncTransmitState()
