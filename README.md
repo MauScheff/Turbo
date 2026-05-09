@@ -21,6 +21,7 @@ The app side currently proves out Apple's PushToTalk framework integration. The 
 - `SIMULATOR_FUZZING.md`: deterministic simulator fuzzing, artifacts, replay, shrinking, and promotion workflow.
 - `INVARIANTS.md`: invariant rule catalog and diagnostics-backed regression guidance.
 - `SELF_HEALING.md`: recoverable bad-state taxonomy, repair rules, and proof checklist.
+- `RELIABILITY_GOALS.md`: north-star product and architecture goals for infrastructure-grade reliability.
 - `PRODUCTION_TELEMETRY.md`: production telemetry architecture, deployment, alerting, and query workflow.
 - `journal/`: timestamped engineering notes for design lessons, debugging conclusions, and changelog-style session records.
 - `.agents/`: supporting Unison language and workflow notes.
@@ -57,6 +58,8 @@ Use these docs as the primary authority for their respective concerns:
   - how invariant IDs, typed violation logging, merged diagnostics checks, and regression expectations are encoded
 - `SELF_HEALING.md`
   - how typed invariant violations become bounded, idempotent app/backend repair actions
+- `RELIABILITY_GOALS.md`
+  - product-level reliability guarantees, authority boundaries, control-plane/media reliability strategy, proof loops, and CTO-level roadmap
 - `PRODUCTION_TELEMETRY.md`
   - production telemetry architecture, worker/backend setup, and operator query workflow
 - `handoffs/README.md`

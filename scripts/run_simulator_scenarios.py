@@ -9,7 +9,9 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 TRANSIENT_FAILURE_MARKERS = (
@@ -35,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device-id-a", default="sim-scenario-avery")
     parser.add_argument("--device-id-b", default="sim-scenario-blake")
     parser.add_argument("--lock-file", default=".scenario-test.lock")
+    parser.add_argument("--simulator-lock-file", default="/tmp/turbo-simulator-test.lock")
     parser.add_argument("--runtime-config", default=".scenario-runtime-config.json")
     parser.add_argument("--scenario-file", default="")
     parser.add_argument("--scenario-directory", default="")
@@ -43,10 +46,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def write_runtime_config(path: Path, args: argparse.Namespace) -> None:
+def write_runtime_config(path: Path, args: argparse.Namespace, scenario_filter: str | None = None) -> None:
     payload = {
         "enabledUntilEpochSeconds": time.time() + 600,
-        "filter": args.scenario,
+        "filter": args.scenario if scenario_filter is None else scenario_filter,
         "baseURL": args.base_url,
         "handleA": args.handle_a,
         "handleB": args.handle_b,
@@ -56,6 +59,46 @@ def write_runtime_config(path: Path, args: argparse.Namespace) -> None:
         "scenarioDirectory": args.scenario_directory,
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def base_url_is_local(value: str) -> bool:
+    host = (urlparse(value).hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
+def checked_in_scenario_names(args: argparse.Namespace, repo_root: Path) -> list[str] | None:
+    if args.scenario_file or args.scenario_directory:
+        return None
+
+    scenario_dir = repo_root / "scenarios"
+    requested = [
+        name.strip()
+        for name in args.scenario.split(",")
+        if name.strip()
+    ]
+    requested_set = set(requested)
+    names: list[str] = []
+    local_only_mismatches: list[str] = []
+
+    for path in sorted(scenario_dir.glob("*.json")):
+        spec = json.loads(path.read_text(encoding="utf-8"))
+        name = str(spec.get("name") or path.stem)
+        if requested_set and name not in requested_set:
+            continue
+        requires_local = spec.get("requiresLocalBackend") is True
+        if requires_local and not base_url_is_local(args.base_url):
+            local_only_mismatches.append(name)
+            continue
+        names.append(name)
+
+    missing = [name for name in requested if name not in set(names) and name not in set(local_only_mismatches)]
+    if missing:
+        raise RuntimeError(f"No simulator scenarios matched filter {','.join(missing)}")
+    if requested and local_only_mismatches:
+        raise RuntimeError(f"Scenario(s) require a local backend: {', '.join(local_only_mismatches)}")
+    if not names:
+        raise RuntimeError(f"No runnable simulator scenarios found in {scenario_dir}")
+    return names
 
 
 def run_command(command: list[str]) -> tuple[int, str]:
@@ -82,47 +125,101 @@ def is_transient_failure(output: str, exit_code: int) -> bool:
     return any(marker.lower() in normalized for marker in TRANSIENT_FAILURE_MARKERS)
 
 
+def run_with_retries(command: list[str], args: argparse.Namespace) -> int:
+    last_exit_code = 1
+    for attempt in range(1, args.max_attempts + 1):
+        if attempt > 1:
+            print(f"Retrying simulator scenario run (attempt {attempt}/{args.max_attempts}) after transient failure...", flush=True)
+            time.sleep(args.retry_delay_seconds)
+        last_exit_code, output = run_command(command)
+        if last_exit_code == 0:
+            return 0
+        if not is_transient_failure(output, last_exit_code):
+            return last_exit_code
+    return last_exit_code
+
+
+def process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    else:
+        return True
+
+
+@contextmanager
+def acquire_pid_lock(lock_path: Path):
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
+                lock_file.write(f"{os.getpid()}\n")
+            break
+        except FileExistsError:
+            try:
+                lock_pid = int(lock_path.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                lock_pid = 0
+            if lock_pid == 0:
+                lock_path.unlink(missing_ok=True)
+                continue
+            if lock_pid and not process_exists(lock_pid):
+                lock_path.unlink(missing_ok=True)
+                continue
+            time.sleep(0.2)
+
+    try:
+        yield
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
 def main() -> int:
     args = parse_args()
     repo_root = Path.cwd()
     lock_path = repo_root / args.lock_file
+    simulator_lock_path = Path(args.simulator_lock_file)
     runtime_config_path = repo_root / args.runtime_config
 
-    with lock_path.open("w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        write_runtime_config(runtime_config_path, args)
-        try:
-            command = [
-                "xcodebuild",
-                "-project", args.project,
-                "-scheme", args.scheme,
-                "-destination", args.destination,
-                "-only-testing:TurboTests/SimulatorScenarioTests",
-                "-skip-testing:TurboUITests",
-                "-parallel-testing-enabled", "NO",
-                "-maximum-concurrent-test-simulator-destinations", "1",
-                "-maximum-parallel-testing-workers", "1",
-                "-derivedDataPath", args.derived_data,
-                "test",
-                "CODE_SIGNING_ALLOWED=NO",
-            ]
-
-            last_exit_code = 1
-            for attempt in range(1, args.max_attempts + 1):
-                if attempt > 1:
-                    print(f"Retrying simulator scenario run (attempt {attempt}/{args.max_attempts}) after transient failure...", flush=True)
-                    time.sleep(args.retry_delay_seconds)
-                last_exit_code, output = run_command(command)
-                if last_exit_code == 0:
-                    return 0
-                if not is_transient_failure(output, last_exit_code):
-                    return last_exit_code
-            return last_exit_code
-        finally:
+    with acquire_pid_lock(simulator_lock_path):
+        with lock_path.open("w", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
-                runtime_config_path.unlink()
-            except FileNotFoundError:
-                pass
+                command = [
+                    "xcodebuild",
+                    "-project", args.project,
+                    "-scheme", args.scheme,
+                    "-destination", args.destination,
+                    "-only-testing:TurboTests/SimulatorScenarioTests",
+                    "-skip-testing:TurboUITests",
+                    "-parallel-testing-enabled", "NO",
+                    "-maximum-concurrent-test-simulator-destinations", "1",
+                    "-maximum-parallel-testing-workers", "1",
+                    "-derivedDataPath", args.derived_data,
+                    "test",
+                    "CODE_SIGNING_ALLOWED=NO",
+                ]
+
+                scenario_names = checked_in_scenario_names(args, repo_root)
+                if scenario_names is None:
+                    write_runtime_config(runtime_config_path, args)
+                    return run_with_retries(command, args)
+
+                for index, scenario_name in enumerate(scenario_names, start=1):
+                    print(f"Running simulator scenario {index}/{len(scenario_names)}: {scenario_name}", flush=True)
+                    write_runtime_config(runtime_config_path, args, scenario_filter=scenario_name)
+                    exit_code = run_with_retries(command, args)
+                    if exit_code != 0:
+                        return exit_code
+                return 0
+            finally:
+                try:
+                    runtime_config_path.unlink()
+                except FileNotFoundError:
+                    pass
 
 
 if __name__ == "__main__":

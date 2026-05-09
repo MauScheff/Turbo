@@ -164,7 +164,7 @@ For distributed app/backend flows that do not require a physical device, prefer 
 
 `just simulator-scenario-suite-local` is the deterministic local websocket-backed catalog run. It assumes `just serve-local` is already running on `http://localhost:8090/s/turbo`.
 
-The simulator scenario commands are backed by `scripts/run_simulator_scenarios.py`, which owns the temporary runtime config, serializes scenario runs with a repo-local lock, and retries transient XCTest bootstrap failures. Prefer the `just` recipes over direct `xcodebuild` for the scenario loop.
+The simulator scenario commands are backed by `scripts/run_simulator_scenarios.py`, which owns the temporary runtime config, serializes scenario runs with a repo-local lock, shares the `/tmp/turbo-simulator-test.lock` simulator lane with targeted Swift tests, and retries transient XCTest bootstrap failures. Prefer the `just` recipes over direct `xcodebuild` for the scenario loop.
 
 `just swift-test-target <name>` is the supported targeted Swift Testing loop. It runs the full non-UI bundle and fails if the requested test name never appears in the output, which prevents the false-green "0 tests executed" cases that can happen with direct `-only-testing` invocations against Swift Testing tests in this repo.
 

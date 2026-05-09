@@ -319,10 +319,17 @@ extension PTTViewModel {
             || (isJoined && activeChannelId == contactID)
         guard !localSessionTouchesContact else { return }
 
+        let backendLeaveCommandInFlight: Bool = {
+            guard case .leave(let pendingContactID) = backendCommandCoordinator.state.activeOperation else {
+                return false
+            }
+            return pendingContactID == contactID
+        }()
         let pendingJoinIsStale = selectedChannel != nil && sessionCoordinator.pendingJoinContactID == contactID
         let pendingLeaveIsComplete =
-            backendChannelReferenceAbsent
-            && sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
+            sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
+            && !backendLeaveCommandInFlight
+            && (selectedChannel == nil || backendChannelReferenceAbsent)
         guard pendingJoinIsStale || pendingLeaveIsComplete else { return }
 
         sessionCoordinator.clearPendingJoin(for: contactID)

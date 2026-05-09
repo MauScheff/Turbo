@@ -9,6 +9,7 @@ extension PTTViewModel {
     private var foregroundDirectQuicInitialConnectivityRetryLimit: Int { 2 }
     var directQuicFirstTalkGraceMilliseconds: Int { 5_000 }
     var directQuicAudioFreshnessMilliseconds: Int { 30_000 }
+    var directQuicUpgradeRequestThrottleMilliseconds: Int { 5_000 }
 
     func directQuicAttemptRole(
         localDeviceID: String,
@@ -125,6 +126,7 @@ extension PTTViewModel {
         )
 
         cancelDirectQuicPromotionTimeout()
+        mediaRuntime.clearReceiverPrewarmState(for: contactID)
         let fallback = mediaRuntime.directQuicUpgrade.clearAttempt(
             for: contactID,
             fallbackReason: reason
@@ -719,6 +721,12 @@ extension PTTViewModel {
                     "debugBypass": String(shouldAllowDirectQuicDebugBypassForAutomaticProbe()),
                 ]
             )
+            if blockReason == "not-listener-offerer" {
+                await requestRemoteDirectQuicOfferIfPossible(
+                    for: contactID,
+                    reason: reason
+                )
+            }
             return
         }
 
@@ -735,6 +743,118 @@ extension PTTViewModel {
             for: contactID,
             allowDebugBypassWithoutBackendAdvertisement: shouldAllowDirectQuicDebugBypassForAutomaticProbe()
         )
+    }
+
+    func requestRemoteDirectQuicOfferIfPossible(
+        for contactID: UUID,
+        reason: String
+    ) async {
+        guard backendAdvertisesDirectQuicUpgrade else {
+            diagnostics.record(
+                .websocket,
+                message: "Direct QUIC upgrade request skipped because backend capability is disabled",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                ]
+            )
+            return
+        }
+        let throttleInterval = TimeInterval(directQuicUpgradeRequestThrottleMilliseconds) / 1_000
+        guard mediaRuntime.shouldSendDirectQuicUpgradeRequest(
+            for: contactID,
+            minimumInterval: throttleInterval
+        ) else {
+            diagnostics.record(
+                .media,
+                message: "Direct QUIC upgrade request throttled",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "throttleMs": "\(directQuicUpgradeRequestThrottleMilliseconds)",
+                ]
+            )
+            return
+        }
+        guard let backend = backendServices, backend.supportsWebSocket else {
+            diagnostics.record(
+                .websocket,
+                message: "Direct QUIC upgrade request skipped because websocket is unavailable",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                ]
+            )
+            return
+        }
+        guard let contact = contacts.first(where: { $0.id == contactID }),
+              let channelID = contact.backendChannelId,
+              let remoteUserID = contact.remoteUserId,
+              let peerDeviceID = directQuicPeerDeviceID(for: contactID) else {
+            diagnostics.record(
+                .websocket,
+                message: "Direct QUIC upgrade request skipped because peer routing metadata is missing",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                ]
+            )
+            return
+        }
+        guard directQuicAttemptRole(
+            localDeviceID: backend.deviceID,
+            peerDeviceID: peerDeviceID
+        ) == .dialerAnswerer else {
+            return
+        }
+
+        let payload = TurboDirectQuicUpgradeRequestPayload(
+            requestId: UUID().uuidString.lowercased(),
+            channelId: channelID,
+            fromDeviceId: backend.deviceID,
+            toDeviceId: peerDeviceID,
+            reason: reason,
+            roleIntent: .listener,
+            debugBypass: false
+        )
+
+        do {
+            let envelope = try TurboSignalEnvelope.directQuicUpgradeRequest(
+                channelId: channelID,
+                fromUserId: backend.currentUserID ?? "",
+                fromDeviceId: backend.deviceID,
+                toUserId: remoteUserID,
+                toDeviceId: peerDeviceID,
+                payload: payload
+            )
+            try await backend.sendSignal(envelope)
+            mediaRuntime.markDirectQuicUpgradeRequestSent(for: contactID)
+            diagnostics.record(
+                .websocket,
+                message: "Direct QUIC upgrade request sent",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "requestId": payload.requestId,
+                    "reason": reason,
+                    "localRole": DirectQuicAttemptRole.dialerAnswerer.rawValue,
+                    "peerDeviceId": peerDeviceID,
+                ]
+            )
+        } catch {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Direct QUIC upgrade request send failed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "reason": reason,
+                    "peerDeviceId": peerDeviceID,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
     }
 
     func scheduleAutomaticDirectQuicProbe(
@@ -1735,6 +1855,7 @@ extension PTTViewModel {
             for: contactID,
             reason: reason
         ) {
+            mediaRuntime.clearReceiverPrewarmState(for: contactID)
             applyDirectQuicUpgradeTransition(recovering, for: contactID)
             applyDirectQuicUpgradeTransition(
                 .fellBackToRelay(previousAttemptId: recovering.attemptId, reason: reason),
@@ -2251,6 +2372,7 @@ extension PTTViewModel {
             mediaRuntime.directQuicProbeController?.cancel(reason: payload.reason)
             mediaRuntime.directQuicProbeController = nil
             if isRecoveringActivePath {
+                mediaRuntime.clearReceiverPrewarmState(for: contactID)
                 applyDirectQuicUpgradeTransition(
                     .fellBackToRelay(
                         previousAttemptId: payload.attemptId,
@@ -2263,6 +2385,100 @@ extension PTTViewModel {
                     configureOutgoingAudioRoute(target: activeTarget)
                 }
             }
+        }
+    }
+
+    func handleIncomingDirectQuicUpgradeRequest(
+        _ envelope: TurboSignalEnvelope,
+        contactID: UUID
+    ) {
+        do {
+            let payload = try envelope.decodeDirectQuicUpgradeRequestPayload()
+            guard let backend = backendServices else { return }
+
+            var metadata: [String: String] = [
+                "contactId": contactID.uuidString,
+                "channelId": envelope.channelId,
+                "requestId": payload.requestId,
+                "reason": payload.reason,
+                "fromDeviceId": envelope.fromDeviceId,
+                "toDeviceId": envelope.toDeviceId,
+                "debugBypass": String(payload.debugBypass == true),
+            ]
+
+            guard envelope.toDeviceId == backend.deviceID,
+                  payload.toDeviceId == backend.deviceID,
+                  payload.fromDeviceId == envelope.fromDeviceId,
+                  payload.channelId == envelope.channelId else {
+                diagnostics.record(
+                    .websocket,
+                    level: .error,
+                    message: "Rejected Direct QUIC upgrade request because envelope and payload disagree",
+                    metadata: metadata
+                )
+                return
+            }
+
+            let peerDeviceID = directQuicPeerDeviceID(for: contactID, fallback: envelope.fromDeviceId)
+            guard peerDeviceID == envelope.fromDeviceId else {
+                metadata["expectedPeerDeviceId"] = peerDeviceID ?? "none"
+                diagnostics.record(
+                    .websocket,
+                    level: .error,
+                    message: "Rejected Direct QUIC upgrade request from unexpected peer device",
+                    metadata: metadata
+                )
+                return
+            }
+
+            let role = directQuicAttemptRole(
+                localDeviceID: backend.deviceID,
+                peerDeviceID: envelope.fromDeviceId
+            )
+            metadata["localRole"] = role.rawValue
+            guard role == .listenerOfferer else {
+                diagnostics.record(
+                    .websocket,
+                    message: "Ignored Direct QUIC upgrade request because local role is not listener-offerer",
+                    metadata: metadata
+                )
+                return
+            }
+
+            if let blockReason = automaticDirectQuicProbeBlockReason(for: contactID) {
+                metadata["blockReason"] = blockReason
+                diagnostics.record(
+                    .websocket,
+                    message: "Ignored Direct QUIC upgrade request because automatic probe is blocked",
+                    metadata: metadata
+                )
+                return
+            }
+
+            diagnostics.record(
+                .websocket,
+                message: "Direct QUIC upgrade request accepted",
+                metadata: metadata
+            )
+            Task {
+                await maybeStartDirectQuicProbe(
+                    for: contactID,
+                    allowDebugBypassWithoutBackendAdvertisement: payload.debugBypass == true
+                        && shouldAllowDirectQuicDebugBypassForAutomaticProbe()
+                )
+            }
+        } catch {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Failed to decode Direct QUIC upgrade request",
+                metadata: [
+                    "type": envelope.type.rawValue,
+                    "channelId": envelope.channelId,
+                    "contactId": contactID.uuidString,
+                    "error": error.localizedDescription,
+                ]
+            )
         }
     }
 

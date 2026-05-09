@@ -15,6 +15,12 @@ struct BackendSyncState: Equatable {
         "\(invite.inviteId)|\(invite.requestCount)|\(invite.updatedAt ?? invite.createdAt)"
     }
 
+    private func shouldApplyProjectionEpoch(incoming: String?, existing: String?) -> Bool {
+        guard let incoming else { return true }
+        guard let existing else { return true }
+        return incoming >= existing
+    }
+
     mutating func applyContactSummaries(_ summaries: [UUID: TurboContactSummaryResponse]) {
         contactSummaries = summaries
         let contactsWithLiveChannels: Set<UUID> = Set(
@@ -44,6 +50,12 @@ struct BackendSyncState: Equatable {
     }
 
     mutating func applyChannelState(_ channelState: TurboChannelStateResponse, for contactID: UUID) {
+        guard shouldApplyProjectionEpoch(
+            incoming: channelState.stateEpoch,
+            existing: channelStates[contactID]?.stateEpoch
+        ) else {
+            return
+        }
         channelStates[contactID] = channelState
         if channelState.membership == .absent {
             channelReadiness[contactID] = nil
@@ -61,6 +73,12 @@ struct BackendSyncState: Equatable {
     mutating func applyChannelReadiness(_ readiness: TurboChannelReadinessResponse, for contactID: UUID) {
         if channelStates[contactID]?.membership == .absent {
             channelReadiness[contactID] = nil
+            return
+        }
+        guard shouldApplyProjectionEpoch(
+            incoming: readiness.stateEpoch,
+            existing: channelReadiness[contactID]?.stateEpoch
+        ) else {
             return
         }
         channelReadiness[contactID] = readiness

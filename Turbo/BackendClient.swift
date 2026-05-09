@@ -86,9 +86,12 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     private var connectTimeoutTask: Task<Void, Never>?
     private var runtimeConfig: TurboBackendRuntimeConfig?
     private var webSocketConnectionState: WebSocketConnectionState = .idle
+    private var currentWebSocketSessionID: String?
     private var shouldMaintainWebSocket = false
     private var isWebSocketSuspended = false
     private let webSocketConnectTimeoutNanoseconds: UInt64 = 12_000_000_000
+    private var capturesSentSignalsForTesting = false
+    private var capturedSentSignalsForTesting: [TurboSignalEnvelope] = []
 
     var onSignal: (@MainActor (TurboSignalEnvelope) -> Void)?
     var onServerNotice: (@MainActor (String) -> Void)?
@@ -104,9 +107,13 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     var supportsWebSocket: Bool { runtimeConfig?.supportsWebSocket ?? false }
     var supportsDirectQuicUpgrade: Bool { runtimeConfig?.supportsDirectQuicUpgrade ?? false }
     var supportsMediaEndToEndEncryption: Bool { runtimeConfig?.supportsMediaEndToEndEncryption ?? false }
+    var supportsSignalSessionIds: Bool { runtimeConfig?.supportsSignalSessionIds ?? false }
+    var supportsTransmitIds: Bool { runtimeConfig?.supportsTransmitIds ?? false }
+    var supportsProjectionEpochs: Bool { runtimeConfig?.supportsProjectionEpochs ?? false }
     var directQuicPolicy: TurboDirectQuicPolicy? { runtimeConfig?.directQuicPolicy }
     var modeDescription: String { runtimeConfig?.mode ?? "unknown" }
     var isWebSocketConnected: Bool { webSocketConnectionState == .connected }
+    var webSocketSessionID: String? { currentWebSocketSessionID }
 
     func fetchRuntimeConfig() async throws -> TurboBackendRuntimeConfig {
         let response: TurboBackendRuntimeConfig = try await request(path: "/v1/config")
@@ -337,19 +344,25 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         )
     }
 
-    func endTransmit(channelId: String) async throws -> TurboEndTransmitResponse {
+    func endTransmit(channelId: String, transmitId: String? = nil) async throws -> TurboEndTransmitResponse {
         try await request(
             path: "/v1/channels/\(channelId)/end-transmit",
             method: "POST",
-            body: TurboChannelDeviceRequest(deviceId: config.deviceID)
+            body: TurboChannelDeviceRequest(
+                deviceId: config.deviceID,
+                transmitId: supportsTransmitIds ? transmitId : nil
+            )
         )
     }
 
-    func renewTransmit(channelId: String) async throws -> TurboRenewTransmitResponse {
+    func renewTransmit(channelId: String, transmitId: String? = nil) async throws -> TurboRenewTransmitResponse {
         try await request(
             path: "/v1/channels/\(channelId)/renew-transmit",
             method: "POST",
-            body: TurboChannelDeviceRequest(deviceId: config.deviceID)
+            body: TurboChannelDeviceRequest(
+                deviceId: config.deviceID,
+                transmitId: supportsTransmitIds ? transmitId : nil
+            )
         )
     }
 
@@ -376,6 +389,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         request.addValue("Bearer \(config.devUserHandle)", forHTTPHeaderField: "Authorization")
         let task = webSocketSession.webSocketTask(with: request)
         setWebSocketConnectionState(.connecting)
+        currentWebSocketSessionID = nil
         webSocketTask = task
         scheduleConnectTimeout(for: task)
         task.resume()
@@ -391,6 +405,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         receiveTask = nil
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
+        currentWebSocketSessionID = nil
         setWebSocketConnectionState(.idle)
     }
 
@@ -432,23 +447,62 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         throw TurboBackendError.webSocketUnavailable
     }
 
+    func waitForWebSocketSessionIfNeeded() async throws {
+        guard supportsWebSocket else { return }
+        try await waitForWebSocketConnection()
+        guard supportsSignalSessionIds else { return }
+        for _ in 0 ..< 20 {
+            if currentWebSocketSessionID != nil {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        throw TurboBackendError.webSocketUnavailable
+    }
+
     func sendSignal(_ envelope: TurboSignalEnvelope) async throws {
         guard supportsWebSocket else {
             throw TurboBackendError.webSocketUnavailable
         }
+        let stampedEnvelope: TurboSignalEnvelope
+        if supportsSignalSessionIds {
+            if currentWebSocketSessionID == nil {
+                try await waitForWebSocketSessionIfNeeded()
+            }
+            stampedEnvelope = envelope.withSessionId(currentWebSocketSessionID)
+        } else {
+            stampedEnvelope = envelope
+        }
+        if capturesSentSignalsForTesting {
+            capturedSentSignalsForTesting.append(stampedEnvelope)
+            return
+        }
         if webSocketConnectionState != .connected || webSocketTask == nil {
-            try await waitForWebSocketConnection()
+            try await waitForWebSocketSessionIfNeeded()
         }
         guard webSocketConnectionState == .connected, let webSocketTask else {
             throw TurboBackendError.webSocketUnavailable
         }
-        let data = try JSONEncoder().encode(envelope)
+        let data = try JSONEncoder().encode(stampedEnvelope)
         let text = String(decoding: data, as: UTF8.self)
         try await webSocketTask.send(.string(text))
     }
 
     func setWebSocketConnectionStateForTesting(_ state: WebSocketConnectionState) {
         webSocketConnectionState = state
+    }
+
+    func setWebSocketSessionIDForTesting(_ sessionID: String?) {
+        currentWebSocketSessionID = sessionID
+    }
+
+    func enableSentSignalCaptureForTesting() {
+        capturesSentSignalsForTesting = true
+        capturedSentSignalsForTesting = []
+    }
+
+    func sentSignalsForTesting() -> [TurboSignalEnvelope] {
+        capturedSentSignalsForTesting
     }
 
     private func listenForMessages() async {
@@ -464,6 +518,9 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
                         onSignal?(envelope)
                     } else if let data = text.data(using: .utf8),
                               let notice = try? JSONDecoder().decode(TurboWebSocketStatusNotice.self, from: data) {
+                        if notice.status == "connected" {
+                            currentWebSocketSessionID = notice.sessionId
+                        }
                         if notice.status != "connected" {
                             onServerNotice?("WebSocket \(notice.status)")
                         }
@@ -487,6 +544,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             self.connectTimeoutTask = nil
             self.receiveTask = nil
             self.webSocketTask = nil
+            self.currentWebSocketSessionID = nil
             self.setWebSocketConnectionState(.idle)
             let reason = "WebSocket disconnected: \(error.localizedDescription)"
             onServerNotice?(reason)
@@ -529,6 +587,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             self.receiveTask?.cancel()
             self.receiveTask = nil
             self.webSocketTask = nil
+            self.currentWebSocketSessionID = nil
             self.setWebSocketConnectionState(.idle)
             if self.shouldMaintainWebSocket {
                 let reason =
@@ -576,6 +635,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             self.receiveTask?.cancel()
             self.receiveTask = nil
             self.webSocketTask = nil
+            self.currentWebSocketSessionID = nil
             self.setWebSocketConnectionState(.idle)
             task.cancel(with: .goingAway, reason: nil)
             self.onServerNotice?("WebSocket connect timed out")
@@ -674,6 +734,12 @@ private struct TurboForgetContactRequest: Encodable {
 
 private struct TurboChannelDeviceRequest: Encodable {
     let deviceId: String
+    let transmitId: String?
+
+    init(deviceId: String, transmitId: String? = nil) {
+        self.deviceId = deviceId
+        self.transmitId = transmitId
+    }
 }
 
 private struct TurboEphemeralTokenRequest: Encodable {

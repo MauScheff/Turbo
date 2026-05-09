@@ -672,6 +672,7 @@ final class MediaRuntimeState {
     private var handledReceiverPrewarmRequestIDs: Set<String> = []
     private(set) var receiverPrewarmAckRequestIDByContactID: [UUID: String] = [:]
     private var receiverPrewarmAckReceivedAtByContactID: [UUID: Date] = [:]
+    private var directQuicUpgradeRequestSentAtByContactID: [UUID: Date] = [:]
     private(set) var directQuicWarmPongIDByContactID: [UUID: String] = [:]
     private var directQuicWarmPongReceivedAtByContactID: [UUID: Date] = [:]
     private var incomingRelayAudioDetailedReportsRemainingByContactID: [UUID: Int] = [:]
@@ -786,6 +787,7 @@ final class MediaRuntimeState {
             handledReceiverPrewarmRequestIDs = []
             receiverPrewarmAckRequestIDByContactID = [:]
             receiverPrewarmAckReceivedAtByContactID = [:]
+            directQuicUpgradeRequestSentAtByContactID = [:]
             directQuicWarmPongIDByContactID = [:]
             directQuicWarmPongReceivedAtByContactID = [:]
         }
@@ -823,6 +825,25 @@ final class MediaRuntimeState {
             return .suppressedNotice
         }
         return .suppressed
+    }
+
+    func shouldSendDirectQuicUpgradeRequest(
+        for contactID: UUID,
+        minimumInterval: TimeInterval,
+        now: Date = Date()
+    ) -> Bool {
+        guard let sentAt = directQuicUpgradeRequestSentAtByContactID[contactID] else {
+            return true
+        }
+        return now.timeIntervalSince(sentAt) >= minimumInterval
+    }
+
+    func markDirectQuicUpgradeRequestSent(for contactID: UUID, at date: Date = Date()) {
+        directQuicUpgradeRequestSentAtByContactID[contactID] = date
+    }
+
+    func clearDirectQuicUpgradeRequestThrottle(for contactID: UUID) {
+        directQuicUpgradeRequestSentAtByContactID.removeValue(forKey: contactID)
     }
 
     func requestInteractivePrewarmAfterAudioDeactivation(for contactID: UUID) {
@@ -1190,6 +1211,9 @@ struct BackendServices {
     var supportsWebSocket: Bool { client.supportsWebSocket }
     var supportsDirectQuicUpgrade: Bool { client.supportsDirectQuicUpgrade }
     var supportsMediaEndToEndEncryption: Bool { client.supportsMediaEndToEndEncryption }
+    var supportsSignalSessionIds: Bool { client.supportsSignalSessionIds }
+    var supportsTransmitIds: Bool { client.supportsTransmitIds }
+    var supportsProjectionEpochs: Bool { client.supportsProjectionEpochs }
     var isWebSocketConnected: Bool { client.isWebSocketConnected }
     var deviceID: String { client.deviceID }
     var usesLocalHTTPBackend: Bool { mode == "local-http" }
@@ -1351,12 +1375,12 @@ struct BackendServices {
         try await criticalHTTPClient.beginTransmit(channelId: channelId)
     }
 
-    func endTransmit(channelId: String) async throws -> TurboEndTransmitResponse {
-        try await client.endTransmit(channelId: channelId)
+    func endTransmit(channelId: String, transmitId: String? = nil) async throws -> TurboEndTransmitResponse {
+        try await client.endTransmit(channelId: channelId, transmitId: transmitId)
     }
 
-    func renewTransmit(channelId: String) async throws -> TurboRenewTransmitResponse {
-        try await client.renewTransmit(channelId: channelId)
+    func renewTransmit(channelId: String, transmitId: String? = nil) async throws -> TurboRenewTransmitResponse {
+        try await client.renewTransmit(channelId: channelId, transmitId: transmitId)
     }
 
     func connectWebSocket() {

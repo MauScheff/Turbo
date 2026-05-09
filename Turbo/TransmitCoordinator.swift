@@ -15,6 +15,21 @@ struct TransmitTarget: Equatable, Sendable {
     let userID: String
     let deviceID: String
     let channelID: String
+    let transmitID: String?
+
+    init(
+        contactID: UUID,
+        userID: String,
+        deviceID: String,
+        channelID: String,
+        transmitID: String? = nil
+    ) {
+        self.contactID = contactID
+        self.userID = userID
+        self.deviceID = deviceID
+        self.channelID = channelID
+        self.transmitID = transmitID
+    }
 }
 
 enum TransmitPhase: Equatable {

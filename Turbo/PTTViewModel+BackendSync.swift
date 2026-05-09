@@ -490,7 +490,14 @@ extension PTTViewModel {
                 || (activityState == nil && mediaSessionContactID == contactID && mediaConnectionState == .connected)
         case .transmitStop:
             return activityState == nil || activityState?.isPeerTransmitting == false
-        case .offer, .answer, .iceCandidate, .hangup, .audioChunk, .receiverReady, .receiverNotReady:
+        case .offer,
+             .answer,
+             .iceCandidate,
+             .hangup,
+             .directQuicUpgradeRequest,
+             .audioChunk,
+             .receiverReady,
+             .receiverNotReady:
             return false
         }
     }
@@ -2214,6 +2221,8 @@ extension PTTViewModel {
                     contactID: contactID
                 )
             }
+        case .directQuicUpgradeRequest:
+            handleIncomingDirectQuicUpgradeRequest(envelope, contactID: contactID)
         case .offer, .answer, .iceCandidate, .hangup:
             handleIncomingDirectQuicControlSignal(envelope, contactID: contactID)
         }

@@ -666,15 +666,14 @@ final class DiagnosticsStore {
             )
         }
 
-        let pendingLocalSessionActionWithoutSession =
+        let pendingLocalJoinWithoutSession =
             pendingAction.contains("joiningLocal(")
             || pendingAction.contains(".joiningLocal(")
-            || pendingAction.contains("leave(")
         let backendMembershipAbsentForPendingLocalAction =
             backendSelfJoined != true
             && backendPeerJoined != true
             && !["waiting-for-peer", "ready", "self-transmitting", "peer-transmitting"].contains(backendChannelStatus)
-        if pendingLocalSessionActionWithoutSession,
+        if pendingLocalJoinWithoutSession,
            selectedPeerRelationship == "none",
            isJoined == false,
            systemSession == "none",

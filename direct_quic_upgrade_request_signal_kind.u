@@ -1,0 +1,135 @@
+type turbo.domain.SignalKind
+  = Offer
+  | Answer
+  | IceCandidate
+  | Hangup
+  | TransmitStart
+  | TransmitStop
+  | AudioChunk
+  | ReceiverReady
+  | ReceiverNotReady
+  | DirectQuicUpgradeRequest
+
+turbo.domain.SignalKind.fromText : Text -> Optional SignalKind
+turbo.domain.SignalKind.fromText = cases
+  "offer"                       -> Some Offer
+  "answer"                      -> Some Answer
+  "ice-candidate"               -> Some IceCandidate
+  "hangup"                      -> Some Hangup
+  "transmit-start"              -> Some TransmitStart
+  "transmit-stop"               -> Some TransmitStop
+  "audio-chunk"                 -> Some AudioChunk
+  "receiver-ready"              -> Some ReceiverReady
+  "receiver-not-ready"          -> Some ReceiverNotReady
+  "direct-quic-upgrade-request" -> Some DirectQuicUpgradeRequest
+  _                             -> None
+
+turbo.domain.SignalKind.toText : SignalKind -> Text
+turbo.domain.SignalKind.toText = cases
+  Offer                    -> "offer"
+  Answer                   -> "answer"
+  IceCandidate             -> "ice-candidate"
+  Hangup                   -> "hangup"
+  TransmitStart            -> "transmit-start"
+  TransmitStop             -> "transmit-stop"
+  AudioChunk               -> "audio-chunk"
+  ReceiverReady            -> "receiver-ready"
+  ReceiverNotReady         -> "receiver-not-ready"
+  DirectQuicUpgradeRequest -> "direct-quic-upgrade-request"
+
+test> turbo.domain.SignalKind.fromText.tests.examples = verify do
+  use SignalKind fromText
+  labeled "parses known tag" do ensureEqual (fromText "answer") (Some Answer)
+  labeled "parses audio chunk tag" do ensureEqual (fromText "audio-chunk") (Some AudioChunk)
+  labeled "parses receiver ready tag" do ensureEqual (fromText "receiver-ready") (Some ReceiverReady)
+  labeled "parses receiver not ready tag" do ensureEqual (fromText "receiver-not-ready") (Some ReceiverNotReady)
+  labeled "parses direct quic upgrade request tag" do
+    ensureEqual
+      (fromText "direct-quic-upgrade-request")
+      (Some DirectQuicUpgradeRequest)
+  labeled "rejects unknown tag" do ensureEqual (fromText "bogus") None
+
+test> turbo.domain.SignalKind.toText.tests.examples = verify do
+  use SignalKind toText
+  labeled "encodes offer" do ensureEqual (toText Offer) "offer"
+  labeled "encodes transmit stop" do ensureEqual (toText TransmitStop) "transmit-stop"
+  labeled "encodes audio chunk" do ensureEqual (toText AudioChunk) "audio-chunk"
+  labeled "encodes receiver ready" do ensureEqual (toText ReceiverReady) "receiver-ready"
+  labeled "encodes receiver not ready" do ensureEqual (toText ReceiverNotReady) "receiver-not-ready"
+  labeled "encodes direct quic upgrade request" do
+    ensureEqual
+      (toText DirectQuicUpgradeRequest)
+      "direct-quic-upgrade-request"
+
+type turbo.domain.SignalEnvelope
+  = SignalEnvelope SignalKind ChannelId UserId DeviceId UserId DeviceId Text
+
+turbo.domain.SignalEnvelope.fromText : Text ->{Exception} SignalEnvelope
+turbo.domain.SignalEnvelope.fromText text =
+  use Text ++
+  use object at!
+  runAllowTrailing
+    (do
+      kindText = at! "type" Decoder.text
+      kind = match SignalKind.fromText kindText with
+        Some kind -> kind
+        None -> Decoder.fail ("unknown signal type: " ++ kindText)
+      channelIdText = at! "channelId" Decoder.text
+      fromUserIdText = at! "fromUserId" Decoder.text
+      fromDeviceIdText = at! "fromDeviceId" Decoder.text
+      toUserIdText = at! "toUserId" Decoder.text
+      toDeviceIdText = at! "toDeviceId" Decoder.text
+      payload = at! "payload" Decoder.text
+      SignalEnvelope kind (ChannelId.fromText channelIdText) (UserId.fromText fromUserIdText) (DeviceId.fromText fromDeviceIdText) (UserId.fromText toUserIdText) (DeviceId.fromText toDeviceIdText) payload)
+    text
+
+turbo.domain.SignalEnvelope.toJson : SignalEnvelope -> Json
+turbo.domain.SignalEnvelope.toJson = cases
+  SignalEnvelope kind channelId fromUserId fromDeviceId toUserId toDeviceId payload ->
+    object.empty
+      |> addText "type" (SignalKind.toText kind)
+      |> addText "channelId" (ChannelId.toText channelId)
+      |> addText "fromUserId" (UserId.toText fromUserId)
+      |> addText "fromDeviceId" (DeviceId.toText fromDeviceId)
+      |> addText "toUserId" (UserId.toText toUserId)
+      |> addText "toDeviceId" (DeviceId.toText toDeviceId)
+      |> addText "payload" payload
+
+turbo.domain.SignalEnvelope.fromText.tests.props : [Result]
+turbo.domain.SignalEnvelope.fromText.tests.props = test.verify do
+  use Text ++
+  Each.repeat 50
+  n = natIn 0 8
+  kind = match n with
+    0 -> Offer
+    1 -> Answer
+    2 -> IceCandidate
+    3 -> Hangup
+    4 -> TransmitStart
+    5 -> TransmitStop
+    6 -> AudioChunk
+    7 -> ReceiverReady
+    _ -> DirectQuicUpgradeRequest
+  suffix = Nat.toText (natIn 0 1000000)
+  envelope = SignalEnvelope kind (ChannelId.fromText ("channel-" ++ suffix)) (UserId.fromText ("from-" ++ suffix)) (DeviceId.fromText ("from-device-" ++ suffix)) (UserId.fromText ("to-" ++ suffix)) (DeviceId.fromText ("to-device-" ++ suffix)) ("payload-" ++ suffix)
+  labeled "json roundtrip preserves the envelope" do ensureEqual (catch do SignalEnvelope.fromText (Json.toText (SignalEnvelope.toJson envelope))) (Right envelope)
+
+turbo.service.ws.internal.signalUsesActiveTransmitTarget :
+  SignalKind -> Boolean
+turbo.service.ws.internal.signalUsesActiveTransmitTarget = cases
+  AudioChunk -> true
+  TransmitStart -> true
+  TransmitStop -> true
+  _ -> false
+
+test> turbo.service.ws.internal.signalUsesActiveTransmitTarget.tests.examples = verify do
+  ensureEqual true
+    (turbo.service.ws.internal.signalUsesActiveTransmitTarget AudioChunk)
+  ensureEqual true
+    (turbo.service.ws.internal.signalUsesActiveTransmitTarget TransmitStart)
+  ensureEqual true
+    (turbo.service.ws.internal.signalUsesActiveTransmitTarget TransmitStop)
+  ensureEqual false
+    (turbo.service.ws.internal.signalUsesActiveTransmitTarget ReceiverReady)
+  ensureEqual false
+    (turbo.service.ws.internal.signalUsesActiveTransmitTarget DirectQuicUpgradeRequest)

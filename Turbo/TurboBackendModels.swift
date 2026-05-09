@@ -1051,10 +1051,11 @@ enum TurboSignalKind: String, Codable {
     case audioChunk = "audio-chunk"
     case receiverReady = "receiver-ready"
     case receiverNotReady = "receiver-not-ready"
+    case directQuicUpgradeRequest = "direct-quic-upgrade-request"
 
     var isDirectQuicControlSignal: Bool {
         switch self {
-        case .offer, .answer, .iceCandidate, .hangup:
+        case .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest:
             return true
         case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady:
             return false
@@ -1230,6 +1231,48 @@ nonisolated struct TurboDirectQuicHangupPayload: TurboDirectQuicSignalingPayload
     }
 }
 
+nonisolated struct TurboDirectQuicUpgradeRequestPayload: TurboDirectQuicSignalingPayload, Equatable {
+    let protocolVersion: String
+    let requestId: String
+    let channelId: String
+    let fromDeviceId: String
+    let toDeviceId: String
+    let reason: String
+    let roleIntent: TurboDirectQuicRoleIntent?
+    let debugBypass: Bool?
+
+    init(
+        protocolVersion: String = Self.expectedProtocolVersion,
+        requestId: String,
+        channelId: String,
+        fromDeviceId: String,
+        toDeviceId: String,
+        reason: String,
+        roleIntent: TurboDirectQuicRoleIntent? = .listener,
+        debugBypass: Bool? = nil
+    ) {
+        self.protocolVersion = protocolVersion
+        self.requestId = requestId
+        self.channelId = channelId
+        self.fromDeviceId = fromDeviceId
+        self.toDeviceId = toDeviceId
+        self.reason = reason
+        self.roleIntent = roleIntent
+        self.debugBypass = debugBypass
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion = "protocol"
+        case requestId
+        case channelId
+        case fromDeviceId
+        case toDeviceId
+        case reason
+        case roleIntent
+        case debugBypass
+    }
+}
+
 enum TurboDirectQuicSignalPayload: Equatable {
     case offer(TurboDirectQuicOfferPayload)
     case answer(TurboDirectQuicAnswerPayload)
@@ -1319,14 +1362,48 @@ struct TurboPTTPushPayload: Equatable {
     }
 }
 
-struct TurboSignalEnvelope: Codable {
+nonisolated struct TurboSignalEnvelope: Codable {
     let type: TurboSignalKind
     let channelId: String
     let fromUserId: String
     let fromDeviceId: String
     let toUserId: String
     let toDeviceId: String
+    let sessionId: String?
     let payload: String
+
+    init(
+        type: TurboSignalKind,
+        channelId: String,
+        fromUserId: String,
+        fromDeviceId: String,
+        toUserId: String,
+        toDeviceId: String,
+        sessionId: String? = nil,
+        payload: String
+    ) {
+        self.type = type
+        self.channelId = channelId
+        self.fromUserId = fromUserId
+        self.fromDeviceId = fromDeviceId
+        self.toUserId = toUserId
+        self.toDeviceId = toDeviceId
+        self.sessionId = sessionId
+        self.payload = payload
+    }
+
+    func withSessionId(_ sessionId: String?) -> TurboSignalEnvelope {
+        TurboSignalEnvelope(
+            type: type,
+            channelId: channelId,
+            fromUserId: fromUserId,
+            fromDeviceId: fromDeviceId,
+            toUserId: toUserId,
+            toDeviceId: toDeviceId,
+            sessionId: sessionId,
+            payload: payload
+        )
+    }
 
     static func directQuicOffer(
         channelId: String,
@@ -1404,6 +1481,25 @@ struct TurboSignalEnvelope: Codable {
         )
     }
 
+    static func directQuicUpgradeRequest(
+        channelId: String,
+        fromUserId: String,
+        fromDeviceId: String,
+        toUserId: String,
+        toDeviceId: String,
+        payload: TurboDirectQuicUpgradeRequestPayload
+    ) throws -> TurboSignalEnvelope {
+        try makeDirectQuicEnvelope(
+            type: .directQuicUpgradeRequest,
+            channelId: channelId,
+            fromUserId: fromUserId,
+            fromDeviceId: fromDeviceId,
+            toUserId: toUserId,
+            toDeviceId: toDeviceId,
+            payload: payload
+        )
+    }
+
     func decodeDirectQuicSignalPayload() throws -> TurboDirectQuicSignalPayload {
         switch type {
         case .offer:
@@ -1414,9 +1510,16 @@ struct TurboSignalEnvelope: Codable {
             return .candidate(try decodeDirectQuicPayload(TurboDirectQuicCandidatePayload.self, expectedKind: .iceCandidate))
         case .hangup:
             return .hangup(try decodeDirectQuicPayload(TurboDirectQuicHangupPayload.self, expectedKind: .hangup))
-        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady:
+        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .directQuicUpgradeRequest:
             throw TurboDirectQuicPayloadError.notDirectQuicSignal(type)
         }
+    }
+
+    func decodeDirectQuicUpgradeRequestPayload() throws -> TurboDirectQuicUpgradeRequestPayload {
+        try decodeDirectQuicPayload(
+            TurboDirectQuicUpgradeRequestPayload.self,
+            expectedKind: .directQuicUpgradeRequest
+        )
     }
 
     private static func makeDirectQuicEnvelope<Payload: TurboDirectQuicSignalingPayload>(
@@ -1551,6 +1654,9 @@ struct TurboBackendRuntimeConfig: Decodable {
     let supportsDirectQuicUpgrade: Bool
     let supportsDirectQuicProvisioning: Bool
     let supportsMediaEndToEndEncryption: Bool
+    let supportsSignalSessionIds: Bool
+    let supportsTransmitIds: Bool
+    let supportsProjectionEpochs: Bool
     let directQuicPolicy: TurboDirectQuicPolicy?
 
     init(
@@ -1560,6 +1666,9 @@ struct TurboBackendRuntimeConfig: Decodable {
         supportsDirectQuicUpgrade: Bool = false,
         supportsDirectQuicProvisioning: Bool = false,
         supportsMediaEndToEndEncryption: Bool = false,
+        supportsSignalSessionIds: Bool = false,
+        supportsTransmitIds: Bool = false,
+        supportsProjectionEpochs: Bool = false,
         directQuicPolicy: TurboDirectQuicPolicy? = nil
     ) {
         self.mode = mode
@@ -1568,6 +1677,9 @@ struct TurboBackendRuntimeConfig: Decodable {
         self.supportsDirectQuicUpgrade = supportsDirectQuicUpgrade
         self.supportsDirectQuicProvisioning = supportsDirectQuicProvisioning
         self.supportsMediaEndToEndEncryption = supportsMediaEndToEndEncryption
+        self.supportsSignalSessionIds = supportsSignalSessionIds
+        self.supportsTransmitIds = supportsTransmitIds
+        self.supportsProjectionEpochs = supportsProjectionEpochs
         self.directQuicPolicy = directQuicPolicy
     }
 
@@ -1578,6 +1690,9 @@ struct TurboBackendRuntimeConfig: Decodable {
         case supportsDirectQuicUpgrade
         case supportsDirectQuicProvisioning
         case supportsMediaEndToEndEncryption
+        case supportsSignalSessionIds
+        case supportsTransmitIds
+        case supportsProjectionEpochs
         case directQuicPolicy
     }
 
@@ -1589,6 +1704,9 @@ struct TurboBackendRuntimeConfig: Decodable {
         supportsDirectQuicUpgrade = try container.decodeIfPresent(Bool.self, forKey: .supportsDirectQuicUpgrade) ?? false
         supportsDirectQuicProvisioning = try container.decodeIfPresent(Bool.self, forKey: .supportsDirectQuicProvisioning) ?? false
         supportsMediaEndToEndEncryption = try container.decodeIfPresent(Bool.self, forKey: .supportsMediaEndToEndEncryption) ?? false
+        supportsSignalSessionIds = try container.decodeIfPresent(Bool.self, forKey: .supportsSignalSessionIds) ?? false
+        supportsTransmitIds = try container.decodeIfPresent(Bool.self, forKey: .supportsTransmitIds) ?? false
+        supportsProjectionEpochs = try container.decodeIfPresent(Bool.self, forKey: .supportsProjectionEpochs) ?? false
         directQuicPolicy = try container.decodeIfPresent(TurboDirectQuicPolicy.self, forKey: .directQuicPolicy)
     }
 }
@@ -1695,6 +1813,7 @@ struct TurboSeedResponse: Decodable {
 struct TurboWebSocketStatusNotice: Decodable {
     let status: String
     let deviceId: String?
+    let sessionId: String?
 }
 
 struct TurboDiagnosticsUploadRequest: Encodable {
@@ -2090,6 +2209,9 @@ struct TurboChannelStateResponse: Decodable, Equatable {
     let peerHandle: String
     let selfOnline: Bool
     let peerOnline: Bool
+    let stateEpoch: String?
+    let serverTimestamp: String?
+    let activeTransmitId: String?
     let transmitLeaseExpiresAt: String?
     let canTransmit: Bool
     private let membershipPayload: TurboChannelMembershipPayload
@@ -2110,7 +2232,10 @@ struct TurboChannelStateResponse: Decodable, Equatable {
         hasOutgoingRequest: Bool,
         requestCount: Int,
         activeTransmitterUserId: String?,
+        activeTransmitId: String? = nil,
         transmitLeaseExpiresAt: String?,
+        stateEpoch: String? = nil,
+        serverTimestamp: String? = nil,
         status: String,
         canTransmit: Bool,
         membershipPayload: TurboChannelMembershipPayload? = nil,
@@ -2123,6 +2248,9 @@ struct TurboChannelStateResponse: Decodable, Equatable {
         self.peerHandle = peerHandle
         self.selfOnline = selfOnline
         self.peerOnline = peerOnline
+        self.stateEpoch = stateEpoch
+        self.serverTimestamp = serverTimestamp
+        self.activeTransmitId = activeTransmitId
         self.transmitLeaseExpiresAt = transmitLeaseExpiresAt
         self.canTransmit = canTransmit
         self.membershipPayload = membershipPayload ?? Self.synthesizedMembershipPayload(
@@ -2148,6 +2276,9 @@ struct TurboChannelStateResponse: Decodable, Equatable {
         case peerHandle
         case selfOnline
         case peerOnline
+        case stateEpoch
+        case serverTimestamp
+        case activeTransmitId
         case selfJoined
         case peerJoined
         case peerDeviceConnected
@@ -2171,6 +2302,9 @@ struct TurboChannelStateResponse: Decodable, Equatable {
         peerHandle = try container.decode(String.self, forKey: .peerHandle)
         selfOnline = try container.decode(Bool.self, forKey: .selfOnline)
         peerOnline = try container.decode(Bool.self, forKey: .peerOnline)
+        stateEpoch = try container.decodeIfPresent(String.self, forKey: .stateEpoch)
+        serverTimestamp = try container.decodeIfPresent(String.self, forKey: .serverTimestamp)
+        activeTransmitId = try container.decodeIfPresent(String.self, forKey: .activeTransmitId)
         transmitLeaseExpiresAt = try container.decodeIfPresent(String.self, forKey: .transmitLeaseExpiresAt)
         canTransmit = try container.decode(Bool.self, forKey: .canTransmit)
         membershipPayload = try container.decode(TurboChannelMembershipPayload.self, forKey: .membership)
@@ -2298,7 +2432,10 @@ struct TurboChannelStateResponse: Decodable, Equatable {
             hasOutgoingRequest: hasOutgoingRequest,
             requestCount: requestCount,
             activeTransmitterUserId: activeTransmitterUserId,
+            activeTransmitId: activeTransmitId,
             transmitLeaseExpiresAt: transmitLeaseExpiresAt,
+            stateEpoch: stateEpoch,
+            serverTimestamp: serverTimestamp,
             status: statusKind,
             canTransmit: canTransmit,
             requestRelationshipPayload: requestRelationshipPayload,
@@ -2312,6 +2449,9 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
     let peerUserId: String
     let selfHasActiveDevice: Bool
     let peerHasActiveDevice: Bool
+    let stateEpoch: String?
+    let serverTimestamp: String?
+    let activeTransmitId: String?
     let activeTransmitExpiresAt: String?
     private let readinessPayload: TurboChannelReadinessPayload
     private let audioReadinessPayload: TurboChannelAudioReadinessPayload
@@ -2325,7 +2465,10 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         selfHasActiveDevice: Bool,
         peerHasActiveDevice: Bool,
         activeTransmitterUserId: String?,
+        activeTransmitId: String? = nil,
         activeTransmitExpiresAt: String?,
+        stateEpoch: String? = nil,
+        serverTimestamp: String? = nil,
         status: String,
         readinessPayload: TurboChannelReadinessPayload? = nil,
         audioReadinessPayload: TurboChannelAudioReadinessPayload? = nil,
@@ -2337,6 +2480,9 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         self.peerUserId = peerUserId
         self.selfHasActiveDevice = selfHasActiveDevice
         self.peerHasActiveDevice = peerHasActiveDevice
+        self.stateEpoch = stateEpoch
+        self.serverTimestamp = serverTimestamp
+        self.activeTransmitId = activeTransmitId
         self.activeTransmitExpiresAt = activeTransmitExpiresAt
         self.readinessPayload = readinessPayload ?? TurboChannelReadinessPayload(
             kind: status,
@@ -2360,6 +2506,9 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         case peerUserId
         case selfHasActiveDevice
         case peerHasActiveDevice
+        case stateEpoch
+        case serverTimestamp
+        case activeTransmitId
         case activeTransmitterUserId
         case activeTransmitExpiresAt
         case status
@@ -2376,6 +2525,9 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         peerUserId = try container.decode(String.self, forKey: .peerUserId)
         selfHasActiveDevice = try container.decode(Bool.self, forKey: .selfHasActiveDevice)
         peerHasActiveDevice = try container.decode(Bool.self, forKey: .peerHasActiveDevice)
+        stateEpoch = try container.decodeIfPresent(String.self, forKey: .stateEpoch)
+        serverTimestamp = try container.decodeIfPresent(String.self, forKey: .serverTimestamp)
+        activeTransmitId = try container.decodeIfPresent(String.self, forKey: .activeTransmitId)
         activeTransmitExpiresAt = try container.decodeIfPresent(String.self, forKey: .activeTransmitExpiresAt)
         readinessPayload = try container.decode(TurboChannelReadinessPayload.self, forKey: .readiness)
         audioReadinessPayload = try container.decode(TurboChannelAudioReadinessPayload.self, forKey: .audioReadiness)
@@ -2445,7 +2597,10 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             selfHasActiveDevice: selfHasActiveDevice,
             peerHasActiveDevice: peerHasActiveDevice,
             activeTransmitterUserId: activeTransmitterUserId,
+            activeTransmitId: activeTransmitId,
             activeTransmitExpiresAt: activeTransmitExpiresAt,
+            stateEpoch: stateEpoch,
+            serverTimestamp: serverTimestamp,
             status: statusKind,
             readinessPayload: readinessPayload,
             audioReadinessPayload: audioReadinessPayload.settingRemoteStatus(status),
@@ -2462,7 +2617,10 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             selfHasActiveDevice: selfHasActiveDevice,
             peerHasActiveDevice: peerHasActiveDevice,
             activeTransmitterUserId: activeTransmitterUserId,
+            activeTransmitId: activeTransmitId,
             activeTransmitExpiresAt: activeTransmitExpiresAt,
+            stateEpoch: stateEpoch,
+            serverTimestamp: serverTimestamp,
             status: statusKind,
             readinessPayload: readinessPayload,
             audioReadinessPayload: audioReadinessPayload,
@@ -2482,6 +2640,7 @@ struct TurboTokenResponse: Decodable {
 struct TurboBeginTransmitResponse: Decodable {
     let channelId: String
     let status: String
+    let transmitId: String?
     let startedAt: String
     let expiresAt: String
     let targetUserId: String
@@ -2491,6 +2650,7 @@ struct TurboBeginTransmitResponse: Decodable {
 struct TurboRenewTransmitResponse: Decodable {
     let channelId: String
     let status: String
+    let transmitId: String?
     let startedAt: String
     let expiresAt: String
 }

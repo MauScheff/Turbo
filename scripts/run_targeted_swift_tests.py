@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheme", default="BeepBeep")
     parser.add_argument("--destination", default="platform=iOS Simulator,name=iPhone 17")
     parser.add_argument("--derived-data", default="/tmp/turbo-dd-targeted-swift-tests")
-    parser.add_argument("--lock-file", default=".swift-test-target.lock")
+    parser.add_argument("--lock-file", default="/tmp/turbo-simulator-test.lock")
     return parser.parse_args()
 
 

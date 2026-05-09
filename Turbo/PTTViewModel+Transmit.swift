@@ -781,7 +781,10 @@ extension PTTViewModel {
             || shouldUseDirectQuicTransport(for: contactID)
         let receiverWarm =
             selectedChannelSnapshot(for: contactID)?.remoteAudioReadyForLiveTransmit == true
-            || mediaRuntime.receiverPrewarmAckRequestIDByContactID[contactID] != nil
+            || mediaRuntime.receiverPrewarmRequestIsAcknowledged(
+                for: contactID,
+                maximumAge: TimeInterval(directQuicAudioFreshnessMilliseconds) / 1_000
+            )
         let transportWarm = localRelayTransportReadyForTransmit(for: contactID)
 
         return FirstTalkReadinessProjection(
@@ -1812,7 +1815,8 @@ extension PTTViewModel {
                 contactID: request.contactID,
                 userID: request.remoteUserID,
                 deviceID: response.targetDeviceId,
-                channelID: request.backendChannelID
+                channelID: request.backendChannelID,
+                transmitID: response.transmitId ?? response.startedAt
             )
             diagnostics.record(
                 .media,
@@ -1821,6 +1825,7 @@ extension PTTViewModel {
                     "contactId": target.contactID.uuidString,
                     "channelId": target.channelID,
                     "startedAt": response.startedAt,
+                    "transmitId": target.transmitID ?? "missing",
                     "expiresAt": response.expiresAt,
                     "targetDeviceId": response.targetDeviceId,
                     "clientHttpElapsedMs": String(backendLeaseRequestElapsedMs),
@@ -1834,6 +1839,7 @@ extension PTTViewModel {
                 metadata: [
                     "targetDeviceId": response.targetDeviceId,
                     "startedAt": response.startedAt,
+                    "transmitId": target.transmitID ?? "missing",
                     "expiresAt": response.expiresAt,
                     "clientHttpElapsedMs": String(backendLeaseRequestElapsedMs),
                 ]
@@ -1847,6 +1853,7 @@ extension PTTViewModel {
                     "contactId": target.contactID.uuidString,
                     "channelId": target.channelID,
                     "startedAt": response.startedAt,
+                    "transmitId": target.transmitID ?? "missing",
                     "expiresAt": response.expiresAt,
                     "targetDeviceId": response.targetDeviceId,
                     "clientHttpElapsedMs": String(backendLeaseRequestElapsedMs),
@@ -1950,7 +1957,8 @@ extension PTTViewModel {
                 contactID: request.contactID,
                 userID: request.remoteUserID,
                 deviceID: response.targetDeviceId,
-                channelID: request.backendChannelID
+                channelID: request.backendChannelID,
+                transmitID: response.transmitId ?? response.startedAt
             )
             diagnostics.record(
                 .media,
@@ -1959,6 +1967,7 @@ extension PTTViewModel {
                     "contactId": target.contactID.uuidString,
                     "channelId": target.channelID,
                     "startedAt": response.startedAt,
+                    "transmitId": target.transmitID ?? "missing",
                     "expiresAt": response.expiresAt,
                     "targetDeviceId": response.targetDeviceId,
                 ]
@@ -2133,7 +2142,10 @@ extension PTTViewModel {
 
         let renewStartedAt = Date()
         do {
-            let renewed = try await backend.renewTransmit(channelId: target.channelID)
+            let renewed = try await backend.renewTransmit(
+                channelId: target.channelID,
+                transmitId: target.transmitID
+            )
             let renewDurationMs = Int(Date().timeIntervalSince(renewStartedAt) * 1_000)
             diagnostics.record(
                 .media,
@@ -2143,6 +2155,7 @@ extension PTTViewModel {
                     "channelId": target.channelID,
                     "targetDeviceId": target.deviceID,
                     "startedAt": renewed.startedAt,
+                    "transmitId": renewed.transmitId ?? target.transmitID ?? "missing",
                     "expiresAt": renewed.expiresAt,
                     "renewDurationMs": String(renewDurationMs),
                     "source": source,
@@ -2160,7 +2173,13 @@ extension PTTViewModel {
                     "source": source,
                 ]
             )
-            return target
+            return TransmitTarget(
+                contactID: target.contactID,
+                userID: target.userID,
+                deviceID: target.deviceID,
+                channelID: target.channelID,
+                transmitID: renewed.transmitId ?? target.transmitID
+            )
         } catch {
             guard shouldTreatTransmitLeaseLossAsStop(error) else { throw error }
 
@@ -2182,7 +2201,8 @@ extension PTTViewModel {
                 contactID: request.contactID,
                 userID: request.remoteUserID,
                 deviceID: reacquired.targetDeviceId,
-                channelID: request.backendChannelID
+                channelID: request.backendChannelID,
+                transmitID: reacquired.transmitId ?? reacquired.startedAt
             )
         }
     }
@@ -2230,7 +2250,7 @@ extension PTTViewModel {
                 )
             )
         }
-        _ = try? await backend.endTransmit(channelId: target.channelID)
+        _ = try? await backend.endTransmit(channelId: target.channelID, transmitId: target.transmitID)
         await refreshChannelState(for: target.contactID)
         updateStatusForSelectedContact()
     }
@@ -4555,20 +4575,6 @@ extension PTTViewModel {
                             ]
                         )
                     }
-                } else if !transmitRuntime.isPressingTalk {
-                    diagnostics.record(
-                        .media,
-                        message: "Wake-capable receiver recovery grace elapsed; releasing outbound audio send gate",
-                        metadata: [
-                            "contactId": target.contactID.uuidString,
-                            "channelId": target.channelID,
-                            "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
-                            "remoteAudioReadiness": String(
-                                describing: selectedChannelSnapshot(for: target.contactID)?.remoteAudioReadiness ?? .unknown
-                            ),
-                        ]
-                    )
-                    return true
                 }
             }
 
@@ -4729,7 +4735,7 @@ extension PTTViewModel {
                         "webSocketConnected": String(backend.isWebSocketConnected),
                     ]
                 )
-                _ = try await backend.endTransmit(channelId: target.channelID)
+                _ = try await backend.endTransmit(channelId: target.channelID, transmitId: target.transmitID)
                 diagnostics.record(
                     .media,
                     message: "Ended transmit on backend",
@@ -4820,7 +4826,7 @@ extension PTTViewModel {
                     "webSocketConnected": String(backend.isWebSocketConnected),
                 ]
             )
-            _ = try? await backend.endTransmit(channelId: target.channelID)
+            _ = try? await backend.endTransmit(channelId: target.channelID, transmitId: target.transmitID)
             diagnostics.record(
                 .media,
                 message: "Aborted transmit on backend",
@@ -4861,12 +4867,12 @@ extension PTTViewModel {
     }
 
     private func renewTransmitLeaseOnBackend(
-        channelId: String
+        target: TransmitTarget
     ) async throws -> TurboRenewTransmitResponse {
         guard let backend = backendServices else {
             throw TurboBackendError.invalidConfiguration
         }
-        return try await backend.renewTransmit(channelId: channelId)
+        return try await backend.renewTransmit(channelId: target.channelID, transmitId: target.transmitID)
     }
 
     private func startRenewingTransmit(_ target: TransmitTarget) {
@@ -4896,7 +4902,7 @@ extension PTTViewModel {
                         ]
                     )
                 }
-                let response = try await renewTransmitLeaseOnBackend(channelId: target.channelID)
+                let response = try await renewTransmitLeaseOnBackend(target: target)
                 let renewDurationMs = Int(Date().timeIntervalSince(renewStartedAt) * 1000)
                 await MainActor.run {
                     self.diagnostics.record(

@@ -2186,18 +2186,14 @@ private extension ConversationDerivationContext {
         let authoritativeBackendReady = backendReadyAuthoritativelySatisfiesRemoteAudio
 
         if shouldPreserveConnectedReadinessDuringControlPlaneTransition,
-           controlPlaneReconnectGraceActive {
+           controlPlaneReconnectGraceActive,
+           canTransmit {
             return .ready
         }
 
         if shouldPreserveConnectedReadinessDuringControlPlaneTransition,
            !canTransmit {
-            switch remoteAudioReadinessState {
-            case .ready:
-                return .ready
-            case .wakeCapable, .waiting, .unknown:
-                return .wakeReady
-            }
+            return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
         }
 
         if sessionTransmitReady && canTransmit {
@@ -2218,10 +2214,6 @@ private extension ConversationDerivationContext {
                 return .waiting(reason: .localTransportWarmup, statusMessage: "Connecting...")
             }
 
-            if authoritativeBackendReady {
-                return .ready
-            }
-
             switch localMediaWarmupState {
             case .cold:
                 if remoteAudioReadinessState == .wakeCapable,
@@ -2239,6 +2231,15 @@ private extension ConversationDerivationContext {
                 return .waiting(reason: .localAudioPrewarm, statusMessage: "Audio unavailable")
             case .ready:
                 break
+            }
+
+            if remoteAudioReadinessState == .wakeCapable,
+               case .wakeCapable = remoteWakeCapabilityState {
+                return .wakeReady
+            }
+
+            if authoritativeBackendReady {
+                return .ready
             }
 
             switch remoteAudioReadinessState {
@@ -2420,7 +2421,7 @@ private extension ConversationDerivationContext {
 
         switch remoteWakeCapabilityState {
         case .wakeCapable:
-            return remoteAudioReadinessState != .waiting
+            return remoteAudioReadinessState == .ready
         case .unavailable:
             return remoteAudioReadinessState == .ready
         }
