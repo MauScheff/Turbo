@@ -264,8 +264,6 @@ extension PTTViewModel {
             return true
         }
 
-        guard channelState.membership.hasLocalMembership else { return false }
-
         switch channelState.conversationStatus {
         case nil:
             return false

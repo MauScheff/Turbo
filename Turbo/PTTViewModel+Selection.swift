@@ -887,7 +887,7 @@ extension PTTViewModel {
         }
         let selectedPeerState = selectedPeerCoordinator.state.selectedPeerState
         guard selectedPeerState.contactID == contactID,
-              shouldTimeoutSelectedConnectionAttempt(selectedPeerState) else {
+              shouldTimeoutSelectedConnectionAttempt(selectedPeerState, contactID: contactID) else {
             cancelSelectedConnectionAttemptTimeout()
             return
         }
@@ -928,7 +928,15 @@ extension PTTViewModel {
         selectedConnectionAttemptTimeoutKey = nil
     }
 
-    func shouldTimeoutSelectedConnectionAttempt(_ selectedPeerState: SelectedPeerState) -> Bool {
+    func shouldTimeoutSelectedConnectionAttempt(
+        _ selectedPeerState: SelectedPeerState,
+        contactID: UUID? = nil
+    ) -> Bool {
+        if let contactID,
+           sessionCoordinator.pendingAction.pendingConnectContactID == contactID {
+            return false
+        }
+
         switch selectedPeerState.detail {
         case .waitingForPeer(reason: .pendingJoin),
              .waitingForPeer(reason: .backendSessionTransition),

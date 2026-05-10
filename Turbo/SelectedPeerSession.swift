@@ -270,6 +270,9 @@ enum SelectedPeerReducer {
                   isInterruptibleConnectionAttempt(nextState.selectedPeerState) else {
                 return SelectedPeerTransition(state: nextState)
             }
+            nextState.requesterAutoJoinOnPeerAcceptanceArmed = false
+            nextState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = false
+            nextState.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest = false
             nextState.interruptedConnectionAttemptContactID = contactID
             recomputeDerivedState(&nextState)
             return SelectedPeerTransition(state: nextState)

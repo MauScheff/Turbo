@@ -24,6 +24,7 @@ Optimize for:
 - persistent readable logs before screenshot-based diagnosis
 - checked-in simulator scenario specs under [`scenarios/`](/Users/mau/Development/Turbo/scenarios) for distributed control-plane bugs
 - `just simulator-scenario-merge` before guessing from screenshots or prose
+- `just reliability-gate-smoke` before treating hosted control-plane changes as stable
 - trusting simulator exact-device diagnostics only after confirming tests actually ran
 
 ## Turbo-specific iteration notes
@@ -34,7 +35,7 @@ Optimize for:
 - For physical-device timelines, use `python3 scripts/merged_diagnostics.py @mau @bau`; it merges Cloudflare telemetry by default when credentials are available and treats missing latest backend snapshots as source warnings.
 - Agents should not ask for manual in-app diagnostics upload during the normal debug loop. If a current debug build has recent activity and `merged_diagnostics.py` cannot find a backend latest snapshot, investigate auto-publish/backend diagnostics rather than changing the workflow to manual upload.
 - The simulator scenario runner is controlled by a temporary repo-local file `.scenario-runtime-config.json` that `just simulator-scenario` creates and removes through `scripts/run_simulator_scenarios.py`. Do not check this file in or depend on it manually.
-- The scenario runner now serializes scenario invocations with `.scenario-test.lock`, shares the `/tmp/turbo-simulator-test.lock` simulator lane with targeted Swift tests, and retries transient XCTest bootstrap crashes automatically. Use the `just` entrypoints instead of invoking `xcodebuild` manually when you want the stable loop.
+- The scenario runner now serializes scenario invocations with `.scenario-test.lock`, shares the `/tmp/turbo-simulator-test.lock` simulator lane with targeted Swift tests, and retries transient XCTest bootstrap crashes automatically. Full catalog runs also retry each catalog scenario once for hosted timing noise, while focused single-scenario runs remain strict. Use the `just` entrypoints instead of invoking `xcodebuild` manually when you want the stable loop.
 - For targeted Swift Testing runs, use `just swift-test-target <name>` instead of raw `-only-testing`. The wrapper fails if the requested test name never actually executes, which prevents false-green zero-test runs.
 - If `xcodebuild` says the simulator scenario command succeeded unusually quickly, confirm that tests actually ran. Swift Testing does not use the same selector behavior as classic XCTest, so a bad `-only-testing` filter can silently run zero tests.
 
@@ -205,6 +206,8 @@ If the backend-owned fact is wrong, the frontend may add guardrails or better di
 
 Useful commands:
 
+- `just reliability-gate-smoke`
+- `just reliability-gate-full`
 - `just simulator-scenario`
 - `just simulator-scenario foreground-ptt`
 - `just simulator-scenario request_accept_ready`

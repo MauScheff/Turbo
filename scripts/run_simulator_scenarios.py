@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario-file", default="")
     parser.add_argument("--scenario-directory", default="")
     parser.add_argument("--max-attempts", type=int, default=2)
+    parser.add_argument("--catalog-scenario-attempts", type=int, default=2)
     parser.add_argument("--retry-delay-seconds", type=float, default=3.0)
     return parser.parse_args()
 
@@ -139,6 +140,23 @@ def run_with_retries(command: list[str], args: argparse.Namespace) -> int:
     return last_exit_code
 
 
+def run_catalog_scenario_with_retries(command: list[str], args: argparse.Namespace, scenario_name: str) -> int:
+    last_exit_code = 1
+    max_attempts = max(1, args.catalog_scenario_attempts)
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            print(
+                f"Retrying simulator scenario {scenario_name} "
+                f"(attempt {attempt}/{max_attempts}) after isolated catalog failure...",
+                flush=True,
+            )
+            time.sleep(args.retry_delay_seconds)
+        last_exit_code = run_with_retries(command, args)
+        if last_exit_code == 0:
+            return 0
+    return last_exit_code
+
+
 def process_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -211,7 +229,7 @@ def main() -> int:
                 for index, scenario_name in enumerate(scenario_names, start=1):
                     print(f"Running simulator scenario {index}/{len(scenario_names)}: {scenario_name}", flush=True)
                     write_runtime_config(runtime_config_path, args, scenario_filter=scenario_name)
-                    exit_code = run_with_retries(command, args)
+                    exit_code = run_catalog_scenario_with_retries(command, args, scenario_name)
                     if exit_code != 0:
                         return exit_code
                 return 0

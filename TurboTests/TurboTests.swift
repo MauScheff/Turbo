@@ -8043,6 +8043,29 @@ struct TurboTests {
         #expect(retry.effects == [.requestConnection(contactID: contactID)])
     }
 
+    @MainActor
+    @Test func selectedConnectionTimeoutDoesNotInterruptInFlightBackendConnect() {
+        let contactID = UUID()
+        let viewModel = PTTViewModel()
+        let connectingState = SelectedPeerState(
+            contactID: contactID,
+            contactName: "Blake",
+            relationship: .incomingRequest(requestCount: 1),
+            detail: .waitingForPeer(reason: .backendSessionTransition),
+            statusMessage: "Connecting...",
+            canTransmitNow: false
+        )
+
+        #expect(viewModel.shouldTimeoutSelectedConnectionAttempt(connectingState, contactID: contactID))
+
+        viewModel.sessionCoordinator.queueConnect(
+            contactID: contactID,
+            origin: .acceptingIncomingRequest
+        )
+
+        #expect(!viewModel.shouldTimeoutSelectedConnectionAttempt(connectingState, contactID: contactID))
+    }
+
     @Test func selectedPeerReducerUsesBackendReadyOnlyAfterLocalAlignment() {
         let contactID = UUID()
         let selection = SelectedPeerSelection(
@@ -9101,6 +9124,136 @@ struct TurboTests {
         #expect(peerReady.state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight)
         #expect(peerReady.state.selectedPeerState.phase == .waitingForPeer)
         #expect(peerReady.state.selectedPeerState.statusMessage == "Connecting...")
+    }
+
+    @Test func selectedPeerReducerConnectionTimeoutClearsRequesterAutoJoinIdleGap() {
+        let contactID = UUID()
+        let selection = SelectedPeerSelection(
+            contactID: contactID,
+            contactName: "Blake",
+            contactIsOnline: true
+        )
+
+        let requestedState = SelectedPeerReducer.reduce(
+            state: .initial,
+            event: .syncUpdated(
+                SelectedPeerSyncSnapshot(
+                    selection: selection,
+                    relationship: .outgoingRequest(requestCount: 1),
+                    baseState: .requested,
+                    channel: ChannelReadinessSnapshot(
+                        channelState: makeChannelState(
+                            status: .requested,
+                            canTransmit: false,
+                            selfJoined: false,
+                            peerJoined: false,
+                            peerDeviceConnected: false
+                        )
+                    ),
+                    isJoined: false,
+                    activeChannelID: nil,
+                    pendingAction: .none,
+                    pendingConnectAcceptedIncomingRequest: false,
+                    requesterAutoJoinOnPeerAcceptanceEnabled: true,
+                    localTransmit: .idle,
+                    peerSignalIsTransmitting: false,
+                    systemSessionState: .none,
+                    systemSessionMatchesContact: false,
+                    mediaState: .idle,
+                    localRelayTransportReady: true,
+                    directMediaPathActive: false,
+                    incomingWakeActivationState: nil,
+                    localJoinFailure: nil
+                )
+            )
+        ).state
+
+        let idleGap = SelectedPeerReducer.reduce(
+            state: requestedState,
+            event: .syncUpdated(
+                SelectedPeerSyncSnapshot(
+                    selection: selection,
+                    relationship: .none,
+                    baseState: .idle,
+                    channel: ChannelReadinessSnapshot(
+                        channelState: makeChannelState(
+                            status: .idle,
+                            canTransmit: false,
+                            selfJoined: false,
+                            peerJoined: false,
+                            peerDeviceConnected: false
+                        )
+                    ),
+                    isJoined: false,
+                    activeChannelID: nil,
+                    pendingAction: .none,
+                    pendingConnectAcceptedIncomingRequest: false,
+                    requesterAutoJoinOnPeerAcceptanceEnabled: true,
+                    localTransmit: .idle,
+                    peerSignalIsTransmitting: false,
+                    systemSessionState: .none,
+                    systemSessionMatchesContact: false,
+                    mediaState: .idle,
+                    localRelayTransportReady: true,
+                    directMediaPathActive: false,
+                    incomingWakeActivationState: nil,
+                    localJoinFailure: nil
+                )
+            )
+        ).state
+
+        #expect(idleGap.requesterAutoJoinOnPeerAcceptanceArmed)
+        #expect(idleGap.selectedPeerState.phase == .waitingForPeer)
+
+        let timedOut = SelectedPeerReducer.reduce(
+            state: idleGap,
+            event: .connectionAttemptTimedOut(contactID: contactID)
+        ).state
+
+        #expect(!timedOut.requesterAutoJoinOnPeerAcceptanceArmed)
+        #expect(!timedOut.requesterAutoJoinOnPeerAcceptanceDispatchInFlight)
+        #expect(!timedOut.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest)
+        #expect(timedOut.selectedPeerState.phase == .idle)
+        #expect(timedOut.selectedPeerState.statusMessage == "Blake is online")
+
+        let refreshed = SelectedPeerReducer.reduce(
+            state: timedOut,
+            event: .syncUpdated(
+                SelectedPeerSyncSnapshot(
+                    selection: selection,
+                    relationship: .none,
+                    baseState: .idle,
+                    channel: ChannelReadinessSnapshot(
+                        channelState: makeChannelState(
+                            status: .idle,
+                            canTransmit: false,
+                            selfJoined: false,
+                            peerJoined: false,
+                            peerDeviceConnected: false
+                        )
+                    ),
+                    isJoined: false,
+                    activeChannelID: nil,
+                    pendingAction: .none,
+                    pendingConnectAcceptedIncomingRequest: false,
+                    requesterAutoJoinOnPeerAcceptanceEnabled: true,
+                    localTransmit: .idle,
+                    peerSignalIsTransmitting: false,
+                    systemSessionState: .none,
+                    systemSessionMatchesContact: false,
+                    mediaState: .idle,
+                    localRelayTransportReady: true,
+                    directMediaPathActive: false,
+                    incomingWakeActivationState: nil,
+                    localJoinFailure: nil
+                )
+            )
+        ).state
+
+        #expect(!refreshed.requesterAutoJoinOnPeerAcceptanceArmed)
+        #expect(!refreshed.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest)
+        #expect(refreshed.selectedPeerState.phase == .idle)
+        #expect(refreshed.selectedPeerState.statusMessage == "Blake is online")
     }
 
     @Test func selectedPeerReducerSkipsPeerReadyFlashWhileRequesterAutoJoinIsArmed() {
@@ -26003,6 +26156,49 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func signalingJoinDriftReassertsRequestedBackendChannelForActiveLocalSession() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: channelUUID,
+            backendChannelId: "channel",
+            remoteUserId: "peer-user"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(
+                    status: .requested,
+                    canTransmit: false,
+                    selfJoined: false,
+                    peerJoined: false,
+                    peerDeviceConnected: false
+                )
+            )
+        )
+
+        #expect(viewModel.shouldReassertBackendJoinAfterSignalingDrift(for: contactID))
+    }
+
+    @MainActor
     @Test func signalingPrefixedJoinDriftNoticeReassertsBackendJoinForActiveLocalSession() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -30649,6 +30845,45 @@ struct SimulatorScenarioPlannerTests {
         }
     }
 
+    @Test func scenarioBackendExpectationAcceptsReadyWhenPhaseHasProgressed() {
+        #expect(
+            simulatorScenarioBackendStatusMatches(
+                expected: "waiting-for-peer",
+                actual: "ready",
+                selectedPhaseMatch: .progressed
+            )
+        )
+        #expect(
+            simulatorScenarioBackendReadinessMatches(
+                expected: "waiting-for-self",
+                actual: "ready",
+                selectedPhaseMatch: .progressed
+            )
+        )
+        #expect(
+            simulatorScenarioBackendCanTransmitMatches(
+                expected: false,
+                actual: true,
+                selectedPhaseMatch: .progressed
+            )
+        )
+
+        #expect(
+            !simulatorScenarioBackendReadinessMatches(
+                expected: "waiting-for-self",
+                actual: "ready",
+                selectedPhaseMatch: .exact
+            )
+        )
+        #expect(
+            !simulatorScenarioBackendCanTransmitMatches(
+                expected: false,
+                actual: true,
+                selectedPhaseMatch: .exact
+            )
+        )
+    }
+
     @Test func scenarioSourceSupportsRuntimeScenarioFile() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("turbo-scenario-source-\(UUID().uuidString)", isDirectory: true)
@@ -32173,10 +32408,12 @@ private func scenarioExpectationsMatch(
         guard let participant = viewModels[actor] else { return false }
         let projection = participant.stateMachineProjection
 
-        if let selected = expected.selectedExpectation,
-           !scenarioSelectedExpectationMatches(selected, projection: projection)
-        {
-            return false
+        var selectedPhaseMatch: SimulatorScenarioPhaseMatch = .exact
+        if let selected = expected.selectedExpectation {
+            guard let phaseMatch = scenarioSelectedExpectationMatches(selected, projection: projection) else {
+                return false
+            }
+            selectedPhaseMatch = phaseMatch
         }
 
         if let contacts = expected.contacts,
@@ -32186,7 +32423,11 @@ private func scenarioExpectationsMatch(
         }
 
         if let backend = expected.backend,
-           !scenarioBackendExpectationMatches(backend, projection: projection)
+           !scenarioBackendExpectationMatches(
+               backend,
+               projection: projection,
+               selectedPhaseMatch: selectedPhaseMatch
+           )
         {
             return false
         }
@@ -32198,47 +32439,47 @@ private func scenarioExpectationsMatch(
 private func scenarioSelectedExpectationMatches(
     _ expected: SimulatorScenarioSelectedExpectation,
     projection: StateMachineProjection
-) -> Bool {
+) -> SimulatorScenarioPhaseMatch? {
     let selected = projection.selectedSession
 
     if let handle = expected.handle,
        selected.selectedHandle != handle {
-        return false
+        return nil
     }
 
     var phaseMatch: SimulatorScenarioPhaseMatch = .exact
     if let phase = expected.phase {
         guard let matched = simulatorScenarioPhaseMatch(expected: phase, actual: selected.selectedPhase) else {
-            return false
+            return nil
         }
         phaseMatch = matched
     }
 
     if let status = expected.status,
        selected.statusMessage != status {
-        return false
+        return nil
     }
 
     if let isJoined = expected.isJoined,
        !(phaseMatch == .progressed && isJoined == false) && selected.isJoined != isJoined {
-        return false
+        return nil
     }
 
     if let isTransmitting = expected.isTransmitting,
        !(phaseMatch == .progressed && isTransmitting == false) && selected.isTransmitting != isTransmitting {
-        return false
+        return nil
     }
 
     if let canTransmitNow = expected.canTransmitNow,
        !(phaseMatch == .progressed && canTransmitNow == false) && selected.canTransmitNow != canTransmitNow {
-        return false
+        return nil
     }
     if let pttTokenRegistrationKind = expected.pttTokenRegistrationKind,
        selected.pttTokenRegistrationKind != pttTokenRegistrationKind {
-        return false
+        return nil
     }
 
-    return true
+    return phaseMatch
 }
 
 private func scenarioContactExpectationsMatch(
@@ -32285,16 +32526,25 @@ private func scenarioContactExpectationsMatch(
 
 private func scenarioBackendExpectationMatches(
     _ expected: SimulatorScenarioBackendExpectation,
-    projection: StateMachineProjection
+    projection: StateMachineProjection,
+    selectedPhaseMatch: SimulatorScenarioPhaseMatch = .exact
 ) -> Bool {
     let selected = projection.selectedSession
 
     if let channelStatus = expected.channelStatus,
-       selected.backendChannelStatus != channelStatus {
+       !simulatorScenarioBackendStatusMatches(
+           expected: channelStatus,
+           actual: selected.backendChannelStatus,
+           selectedPhaseMatch: selectedPhaseMatch
+       ) {
         return false
     }
     if let readiness = expected.readiness,
-       selected.backendReadiness != readiness {
+       !simulatorScenarioBackendReadinessMatches(
+           expected: readiness,
+           actual: selected.backendReadiness,
+           selectedPhaseMatch: selectedPhaseMatch
+       ) {
         return false
     }
     if let remoteAudioReadiness = expected.remoteAudioReadiness,
@@ -32326,7 +32576,11 @@ private func scenarioBackendExpectationMatches(
         return false
     }
     if let canTransmit = expected.canTransmit,
-       selected.backendCanTransmit != canTransmit {
+       !simulatorScenarioBackendCanTransmitMatches(
+           expected: canTransmit,
+           actual: selected.backendCanTransmit,
+           selectedPhaseMatch: selectedPhaseMatch
+       ) {
         return false
     }
     if let webSocketConnected = expected.webSocketConnected,
@@ -32335,6 +32589,51 @@ private func scenarioBackendExpectationMatches(
     }
 
     return true
+}
+
+private func simulatorScenarioBackendStatusMatches(
+    expected: String,
+    actual: String?,
+    selectedPhaseMatch: SimulatorScenarioPhaseMatch
+) -> Bool {
+    guard let actual else { return false }
+    if actual == expected { return true }
+    guard selectedPhaseMatch == .progressed else { return false }
+
+    switch (expected, actual) {
+    case ("waiting-for-peer", "ready"):
+        return true
+    default:
+        return false
+    }
+}
+
+private func simulatorScenarioBackendReadinessMatches(
+    expected: String,
+    actual: String?,
+    selectedPhaseMatch: SimulatorScenarioPhaseMatch
+) -> Bool {
+    guard let actual else { return false }
+    if actual == expected { return true }
+    guard selectedPhaseMatch == .progressed else { return false }
+
+    switch (expected, actual) {
+    case ("waiting-for-self", "ready"),
+         ("waiting-for-peer", "ready"):
+        return true
+    default:
+        return false
+    }
+}
+
+private func simulatorScenarioBackendCanTransmitMatches(
+    expected: Bool,
+    actual: Bool?,
+    selectedPhaseMatch: SimulatorScenarioPhaseMatch
+) -> Bool {
+    guard let actual else { return false }
+    if actual == expected { return true }
+    return selectedPhaseMatch == .progressed && expected == false && actual == true
 }
 
 private func simulatorScenarioPhaseMatch<Phase: CustomStringConvertible>(

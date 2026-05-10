@@ -235,4 +235,26 @@ simulator-fuzz-shrink artifact_dir:
 swift-test-target name:
   python3 scripts/run_targeted_swift_tests.py --name "{{name}}"
 
+reliability-gate-regressions:
+  python3 -m py_compile scripts/run_simulator_scenarios.py scripts/run_targeted_swift_tests.py scripts/merged_diagnostics.py
+  just swift-test-target signalingJoinDriftReassertsRequestedBackendChannelForActiveLocalSession
+  just swift-test-target selectedPeerReducerConnectionTimeoutClearsRequesterAutoJoinIdleGap
+  just swift-test-target selectedConnectionTimeoutDoesNotInterruptInFlightBackendConnect
+  just swift-test-target scenarioBackendExpectationAcceptsReadyWhenPhaseHasProgressed
+
+reliability-gate-smoke:
+  just reliability-gate-regressions
+  just simulator-scenario "presence_online_projection,request_accept_ready_refresh_stability"
+  just simulator-scenario-merge-strict
+
+reliability-gate-full:
+  just reliability-gate-regressions
+  just simulator-scenario-suite
+  just simulator-scenario-merge-strict
+
+reliability-gate-local:
+  just reliability-gate-regressions
+  just simulator-scenario-suite-local
+  just simulator-scenario-merge-local-strict
+
 backend-check: venv prod-probe

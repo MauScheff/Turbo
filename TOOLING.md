@@ -115,6 +115,10 @@ Important operational commands:
 - `just simulator-scenario-merge-local`
 - `just simulator-scenario-merge-local-strict`
 - `just swift-test-target <name>`
+- `just reliability-gate-regressions`
+- `just reliability-gate-smoke`
+- `just reliability-gate-full`
+- `just reliability-gate-local`
 - `direnv exec . just ptt-push-target <channel_id> <backend> <sender>`
 - `direnv exec . just ptt-apns-worker`
 - `direnv exec . just ptt-apns-bridge`
@@ -164,9 +168,16 @@ For distributed app/backend flows that do not require a physical device, prefer 
 
 `just simulator-scenario-suite-local` is the deterministic local websocket-backed catalog run. It assumes `just serve-local` is already running on `http://localhost:8090/s/turbo`.
 
-The simulator scenario commands are backed by `scripts/run_simulator_scenarios.py`, which owns the temporary runtime config, serializes scenario runs with a repo-local lock, shares the `/tmp/turbo-simulator-test.lock` simulator lane with targeted Swift tests, and retries transient XCTest bootstrap failures. Prefer the `just` recipes over direct `xcodebuild` for the scenario loop.
+The simulator scenario commands are backed by `scripts/run_simulator_scenarios.py`, which owns the temporary runtime config, serializes scenario runs with a repo-local lock, shares the `/tmp/turbo-simulator-test.lock` simulator lane with targeted Swift tests, and retries transient XCTest bootstrap failures. Full catalog runs also allow one catalog-level retry per scenario to absorb hosted timing noise; focused single-scenario runs stay strict. Prefer the `just` recipes over direct `xcodebuild` for the scenario loop.
 
 `just swift-test-target <name>` is the supported targeted Swift Testing loop. It runs the full non-UI bundle and fails if the requested test name never appears in the output, which prevents the false-green "0 tests executed" cases that can happen with direct `-only-testing` invocations against Swift Testing tests in this repo.
+
+Use the reliability gates when you need a named confidence level:
+
+- `just reliability-gate-regressions` runs the focused Swift regressions and Python wrapper syntax checks.
+- `just reliability-gate-smoke` runs those regressions, the hosted smoke scenarios, and strict merged diagnostics.
+- `just reliability-gate-full` runs those regressions, the full hosted scenario catalog, and strict merged diagnostics.
+- `just reliability-gate-local` runs those regressions, the full local scenario catalog, and strict local merged diagnostics. Start `just serve-local` first.
 
 This is the preferred way to iterate and prove:
 
