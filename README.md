@@ -22,6 +22,7 @@ The app side currently proves out Apple's PushToTalk framework integration. The 
 - `INVARIANTS.md`: invariant rule catalog and diagnostics-backed regression guidance.
 - `SELF_HEALING.md`: recoverable bad-state taxonomy, repair rules, and proof checklist.
 - `RELIABILITY_GOALS.md`: north-star product and architecture goals for infrastructure-grade reliability.
+- `RELIABILITY_PLAN.md`: staged execution plan for making the system reliable by design.
 - `PRODUCTION_TELEMETRY.md`: production telemetry architecture, deployment, alerting, and query workflow.
 - `journal/`: timestamped engineering notes for design lessons, debugging conclusions, and changelog-style session records.
 - `.agents/`: supporting Unison language and workflow notes.
@@ -60,6 +61,8 @@ Use these docs as the primary authority for their respective concerns:
   - how typed invariant violations become bounded, idempotent app/backend repair actions
 - `RELIABILITY_GOALS.md`
   - product-level reliability guarantees, authority boundaries, control-plane/media reliability strategy, proof loops, and CTO-level roadmap
+- `RELIABILITY_PLAN.md`
+  - staged reliability execution plan: invariant registry, structured diagnostics, scenario assertions, ADT hardening, gates, backend contract parity, self-healing, and production replay
 - `PRODUCTION_TELEMETRY.md`
   - production telemetry architecture, worker/backend setup, and operator query workflow
 - `handoffs/README.md`

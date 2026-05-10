@@ -14366,11 +14366,12 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func systemTransmitBeginWhileWakeReadyStartsBackendRequest() async {
+    @Test func backgroundSystemTransmitBeginWhileWakeReadyStartsBackendRequest() async {
         let pttClient = RecordingPTTSystemClient()
         let viewModel = PTTViewModel(pttSystemClient: pttClient)
         let contactID = UUID()
         let channelUUID = UUID()
+        viewModel.applicationStateOverride = .background
         viewModel.transmitCoordinator.effectHandler = nil
         viewModel.applyAuthenticatedBackendSession(
             client: TurboBackendClient(config: makeUnreachableBackendConfig()),
@@ -21287,6 +21288,52 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func backgroundReceiverNotReadyRefreshUsesWakeCapableReason() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "self-user", mode: "cloud")
+        viewModel.applicationStateOverride = .background
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+
+        #expect(!viewModel.desiredLocalReceiverAudioReadiness(for: contactID))
+
+        let telemetryIntent = viewModel.receiverAudioReadinessIntent(
+            for: contactID,
+            reason: "telemetry-refresh"
+        )
+        let channelRefreshIntent = viewModel.receiverAudioReadinessIntent(
+            for: contactID,
+            reason: "channel-refresh"
+        )
+
+        #expect(telemetryIntent?.isReady == false)
+        #expect(telemetryIntent?.reason == "app-background-media-closed")
+        #expect(channelRefreshIntent?.isReady == false)
+        #expect(channelRefreshIntent?.reason == "app-background-media-closed")
+    }
+
+    @MainActor
     @Test func backgroundTransitionPreservesDirectQuicOwnedByPendingWake() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -22288,11 +22335,55 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func systemTransmitBeginWithoutLocalPressStartsSystemOriginatedTransmitRequest() async {
+    @Test func foregroundSystemTransmitBeginWithoutLocalPressIsRejected() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
 
+        viewModel.applicationStateOverride = .active
+        viewModel.applyAuthenticatedBackendSession(
+            client: TurboBackendClient(config: makeUnreachableBackendConfig()),
+            userID: "self-user",
+            mode: "cloud"
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-avery",
+                remoteUserId: "peer-user"
+            )
+        ]
+        await viewModel.pttCoordinator.handle(
+            .didJoinChannel(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "test"
+            )
+        )
+        viewModel.syncPTTState()
+
+        viewModel.handleDidBeginTransmitting(channelUUID, source: "system-ui")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(viewModel.isTransmitting == false)
+        #expect(viewModel.pttCoordinator.state.isTransmitting == false)
+        #expect(viewModel.transmitRuntime.isSystemTransmitting == false)
+        #expect(viewModel.transmitRuntime.isPressingTalk == false)
+        #expect(viewModel.transmitCoordinator.state.phase == .idle)
+        #expect(viewModel.diagnosticsTranscript.contains("[ptt.foreground_system_begin_without_local_press]"))
+    }
+
+    @MainActor
+    @Test func backgroundSystemTransmitBeginWithoutLocalPressStartsSystemOriginatedTransmitRequest() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+
+        viewModel.applicationStateOverride = .background
         viewModel.transmitCoordinator.effectHandler = nil
         viewModel.applyAuthenticatedBackendSession(
             client: TurboBackendClient(config: makeUnreachableBackendConfig()),

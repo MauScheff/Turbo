@@ -10,6 +10,9 @@ not a claim that software can literally be 100% reliable across Apple
 PushToTalk, APNs, carrier networks, radios, batteries, permissions, and user
 behavior.
 
+For the step-by-step execution roadmap, use
+[`RELIABILITY_PLAN.md`](/Users/mau/Development/Turbo/RELIABILITY_PLAN.md).
+
 The practical goal is:
 
 > Every impossible state should be made unrepresentable, detected at the
@@ -274,6 +277,7 @@ specific reliability limit.
 
 ## Related Documents
 
+- [`RELIABILITY_PLAN.md`](/Users/mau/Development/Turbo/RELIABILITY_PLAN.md)
 - [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md)
 - [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md)
 - [`SELF_HEALING.md`](/Users/mau/Development/Turbo/SELF_HEALING.md)

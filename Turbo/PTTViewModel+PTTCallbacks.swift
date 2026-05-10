@@ -828,6 +828,13 @@ extension PTTViewModel {
             ) {
                 return
             }
+            if await rejectForegroundSystemTransmitBeginWithoutLocalIntentIfNeeded(
+                channelUUID: channelUUID,
+                source: source,
+                callbackTarget: callbackTarget
+            ) {
+                return
+            }
             transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
             transmitRuntime.noteSystemTransmitBegan()
             systemTransmitBeginRecoveryAttemptsByChannelUUID.removeValue(forKey: channelUUID)
@@ -888,6 +895,56 @@ extension PTTViewModel {
             )
             captureDiagnosticsState("ptt-callback:transmit-began")
         }
+    }
+
+    func rejectForegroundSystemTransmitBeginWithoutLocalIntentIfNeeded(
+        channelUUID: UUID,
+        source: String,
+        callbackTarget: TransmitTarget?
+    ) async -> Bool {
+        guard callbackTarget == nil else { return false }
+        guard currentApplicationState() == .active else { return false }
+        guard !hasPendingTransmitLifecycle(for: channelUUID) else { return false }
+        guard !transmitRuntime.isPressingTalk,
+              !transmitCoordinator.state.isPressingTalk,
+              !hasPendingBeginOrActiveTransmit else {
+            return false
+        }
+
+        let contactID = contactId(for: channelUUID)
+        diagnostics.recordInvariantViolation(
+            invariantID: "ptt.foreground_system_begin_without_local_press",
+            scope: .local,
+            message: "foreground system-originated transmit begin arrived without a local hold or pending transmit lifecycle",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "contactId": contactID?.uuidString ?? "none",
+                "source": source,
+                "applicationState": String(describing: currentApplicationState()),
+                "pttServiceStatus": lastReportedPTTServiceStatus.map(String.init(describing:)) ?? "none",
+                "pttServiceStatusReason": lastReportedPTTServiceStatusReason ?? "none",
+                "pttDescriptorName": lastReportedPTTDescriptorName ?? "none",
+                "pttDescriptorReason": lastReportedPTTDescriptorReason ?? "none",
+                "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
+            ]
+        )
+        diagnostics.record(
+            .pushToTalk,
+            message: "Rejected foreground system transmit begin without local hold",
+            metadata: [
+                "channelUUID": channelUUID.uuidString,
+                "contactId": contactID?.uuidString ?? "none",
+                "source": source,
+            ]
+        )
+        transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
+        transmitRuntime.markPressEnded()
+        try? pttSystemClient.stopTransmitting(channelUUID: channelUUID)
+        await transmitCoordinator.handle(.systemEnded)
+        syncTransmitState()
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("ptt-callback:transmit-began-rejected-foreground-unowned")
+        return true
     }
 
     private func rejectSystemTransmitBeginIfPeerIsActive(

@@ -21,18 +21,15 @@ extension PTTViewModel {
             return nil
         }
 
+        let applicationState = currentApplicationState()
         let isBackgroundMediaClosure = reason == "app-background-media-closed"
         let isReady = isBackgroundMediaClosure
             ? false
             : desiredLocalReceiverAudioReadiness(for: contactID)
         let effectiveReason: String = {
             guard !isReady else { return reason }
-            let appState = currentApplicationState()
-            guard appState != .active else { return reason }
-            if reason == "app-background-media-closed" || reason.hasPrefix("media-") {
-                return "app-background-media-closed"
-            }
-            return reason
+            guard applicationState != .active else { return reason }
+            return "app-background-media-closed"
         }()
 
         return ReceiverAudioReadinessIntent(
@@ -84,6 +81,22 @@ extension PTTViewModel {
                 .receiverAudioReadinessContextUnavailable(contactID: intent.contactID)
             )
             return
+        }
+
+        if !intent.isReady,
+           intent.reason != "app-background-media-closed",
+           currentApplicationState() != .active {
+            diagnostics.recordInvariantViolation(
+                invariantID: "receiver.background_not_ready_without_wake_reason",
+                scope: .local,
+                message: "background receiver-not-ready would be interpreted as ordinary waiting instead of wake-capable",
+                metadata: [
+                    "contactId": intent.contactID.uuidString,
+                    "handle": intent.contactHandle,
+                    "reason": intent.reason,
+                    "applicationState": String(describing: currentApplicationState()),
+                ]
+            )
         }
 
         do {

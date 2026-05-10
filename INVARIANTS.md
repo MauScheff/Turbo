@@ -348,6 +348,8 @@ Current first-pass IDs in the repo:
 - `selected.stale_membership_peer_ready_without_session`
 - `selected.local_join_failure_present`
 - `selected.online_contact_projected_offline`
+- `receiver.background_not_ready_without_wake_reason`
+- `ptt.foreground_system_begin_without_local_press`
 - `pair.backend_ready_ui_not_live`
 - `pair.symmetric_peer_ready_without_session`
 - `channel.stale_membership_on_session_connect`
