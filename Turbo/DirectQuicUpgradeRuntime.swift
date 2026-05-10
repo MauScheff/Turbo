@@ -84,14 +84,14 @@ enum DirectQuicRetryBackoffPolicy {
 
     static func milliseconds(
         baseMilliseconds: Int,
-        reason: String,
+        category: DirectQuicFailureCategory,
         priorFailureCount: Int = 0
     ) -> Int {
         guard baseMilliseconds > 0 else { return 0 }
 
         let base: Int
         let maximum: Int
-        switch category(for: reason) {
+        switch category {
         case .connectivity, .unknown:
             base = baseMilliseconds
             maximum = maxConnectivityBackoffMilliseconds

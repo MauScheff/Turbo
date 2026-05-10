@@ -32,6 +32,12 @@
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>BeepBeep uses the camera to scan QR codes for adding contacts.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>INStartCallIntent</string>
+	</array>
 	<key>TurboBackendBaseURL</key>
 	<string>https://beepbeep.to</string>
 	<key>TurboDevUserHandle</key>

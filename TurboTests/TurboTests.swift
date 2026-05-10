@@ -2489,33 +2489,33 @@ struct TurboTests {
         #expect(
             DirectQuicRetryBackoffPolicy.milliseconds(
                 baseMilliseconds: 15_000,
-                reason: "promotion-timeout",
+                category: .connectivity,
                 priorFailureCount: 1
             ) == 30_000
         )
         #expect(
             DirectQuicRetryBackoffPolicy.milliseconds(
                 baseMilliseconds: 15_000,
-                reason: "promotion-timeout",
+                category: .connectivity,
                 priorFailureCount: 8
             ) == 300_000
         )
         #expect(
             DirectQuicRetryBackoffPolicy.milliseconds(
                 baseMilliseconds: 15_000,
-                reason: "promotion-timeout"
+                category: .connectivity
             ) == 15_000
         )
         #expect(
             DirectQuicRetryBackoffPolicy.milliseconds(
                 baseMilliseconds: 15_000,
-                reason: "answer-send-failed"
+                category: .signaling
             ) == 30_000
         )
         #expect(
             DirectQuicRetryBackoffPolicy.milliseconds(
                 baseMilliseconds: 15_000,
-                reason: "peer-certificate-fingerprint-mismatch"
+                category: .security
             ) == 60_000
         )
     }
@@ -5199,7 +5199,7 @@ struct TurboTests {
         let channelRefreshPublish = capturedEffects.compactMap { effect -> ReceiverAudioReadinessIntent? in
             guard case .publishReceiverAudioReadiness(let intent) = effect,
                   intent.contactID == contactID,
-                  intent.reason == "channel-refresh" else {
+                  intent.reason == .channelRefresh else {
                 return nil
             }
             return intent
@@ -10933,6 +10933,47 @@ struct TurboTests {
         #expect(renew.transmitId == "transmit-1")
     }
 
+    @MainActor
+    @Test func backendJoinPlanUsesExistingLocalMembershipAsJoinSession() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let request = BackendJoinRequest(
+            contactID: contactID,
+            handle: "@blake",
+            intent: .requestConnection,
+            relationship: .none,
+            existingRemoteUserID: "peer",
+            existingBackendChannelID: "channel",
+            incomingInvite: nil,
+            outgoingInvite: nil,
+            requestCooldownRemaining: nil,
+            usesLocalHTTPBackend: false
+        )
+        let channel = ChannelReadinessSnapshot(
+            channelState: makeChannelState(
+                status: .waitingForPeer,
+                canTransmit: false,
+                selfJoined: true,
+                peerJoined: true,
+                peerDeviceConnected: true
+            ),
+            readiness: makeChannelReadiness(
+                status: .waitingForSelf,
+                selfHasActiveDevice: false,
+                peerHasActiveDevice: true,
+                remoteAudioReadiness: .wakeCapable
+            )
+        )
+
+        let plan = viewModel.backendJoinExecutionPlan(
+            request: request,
+            createdInvite: nil,
+            currentChannel: channel
+        )
+
+        #expect(plan == .joinSession)
+    }
+
     @Test func channelReadinessDecodeFailsWithoutNestedContract() {
         let data = Data(
             """
@@ -10952,6 +10993,107 @@ struct TurboTests {
             _ = try JSONDecoder().decode(TurboChannelReadinessResponse.self, from: data)
             Issue.record("Expected TurboChannelReadinessResponse decode to fail without readiness contract")
         } catch {
+        }
+    }
+
+    @Test func backendChannelContractManifestExamplesDecodeAndCoverVariants() throws {
+        let manifest = try backendContractManifest()
+        let decoder = JSONDecoder()
+
+        let expectedRequestRelationshipKinds = try backendContractVariants(manifest, "requestRelationship")
+        let expectedMembershipKinds = try backendContractVariants(manifest, "membership")
+        let expectedConversationStatusKinds = try backendContractVariants(manifest, "conversationStatus")
+        let expectedReadinessKinds = try backendContractVariants(manifest, "readiness")
+        let expectedAudioReadinessKinds = try backendContractVariants(manifest, "audioReadiness")
+        let expectedWakeReadinessKinds = try backendContractVariants(manifest, "wakeReadiness")
+
+        var requestRelationshipKinds: Set<String> = []
+        var membershipKinds: Set<String> = []
+        var conversationStatusKinds: Set<String> = []
+        for example in try backendContractExamples(manifest, "channelState") {
+            let payload = try backendContractDictionary(example["payload"], path: "channelState.payload")
+            let decoded = try decoder.decode(
+                TurboChannelStateResponse.self,
+                from: try backendContractPayloadData(payload)
+            )
+            #expect(decoded.channelId == payload["channelId"] as? String)
+
+            let relationship = try backendContractDictionary(
+                payload["requestRelationship"],
+                path: "channelState.requestRelationship"
+            )
+            requestRelationshipKinds.insert(try backendContractString(relationship["kind"], path: "requestRelationship.kind"))
+
+            let membership = try backendContractDictionary(payload["membership"], path: "channelState.membership")
+            membershipKinds.insert(try backendContractString(membership["kind"], path: "membership.kind"))
+
+            let conversationStatus = try backendContractDictionary(
+                payload["conversationStatus"],
+                path: "channelState.conversationStatus"
+            )
+            conversationStatusKinds.insert(try backendContractString(conversationStatus["kind"], path: "conversationStatus.kind"))
+        }
+
+        #expect(requestRelationshipKinds == expectedRequestRelationshipKinds)
+        #expect(membershipKinds == expectedMembershipKinds)
+        #expect(conversationStatusKinds == expectedConversationStatusKinds)
+
+        var readinessKinds: Set<String> = []
+        var audioReadinessKinds: Set<String> = []
+        var wakeReadinessKinds: Set<String> = []
+        for example in try backendContractExamples(manifest, "channelReadiness") {
+            let payload = try backendContractDictionary(example["payload"], path: "channelReadiness.payload")
+            let decoded = try decoder.decode(
+                TurboChannelReadinessResponse.self,
+                from: try backendContractPayloadData(payload)
+            )
+            #expect(decoded.channelId == payload["channelId"] as? String)
+
+            let readiness = try backendContractDictionary(payload["readiness"], path: "channelReadiness.readiness")
+            readinessKinds.insert(try backendContractString(readiness["kind"], path: "readiness.kind"))
+
+            let audioReadiness = try backendContractDictionary(
+                payload["audioReadiness"],
+                path: "channelReadiness.audioReadiness"
+            )
+            for side in ["self", "peer"] {
+                let sidePayload = try backendContractDictionary(audioReadiness[side], path: "audioReadiness.\(side)")
+                audioReadinessKinds.insert(try backendContractString(sidePayload["kind"], path: "audioReadiness.\(side).kind"))
+            }
+
+            let wakeReadiness = try backendContractDictionary(
+                payload["wakeReadiness"],
+                path: "channelReadiness.wakeReadiness"
+            )
+            for side in ["self", "peer"] {
+                let sidePayload = try backendContractDictionary(wakeReadiness[side], path: "wakeReadiness.\(side)")
+                wakeReadinessKinds.insert(try backendContractString(sidePayload["kind"], path: "wakeReadiness.\(side).kind"))
+            }
+        }
+
+        #expect(readinessKinds == expectedReadinessKinds)
+        #expect(audioReadinessKinds == expectedAudioReadinessKinds)
+        #expect(wakeReadinessKinds == expectedWakeReadinessKinds)
+
+        for example in try backendContractInvalidExamples(manifest) {
+            let name = try backendContractString(example["name"], path: "invalidExamples.name")
+            let target = try backendContractString(example["target"], path: "\(name).target")
+            let payload = try backendContractDictionary(example["payload"], path: "\(name).payload")
+            let payloadData = try backendContractPayloadData(payload)
+            do {
+                switch target {
+                case "channelState":
+                    _ = try decoder.decode(TurboChannelStateResponse.self, from: payloadData)
+                case "channelReadiness":
+                    _ = try decoder.decode(TurboChannelReadinessResponse.self, from: payloadData)
+                default:
+                    throw BackendContractManifestError.missing("unsupported invalid example target \(target)")
+                }
+                Issue.record("Expected backend contract invalid example \(name) to fail decoding")
+            } catch let manifestError as BackendContractManifestError {
+                throw manifestError
+            } catch {
+            }
         }
     }
 
@@ -11332,6 +11474,40 @@ struct TurboTests {
         #expect(transition.state.phase == .stopping(contactID: request.contactID))
         #expect(transition.state.isPressingTalk == false)
         #expect(transition.effects.isEmpty)
+    }
+
+    @Test func transmitReducerIgnoresStaleStopCompletionForNewerActiveTransmit() {
+        let contactID = UUID()
+        let staleTarget = TransmitTarget(
+            contactID: contactID,
+            userID: "peer-user",
+            deviceID: "peer-device",
+            channelID: "channel-123",
+            transmitID: "transmit-1"
+        )
+        let currentTarget = TransmitTarget(
+            contactID: contactID,
+            userID: "peer-user",
+            deviceID: "peer-device",
+            channelID: "channel-123",
+            transmitID: "transmit-2"
+        )
+        let activeState = TransmitSessionState(
+            phase: .active(contactID: contactID),
+            isPressingTalk: true,
+            pendingRequest: nil,
+            activeTarget: currentTarget,
+            lastError: nil
+        )
+
+        let transition = TransmitReducer.reduce(
+            state: activeState,
+            event: .stopCompleted(staleTarget)
+        )
+
+        #expect(transition.state == activeState)
+        #expect(transition.effects.isEmpty)
+        #expect(transition.invariantViolationsEmitted == ["transmit.stale_end_overrides_newer_epoch"])
     }
 
     @Test func transmitRuntimePreservesLatchedTargetWhilePressRemainsActive() {
@@ -12579,7 +12755,7 @@ struct TurboTests {
             trigger: "test-pre-backend"
         )
         viewModel.pttCoordinator.send(
-            .didBeginTransmitting(channelUUID: channelUUID, source: "test")
+            .didBeginTransmitting(channelUUID: channelUUID, origin: .foregroundAppPress)
         )
         viewModel.syncPTTState()
 
@@ -16953,7 +17129,7 @@ struct TurboTests {
             )
         )
         viewModel.pttCoordinator.send(
-            .didBeginTransmitting(channelUUID: channelUUID, source: "test")
+            .didBeginTransmitting(channelUUID: channelUUID, origin: .foregroundAppPress)
         )
         #expect(
             viewModel.shouldSetSystemRemoteParticipantFromSignalPath(
@@ -16988,7 +17164,7 @@ struct TurboTests {
 
         #expect(viewModel.shouldClearSystemRemoteParticipantFromSignalPath(for: contactID))
         viewModel.pttCoordinator.send(
-            .didBeginTransmitting(channelUUID: channelUUID, source: "test")
+            .didBeginTransmitting(channelUUID: channelUUID, origin: .foregroundAppPress)
         )
         #expect(viewModel.shouldClearSystemRemoteParticipantFromSignalPath(for: contactID) == false)
     }
@@ -20693,7 +20869,7 @@ struct TurboTests {
             .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
         )
         viewModel.pttCoordinator.send(
-            .didBeginTransmitting(channelUUID: channelUUID, source: "system-ui")
+            .didBeginTransmitting(channelUUID: channelUUID, origin: .foregroundAppPress)
         )
         viewModel.syncPTTState()
         viewModel.backendSyncCoordinator.send(
@@ -21130,7 +21306,7 @@ struct TurboTests {
                 guard case .publishReceiverAudioReadiness(let intent) = $0 else { return false }
                 return intent.contactID == contactID
                     && intent.isReady == false
-                    && intent.reason == "app-background-media-closed"
+                    && intent.reason == .appBackgroundMediaClosed
             }
         )
         #expect(viewModel.diagnosticsTranscript.contains("Retiring Direct QUIC media path"))
@@ -21280,11 +21456,11 @@ struct TurboTests {
 
         let intent = viewModel.receiverAudioReadinessIntent(
             for: contactID,
-            reason: "app-background-media-closed"
+            reason: .appBackgroundMediaClosed
         )
 
         #expect(intent?.isReady == false)
-        #expect(intent?.reason == "app-background-media-closed")
+        #expect(intent?.reason == .appBackgroundMediaClosed)
     }
 
     @MainActor
@@ -21320,17 +21496,17 @@ struct TurboTests {
 
         let telemetryIntent = viewModel.receiverAudioReadinessIntent(
             for: contactID,
-            reason: "telemetry-refresh"
+            reason: .telemetryRefresh
         )
         let channelRefreshIntent = viewModel.receiverAudioReadinessIntent(
             for: contactID,
-            reason: "channel-refresh"
+            reason: .channelRefresh
         )
 
         #expect(telemetryIntent?.isReady == false)
-        #expect(telemetryIntent?.reason == "app-background-media-closed")
+        #expect(telemetryIntent?.reason == .appBackgroundMediaClosed)
         #expect(channelRefreshIntent?.isReady == false)
-        #expect(channelRefreshIntent?.reason == "app-background-media-closed")
+        #expect(channelRefreshIntent?.reason == .appBackgroundMediaClosed)
     }
 
     @MainActor
@@ -22020,7 +22196,7 @@ struct TurboTests {
         await viewModel.pttCoordinator.handle(
             .didBeginTransmitting(
                 channelUUID: channelUUID,
-                source: "test"
+                origin: .foregroundAppPress
             )
         )
         viewModel.syncPTTState()
@@ -22070,7 +22246,7 @@ struct TurboTests {
         await viewModel.pttCoordinator.handle(
             .didBeginTransmitting(
                 channelUUID: channelUUID,
-                source: "test"
+                origin: .foregroundAppPress
             )
         )
         await viewModel.transmitCoordinator.handle(
@@ -22378,6 +22554,53 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func systemTransmitEndCallbackClearsStuckPTTStateAfterRuntimeLifecycleAlreadyCleared() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-avery",
+                remoteUserId: "peer-user"
+            )
+        ]
+        await viewModel.pttCoordinator.handle(
+            .didJoinChannel(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "test"
+            )
+        )
+        await viewModel.pttCoordinator.handle(
+            .didBeginTransmitting(
+                channelUUID: channelUUID,
+                origin: .foregroundAppPress
+            )
+        )
+        viewModel.syncPTTState()
+
+        #expect(viewModel.pttCoordinator.state.isTransmitting)
+        #expect(viewModel.transmitRuntime.hasSystemTransmitLifecycle == false)
+
+        viewModel.handleDidEndTransmitting(channelUUID, source: "system-ui")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(viewModel.pttCoordinator.state.isTransmitting == false)
+        #expect(viewModel.isTransmitting == false)
+        #expect(viewModel.diagnostics.entries.contains {
+            $0.message == "System transmit ended"
+                && $0.metadata["runtimeHadSystemLifecycle"] == "false"
+                && $0.metadata["systemWasTransmitting"] == "true"
+        })
+    }
+
+    @MainActor
     @Test func backgroundSystemTransmitBeginWithoutLocalPressStartsSystemOriginatedTransmitRequest() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -22552,7 +22775,7 @@ struct TurboTests {
         await viewModel.pttCoordinator.handle(
             .didBeginTransmitting(
                 channelUUID: channelUUID,
-                source: "system-ui"
+                origin: .foregroundAppPress
             )
         )
         await viewModel.transmitCoordinator.handle(.systemPressRequested(request))
@@ -22626,7 +22849,7 @@ struct TurboTests {
         await viewModel.pttCoordinator.handle(
             .didBeginTransmitting(
                 channelUUID: channelUUID,
-                source: "system-ui"
+                origin: .foregroundAppPress
             )
         )
         await viewModel.transmitCoordinator.handle(.systemPressRequested(request))
@@ -22837,7 +23060,7 @@ struct TurboTests {
             .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
         )
         viewModel.pttCoordinator.send(
-            .didBeginTransmitting(channelUUID: channelUUID, source: "test")
+            .didBeginTransmitting(channelUUID: channelUUID, origin: .foregroundAppPress)
         )
         viewModel.syncPTTState()
 
@@ -23014,7 +23237,7 @@ struct TurboTests {
         await viewModel.pttCoordinator.handle(
             .didBeginTransmitting(
                 channelUUID: joinedChannelUUID,
-                source: "test"
+                origin: .foregroundAppPress
             )
         )
         viewModel.syncPTTState()
@@ -23101,6 +23324,230 @@ struct TurboTests {
         #expect(transition.state.isTransmitting == false)
         #expect(transition.state.lastError == "denied")
         #expect(transition.effects == [.handleSystemTransmitFailure("denied")])
+    }
+
+    @Test func pttSessionStateDoesNotRepresentTransmitWithoutSystemChannel() {
+        let impossibleTransmittingState = PTTSessionState(
+            systemChannelUUID: nil,
+            activeContactID: UUID(),
+            isJoined: false,
+            isTransmitting: true
+        )
+        let impossibleJoinedState = PTTSessionState(
+            systemChannelUUID: nil,
+            activeContactID: UUID(),
+            isJoined: true,
+            isTransmitting: false
+        )
+
+        #expect(impossibleTransmittingState.systemSessionState == .none)
+        #expect(impossibleTransmittingState.isJoined == false)
+        #expect(impossibleTransmittingState.isTransmitting == false)
+        #expect(impossibleJoinedState.systemSessionState == .none)
+        #expect(impossibleJoinedState.isJoined == false)
+        #expect(impossibleJoinedState.isTransmitting == false)
+    }
+
+    @Test func pttReducerExplicitStopReconciliationClearsMatchingStuckTransmission() {
+        let channelUUID = UUID()
+        let contactID = UUID()
+        let transmittingState = PTTSessionState(
+            systemChannelUUID: channelUUID,
+            activeContactID: contactID,
+            isJoined: true,
+            isTransmitting: true
+        )
+
+        let transition = PTTReducer.reduce(
+            state: transmittingState,
+            event: .didEndTransmitting(
+                channelUUID: channelUUID,
+                origin: .explicitStopReconciliation(source: "test-fallback")
+            )
+        )
+
+        #expect(transition.state.isJoined)
+        #expect(transition.state.activeContactID == contactID)
+        #expect(transition.state.systemChannelUUID == channelUUID)
+        #expect(transition.state.isTransmitting == false)
+        #expect(transition.effects.isEmpty)
+    }
+
+    @Test func pttReducerExplicitStopReconciliationIgnoresAlreadyIdleSession() {
+        let channelUUID = UUID()
+        let idleState = PTTSessionState(
+            systemChannelUUID: channelUUID,
+            activeContactID: UUID(),
+            isJoined: true,
+            isTransmitting: false
+        )
+
+        let transition = PTTReducer.reduce(
+            state: idleState,
+            event: .didEndTransmitting(
+                channelUUID: channelUUID,
+                origin: .explicitStopReconciliation(source: "test-fallback")
+            )
+        )
+
+        #expect(transition.state == idleState)
+        #expect(transition.effects.isEmpty)
+    }
+
+    @Test func pttReducerSystemEndCallbackClearsStuckTransmissionWithoutRuntimeLifecycle() {
+        let channelUUID = UUID()
+        let transmittingState = PTTSessionState(
+            systemChannelUUID: channelUUID,
+            activeContactID: UUID(),
+            isJoined: true,
+            isTransmitting: true
+        )
+
+        let transition = PTTReducer.reduce(
+            state: transmittingState,
+            event: .didEndTransmitting(
+                channelUUID: channelUUID,
+                origin: .systemCallback(source: "system-ui")
+            )
+        )
+
+        #expect(transition.state.isTransmitting == false)
+        #expect(transition.effects.isEmpty)
+    }
+
+    @Test func systemTransmitBeginOriginClassifiesForegroundAppPress() {
+        let origin = SystemTransmitBeginOrigin.classify(
+            applicationIsActive: true,
+            hadPendingSystemBegin: true,
+            hasCallbackTarget: false,
+            hasPendingLifecycle: false,
+            runtimeIsPressingTalk: true,
+            coordinatorIsPressingTalk: false,
+            hasPendingBeginOrActiveTransmit: true
+        )
+
+        #expect(origin == .foregroundAppPress)
+        #expect(origin.isSystemOriginated == false)
+    }
+
+    @Test func systemTransmitBeginOriginClassifiesForegroundUnownedCallback() {
+        let origin = SystemTransmitBeginOrigin.classify(
+            applicationIsActive: true,
+            hadPendingSystemBegin: false,
+            hasCallbackTarget: false,
+            hasPendingLifecycle: false,
+            runtimeIsPressingTalk: false,
+            coordinatorIsPressingTalk: false,
+            hasPendingBeginOrActiveTransmit: false
+        )
+
+        #expect(origin == .foregroundSystemCallbackWithoutLocalIntent)
+        #expect(origin.isRejectedForegroundUnownedBegin)
+    }
+
+    @Test func systemTransmitBeginOriginClassifiesBackgroundWakeHandoff() {
+        let origin = SystemTransmitBeginOrigin.classify(
+            applicationIsActive: false,
+            hadPendingSystemBegin: false,
+            hasCallbackTarget: false,
+            hasPendingLifecycle: false,
+            runtimeIsPressingTalk: false,
+            coordinatorIsPressingTalk: false,
+            hasPendingBeginOrActiveTransmit: false
+        )
+
+        #expect(origin == .backgroundWakeHandoff)
+        #expect(origin.isSystemOriginated)
+    }
+
+    @Test func pttReducerDoesNotRepresentTransmitWithoutJoinedSession() {
+        let channelUUID = UUID()
+
+        let transition = PTTReducer.reduce(
+            state: .initial,
+            event: .didBeginTransmitting(channelUUID: channelUUID, origin: .foregroundAppPress)
+        )
+
+        #expect(transition.state.systemSessionState == .none)
+        #expect(transition.state.isJoined == false)
+        #expect(transition.state.isTransmitting == false)
+        #expect(transition.effects.isEmpty)
+    }
+
+    @Test func pttReducerIgnoresTransmitBeginForDifferentSystemChannel() {
+        let joinedChannelUUID = UUID()
+        let otherChannelUUID = UUID()
+        let contactID = UUID()
+        let joinedState = PTTReducer.reduce(
+            state: .initial,
+            event: .didJoinChannel(channelUUID: joinedChannelUUID, contactID: contactID, reason: "test")
+        ).state
+
+        let transition = PTTReducer.reduce(
+            state: joinedState,
+            event: .didBeginTransmitting(channelUUID: otherChannelUUID, origin: .foregroundAppPress)
+        )
+
+        #expect(transition.state.systemSessionState == .active(contactID: contactID, channelUUID: joinedChannelUUID))
+        #expect(transition.state.isJoined)
+        #expect(transition.state.isTransmitting == false)
+        #expect(transition.effects.isEmpty)
+    }
+
+    @Test func pttReducerIgnoresTransmitFailureForDifferentSystemChannel() {
+        let joinedChannelUUID = UUID()
+        let otherChannelUUID = UUID()
+        let contactID = UUID()
+        let joinedState = PTTReducer.reduce(
+            state: .initial,
+            event: .didJoinChannel(channelUUID: joinedChannelUUID, contactID: contactID, reason: "test")
+        ).state
+        let transmittingState = PTTReducer.reduce(
+            state: joinedState,
+            event: .didBeginTransmitting(channelUUID: joinedChannelUUID, origin: .foregroundAppPress)
+        ).state
+
+        let transition = PTTReducer.reduce(
+            state: transmittingState,
+            event: .failedToBeginTransmitting(channelUUID: otherChannelUUID, message: "denied")
+        )
+
+        #expect(transition.state.systemSessionState == .active(contactID: contactID, channelUUID: joinedChannelUUID))
+        #expect(transition.state.isTransmitting)
+        #expect(transition.state.lastError == nil)
+        #expect(transition.effects.isEmpty)
+    }
+
+    @Test func pttReducerFailedJoinDoesNotClearDifferentActiveSystemSession() {
+        let joinedChannelUUID = UUID()
+        let failedChannelUUID = UUID()
+        let contactID = UUID()
+        let joinedState = PTTReducer.reduce(
+            state: .initial,
+            event: .didJoinChannel(channelUUID: joinedChannelUUID, contactID: contactID, reason: "test")
+        ).state
+
+        let transition = PTTReducer.reduce(
+            state: joinedState,
+            event: .failedToJoinChannel(
+                channelUUID: failedChannelUUID,
+                contactID: nil,
+                reason: .other(message: "denied")
+            )
+        )
+
+        #expect(transition.state.systemSessionState == .active(contactID: contactID, channelUUID: joinedChannelUUID))
+        #expect(transition.state.isJoined)
+        #expect(transition.state.lastError == "denied")
+        #expect(
+            transition.state.lastJoinFailure
+                == PTTJoinFailure(
+                    contactID: nil,
+                    channelUUID: failedChannelUUID,
+                    reason: .other(message: "denied")
+                )
+        )
+        #expect(transition.effects.isEmpty)
     }
 
     @Test func pttReducerCapturesJoinFailureReasonAndContact() {
@@ -23224,8 +23671,48 @@ struct TurboTests {
     @Test func receiverAudioReadinessSignalPayloadPreservesLegacyReasonPayloads() throws {
         let payload = ReceiverAudioReadinessSignalPayload.decode(from: "app-background-media-closed")
 
-        #expect(payload.reason == "app-background-media-closed")
+        #expect(payload.reason == .appBackgroundMediaClosed)
         #expect(payload.telemetry == nil)
+    }
+
+    @Test func receiverAudioReadinessReasonRoundTripsTypedWireValues() throws {
+        let reasons: [ReceiverAudioReadinessReason] = [
+            .appBackgroundMediaClosed,
+            .audioRouteChange,
+            .audioRoutePreference("speaker"),
+            .backendReconnect,
+            .backendSignalingRecovery,
+            .channelRefresh,
+            .directQuicReceiverPrewarm,
+            .directQuicTransmitPrepare,
+            .foregroundTalkPrewarm("startup"),
+            .incomingPushForeground,
+            .mediaState(.idle),
+            .mediaState(.preparing),
+            .mediaState(.connected),
+            .mediaState(.closed),
+            .networkChange,
+            .pttSync,
+            .pttWakePostActivationRefresh,
+            .receiverPrewarmRequest,
+            .remoteAudioEndedKeepalive,
+            .telemetryRefresh,
+            .websocketConnected,
+            .legacy("future-reason")
+        ]
+
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        for reason in reasons {
+            let decoded = try decoder.decode(
+                ReceiverAudioReadinessReason.self,
+                from: encoder.encode(reason)
+            )
+
+            #expect(decoded == reason)
+            #expect(ReceiverAudioReadinessReason(wireValue: reason.wireValue) == reason)
+        }
     }
 
     @Test func receiverAudioReadinessSignalPayloadRoundTripsTelemetry() throws {
@@ -23234,7 +23721,7 @@ struct TurboTests {
             connection: .init(interface: .cellular)
         )
         let payload = ReceiverAudioReadinessSignalPayload(
-            reason: "channel-refresh",
+            reason: .channelRefresh,
             telemetry: telemetry
         )
 
@@ -23253,7 +23740,7 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "channel-refresh",
+            reason: .channelRefresh,
             telemetry: nil
         )
 
@@ -23288,7 +23775,7 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "channel-refresh",
+            reason: .channelRefresh,
             telemetry: nil
         )
 
@@ -23329,7 +23816,7 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: false,
-            reason: "app-background-media-closed",
+            reason: .appBackgroundMediaClosed,
             telemetry: nil
         )
 
@@ -23361,7 +23848,7 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "media-connected",
+            reason: .mediaState(.connected),
             telemetry: nil
         )
         let refreshIntent = ReceiverAudioReadinessIntent(
@@ -23372,7 +23859,7 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "channel-refresh",
+            reason: .channelRefresh,
             telemetry: nil
         )
 
@@ -23402,7 +23889,7 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "channel-refresh",
+            reason: .channelRefresh,
             telemetry: nil
         )
 
@@ -23440,7 +23927,7 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "channel-refresh",
+            reason: .channelRefresh,
             telemetry: firstTelemetry
         )
         let changedIntent = ReceiverAudioReadinessIntent(
@@ -23451,7 +23938,7 @@ struct TurboTests {
             currentUserID: "self-user",
             deviceID: "self-device",
             isReady: true,
-            reason: "channel-refresh",
+            reason: .channelRefresh,
             telemetry: changedTelemetry
         )
 
@@ -23760,6 +24247,7 @@ struct TurboTests {
         await viewModel.handleTalkRequestNotificationResponse(
             userInfo: ["event": "talk-request", "fromHandle": "@avery", "inviteId": "invite-1"]
         )
+        try? await Task.sleep(nanoseconds: 50_000_000)
 
         #expect(viewModel.selectedContactId == contactID)
         #expect(viewModel.pendingTalkRequestNotificationHandle == "@avery")
@@ -23769,7 +24257,7 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func notificationOpenForOnlineIncomingRequestSelectsExpandsAndRequestsJoin() async {
+    @Test func notificationAcceptForOnlineIncomingRequestSelectsExpandsAndRequestsJoin() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let invite = makeInvite(
@@ -23804,7 +24292,7 @@ struct TurboTests {
             capturedEffects.append(effect)
         }
 
-        await viewModel.handleTalkRequestNotificationResponse(
+        await viewModel.handleTalkRequestNotificationAcceptResponse(
             userInfo: ["event": "talk-request", "fromHandle": "@avery", "inviteId": "invite-1"]
         )
         try? await Task.sleep(nanoseconds: 50_000_000)
@@ -23823,7 +24311,7 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func pendingNotificationOpenForOnlineIncomingRequestExpandsAndRequestsJoin() async {
+    @Test func pendingNotificationAcceptForOnlineIncomingRequestExpandsAndRequestsJoin() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let invite = makeInvite(
@@ -23875,6 +24363,125 @@ struct TurboTests {
                     && request.relationship == .incomingRequest(requestCount: 1)
                     && request.incomingInvite?.inviteId == "invite-1"
             }
+        )
+    }
+
+    @MainActor
+    @Test func notificationOpenForOnlineIncomingRequestSelectsExpandsAndRequestsJoin() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let invite = makeInvite(
+            direction: "incoming",
+            inviteId: "invite-1",
+            fromHandle: "@avery",
+            toHandle: "@self"
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: invite.channelId,
+                remoteUserId: invite.fromUserId
+            )
+        ]
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [BackendInviteUpdate(contactID: contactID, invite: invite)],
+                outgoing: [],
+                now: .now
+            )
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+
+        var capturedEffects: [BackendCommandEffect] = []
+        viewModel.backendCommandCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        await viewModel.handleTalkRequestNotificationResponse(
+            userInfo: ["event": "talk-request", "fromHandle": "@avery", "inviteId": "invite-1"]
+        )
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(viewModel.selectedContactId == contactID)
+        #expect(viewModel.requestedExpandedCallContactID == contactID)
+        #expect(
+            capturedEffects.contains {
+                guard case let .join(request) = $0 else { return false }
+                return request.contactID == contactID
+                    && request.relationship == .incomingRequest(requestCount: 1)
+                    && request.incomingInvite?.inviteId == "invite-1"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func notificationNotNowWithoutBackendRecordsDeclineDiagnostic() async {
+        let viewModel = PTTViewModel()
+
+        await viewModel.handleTalkRequestNotificationNotNowResponse(
+            userInfo: ["event": "talk-request", "fromHandle": "@avery", "inviteId": "invite-1"]
+        )
+
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Cannot decline talk request notification before backend is ready"
+            )
+        )
+    }
+
+    @Test func conversationOpenIntentParsesConversationDeepLink() {
+        let url = URL(string: "beepbeep://conversation?handle=@avery&action=accept&inviteId=invite-1&channelId=channel-1")!
+        let intent = TurboIncomingLink.conversationOpenIntent(from: url)
+
+        #expect(intent?.reference == "@avery")
+        #expect(intent?.action == .accept)
+        #expect(intent?.inviteID == "invite-1")
+        #expect(intent?.channelID == "channel-1")
+    }
+
+    @Test func liveActivityProjectionMapsSelectedPeerPhases() {
+        let contact = Contact(
+            id: UUID(),
+            name: "Avery",
+            handle: "@avery",
+            isOnline: true,
+            channelId: UUID()
+        )
+        let transmitting = SelectedPeerState(
+            contactID: contact.id,
+            contactName: contact.name,
+            relationship: .none,
+            detail: .transmitting,
+            statusMessage: "Speaking",
+            canTransmitNow: true
+        )
+        let receiving = SelectedPeerState(
+            contactID: contact.id,
+            contactName: contact.name,
+            relationship: .none,
+            detail: .receiving,
+            statusMessage: "Listening",
+            canTransmitNow: false
+        )
+
+        #expect(
+            LiveConversationActivityProjection(
+                contact: contact,
+                selectedPeerState: transmitting,
+                localDisplayName: "Mau"
+            )?.phase == .speaking
+        )
+        #expect(
+            LiveConversationActivityProjection(
+                contact: contact,
+                selectedPeerState: receiving,
+                localDisplayName: "Mau"
+            )?.speakerName == "Avery"
         )
     }
 
@@ -24981,11 +25588,43 @@ struct TurboTests {
             )
         )
 
-        await viewModel.syncLocalReceiverAudioReadinessSignal(for: contactID, reason: "channel-refresh")
+        await viewModel.syncLocalReceiverAudioReadinessSignal(for: contactID, reason: .channelRefresh)
 
         #expect(viewModel.localReceiverAudioReadinessPublications[contactID] == nil)
         #expect(viewModel.diagnosticsTranscript.contains("Deferred receiver audio readiness publish until WebSocket reconnects"))
         #expect(!viewModel.diagnosticsTranscript.contains("Receiver audio readiness publish failed"))
+    }
+
+    @MainActor
+    @Test func receiverAudioReadinessPublishEmitsInvariantForBackgroundNotReadyWithoutWakeReason() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: false)
+        )
+
+        viewModel.applicationStateOverride = .background
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+
+        await viewModel.publishReceiverAudioReadiness(
+            ReceiverAudioReadinessIntent(
+                contactID: contactID,
+                contactHandle: "@blake",
+                backendChannelID: "channel",
+                remoteUserID: "peer-user",
+                currentUserID: "user-self",
+                deviceID: "self-device",
+                isReady: false,
+                reason: .channelRefresh,
+                telemetry: nil
+            )
+        )
+
+        #expect(viewModel.diagnostics.invariantViolations.contains {
+            $0.invariantID == "receiver.background_not_ready_without_wake_reason"
+                && $0.metadata["reason"] == ReceiverAudioReadinessReason.channelRefresh.wireValue
+        })
     }
 
     @MainActor
@@ -25032,7 +25671,7 @@ struct TurboTests {
             )
         )
 
-        await viewModel.syncLocalReceiverAudioReadinessSignal(for: contactID, reason: "channel-refresh")
+        await viewModel.syncLocalReceiverAudioReadinessSignal(for: contactID, reason: .channelRefresh)
 
         #expect(viewModel.localReceiverAudioReadinessPublications[contactID] == nil)
         #expect(viewModel.diagnosticsTranscript.contains("Deferred receiver audio readiness publish until WebSocket reconnects"))
@@ -25088,7 +25727,7 @@ struct TurboTests {
 
         #expect(viewModel.desiredLocalReceiverAudioReadiness(for: contactID))
 
-        await viewModel.syncLocalReceiverAudioReadinessSignal(for: contactID, reason: "channel-refresh")
+        await viewModel.syncLocalReceiverAudioReadinessSignal(for: contactID, reason: .channelRefresh)
 
         #expect(viewModel.localReceiverAudioReadinessPublications[contactID] == nil)
         #expect(viewModel.diagnosticsTranscript.contains("Deferred receiver audio readiness publish until WebSocket reconnects"))
@@ -25886,7 +26525,7 @@ struct TurboTests {
         #expect(viewModel.desiredLocalReceiverAudioReadiness(for: contactID))
         #expect(!viewModel.peerIsRoutableForReceiverAudioReadiness(for: contactID))
 
-        await viewModel.syncLocalReceiverAudioReadinessSignal(for: contactID, reason: "channel-refresh")
+        await viewModel.syncLocalReceiverAudioReadinessSignal(for: contactID, reason: .channelRefresh)
 
         let publication = viewModel.localReceiverAudioReadinessPublications[contactID]
         #expect(publication?.isReady == true)
@@ -27895,6 +28534,19 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func pttSystemLeaveReasonClassifiesBoundaryDescriptions() {
+        let userInitiated = PTTSystemLeaveReason(rawDescription: "PTChannelLeaveReason(rawValue: 1)")
+        let system = PTTSystemLeaveReason(rawDescription: "PTChannelLeaveReason(rawValue: 2)")
+        let simulator = PTTSystemLeaveReason.simulator
+
+        #expect(userInitiated.isUserInitiated)
+        #expect(!system.isUserInitiated)
+        #expect(!simulator.isUserInitiated)
+        #expect(userInitiated.description == "PTChannelLeaveReason(rawValue: 1)")
+        #expect(simulator.description == "simulator")
+    }
+
+    @MainActor
     @Test func localOnlySystemChannelRecoveryLeaveDoesNotClearBackendMembershipDuringRejoin() async {
         let pttClient = RecordingPTTSystemClient()
         let viewModel = PTTViewModel(pttSystemClient: pttClient)
@@ -27981,6 +28633,54 @@ struct TurboTests {
                 $0.message == "Backend leave requested immediately for explicit disconnect"
             }
         )
+    }
+
+    @MainActor
+    @Test func disconnectTimeoutSelfHeals() async throws {
+        let pttClient = RecordingPTTSystemClient()
+        let viewModel = PTTViewModel(pttSystemClient: pttClient)
+        viewModel.disconnectRecoveryDelayNanoseconds = 10_000_000
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-1",
+                remoteUserId: "user-blake"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.syncPTTState()
+
+        viewModel.performDisconnect()
+
+        try await waitForScenario(
+            "disconnect timeout self-heals",
+            participants: [viewModel],
+            timeoutNanoseconds: 1_000_000_000,
+            pollNanoseconds: 10_000_000
+        ) {
+            viewModel.diagnostics.invariantViolations.contains {
+                $0.invariantID == "selected.disconnecting_timeout"
+            }
+            && viewModel.diagnostics.entries.contains {
+                $0.message == "Recovering stuck disconnect"
+            }
+            && viewModel.sessionCoordinator.pendingAction == .none
+        }
+
+        #expect(pttClient.leaveRequests.count >= 2)
+        #expect(viewModel.isJoined == false)
+        #expect(viewModel.systemSessionState == .none)
     }
 
     @MainActor
@@ -29470,7 +30170,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29488,7 +30188,7 @@ struct TurboTests {
             ]
         )
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29618,7 +30318,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29647,11 +30347,433 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func diagnosticsExportIncludesReceivingWithoutJoinedSessionInvariant() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "receiving",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "false",
+                "isTransmitting": "false",
+                "systemSession": "none",
+                "backendChannelStatus": "receiving",
+                "backendReadiness": "receiving",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "false",
+                "remoteWakeCapabilityKind": "wake-capable",
+                "selectedPeerStatus": "Receiving"
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=receiving")
+
+        #expect(exported.contains("[selected.receiving_without_joined_session]"))
+        #expect(
+            store.invariantViolations.contains {
+                $0.invariantID == "selected.receiving_without_joined_session"
+            }
+        )
+        #expect(
+            store.latestError?.message
+                == "selectedPeerPhase=receiving without joined local session evidence"
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsSuppressesReceivingWithoutJoinedSessionInvariantForJoinedActiveSession() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "receiving",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "isTransmitting": "false",
+                "systemSession": "active(contactID: 123, channelUUID: 456)",
+                "backendChannelStatus": "receiving",
+                "backendReadiness": "receiving",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "true",
+                "remoteWakeCapabilityKind": "wake-capable",
+                "selectedPeerStatus": "Receiving"
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=receiving")
+
+        #expect(!exported.contains("[selected.receiving_without_joined_session]"))
+        #expect(
+            !store.invariantViolations.contains {
+                $0.invariantID == "selected.receiving_without_joined_session"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsExportIncludesLiveProjectionAfterMembershipExitInvariant() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "transmitting",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "false",
+                "isTransmitting": "true",
+                "systemSession": "none",
+                "backendChannelStatus": "none",
+                "backendReadiness": "inactive",
+                "backendSelfJoined": "false",
+                "backendPeerJoined": "false",
+                "backendPeerDeviceConnected": "false",
+                "selectedPeerStatus": "Speaking"
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=transmitting")
+
+        #expect(exported.contains("[selected.live_projection_after_membership_exit]"))
+        #expect(
+            store.invariantViolations.contains {
+                $0.invariantID == "selected.live_projection_after_membership_exit"
+            }
+        )
+        #expect(
+            store.latestError?.message
+                == "selectedPeerPhase=transmitting after local membership exit"
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsSuppressesLiveProjectionAfterMembershipExitInvariantForJoinedTransmit() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "transmitting",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "isTransmitting": "true",
+                "systemSession": "active(contactID: 123, channelUUID: 456)",
+                "backendChannelStatus": "self-transmitting",
+                "backendReadiness": "self-transmitting",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "true",
+                "selectedPeerStatus": "Speaking"
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=transmitting")
+
+        #expect(!exported.contains("[selected.live_projection_after_membership_exit]"))
+        #expect(
+            !store.invariantViolations.contains {
+                $0.invariantID == "selected.live_projection_after_membership_exit"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsExportIncludesLiveProjectionAfterLeaseExpiryInvariant() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "receiving",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "isTransmitting": "false",
+                "systemSession": "active(contactID: 123, channelUUID: 456)",
+                "backendChannelStatus": "peer-transmitting",
+                "backendReadiness": "peer-transmitting",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "true",
+                "backendActiveTransmitterUserId": "peer-user",
+                "backendActiveTransmitId": "transmit-expired",
+                "backendActiveTransmitExpiresAt": "2001-01-01T00:00:00Z",
+                "backendServerTimestamp": "2001-01-01T00:00:06Z",
+                "remoteReceiveActive": "true",
+                "selectedPeerStatus": "Receiving"
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=receiving")
+
+        #expect(exported.contains("[transmit.live_projection_after_lease_expiry]"))
+        #expect(
+            store.invariantViolations.contains {
+                $0.invariantID == "transmit.live_projection_after_lease_expiry"
+                    && $0.metadata["backendActiveTransmitId"] == "transmit-expired"
+                    && $0.metadata["graceMs"] == "5000"
+            }
+        )
+        #expect(
+            store.latestError?.message
+                == "selectedPeerPhase remained live after backend transmit lease expiry"
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsSuppressesLiveProjectionAfterLeaseExpiryInvariantWithinGrace() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "receiving",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "isTransmitting": "false",
+                "systemSession": "active(contactID: 123, channelUUID: 456)",
+                "backendChannelStatus": "peer-transmitting",
+                "backendReadiness": "peer-transmitting",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "true",
+                "backendActiveTransmitterUserId": "peer-user",
+                "backendActiveTransmitId": "transmit-current",
+                "backendActiveTransmitExpiresAt": "2099-01-01T00:00:00Z",
+                "remoteReceiveActive": "true",
+                "selectedPeerStatus": "Receiving"
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=receiving")
+
+        #expect(!exported.contains("[transmit.live_projection_after_lease_expiry]"))
+        #expect(
+            !store.invariantViolations.contains {
+                $0.invariantID == "transmit.live_projection_after_lease_expiry"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsTranscriptEmbedsStructuredEnvelope() throws {
+        let viewModel = PTTViewModel()
+
+        let envelope = viewModel.diagnosticsEnvelope(
+            appVersion: "test-app",
+            scenarioName: "structured-diagnostics-test",
+            scenarioRunID: "run-1"
+        )
+        let envelopeJSON = try PTTViewModel.structuredDiagnosticsEnvelopeJSON(envelope)
+        let transcript = viewModel.diagnosticsTranscriptText(structuredEnvelopeJSON: envelopeJSON)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(DiagnosticsEnvelope.self, from: Data(envelopeJSON.utf8))
+
+        #expect(transcript.contains("STRUCTURED DIAGNOSTICS"))
+        #expect(transcript.contains(envelopeJSON))
+        #expect(decoded.schemaVersion == 1)
+        #expect(decoded.appVersion == "test-app")
+        #expect(decoded.deviceId == envelope.deviceId)
+        #expect(!decoded.deviceId.isEmpty)
+        #expect(decoded.handle == viewModel.currentDevUserHandle)
+        #expect(decoded.scenarioName == "structured-diagnostics-test")
+        #expect(decoded.scenarioRunId == "run-1")
+        #expect(decoded.projection == envelope.projection)
+        #expect(decoded.directQuic == envelope.directQuic)
+    }
+
+    @MainActor
+    @Test func reducerTransitionReportsAreCapturedInDiagnosticsEnvelope() throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "test"
+            )
+        )
+
+        let report = try #require(
+            viewModel.diagnostics.reducerTransitionReports.first {
+                $0.reducerName == "ptt-session"
+            }
+        )
+        let envelope = viewModel.diagnosticsEnvelope(appVersion: "test-app")
+        let transcript = viewModel.diagnosticsTranscriptText()
+
+        #expect(report.eventName == "didJoinChannel")
+        #expect(report.effectsEmitted.contains { $0.contains("syncJoinedChannel") })
+        #expect(report.previousStateSummary.contains("systemSession"))
+        #expect(report.previousStateSummary.contains("none"))
+        #expect(report.nextStateSummary.contains("systemSession"))
+        #expect(report.nextStateSummary.contains("joined"))
+        #expect(report.correlationIDs["channelUUID"] == channelUUID.uuidString)
+        #expect(report.correlationIDs["contactID"] == contactID.uuidString)
+        #expect(envelope.reducerTransitionReports.first == report)
+        #expect(transcript.contains("REDUCER TRANSITIONS"))
+        #expect(transcript.contains("[ptt-session] [didJoinChannel]"))
+    }
+
+    @MainActor
+    @Test func reducerEmittedInvariantIsCapturedInDiagnosticsEnvelope() throws {
+        let viewModel = PTTViewModel()
+        let report = ReducerTransitionReport(
+            reducerName: "transmit",
+            eventName: "stopCompleted",
+            previousStateSummary: "activeTarget: transmit-2",
+            nextStateSummary: "activeTarget: transmit-2",
+            invariantViolationsEmitted: ["transmit.stale_end_overrides_newer_epoch"],
+            correlationIDs: [
+                "channelID": "channel-123",
+                "transmitID": "transmit-1",
+            ]
+        )
+
+        viewModel.diagnostics.recordReducerTransition(report)
+
+        let envelope = viewModel.diagnosticsEnvelope(appVersion: "test-app")
+        let transcript = viewModel.diagnosticsTranscriptText()
+        let violation = try #require(
+            envelope.invariantViolations.first {
+                $0.invariantID == "transmit.stale_end_overrides_newer_epoch"
+            }
+        )
+
+        #expect(violation.scope == .local)
+        #expect(violation.metadata["reducerName"] == "transmit")
+        #expect(violation.metadata["eventName"] == "stopCompleted")
+        #expect(violation.metadata["channelID"] == "channel-123")
+        #expect(transcript.contains("[transmit.stale_end_overrides_newer_epoch]"))
+        #expect(transcript.contains("invariants=transmit.stale_end_overrides_newer_epoch"))
+    }
+
+    @MainActor
+    @Test func localSessionProjectionComposesCoordinatorFactsInDiagnosticsEnvelope() throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = channelUUID
+        viewModel.isJoined = true
+
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "test"
+            )
+        )
+        viewModel.receiveExecutionCoordinator.send(
+            .remoteActivityDetected(contactID: contactID, source: .transmitStartSignal)
+        )
+
+        let localSession = viewModel
+            .diagnosticsEnvelope(appVersion: "test-app")
+            .projection
+            .localSession
+
+        #expect(localSession.selectedContactID == contactID.uuidString)
+        #expect(localSession.selectedHandle == "@blake")
+        #expect(localSession.activeChannelID == channelUUID.uuidString)
+        #expect(localSession.systemChannelUUID == channelUUID.uuidString)
+        #expect(localSession.systemActiveContactID == contactID.uuidString)
+        #expect(localSession.remoteReceiveActive == true)
+        #expect(localSession.remoteReceiveActivityState?.contains("transmitStartSignal") == true)
+    }
+
+    @MainActor
+    @Test func localSessionProjectionDerivesCrossCoordinatorInvariantCandidates() {
+        let projection = LocalSessionDiagnosticsProjection(
+            selectedContactID: UUID().uuidString,
+            selectedHandle: "@blake",
+            selectedPeerPhase: "waitingForPeer",
+            selectedPeerPhaseDetail: "remoteAudioPrewarm",
+            selectedPeerRelationship: "none",
+            selectedPeerCanTransmit: false,
+            isJoined: true,
+            isTransmitting: false,
+            activeChannelID: UUID().uuidString,
+            systemSession: "active(channelUUID: test, contactID: test, transmission: idle)",
+            systemActiveContactID: UUID().uuidString,
+            systemChannelUUID: UUID().uuidString,
+            mediaState: "connected",
+            transmitPhase: "idle",
+            transmitActiveContactID: nil,
+            transmitPressActive: false,
+            transmitExplicitStopRequested: false,
+            transmitSystemTransmitting: false,
+            incomingWakeActivationState: nil,
+            incomingWakeBufferedChunkCount: 0,
+            remoteReceiveActive: false,
+            remoteReceiveActivityState: nil,
+            receiverAudioReadinessState: nil,
+            pendingAction: "none",
+            reconciliationAction: "none",
+            hadConnectedSessionContinuity: true,
+            controlPlaneReconnectGraceActive: false,
+            backendSignalingJoinRecoveryActive: false,
+            backendChannelStatus: "ready",
+            backendReadiness: "ready",
+            backendSelfJoined: true,
+            backendPeerJoined: true,
+            backendPeerDeviceConnected: true,
+            backendActiveTransmitterUserId: nil,
+            backendActiveTransmitId: nil,
+            backendActiveTransmitExpiresAt: nil,
+            backendServerTimestamp: nil,
+            backendCanTransmit: true,
+            remoteAudioReadiness: "ready",
+            remoteWakeCapabilityKind: "wake-capable"
+        )
+
+        let candidate = projection.derivedInvariantCandidates.first {
+            $0.invariantID == "selected.backend_ready_missing_remote_audio_signal"
+        }
+
+        #expect(candidate?.scope == .backend)
+        #expect(candidate?.metadata["mediaState"] == "connected")
+        #expect(candidate?.metadata["remoteWakeCapabilityKind"] == "wake-capable")
+    }
+
+    @MainActor
     @Test func diagnosticsDoNotFlagReadyWhileBackendSelfTransmitting() {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "ptt-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29684,7 +30806,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29722,7 +30844,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29761,7 +30883,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29793,7 +30915,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-status-refresh",
             fields: [
                 "selectedContact": "@blake",
@@ -29825,7 +30947,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29863,7 +30985,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29902,7 +31024,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29942,7 +31064,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -29984,7 +31106,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -30024,7 +31146,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -30061,7 +31183,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-effect:teardown-local",
             fields: [
                 "selectedContact": "@blake",
@@ -30097,7 +31219,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-status-refresh",
             fields: [
                 "selectedContact": "@blake",
@@ -30130,7 +31252,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -30171,7 +31293,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "backend-signaling:recovery-scheduled",
             fields: [
                 "selectedContact": "@blake",
@@ -30209,7 +31331,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -30246,7 +31368,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "backend-signal:receiver-not-ready",
             fields: [
                 "selectedContact": "@blake",
@@ -30284,7 +31406,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-peer-sync",
             fields: [
                 "selectedContact": "@blake",
@@ -30325,7 +31447,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-status-refresh",
             fields: [
                 "selectedContact": "@blake",
@@ -30362,7 +31484,7 @@ struct TurboTests {
         let store = DiagnosticsStore()
         store.clear()
 
-        store.captureState(
+        captureLocalSessionDiagnosticsState(store,
             reason: "selected-status-refresh",
             fields: [
                 "selectedContact": "@blake",
@@ -30975,6 +32097,75 @@ struct SimulatorScenarioPlannerTests {
         )
     }
 
+    @Test func scenarioInvariantExpectationsUseStepBaseline() throws {
+        let expectation = try JSONDecoder().decode(
+            SimulatorScenarioExpectation.self,
+            from: Data(
+                """
+                {
+                  "noInvariantViolations": true,
+                  "expectInvariant": ["selected.ready_without_join"],
+                  "eventuallyNoInvariant": ["selected.backend_ready_ui_not_live"],
+                  "allowInvariantDuringStep": ["selected.ready_without_join"]
+                }
+                """.utf8
+            )
+        )
+        let preexisting = DiagnosticsInvariantViolation(
+            invariantID: "selected.ready_without_join",
+            scope: .local,
+            message: "preexisting"
+        )
+        let newlyAllowed = DiagnosticsInvariantViolation(
+            invariantID: "selected.ready_without_join",
+            scope: .local,
+            message: "newly allowed"
+        )
+        let baseline = SimulatorScenarioInvariantBaseline(violations: [preexisting])
+
+        #expect(
+            scenarioInvariantExpectationMismatch(
+                expectation,
+                baseline: baseline,
+                violations: [newlyAllowed, preexisting]
+            ) == nil
+        )
+
+        let strictExpectation = try JSONDecoder().decode(
+            SimulatorScenarioExpectation.self,
+            from: Data(
+                """
+                {
+                  "noInvariantViolations": true
+                }
+                """.utf8
+            )
+        )
+        let strictMismatch = scenarioInvariantExpectationMismatch(
+            strictExpectation,
+            baseline: baseline,
+            violations: [newlyAllowed, preexisting]
+        )
+        #expect(strictMismatch?.contains("selected.ready_without_join") == true)
+
+        let missingExpectation = try JSONDecoder().decode(
+            SimulatorScenarioExpectation.self,
+            from: Data(
+                """
+                {
+                  "expectInvariant": ["selected.backend_ready_ui_not_live"]
+                }
+                """.utf8
+            )
+        )
+        let missingMismatch = scenarioInvariantExpectationMismatch(
+            missingExpectation,
+            baseline: baseline,
+            violations: [newlyAllowed, preexisting]
+        )
+        #expect(missingMismatch?.contains("selected.backend_ready_ui_not_live") == true)
+    }
+
     @Test func scenarioSourceSupportsRuntimeScenarioFile() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("turbo-scenario-source-\(UUID().uuidString)", isDirectory: true)
@@ -31524,6 +32715,8 @@ private enum SimulatorScenarioActionPropertySample {
                 "refreshContactSummaries",
                 "refreshInvites",
                 "refreshChannelState",
+                "captureDiagnostics",
+                "injectStaleTransmitStopCompletion",
                 "setHTTPDelay",
                 "dropNextWebSocketSignals",
                 "duplicateNextWebSocketSignals",
@@ -31826,6 +33019,10 @@ private struct SimulatorScenarioExpectation: Decodable {
     let selected: SimulatorScenarioSelectedExpectation?
     let contacts: [SimulatorScenarioContactExpectation]?
     let backend: SimulatorScenarioBackendExpectation?
+    let noInvariantViolations: Bool?
+    let expectInvariant: [String]?
+    let eventuallyNoInvariant: [String]?
+    let allowInvariantDuringStep: [String]?
 
     var selectedExpectation: SimulatorScenarioSelectedExpectation? {
         if let selected {
@@ -31902,6 +33099,7 @@ private struct SimulatorScenarioDiagnosticsArtifact: Codable {
     let baseURL: String
     let selectedHandle: String?
     let appVersion: String
+    let structuredEnvelope: DiagnosticsEnvelope
     let snapshot: String
     let transcript: String
 }
@@ -32052,6 +33250,29 @@ private func simulatorScenarioRuntimeURL(from value: String, isDirectory: Bool) 
     return URL(fileURLWithPath: value, isDirectory: isDirectory)
 }
 
+private struct SimulatorScenarioInvariantBaseline {
+    let countsByInvariantID: [String: Int]
+
+    init(violations: [DiagnosticsInvariantViolation]) {
+        countsByInvariantID = Dictionary(
+            grouping: violations,
+            by: \.invariantID
+        ).mapValues(\.count)
+    }
+}
+
+@MainActor
+private func simulatorScenarioInvariantBaselines(
+    viewModels: [String: PTTViewModel]
+) -> [String: SimulatorScenarioInvariantBaseline] {
+    Dictionary(uniqueKeysWithValues: viewModels.map { actor, viewModel in
+        (
+            actor,
+            SimulatorScenarioInvariantBaseline(violations: viewModel.diagnostics.invariantViolations)
+        )
+    })
+}
+
 private func applyScenarioRuntimeConfig(
     _ runtimeConfig: SimulatorScenarioRuntimeConfig,
     to spec: SimulatorScenarioConfig
@@ -32166,6 +33387,7 @@ private func executeSimulatorScenario(_ spec: SimulatorScenarioConfig) async thr
         }
 
         for step in spec.steps {
+            let invariantBaselines = simulatorScenarioInvariantBaselines(viewModels: viewModels)
             let scheduledActions = try scheduledScenarioActions(for: step.actions)
             var elapsedMilliseconds = 0
 
@@ -32226,6 +33448,10 @@ private func executeSimulatorScenario(_ spec: SimulatorScenarioConfig) async thr
                         throw ScenarioFailure(message: "refreshChannelState requires a selected contact")
                     }
                     await participant.refreshChannelState(for: selectedContactID)
+                case "captureDiagnostics":
+                    participant.captureDiagnosticsState("scenario:capture")
+                case "injectStaleTransmitStopCompletion":
+                    try await injectStaleTransmitStopCompletion(into: participant)
                 case "resetTransportFaults":
                     participant.resetTransportFaults()
                 case "setHTTPDelay":
@@ -32355,9 +33581,13 @@ private func executeSimulatorScenario(_ spec: SimulatorScenarioConfig) async thr
             }
 
             if let expectations = step.expectEventually {
-                try await waitForScenario(step.description, participants: currentParticipants()) {
-                    scenarioExpectationsMatch(expectations, viewModels: viewModels)
-                }
+                try await waitForScenarioExpectations(
+                    step.description,
+                    expectations: expectations,
+                    viewModels: viewModels,
+                    invariantBaselines: invariantBaselines,
+                    participants: currentParticipants()
+                )
             }
         }
 
@@ -32431,7 +33661,9 @@ private func scheduledScenarioActions(
 
 private func scenarioStepRequiresImmediateStabilization(_ step: SimulatorScenarioStep) -> Bool {
     !step.actions.contains { action in
-        action.type == "beginTransmit" || action.type == "endTransmit"
+        action.type == "beginTransmit"
+            || action.type == "endTransmit"
+            || action.type == "captureDiagnostics"
     }
 }
 
@@ -32444,15 +33676,23 @@ private func publishScenarioDiagnosticsArtifacts(
     for (actor, participant) in viewModels {
         let expectedDeviceID = spec.participants[actor]?.deviceId ?? "<missing>"
         let expectedHandle = spec.participants[actor]?.handle ?? participant.currentDevUserHandle
+        let appVersion = "scenario:\(spec.name):\(scenarioRunID):\(expectedDeviceID)"
+        let structuredEnvelope = participant.diagnosticsEnvelope(
+            appVersion: appVersion,
+            scenarioName: spec.name,
+            scenarioRunID: scenarioRunID
+        )
+        let structuredEnvelopeJSON = try PTTViewModel.structuredDiagnosticsEnvelopeJSON(structuredEnvelope)
         let artifact = SimulatorScenarioDiagnosticsArtifact(
             scenarioName: spec.name,
             handle: expectedHandle,
             deviceId: expectedDeviceID,
             baseURL: spec.baseURL.absoluteString,
             selectedHandle: participant.selectedContact?.handle,
-            appVersion: "scenario:\(spec.name):\(scenarioRunID):\(expectedDeviceID)",
+            appVersion: appVersion,
+            structuredEnvelope: structuredEnvelope,
             snapshot: participant.diagnosticsSnapshot,
-            transcript: participant.diagnosticsTranscript
+            transcript: participant.diagnosticsTranscriptText(structuredEnvelopeJSON: structuredEnvelopeJSON)
         )
         try await publishScenarioDiagnosticsArtifact(artifact)
         try await verifyScenarioDiagnosticsArtifactPublished(
@@ -32491,18 +33731,58 @@ private func tearDownSimulatorScenarioParticipants(_ participants: [PTTViewModel
 }
 
 @MainActor
-private func scenarioExpectationsMatch(
+private func waitForScenarioExpectations(
+    _ description: String,
+    expectations: [String: SimulatorScenarioExpectation],
+    viewModels: [String: PTTViewModel],
+    invariantBaselines: [String: SimulatorScenarioInvariantBaseline],
+    participants: [PTTViewModel],
+    timeoutNanoseconds: UInt64 = 30_000_000_000,
+    pollNanoseconds: UInt64 = 500_000_000
+) async throws {
+    let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+    var lastMismatch: String?
+
+    while DispatchTime.now().uptimeNanoseconds < deadline {
+        let mismatch = scenarioExpectationMismatch(
+            expectations,
+            viewModels: viewModels,
+            invariantBaselines: invariantBaselines
+        )
+        if mismatch == nil {
+            return
+        }
+        lastMismatch = mismatch
+        try await Task.sleep(nanoseconds: pollNanoseconds)
+    }
+
+    let snapshotSummary = scenarioSnapshotSummary(participants)
+    throw ScenarioFailure(
+        message: """
+        Timed out waiting for scenario step: \(description)
+        Last mismatch: \(lastMismatch ?? "unknown")
+        \(snapshotSummary)
+        """
+    )
+}
+
+@MainActor
+private func scenarioExpectationMismatch(
     _ expectations: [String: SimulatorScenarioExpectation],
-    viewModels: [String: PTTViewModel]
-) -> Bool {
-    for (actor, expected) in expectations {
-        guard let participant = viewModels[actor] else { return false }
+    viewModels: [String: PTTViewModel],
+    invariantBaselines: [String: SimulatorScenarioInvariantBaseline]
+) -> String? {
+    for actor in expectations.keys.sorted() {
+        guard let expected = expectations[actor] else { continue }
+        guard let participant = viewModels[actor] else {
+            return "\(actor): unknown actor"
+        }
         let projection = participant.stateMachineProjection
 
         var selectedPhaseMatch: SimulatorScenarioPhaseMatch = .exact
         if let selected = expected.selectedExpectation {
             guard let phaseMatch = scenarioSelectedExpectationMatches(selected, projection: projection) else {
-                return false
+                return "\(actor): selected expectation did not match"
             }
             selectedPhaseMatch = phaseMatch
         }
@@ -32510,7 +33790,7 @@ private func scenarioExpectationsMatch(
         if let contacts = expected.contacts,
            !scenarioContactExpectationsMatch(contacts, projection: projection)
         {
-            return false
+            return "\(actor): contact expectation did not match"
         }
 
         if let backend = expected.backend,
@@ -32520,11 +33800,129 @@ private func scenarioExpectationsMatch(
                selectedPhaseMatch: selectedPhaseMatch
            )
         {
-            return false
+            return "\(actor): backend expectation did not match"
+        }
+
+        if let invariantMismatch = scenarioInvariantExpectationMismatch(
+            expected,
+            baseline: invariantBaselines[actor] ?? SimulatorScenarioInvariantBaseline(violations: []),
+            violations: participant.diagnostics.invariantViolations
+        ) {
+            return "\(actor): \(invariantMismatch)"
         }
     }
 
-    return true
+    return nil
+}
+
+private func scenarioInvariantExpectationMismatch(
+    _ expected: SimulatorScenarioExpectation,
+    baseline: SimulatorScenarioInvariantBaseline,
+    violations: [DiagnosticsInvariantViolation]
+) -> String? {
+    let newViolations = simulatorScenarioInvariantViolations(since: baseline, current: violations)
+    let newInvariantIDs = Set(newViolations.map(\.invariantID))
+
+    if let expectedIDs = expected.expectInvariant {
+        let missing = expectedIDs
+            .filter { !$0.isEmpty }
+            .filter { !newInvariantIDs.contains($0) }
+        if !missing.isEmpty {
+            return "expected invariant(s) not emitted since step start: \(simulatorScenarioInvariantList(missing)); saw \(simulatorScenarioInvariantList(Array(newInvariantIDs)))"
+        }
+    }
+
+    if let absentIDs = expected.eventuallyNoInvariant {
+        let forbiddenIDs = Set(absentIDs.filter { !$0.isEmpty })
+        let unexpected = newViolations
+            .map(\.invariantID)
+            .filter { forbiddenIDs.contains($0) }
+        if !unexpected.isEmpty {
+            return "expected no new invariant(s) since step start, saw: \(simulatorScenarioInvariantList(unexpected))"
+        }
+    }
+
+    if expected.noInvariantViolations == true {
+        let allowedIDs = Set((expected.allowInvariantDuringStep ?? []).filter { !$0.isEmpty })
+        let unexpected = newViolations
+            .map(\.invariantID)
+            .filter { !allowedIDs.contains($0) }
+        if !unexpected.isEmpty {
+            return "expected no new invariant violations since step start, saw: \(simulatorScenarioInvariantList(unexpected))"
+        }
+    }
+
+    return nil
+}
+
+private func simulatorScenarioInvariantViolations(
+    since baseline: SimulatorScenarioInvariantBaseline,
+    current violations: [DiagnosticsInvariantViolation]
+) -> [DiagnosticsInvariantViolation] {
+    var remainingBaselineCounts = baseline.countsByInvariantID
+    var newViolations: [DiagnosticsInvariantViolation] = []
+
+    for violation in violations {
+        let invariantID = violation.invariantID
+        if let remaining = remainingBaselineCounts[invariantID], remaining > 0 {
+            remainingBaselineCounts[invariantID] = remaining - 1
+        } else {
+            newViolations.append(violation)
+        }
+    }
+
+    return newViolations
+}
+
+private func simulatorScenarioInvariantList(_ invariantIDs: [String]) -> String {
+    let unique = Set(invariantIDs.filter { !$0.isEmpty })
+    guard !unique.isEmpty else { return "none" }
+    return unique.sorted().joined(separator: ", ")
+}
+
+@MainActor
+private func injectStaleTransmitStopCompletion(into participant: PTTViewModel) async throws {
+    guard let selectedContact = participant.selectedContact else {
+        throw ScenarioFailure(message: "injectStaleTransmitStopCompletion requires a selected contact")
+    }
+
+    let backendChannelID = selectedContact.backendChannelId ?? "scenario-channel-\(selectedContact.id.uuidString)"
+    let request = TransmitRequestContext(
+        contactID: selectedContact.id,
+        contactHandle: selectedContact.handle,
+        backendChannelID: backendChannelID,
+        remoteUserID: "scenario-peer-user",
+        channelUUID: UUID(),
+        usesLocalHTTPBackend: false,
+        backendSupportsWebSocket: true
+    )
+    let currentTarget = TransmitTarget(
+        contactID: selectedContact.id,
+        userID: "scenario-peer-user",
+        deviceID: "scenario-peer-device",
+        channelID: backendChannelID,
+        transmitID: "scenario-current-transmit"
+    )
+    let staleTarget = TransmitTarget(
+        contactID: selectedContact.id,
+        userID: "scenario-peer-user",
+        deviceID: "scenario-peer-device",
+        channelID: backendChannelID,
+        transmitID: "scenario-stale-transmit"
+    )
+
+    let previousEffectHandler = participant.transmitCoordinator.effectHandler
+    participant.transmitCoordinator.effectHandler = nil
+    defer {
+        participant.transmitCoordinator.effectHandler = previousEffectHandler
+        participant.transmitCoordinator.reset()
+        participant.syncTransmitState()
+    }
+
+    await participant.transmitCoordinator.handle(.pressRequested(request))
+    await participant.transmitCoordinator.handle(.beginSucceeded(currentTarget, request))
+    await participant.transmitCoordinator.handle(.stopCompleted(staleTarget))
+    participant.captureDiagnosticsState("scenario:stale-transmit-stop-completion")
 }
 
 private func scenarioSelectedExpectationMatches(
@@ -33268,6 +34666,140 @@ private func makeTransmitRequest() -> TransmitRequestContext {
         usesLocalHTTPBackend: false,
         backendSupportsWebSocket: true
     )
+}
+
+private func captureLocalSessionDiagnosticsState(
+    _ store: DiagnosticsStore,
+    reason: String,
+    fields: [String: String]
+) {
+    store.captureState(
+        reason: reason,
+        fields: fields,
+        localSessionProjection: makeLocalSessionDiagnosticsProjection(fields: fields)
+    )
+}
+
+private func makeLocalSessionDiagnosticsProjection(
+    fields: [String: String]
+) -> LocalSessionDiagnosticsProjection {
+    LocalSessionDiagnosticsProjection(
+        selectedContactID: optionalDiagnosticsString(fields["selectedContactID"]),
+        selectedHandle: optionalDiagnosticsString(fields["selectedContact"]),
+        selectedPeerPhase: fields["selectedPeerPhase"] ?? "none",
+        selectedPeerPhaseDetail: fields["selectedPeerPhaseDetail"] ?? "none",
+        selectedPeerRelationship: fields["selectedPeerRelationship"] ?? "none",
+        selectedPeerCanTransmit: diagnosticsBool(fields["selectedPeerCanTransmit"]) ?? false,
+        isJoined: diagnosticsBool(fields["isJoined"]) ?? false,
+        isTransmitting: diagnosticsBool(fields["isTransmitting"]) ?? false,
+        activeChannelID: optionalDiagnosticsString(fields["activeChannelId"]),
+        systemSession: fields["systemSession"] ?? "none",
+        systemActiveContactID: optionalDiagnosticsString(fields["systemActiveContactID"]),
+        systemChannelUUID: optionalDiagnosticsString(fields["systemChannelUUID"]),
+        mediaState: fields["mediaState"] ?? "none",
+        transmitPhase: fields["transmitPhase"] ?? "idle",
+        transmitActiveContactID: optionalDiagnosticsString(fields["transmitActiveContactID"]),
+        transmitPressActive: diagnosticsBool(fields["transmitPressActive"]) ?? false,
+        transmitExplicitStopRequested: diagnosticsBool(fields["transmitExplicitStopRequested"]) ?? false,
+        transmitSystemTransmitting: diagnosticsBool(fields["transmitSystemTransmitting"]) ?? false,
+        incomingWakeActivationState: optionalDiagnosticsString(fields["incomingWakeActivationState"]),
+        incomingWakeBufferedChunkCount: fields["incomingWakeBufferedChunkCount"].flatMap(Int.init),
+        remoteReceiveActive: diagnosticsBool(fields["remoteReceiveActive"]) ?? false,
+        remoteReceiveActivityState: optionalDiagnosticsString(fields["remoteReceiveActivityState"]),
+        receiverAudioReadinessState: optionalDiagnosticsString(fields["receiverAudioReadinessState"]),
+        pendingAction: fields["pendingAction"] ?? "none",
+        reconciliationAction: fields["selectedPeerReconciliationAction"] ?? "none",
+        hadConnectedSessionContinuity: diagnosticsBool(fields["hadConnectedSessionContinuity"]) ?? false,
+        controlPlaneReconnectGraceActive: diagnosticsBool(fields["controlPlaneReconnectGraceActive"]) ?? false,
+        backendSignalingJoinRecoveryActive: diagnosticsBool(fields["backendSignalingJoinRecoveryActive"]) ?? false,
+        backendChannelStatus: optionalDiagnosticsString(fields["backendChannelStatus"]),
+        backendReadiness: optionalDiagnosticsString(fields["backendReadiness"]),
+        backendSelfJoined: diagnosticsBool(fields["backendSelfJoined"]),
+        backendPeerJoined: diagnosticsBool(fields["backendPeerJoined"]),
+        backendPeerDeviceConnected: diagnosticsBool(fields["backendPeerDeviceConnected"]),
+        backendActiveTransmitterUserId: optionalDiagnosticsString(fields["backendActiveTransmitterUserId"]),
+        backendActiveTransmitId: optionalDiagnosticsString(fields["backendActiveTransmitId"]),
+        backendActiveTransmitExpiresAt: optionalDiagnosticsString(fields["backendActiveTransmitExpiresAt"]),
+        backendServerTimestamp: optionalDiagnosticsString(fields["backendServerTimestamp"]),
+        backendCanTransmit: diagnosticsBool(fields["backendCanTransmit"]),
+        remoteAudioReadiness: optionalDiagnosticsString(fields["remoteAudioReadiness"]),
+        remoteWakeCapabilityKind: optionalDiagnosticsString(fields["remoteWakeCapabilityKind"])
+    )
+}
+
+private func optionalDiagnosticsString(_ value: String?) -> String? {
+    guard let value, value != "none" else { return nil }
+    return value
+}
+
+private func diagnosticsBool(_ value: String?) -> Bool? {
+    switch value {
+    case "true":
+        return true
+    case "false":
+        return false
+    default:
+        return nil
+    }
+}
+
+private enum BackendContractManifestError: Error {
+    case missing(String)
+}
+
+private func backendContractManifest() throws -> [String: Any] {
+    let repoRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let url = repoRoot.appendingPathComponent("contracts/backend_channel_contract_manifest.json")
+    let data = try Data(contentsOf: url)
+    guard let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw BackendContractManifestError.missing("manifest root object")
+    }
+    return manifest
+}
+
+private func backendContractVariants(_ manifest: [String: Any], _ name: String) throws -> Set<String> {
+    let contracts = try backendContractDictionary(manifest["contracts"], path: "contracts")
+    let contract = try backendContractDictionary(contracts[name], path: "contracts.\(name)")
+    let variants = try backendContractArray(contract["variants"], path: "contracts.\(name).variants")
+    return Set(try variants.map { try backendContractString($0, path: "contracts.\(name).variants[]") })
+}
+
+private func backendContractExamples(_ manifest: [String: Any], _ name: String) throws -> [[String: Any]] {
+    let responseExamples = try backendContractDictionary(manifest["responseExamples"], path: "responseExamples")
+    let examples = try backendContractArray(responseExamples[name], path: "responseExamples.\(name)")
+    return try examples.map { try backendContractDictionary($0, path: "responseExamples.\(name)[]") }
+}
+
+private func backendContractInvalidExamples(_ manifest: [String: Any]) throws -> [[String: Any]] {
+    let examples = try backendContractArray(manifest["invalidExamples"], path: "invalidExamples")
+    return try examples.map { try backendContractDictionary($0, path: "invalidExamples[]") }
+}
+
+private func backendContractPayloadData(_ payload: [String: Any]) throws -> Data {
+    try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+}
+
+private func backendContractDictionary(_ value: Any?, path: String) throws -> [String: Any] {
+    guard let dictionary = value as? [String: Any] else {
+        throw BackendContractManifestError.missing(path)
+    }
+    return dictionary
+}
+
+private func backendContractArray(_ value: Any?, path: String) throws -> [Any] {
+    guard let array = value as? [Any] else {
+        throw BackendContractManifestError.missing(path)
+    }
+    return array
+}
+
+private func backendContractString(_ value: Any?, path: String) throws -> String {
+    guard let string = value as? String else {
+        throw BackendContractManifestError.missing(path)
+    }
+    return string
 }
 
 private func makeContactSummary(

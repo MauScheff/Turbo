@@ -258,10 +258,10 @@ extension PTTViewModel {
 
     func shouldReleaseLocalInteractivePrewarmForRemoteBackgrounding(
         contactID: UUID,
-        readinessSignalPayload: String,
+        readinessSignalReason: ReceiverAudioReadinessReason,
         applicationState: UIApplication.State
     ) -> Bool {
-        guard readinessSignalPayload == "app-background-media-closed" else { return false }
+        guard readinessSignalReason.isBackgroundMediaClosure else { return false }
         guard applicationState == .active else { return false }
         guard mediaSessionContactID == contactID else { return false }
         guard systemSessionMatches(contactID) else { return false }
@@ -276,12 +276,12 @@ extension PTTViewModel {
 
     func releaseLocalInteractivePrewarmForRemoteBackgrounding(
         contactID: UUID,
-        readinessSignalPayload: String,
+        readinessSignalReason: ReceiverAudioReadinessReason,
         applicationState: UIApplication.State
     ) {
         guard shouldReleaseLocalInteractivePrewarmForRemoteBackgrounding(
             contactID: contactID,
-            readinessSignalPayload: readinessSignalPayload,
+            readinessSignalReason: readinessSignalReason,
             applicationState: applicationState
         ) else { return }
 
@@ -291,7 +291,7 @@ extension PTTViewModel {
             metadata: [
                 "contactId": contactID.uuidString,
                 "applicationState": String(describing: applicationState),
-                "reason": readinessSignalPayload,
+                "reason": readinessSignalReason.wireValue,
             ]
         )
         closeMediaSession(
@@ -798,7 +798,7 @@ extension PTTViewModel {
             Task {
                 await syncLocalReceiverAudioReadinessSignal(
                     for: contactID,
-                    reason: "remote-audio-ended-keepalive"
+                    reason: .remoteAudioEndedKeepalive
                 )
             }
             return
@@ -2134,7 +2134,7 @@ extension PTTViewModel {
                 case .receiverReady:
                     return .ready
                 case .receiverNotReady:
-                    return readinessReason == "app-background-media-closed" ? .wakeCapable : .waiting
+                    return readinessReason.isBackgroundMediaClosure ? .wakeCapable : .waiting
                 default:
                     return .unknown
                 }
@@ -2142,10 +2142,10 @@ extension PTTViewModel {
             if envelope.type == .receiverNotReady {
                 releaseLocalInteractivePrewarmForRemoteBackgrounding(
                     contactID: contactID,
-                    readinessSignalPayload: readinessReason,
+                    readinessSignalReason: readinessReason,
                     applicationState: applicationState
                 )
-                if readinessReason == "app-background-media-closed" {
+                if readinessReason.isBackgroundMediaClosure {
                     if let attempt = directQuicAttempt(for: contactID) {
                         diagnostics.record(
                             .media,
@@ -2164,7 +2164,7 @@ extension PTTViewModel {
                 let updatedReadiness: TurboChannelReadinessResponse = {
                     var next = existing.settingRemoteAudioReadiness(readiness)
                     if envelope.type == .receiverNotReady,
-                       readinessReason == "app-background-media-closed" {
+                       readinessReason.isBackgroundMediaClosure {
                         next = next.settingRemoteWakeCapability(
                             .wakeCapable(targetDeviceId: envelope.fromDeviceId)
                         )
@@ -2186,7 +2186,7 @@ extension PTTViewModel {
                     "channelId": envelope.channelId,
                     "contactId": contactID.uuidString,
                     "payload": envelope.payload,
-                    "reason": readinessReason,
+                    "reason": readinessReason.wireValue,
                     "hasTelemetry": String(readinessPayload.telemetry != nil),
                 ]
             )
@@ -2205,7 +2205,7 @@ extension PTTViewModel {
                     )
                     await syncLocalReceiverAudioReadinessSignal(
                         for: contactID,
-                        reason: "channel-refresh"
+                        reason: .channelRefresh
                     )
                 }
                 await refreshChannelState(for: contactID)
@@ -2284,7 +2284,7 @@ extension PTTViewModel {
             await prewarmLocalMediaIfNeeded(for: contactID)
             await syncLocalReceiverAudioReadinessSignal(
                 for: contactID,
-                reason: "direct-quic-transmit-prepare"
+                reason: .directQuicTransmitPrepare
             )
         }
         if shouldArmWakeCandidate,
@@ -2590,7 +2590,7 @@ extension PTTViewModel {
                 updateStatusForSelectedContact()
             }
             captureDiagnosticsState("backend-sync:channel-state")
-            await syncLocalReceiverAudioReadinessSignal(for: contactID, reason: "channel-refresh")
+            await syncLocalReceiverAudioReadinessSignal(for: contactID, reason: .channelRefresh)
             await reconcileSelectedSessionIfNeeded()
             if selectedContactId == contactID {
                 await prewarmForegroundTalkPathIfNeeded(

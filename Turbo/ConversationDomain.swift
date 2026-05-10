@@ -868,6 +868,9 @@ struct ChannelReadinessSnapshot: Equatable {
     let status: ConversationState?
     let readinessStatus: TurboChannelReadinessStatus?
     let activeTransmitterUserId: String?
+    let activeTransmitId: String?
+    let activeTransmitExpiresAt: String?
+    let serverTimestamp: String?
     let localHasActiveDevice: Bool
     let localAudioReadiness: RemoteAudioReadinessState
     let remoteAudioReadiness: RemoteAudioReadinessState
@@ -879,6 +882,9 @@ struct ChannelReadinessSnapshot: Equatable {
     ) {
         membership = channelState.membership
         requestRelationship = channelState.requestRelationship
+        activeTransmitId = readiness?.activeTransmitId ?? channelState.activeTransmitId
+        activeTransmitExpiresAt = readiness?.activeTransmitExpiresAt ?? channelState.transmitLeaseExpiresAt
+        serverTimestamp = readiness?.serverTimestamp ?? channelState.serverTimestamp
         localHasActiveDevice = readiness?.selfHasActiveDevice ?? false
         localAudioReadiness = readiness?.localAudioReadiness ?? .unknown
         self.remoteAudioReadiness = readiness?.remoteAudioReadiness ?? .unknown
@@ -1246,11 +1252,10 @@ struct ConversationDerivationContext: Equatable {
         guard localSessionReadiness == .none else { return false }
         guard systemSessionState == .none else { return false }
         guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness,
-              peerDeviceConnected,
-              readinessStatus == .ready else {
+              peerDeviceConnected else {
             return false
         }
-        return true
+        return readinessStatus == .waitingForSelf || readinessStatus == .ready
     }
 
     var backendMembershipIsStaleWithoutLocalSessionEvidence: Bool {

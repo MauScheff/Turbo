@@ -1,481 +1,240 @@
 # Turbo
 
-Turbo is an iOS Push-to-Talk App that uses a Unison Cloud backend.
+Turbo is an iOS Push-to-Talk app backed by a Unison control plane.
 
-The app side currently proves out Apple's PushToTalk framework integration. The backend side is now a first control-plane slice for direct 1:1 channels, device registration, ephemeral PTT token handling, HTTP control endpoints, websocket signaling, and APNs wakeups.
+The app owns the Apple PushToTalk, audio, local projection, and user interaction surfaces. The Unison backend owns shared control-plane truth: identity, devices, direct channels, invites, membership, readiness, wake targeting, websocket signaling, and active transmit ownership.
 
-## Repository layout
+The backend is the control plane, not the media plane.
 
-- `Turbo/`: SwiftUI iOS prototype app.
-- `Server/`: backend notes and architecture documentation.
-- `AGENTS.md`: repo-specific instructions for AI/code agents working on the Unison codebase.
-- `UNISON.md`: Unison workflow, mode rules, and documentation/testing rules.
-- `UNISON_LANGUAGE.md`: Unison language guide and syntax reference.
-- `SWIFT.md`: app-side Swift/iOS architecture and working guidance.
-- `APP_STATE.md`: app-side state machines, session phases, and successful PTT flow examples.
-- `SWIFT_DEBUGGING.md`: simulator/device/PTT/audio debugging guidance.
-- `BACKEND.md`: backend/control-plane/storage/query guidance.
-- `MIGRATIONS.md`: Unison Cloud storage schema changes, drift guard, migration/reset workflow.
-- `TOOLING.md`: tooling, operational entrypoints, and infrastructure overview.
-- `STATE_MACHINE_TESTING.md`: canonical scenario-driven state-machine testing workflow.
-- `SIMULATOR_FUZZING.md`: deterministic simulator fuzzing, artifacts, replay, shrinking, and promotion workflow.
-- `INVARIANTS.md`: invariant rule catalog and diagnostics-backed regression guidance.
-- `SELF_HEALING.md`: recoverable bad-state taxonomy, repair rules, and proof checklist.
-- `RELIABILITY_GOALS.md`: north-star product and architecture goals for infrastructure-grade reliability.
-- `RELIABILITY_PLAN.md`: staged execution plan for making the system reliable by design.
-- `PRODUCTION_TELEMETRY.md`: production telemetry architecture, deployment, alerting, and query workflow.
-- `journal/`: timestamped engineering notes for design lessons, debugging conclusions, and changelog-style session records.
-- `.agents/`: supporting Unison language and workflow notes.
+## How We Work
 
-## Docs ownership
+Turbo's reliability loop is:
 
-Use these docs as the primary authority for their respective concerns:
-
-- `AGENTS.md`
-  - repo-level working rules, mode overview, startup guidance, and doc-loading rules
-- `TOOLING.md`
-  - tooling, operational entrypoints, simulator/probe infrastructure, and how to choose the right tool
-- `UNISON.md`
-  - Unison workflow, scratch-file/typechecking process, and Unison-specific mode rules
-- `UNISON_LANGUAGE.md`
-  - Unison syntax, semantics, and language-reference guidance
-- `SWIFT.md`
-  - app/client architecture, state management boundaries, and implementation guidance
-  - includes the default thin-UI / canonical-state-machine / ADT-first architecture pattern we want to apply broadly
-- `APP_STATE.md`
-  - app-visible session phases, state derivation, and PTT journey examples
-- `SWIFT_DEBUGGING.md`
-  - simulator/device/PTT/audio debugging loops and escalation rules
-  - client-only handshake UX shortcuts and how to disable them during debugging
-- `BACKEND.md`
-  - backend/control-plane scope, storage/query rules, and backend operational guidance
-- `MIGRATIONS.md`
-  - Unison Cloud `OrderedTable` schema changes, `turbo.schemaDrift`, migration/reset/revert workflow, and deploy guard expectations
-- `STATE_MACHINE_TESTING.md`
-  - the default distributed bug reproduction, proof, and regression-testing model
-- `SIMULATOR_FUZZING.md`
-  - seeded simulator fuzzing workflow, local commands, artifacts, replay, shrinking, and failure promotion
-- `INVARIANTS.md`
-  - how invariant IDs, typed violation logging, merged diagnostics checks, and regression expectations are encoded
-- `SELF_HEALING.md`
-  - how typed invariant violations become bounded, idempotent app/backend repair actions
-- `RELIABILITY_GOALS.md`
-  - product-level reliability guarantees, authority boundaries, control-plane/media reliability strategy, proof loops, and CTO-level roadmap
-- `RELIABILITY_PLAN.md`
-  - staged reliability execution plan: invariant registry, structured diagnostics, scenario assertions, ADT hardening, gates, backend contract parity, self-healing, and production replay
-- `PRODUCTION_TELEMETRY.md`
-  - production telemetry architecture, worker/backend setup, and operator query workflow
-- `handoffs/README.md`
-  - handoff conventions and how to use the timestamped handoff log
-- `handoffs/*.md`
-  - timestamped project state and session memory
-- `journal/README.md`
-  - journal conventions and how to write concise design/debugging records
-- `journal/*.md`
-  - timestamped engineering journal entries; use these for lessons learned, ownership boundaries, and changelog-style notes
-
-## Current app status
-
-The iOS app has a backend integration path:
-
-- It uses Apple's PushToTalk framework.
-- It has the PTT entitlement and background mode configured.
-- It receives real ephemeral PTT push tokens from `PTChannelManager`.
-- It uses the backend for dev seeding, auth, device registration, direct-channel lookup, join, ephemeral token upload, and begin/end transmit.
-- Contact presence, request queues, and conversation state are now backend-driven.
-- The contact list now has a dedicated backend summary route, and the selected conversation uses a stronger backend-owned session snapshot.
-- The app also surfaces Apple-held PushToTalk sessions separately, so a stale system session can be ended from the UI.
-- Local websocket signaling is not currently used in the fast local-dev loop.
-- The app no longer depends on WebRTC or CocoaPods; media transport is being kept behind an app-owned abstraction so a relay-oriented implementation can replace the prototype spike cleanly.
-
-### Transport security
-
-When Direct QUIC is available, BeepBeep can connect two devices directly so audio does not have to travel through the relay path.
-
-Audio is end-to-end encrypted on both Direct and Relayed connections. Direct sends audio device to device. Relayed keeps the conversation working when a mobile carrier, VPN, firewall, or network change blocks a direct connection. BeepBeep handles this automatically and uses the fastest available path.
-
-Each device keeps its private media key locally. The backend only stores public key metadata for setup, so relayed audio stays opaque to BeepBeep. Direct QUIC also keeps its private transport key locally and uses a backend-shared certificate fingerprint so each app can verify the direct peer.
-
-## Backend goal
-
-The backend should act as the control plane, not the media plane.
-
-Planned v1 responsibilities:
-
-- dev auth and a simple user directory
-- device registration
-- stable backend-owned 1:1 direct channels
-- channel membership checks
-- ephemeral PTT token ingest and storage
-- websocket signaling for control-plane notices and future transport setup
-- single active transmitter enforcement per channel
-- local stub push sender for development
-
-Explicit non-goal for v1:
-
-- media relay or SFU
-
-Planned media direction after the prototype spike cleanup:
-
-- iOS client: `PushToTalk` + `AVAudioSession` + `AVAudioEngine`
-- transport: app-owned `MediaSession` boundary with a future relay-oriented implementation
-- backend: Unison remains the control plane; media relay will run separately
-
-## Architecture docs
-
-Start here for backend design:
-
-- `Server/unison_ptt_handoff.md`
-- `Server/backend_architecture.md`
-
-## Local Unison setup
-
-Current local facts confirmed in this repo:
-
-- Unison project name: `turbo`
-- Reference project (read-only): `cuts`
-- `ucm` is installed locally
-- the local Unison MCP can access `turbo/main` and `cuts/main`
-
-Current backend libraries installed in `turbo/main`:
-
-- `base`
-- `@unison/cloud`
-- `@unison/routes`
-- `@unison/json`
-
-The `cuts` project is still the best local reference for service structure, store modules, and local/cloud entrypoint patterns.
-
-## AI agents / handoff notes
-
-If you are starting fresh in this repo:
-
-Read this core set first:
-
-1. Read `AGENTS.md`.
-2. Read `handoffs/README.md`.
-3. Read the latest file in `handoffs/` if you need the current project state.
-4. Search `journal/` when a bug looks recurring or when you need the design reasoning behind a recent change.
-
-Then load only the docs needed for the task:
-
-- Read `TOOLING.md` for tooling and infrastructure context.
-- Read `UNISON.md` for Unison/backend workflow rules.
-- Read `UNISON_LANGUAGE.md` only for Unison syntax or semantics.
-- Read `SWIFT.md` for app/client architecture and implementation work.
-- Read `APP_STATE.md` for app-visible conversation/session states and transition examples.
-- Read `SWIFT_DEBUGGING.md` for simulator/device/PTT/audio debugging.
-- Read `BACKEND.md` for backend/cloud/storage/route work.
-- Read `STATE_MACHINE_TESTING.md` when the task is about distributed bugs, scenario design, or proof loops.
-- Read `INVARIANTS.md` when the task is about invariant design, diagnostics-backed regression rules, or merged diagnostics checks.
-- Read `SELF_HEALING.md` when a bad runtime state should recover automatically instead of requiring force quit, reset, or manual disconnect.
-- Read `Server/backend_architecture.md` if you need backend structure or Unison deployment context.
-
-Treat the backend as control-plane-only unless the user explicitly changes scope.
-
-### Current app shape
-
-The iOS client important boundaries are authority for session logic. New behavior should usually go into the domain, coordinators, or typed integration seams first.
-
-### Instrumentation and iteration model
-
-Turbo now has a real development observability loop:
-
-- debug builds auto-capture structured state transitions
-- debug builds auto-publish diagnostics after high-signal transitions
-- the backend stores exact-device diagnostics per authenticated user
-- merged timeline tooling can read `device A + device B` without manual upload steps
-- simulator scenarios are checked into `scenarios/` and run against the simulator PTT shim plus the real backend
-
-This means distributed control-plane bugs should now be debugged in this order:
-
-1. reproduce in the simulator scenario runner when possible
-2. inspect the merged timeline
-3. only move to physical devices for Apple-specific behavior
-
-Treat [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md) as the canonical statement of that loop.
-
-Use [`journal/`](/Users/mau/Development/Turbo/journal) to preserve concise but dense notes when a session produces an architectural lesson, a rejected approach, or a debugging result worth carrying forward. Use [`handoffs/`](/Users/mau/Development/Turbo/handoffs) when the main purpose is resuming active work.
-
-### Current known blocker
-
-The simulator diagnostics transport is fixed, but the scenario itself is not yet green.
-
-What is true right now:
-
-- `just simulator-scenario-merge` reliably reads exact-device simulator reports after a scenario run
-- the scenario runner now executes real Swift Testing cases instead of silently running zero tests
-- the current failing test is `TurboTests/simulatorDistributedJoinScenario()`
-
-So the next engineering task is no longer “make simulator diagnostics visible”; it is “fix the actual scenario crash now that the simulator runner is truthful.”
-
-### Fast iteration loop
-
-Prefer this order:
-
-1. Backend verification
-   - `just prod-probe`
-   - probe defaults are the reserved handles `@quinn` and `@sasha`, not the manual device-test pair
-2. App verification in simulator
-   - run `just simulator-scenario` for the distributed control-plane smoke
-   - run the in-app self-check when you need one-app diagnostics
-   - inspect the persistent diagnostics log when a state transition looks wrong
-3. Real device verification
-   - only for PushToTalk / background / lock-screen / audio behavior
-
-### Scenario-driven simulator loop
-
-The simulator is now valid for distributed control-plane verification because the app uses a simulator PTT shim instead of `PTChannelManager` there.
-
-Use these commands:
-
-- `just simulator-scenario`
-  - runs the checked-in simulator scenarios in [`scenarios/`](/Users/mau/Development/Turbo/scenarios)
-  - covers request creation, incoming accept, peer-ready, both-ready, transmit begin/end, and disconnect
-  - activates the scenario runner through a temporary repo-local runtime config file so the simulator test process executes the selected spec deterministically
-- `just simulator-scenario request_accept_ready`
-  - runs only the named checked-in scenario
-  - use this when iterating on one distributed bug without paying for the whole scenario set
-- `just simulator-scenario-merge`
-  - fetches the simulator pair's latest published diagnostics by exact device id
-  - use it after a run to inspect the merged timeline without manual uploads
-
-Current source of truth:
-
-- the `simulatorDistributedJoinScenario()` spec runner result
-- the merged simulator diagnostics timeline fetched by `just simulator-scenario-merge`
-- the regular `TurboTests` unit suite
-
-Current status:
-
-- the merged simulator diagnostics path is now reliable
-- the scenario itself currently fails, so treat that failure as a real product/integration bug rather than a tooling issue
-
-Recommended testing strategy:
-
-- express new distributed regressions as checked-in scenario JSON in [`scenarios/`](/Users/mau/Development/Turbo/scenarios)
-- simulator scenarios for request/join/ready/transmit/disconnect and distributed state-machine bugs
-- physical devices only for microphone permission, real Apple PushToTalk UI, backgrounding, lock screen, and actual audio
-
-### Background PTT wake loop
-
-Foreground signaling can still use the app websocket, but background receive needs the real PushToTalk wake contract:
-
-- the app uploads the ephemeral PushToTalk token it receives while joined
-- the backend uses that token to send a `pushtotalk` APNs push when a remote speaker starts
-- the app's `incomingPushResult(...)` returns the active remote participant quickly
-- PushToTalk then activates the audio session
-- only after that activation should the app reconnect transport and start background playback
-
-For fast iteration:
-
-- simulator/unit loop:
-  - keep reducer/domain tests for payload parsing and wake state
-  - use `just simulator-ptt-push <channel_id>` to inject a simulator push payload into the running app
-- backend payload loop:
-  - use `just ptt-push-target <channel_id> <backend> <sender>` to inspect the canonical receiver token + wake payload for the sender's active transmit
-  - the intended end state is direct APNs send from Unison, but hosted Unison Cloud is currently waiting on the upstream runtime rollout
-  - until that runtime is deployed, the interim production sender should be the backend-triggered Cloudflare worker path described in [APNS_DELIVERY_PLAN.md](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md)
-  - use `just ptt-apns-start <channel_id> <backend> <sender>` only for manual one-off APNs debugging once auth env vars are configured
-  - use `just ptt-apns-worker <backend>` and `just ptt-apns-bridge <backend> @avery @blake` only as legacy/debug helpers
-  - wake-send attempts are uploaded to the backend dev diagnostics surface, so `scripts/merged_diagnostics.py` includes them in the merged timeline as `[wake:apns] ...`
-- device loop:
-  - use physical devices for lock-screen and blue-pill validation
-  - treat those runs as the source of truth for background wake behavior
-
-The simulator path is useful for payload handling and app state transitions, but physical devices are still required for the real PushToTalk wake + audio-session behavior.
-
-APNs sender env vars for deploys and local APNs debugging:
-
-- `TURBO_APNS_TEAM_ID`
-- `TURBO_APNS_KEY_ID`
-- `TURBO_APNS_PRIVATE_KEY_PATH` or `TURBO_APNS_PRIVATE_KEY`
-- optional `TURBO_APNS_USE_SANDBOX=1` for development entitlements
-- optional `TURBO_APNS_BUNDLE_ID="com.rounded.Turbo"`
-
-Recommended local setup uses `direnv` with an untracked `.envrc`:
-
-```bash
-export TURBO_APNS_TEAM_ID="YOUR_TEAM_ID"
-export TURBO_APNS_KEY_ID="YOUR_KEY_ID"
-export TURBO_APNS_PRIVATE_KEY_PATH="$HOME/.config/turbo/AuthKey_YOUR_KEY_ID.p8"
-export TURBO_APNS_USE_SANDBOX=1
+```text
+report -> diagnostics -> owner -> invariant/regression -> fix -> prove -> release/check
 ```
 
-Notes:
+Humans can describe a failure in product language. Agents should translate that report into typed evidence:
 
-- keep the `.p8` key outside the repo, for example under `~/.config/turbo/`
-- `.envrc` is ignored by git in this repo, so local APNs secrets stay untracked
-- after creating or editing `.envrc`, run `direnv allow`
-- verify the variables are visible inside the repo with `direnv exec . env | rg '^TURBO_APNS'`
-- `turbo.deploy` resolves `TURBO_APNS_PRIVATE_KEY_PATH` locally at deploy time and stores the PEM contents in cloud config as `TURBO_APNS_PRIVATE_KEY`
-- deployed backend code should read `TURBO_APNS_PRIVATE_KEY`, not a filesystem path
+1. collect the best available diagnostics
+2. classify who owns the broken fact
+3. encode the broken truth as an invariant or regression
+4. fix the owning subsystem
+5. prove the fix with the narrowest automated proof
+6. run the appropriate reliability gate or hosted check
 
-### Diagnostics
+Do not patch distributed or backend-owned bugs only in the frontend. Client changes can add guardrails, diagnostics, or better projection, but backend-owned truth must be fixed at the backend or shared contract.
 
-The app now writes a persistent diagnostics log file automatically.
+## Reporting Bugs
 
-In-app:
+When you reproduce a problem, give the agent:
 
-- open the diagnostics sheet
-- note the displayed log-file path
-- use `Copy transcript` for a shareable plain-text snapshot
+- reporter handle
+- peer handle, if there was one
+- incident ID, if shake-to-report produced one
+- what each side did
+- what should have happened
+- what actually happened
+- whether this was debug, TestFlight, production-like, simulator, or physical device
 
-The diagnostics snapshot currently includes:
+Good agent prompt:
 
-- current identity
-- selected contact
-- active channel id
-- joined/transmitting/backend/websocket/media state
-- status text
-- backend status text
-
-The app also auto-publishes diagnostics in debug builds after high-signal state transitions.
-
-That means the normal loop is now:
-
-1. reproduce once
-2. tell the agent which side looked wrong
-3. fetch the merged timeline with `scripts/merged_diagnostics.py`
-
-Manual upload remains available, but it is now a fallback rather than the primary workflow. Current debug builds should automatically publish the latest full backend diagnostics snapshot; if that snapshot is missing after fresh activity, treat it as an auto-publish or backend diagnostics bug.
-
-For physical-device debugging, agents should normally start with:
-
-```bash
-python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 @mau @bau
+```text
+I reproduced a device issue. The handles were @a and @b.
+I used shake-to-report. The incidentId was <id>.
+Expected: ...
+Actual: ...
+Please run reliability intake, classify ownership, convert this into an invariant
+or regression where possible, fix the owning seam, and prove the fix.
 ```
 
-That command merges Cloudflare telemetry, when credentials are present, with backend latest diagnostics. Telemetry is the compact queryable event stream; backend latest diagnostics is the full transcript/audio/local-state anchor. Use [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md) for the detailed operating model.
+## Reliability Intake
 
-For simulator-driven distributed debugging, the normal loop is now:
+Use the facade command first for reports from physical devices, TestFlight, production-like builds, or normal debug sessions:
 
-1. `just simulator-scenario <name>`
-2. `just simulator-scenario-merge`
-3. fix the failing invariant or state transition
+```bash
+just reliability-intake @mau @bau
+```
 
-### Verification baseline
+For a shake-to-report incident:
 
-Most recent validated commands:
+```bash
+just reliability-intake-shake @mau <incidentId> @bau
+```
 
-- `xcodebuild -project Turbo.xcodeproj -scheme BeepBeep -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO`
-- `xcodebuild -project Turbo.xcodeproj -scheme BeepBeep -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.4' -skip-testing:TurboUITests test CODE_SIGNING_ALLOWED=NO`
+The command writes a timestamped artifact under `/tmp/turbo-reliability-intake/` with:
 
-The unit suite currently covers:
+- `intake-summary.md`
+- `merged-diagnostics.txt`
+- `merged-diagnostics.json`
+- `production-replay/` when enough participant evidence exists
+- `reproduce.sh`
 
-- session coordinator invariants
-- authoritative contact retention
-- selected-session reconciliation rules
-- primary action derivation
-- self-check summary behavior
-- simulator PTT join/transmit behavior
-- a simulator-backed distributed smoke scenario
+The wrapper is intentionally thin. It runs [scripts/merged_diagnostics.py](/Users/mau/Development/Turbo/scripts/merged_diagnostics.py), asks for full metadata by default, captures both human and JSON output, and creates a best-effort replay draft through [scripts/convert_production_replay.py](/Users/mau/Development/Turbo/scripts/convert_production_replay.py) when possible.
 
-Important design decisions already agreed for v1:
+## Debug vs TestFlight/Production
 
-- Use one shared backend implementation for local and cloud.
-- Provide both `turbo.deploy` and `turbo.serveLocal`.
-- Stub APNs locally by logging intended pushes.
-- Use backend-owned direct channel IDs.
-- Store ephemeral PTT tokens per `channel + user + device`.
-- Route to one active receiving device per user per channel.
-- Include real websocket signaling from the first backend milestone.
-- Enforce at most one active transmitter per direct channel.
-- Keep the media contract transport-agnostic so a relay-oriented transport can replace the prototype spike cleanly.
+There are two observability lanes. Intake should use both whenever possible.
 
-## Unison Cloud storage guidance
+Telemetry is the compact event stream. It is for high-signal events, timings, route failures, invariant violations, production alerts, and shake-to-report markers. TestFlight and production-like reports depend heavily on this lane.
 
-Backend storage changes in this repo should follow these rules:
+Backend latest diagnostics is the full transcript and local-state anchor. It carries detailed app state, diagnostics transcript, and audio/session evidence that should not be emitted as high-volume telemetry. Current debug builds should auto-publish this after high-signal state transitions. Shake-to-report should also upload it.
 
-- model `OrderedTable` keys from the queries we need to serve
-- use compound keys and `rangeClosed.prefix` for scoped reads
-- avoid whole-table scans with in-memory filtering on route hot paths
-- add explicit secondary indexes or projections for additional access patterns
-- keep primary rows and secondary projections in sync in the same transaction
-- keep transactions small and focused
-- update dev reset/cleanup flows whenever a new projection is added
+Merged diagnostics combines both lanes. That is the agent-facing behavioral view:
 
-Recent production debugging confirmed why this matters: a broad contact-summary path that scanned too much durable state was fine locally but unstable when deployed. The fix was not a hosting workaround; it was a better query-shaped schema and narrower reads.
+```bash
+python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 2 --telemetry-limit 500 --full-metadata @mau @bau
+```
 
-## Local development workflow
+Important interpretation rules:
 
-Use this for fast iteration right now:
+- Missing Cloudflare credentials means telemetry may be absent, but backend latest diagnostics can still be useful.
+- Missing backend latest diagnostics in a current debug build after fresh activity is itself a diagnostics/autopublish bug.
+- In TestFlight or production-like reports, match the `incidentId` and `uploadedAt` before trusting a latest diagnostics URL, because the current URL points to the latest snapshot rather than an immutable incident record.
+- For audio bugs, telemetry alone is not enough. Inspect backend latest transcript anchors for capture, enqueue, receive, scheduling, and playback events.
 
-1. For backend-focused local checks, run `turbo.serveHttpLocal`
-2. For full simulator ready/transmit scenario runs, run `turbo.serveLocal`
-3. Use the printed named URL or the LAN equivalent, for example:
-   - `http://localhost:8081/s/turbo`
-   - `http://localhost:8090/s/turbo`
-   - `http://192.168.1.161:8081/s/turbo`
-4. Set `TurboBackendBaseURL` in [Turbo/Info.plist](/Users/mau/Development/Turbo/Turbo/Info.plist) to that base URL
-5. Rebuild and reinstall the app
+## Ownership Classification
 
-Important current split:
+After intake, classify the broken fact before editing:
 
-- `turbo.serveHttpLocal` is the reliable local path for backend-only and route-level checks, and is HTTP-only
-- `turbo.serveLocal` is the websocket-capable path to use for simulator `request_accept_ready` / transmit scenario verification
-- `turbo.deploy` remains the intended production/cloud path
+- backend/shared truth: fix Unison domain, store, route, readiness, wake, websocket, or active-transmit ownership
+- client projection/reducer: fix Swift state machines, coordinators, or typed projections
+- Apple/PTT/audio adapter: fix the device boundary and prove shared logic separately where possible
+- missing invariant: add detection at the authoritative seam before or with the fix
+- recoverable bad state: follow [SELF_HEALING.md](/Users/mau/Development/Turbo/SELF_HEALING.md)
 
-Operational reminders:
+If the report is really a broken invariant, write it as:
 
-- `Turbo/Info.plist` `TurboBackendBaseURL` should be `http://localhost:8081/s/turbo` for local HTTP route checks, `http://localhost:8090/s/turbo` for local websocket-backed simulator scenario work, `http://<your-mac-lan-ip>:8081/s/turbo` for a physical device against local HTTP, and `https://beepbeep.to` for the deployed backend.
-- If no interactive `ucm` process is already using the local codebase, use `just deploy`.
-- If you are already working inside a live `ucm` session, `just deploy` can block on the codebase lock; in that case run `turbo.deploy` from that existing MCP/UCM session instead.
-- If you changed backend behavior in the local Unison codebase, that change will not be live on `https://beepbeep.to` until `turbo.deploy` has actually run.
-- Dev user seeding is no longer automatic on app launch. If you want the canonical dev handles on a fresh backend, call `POST /v1/dev/seed` explicitly.
-- Use `just reset` for the authenticated runtime reset and `just reset-all` for a full backend cleanup. `just seed` restores the canonical dev handles after a full reset. All default to `https://beepbeep.to` and can be overridden, e.g. `just reset http://localhost:8081/s/turbo @avery`.
-- Use `just clean-scratch` to delete repo-root `scratch_*.u` files when temporary route experiments or one-off migration drafts have drifted away from the actual codebase state.
-- Use `just route-probe` after changing backend route composition. It exercises the deployed HTTP surface end to end, including the routes most likely to regress when Unison route order changes:
-  - dev reset/seed
-  - diagnostics upload and latest-read routes
-  - auth and device bootstrap
-  - contact summaries
-  - invite subroutes (`accept`, `decline`, `cancel`)
-  - websocket registration held open during route assertions that depend on live connectivity
-  - channel state/readiness/transmit routes
-  - `ptt-push-target` during an actual active transmit
-- Treat [`scripts/route_probe.py`](/Users/mau/Development/Turbo/scripts/route_probe.py) as part of the route contract. When you add, remove, rename, or reorder backend routes, update the probe in the same change and run it before trusting the deploy. Some routes only become valid inside a live websocket session or active transmit window, so the probe intentionally keeps those preconditions alive while it asserts them.
-- The simulator is valid for distributed control-plane verification because the app uses the simulator PTT shim there. Real Apple PushToTalk UI, backgrounding, lock-screen behavior, and audio still require physical devices.
-- If local UI behavior looks impossible, restart `turbo.serveHttpLocal` and clear backend runtime state via `POST /v1/dev/reset-state` before debugging further.
+```text
+observer -> subject -> initial conditions -> event sequence -> expected invariant -> observed violation
+```
 
-The backend now exposes `GET /v1/config`, and the app uses that to decide whether websocket signaling is supported by the current runtime.
+Then encode the invariant using [INVARIANTS.md](/Users/mau/Development/Turbo/INVARIANTS.md).
 
-Backend slice currently implemented in the Unison codebase:
+## Proof Ladder
 
-- `GET /v1/config`
-- `POST /v1/auth/session`
-- `POST /v1/devices/register`
-- `POST /v1/presence/heartbeat`
-- `GET /v1/users/by-handle/:handle`
-- `GET /v1/users/by-handle/:handle/presence`
-- `GET /v1/contacts/summaries/:deviceId`
-- `POST /v1/invites`
-- `GET /v1/invites/incoming`
-- `GET /v1/invites/outgoing`
-- `POST /v1/invites/:inviteId/accept`
-- `POST /v1/invites/:inviteId/decline`
-- `POST /v1/invites/:inviteId/cancel`
-- `POST /v1/channels/direct`
-- `POST /v1/channels/:channelId/join`
-- `POST /v1/channels/:channelId/leave`
-- `GET /v1/channels/:channelId/state/:deviceId`
-- `POST /v1/channels/:channelId/ephemeral-token`
-- `POST /v1/channels/:channelId/begin-transmit`
-- `POST /v1/channels/:channelId/end-transmit`
-- `GET /v1/ws?deviceId=...` authenticated websocket signaling endpoint
+Prefer proof in this order:
 
-Current websocket contract:
+1. Swift reducer, domain, or property tests for pure app rules
+2. Unison/backend tests or route probes for backend-owned rules
+3. deterministic simulator scenarios for distributed app/backend journeys
+4. strict merged diagnostics for pair/convergence evidence
+5. TLA+ model checks for protocol interleavings, ordering, retry, reconnect, or stale-projection questions
+6. physical devices only for Apple PushToTalk UI, microphone permission, backgrounding, lock screen, audio-session activation, and actual audio capture/playback
 
-- dev auth still uses the `x-turbo-user-handle` header
-- websocket handshake requires `deviceId` as a query parameter
-- websocket text frames are flat JSON `SignalEnvelope` objects
-- signaling payloads are forwarded opaquely as text
-- clients still send `toUserId`
-- the backend ignores client `toDeviceId` and rewrites it from active channel presence
+Physical-device evidence is valuable. It should become an automated proof whenever the behavior is representable as app intents, backend routes, websocket events, simulator PushToTalk callbacks, timing, or transport faults.
 
-Current transmit contract:
+## Primary Commands
 
-- `POST /v1/channels/:channelId/begin-transmit` now only requires the sender `deviceId`
-- the backend resolves the peer user and their active receiving device server-side
-- requests fail if the target user has no active device joined to that channel
-- the active-session snapshot also exposes backend-derived `canTransmit`, so the client can treat `ready` as “press-to-talk is actually possible now”
+| Need | Command |
+| --- | --- |
+| Intake a two-device report | `just reliability-intake @mau @bau` |
+| Intake a shake report | `just reliability-intake-shake @mau <incidentId> @bau` |
+| Run one simulator scenario | `just simulator-scenario <name>` |
+| Inspect strict simulator diagnostics | `just simulator-scenario-merge-strict` |
+| Fast regression gate | `just reliability-gate-regressions` |
+| Hosted smoke gate | `just reliability-gate-smoke` |
+| Full hosted scenario gate | `just reliability-gate-full` |
+| Local full scenario gate | `just reliability-gate-local` |
+| Protocol model checks | `just protocol-model-checks` |
+| Verify an existing deploy | `just postdeploy-check` |
+| Deploy and verify | `just deploy-verified` |
+
+## Deploy And Hosted Verification
+
+Use one primary release path:
+
+```bash
+just deploy-verified
+```
+
+That command runs the raw backend deploy, then immediately runs the hosted
+synthetic conversation canary and SLO dashboard against the live backend. A
+failure after deploy means the deploy command returned, but the live
+conversation path did not meet the product-facing SLOs. Inspect the printed
+`postdeploy-check.json`, `synthetic-conversation-probe.json`, and
+`slo-dashboard.json` artifact paths before deciding whether to roll forward,
+roll back, or turn the failure into a regression.
+
+If the deploy already happened and you only need to verify the live hosted
+surface, run:
+
+```bash
+just postdeploy-check
+```
+
+Use lower-level probes only when diagnosing a specific layer:
+
+- `just route-probe` checks route/websocket contract details on the hosted
+  backend.
+- `just route-probe-local` checks the same kind of route contract against the
+  local websocket backend.
+- `just synthetic-conversation-probe` and `just slo-dashboard` are building
+  blocks behind `postdeploy-check`; use them directly only when you need one
+  half of that pipeline or want to combine extra evidence sources.
+
+Use [TOOLING.md](/Users/mau/Development/Turbo/TOOLING.md) for the expanded command catalog, local backend setup, APNs helpers, deploy details, route probes, fuzzing, and legacy/diagnostic tools.
+
+## Source Of Truth
+
+- Swift app code: [Turbo/](/Users/mau/Development/Turbo/Turbo)
+- Swift tests: [TurboTests/](/Users/mau/Development/Turbo/TurboTests)
+- Unison backend code: local Unison codebase `turbo/main`, accessed through MCP/UCM
+- scenarios: [scenarios/](/Users/mau/Development/Turbo/scenarios)
+- invariant registry: [invariants/registry.json](/Users/mau/Development/Turbo/invariants/registry.json)
+- operational commands: [justfile](/Users/mau/Development/Turbo/justfile)
+- diagnostics and proof scripts: [scripts/](/Users/mau/Development/Turbo/scripts)
+- TLA+ specs: [specs/tla/](/Users/mau/Development/Turbo/specs/tla)
+
+Repo-root `.u` files are scratch/workflow artifacts, not the backend source of truth.
+
+## Docs Map
+
+Read only what the task needs:
+
+- [AGENTS.md](/Users/mau/Development/Turbo/AGENTS.md): repo-level agent rules
+- [TOOLING.md](/Users/mau/Development/Turbo/TOOLING.md): command selection and operational workflows
+- [STATE_MACHINE_TESTING.md](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md): canonical report-to-regression workflow
+- [SWIFT.md](/Users/mau/Development/Turbo/SWIFT.md): app architecture and Swift-side working rules
+- [SWIFT_DEBUGGING.md](/Users/mau/Development/Turbo/SWIFT_DEBUGGING.md): simulator, device, PTT, and audio debugging
+- [UNISON.md](/Users/mau/Development/Turbo/UNISON.md): Unison workflow and backend editing rules
+- [UNISON_LANGUAGE.md](/Users/mau/Development/Turbo/UNISON_LANGUAGE.md): Unison syntax and semantics
+- [BACKEND.md](/Users/mau/Development/Turbo/BACKEND.md): backend/storage/query/deploy guidance
+- [BACKEND_STRUCTURE.md](/Users/mau/Development/Turbo/BACKEND_STRUCTURE.md): quick backend namespace map
+- [MIGRATIONS.md](/Users/mau/Development/Turbo/MIGRATIONS.md): Unison Cloud storage schema changes
+- [INVARIANTS.md](/Users/mau/Development/Turbo/INVARIANTS.md): invariant naming, placement, diagnostics, and regressions
+- [SELF_HEALING.md](/Users/mau/Development/Turbo/SELF_HEALING.md): bounded repair for recoverable invalid states
+- [TLA_PLUS.md](/Users/mau/Development/Turbo/TLA_PLUS.md): protocol model checking
+- [SIMULATOR_FUZZING.md](/Users/mau/Development/Turbo/SIMULATOR_FUZZING.md): seeded distributed scenario fuzzing
+- [PRODUCTION_TELEMETRY.md](/Users/mau/Development/Turbo/PRODUCTION_TELEMETRY.md): telemetry setup, alerts, and shake reports
+- [handoffs/README.md](/Users/mau/Development/Turbo/handoffs/README.md): active session handoff conventions
+- [journal/README.md](/Users/mau/Development/Turbo/journal/README.md): durable design/debugging notes
+
+## Local Development
+
+Use `just` for repeated workflows.
+
+Backend entrypoints:
+
+- `just serve-local-http`: local HTTP route checks
+- `just serve-local`: local websocket-capable backend for simulator scenarios
+- `just deploy-verified`: normal deploy plus hosted verification
+- `just postdeploy-check`: hosted verification after a deploy
+
+Set `TurboBackendBaseURL` in [Turbo/Info.plist](/Users/mau/Development/Turbo/Turbo/Info.plist) to the backend you are exercising:
+
+- `http://localhost:8081/s/turbo` for local HTTP route checks
+- `http://localhost:8090/s/turbo` for local websocket-backed simulator scenario work
+- `http://<mac-lan-ip>:8081/s/turbo` for physical device against local HTTP
+- `https://beepbeep.to` for the deployed backend
+
+If local UI behavior looks impossible, restart the local backend and clear runtime state before drawing conclusions.
+
+## Current Status
+
+As of 2026-05-10:
+
+- `just reliability-gate-regressions` is the fast focused proof gate.
+- Hosted simulator scenario infrastructure and strict merged diagnostics are the main distributed control-plane proof loop.
+- Real PushToTalk UI, microphone permission, backgrounding, lock screen, audio-session activation, and actual capture/playback still require physical devices.
+- Historical blockers live in [handoffs/](/Users/mau/Development/Turbo/handoffs); do not treat old handoffs as current truth without checking the latest status.

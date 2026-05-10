@@ -250,9 +250,10 @@ extension PTTViewModel {
         priorFailureCount: Int = 0
     ) -> DirectQuicRetryBackoffRequest? {
         let baseMilliseconds = directQuicRetryBackoffMilliseconds()
+        let category = DirectQuicRetryBackoffPolicy.category(for: reason)
         let resolvedMilliseconds = DirectQuicRetryBackoffPolicy.milliseconds(
             baseMilliseconds: baseMilliseconds,
-            reason: reason,
+            category: category,
             priorFailureCount: priorFailureCount
         )
         let milliseconds = preferredMilliseconds.map { min(max($0, 0), resolvedMilliseconds) }
@@ -261,7 +262,7 @@ extension PTTViewModel {
         return DirectQuicRetryBackoffRequest(
             milliseconds: milliseconds,
             reason: reason,
-            category: DirectQuicRetryBackoffPolicy.category(for: reason),
+            category: category,
             attemptId: attemptID
         )
     }
@@ -294,8 +295,9 @@ extension PTTViewModel {
         let isForegroundSelectedPath =
             currentApplicationState() == .active
             && selectedContactId == contactID
+        let category = DirectQuicRetryBackoffPolicy.category(for: reason)
         let isConnectivityFailure =
-            DirectQuicRetryBackoffPolicy.category(for: reason) == .connectivity
+            category == .connectivity
         let priorFailureCount =
             isConnectivityFailure
             ? max(
@@ -307,7 +309,7 @@ extension PTTViewModel {
             )
             : mediaRuntime.directQuicUpgrade.retryFailureCount(
                 for: contactID,
-                category: DirectQuicRetryBackoffPolicy.category(for: reason)
+                category: category
             )
         let fastRetryNumber =
             (isForegroundSelectedPath && isConnectivityFailure)
@@ -1451,7 +1453,7 @@ extension PTTViewModel {
 
         await syncLocalReceiverAudioReadinessSignal(
             for: contactID,
-            reason: "receiver-prewarm-request"
+            reason: .receiverPrewarmRequest
         )
     }
 
@@ -1597,7 +1599,7 @@ extension PTTViewModel {
             await prewarmLocalMediaIfNeeded(for: contactID)
             await syncLocalReceiverAudioReadinessSignal(
                 for: contactID,
-                reason: "direct-quic-receiver-prewarm"
+                reason: .directQuicReceiverPrewarm
             )
         }
 
@@ -1831,6 +1833,7 @@ extension PTTViewModel {
         attemptID: String,
         reason: String
     ) async {
+        let category = DirectQuicRetryBackoffPolicy.category(for: reason)
         diagnostics.record(
             .media,
             level: .notice,
@@ -1839,7 +1842,7 @@ extension PTTViewModel {
                 "contactId": contactID.uuidString,
                 "attemptId": attemptID,
                 "reason": reason,
-                "failureCategory": DirectQuicRetryBackoffPolicy.category(for: reason).rawValue,
+                "failureCategory": category.rawValue,
             ]
         )
         mediaRuntime.directQuicUpgrade.applyRetryBackoff(

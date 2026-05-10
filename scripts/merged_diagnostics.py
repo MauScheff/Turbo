@@ -5,19 +5,43 @@ import json
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 import query_telemetry
 
 
-SECTION_HEADER_RE = re.compile(r"^(STATE SNAPSHOT|STATE TIMELINE|INVARIANT VIOLATIONS|DIAGNOSTICS)$")
+SECTION_HEADER_RE = re.compile(
+    r"^(STATE SNAPSHOT|STRUCTURED DIAGNOSTICS|STATE TIMELINE|INVARIANT VIOLATIONS|DIAGNOSTICS)$"
+)
 TIMELINE_RE = re.compile(r"^\[(?P<timestamp>[^\]]+)\] \[(?P<label>[^\]]+)\] (?P<body>.*)$")
 INVARIANT_RE = re.compile(
     r"^\[(?P<timestamp>[^\]]+)\] \[(?P<invariant_id>[^\]]+)\] \[(?P<scope>[^\]]+)\](?: (?P<body>.*))?$"
 )
 CONTACT_FIELD_RE = re.compile(r"^contact\[(?P<handle>[^\]]+)\]\.(?P<field>.+)$")
+APP_VERSION_SCENARIO_RE = re.compile(r"^scenario:(?P<name>[^:]+):(?P<run_id>[^:]+):(?P<device_id>.+)$")
+TIMELINE_SUBJECT_RE = re.compile(r"^\[(?P<subject>[^\]]+)\]")
+TEXT_CONTEXT_RE = re.compile(
+    r"(?P<key>"
+    r"scenarioRunID|scenarioRunId|scenario_run_id|"
+    r"sessionID|sessionId|session_id|webSocketSessionID|webSocketSessionId|"
+    r"channelUUID|channelID|channelId|channel_id|activeChannelID|activeChannelId|backendChannelID|"
+    r"contactID|contactId|contact_id|selectedContactID|selectedContactId|selectedHandle|systemActiveContactID|"
+    r"transmitActiveContactID|peer_handle|selectedContact|"
+    r"attemptID|attemptId|attempt_id|directQuicAttemptId|directQuicAttemptID"
+    r")=(?P<value>\"[^\"]*\"|[^\s,;]+)"
+)
+TEXT_CONTEXT_COLON_RE = re.compile(
+    r"(?P<key>"
+    r"scenarioRunID|scenarioRunId|"
+    r"sessionID|sessionId|webSocketSessionID|webSocketSessionId|"
+    r"channelUUID|channelID|channelId|activeChannelID|backendChannelID|"
+    r"contactID|contactId|selectedContactID|selectedHandle|systemActiveContactID|transmitActiveContactID|"
+    r"attemptID|attemptId|directQuicAttemptId|directQuicAttemptID"
+    r"): (?P<value>\"[^\"]*\"|[^\s,\)]+)"
+)
+GROUP_DIMENSION_ORDER = ("scenarioRun", "session", "channel", "contact", "attempt")
 
 
 @dataclass(frozen=True)
@@ -28,13 +52,18 @@ class InvariantViolation:
     message: str
     source: str
     timestamp: datetime | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class Report:
     handle: str
     device_id: str
+    app_version: str
+    scenario_name: str | None
+    scenario_run_id: str | None
     uploaded_at: str
+    structured_diagnostics: dict | None
     snapshot: dict[str, str]
     state_timeline: list[tuple[datetime, str]]
     invariant_violations: list[InvariantViolation]
@@ -54,6 +83,8 @@ class SourceWarning:
 class TelemetryEvent:
     timestamp: datetime
     handle: str
+    device_id: str
+    session_id: str
     event_name: str
     source: str
     severity: str
@@ -64,6 +95,44 @@ class TelemetryEvent:
     peer_handle: str
     invariant_id: str
     metadata_text: str
+
+
+@dataclass
+class DiagnosticGroup:
+    dimension: str
+    value: str
+    event_count: int = 0
+    violation_count: int = 0
+    subjects: set[str] = field(default_factory=set)
+    sources: set[str] = field(default_factory=set)
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+    samples: list[str] = field(default_factory=list)
+
+    def add(
+        self,
+        *,
+        timestamp: datetime | None,
+        subject: str,
+        source: str,
+        line: str,
+        is_violation: bool,
+    ) -> None:
+        if is_violation:
+            self.violation_count += 1
+        else:
+            self.event_count += 1
+        if subject:
+            self.subjects.add(subject)
+        if source:
+            self.sources.add(source)
+        if timestamp is not None:
+            if self.first_seen is None or timestamp < self.first_seen:
+                self.first_seen = timestamp
+            if self.last_seen is None or timestamp > self.last_seen:
+                self.last_seen = timestamp
+        if line and len(self.samples) < 3:
+            self.samples.append(line if len(line) <= 220 else line[:220] + "...<truncated>")
 
 
 def snapshot_bool(snapshot: dict[str, str], key: str) -> bool | None:
@@ -210,13 +279,47 @@ def fetch_latest_report(
     report = payload["report"]
     transcript = report.get("transcript", "")
     sections = split_sections(transcript)
+    structured_diagnostics = parse_structured_diagnostics(sections.get("STRUCTURED DIAGNOSTICS", ""))
+    raw_app_version = (
+        structured_diagnostics.get("appVersion")
+        if isinstance(structured_diagnostics, dict)
+        else report.get("appVersion", "")
+    )
+    app_version = raw_app_version if isinstance(raw_app_version, str) else ""
+    scenario_name = (
+        structured_diagnostics.get("scenarioName")
+        if isinstance(structured_diagnostics, dict) and isinstance(structured_diagnostics.get("scenarioName"), str)
+        else None
+    )
+    scenario_run_id = (
+        structured_diagnostics.get("scenarioRunId")
+        if isinstance(structured_diagnostics, dict) and isinstance(structured_diagnostics.get("scenarioRunId"), str)
+        else None
+    )
+    if scenario_name is None or scenario_run_id is None:
+        parsed_scenario = scenario_context_from_app_version(app_version)
+        scenario_name = scenario_name or parsed_scenario.get("scenarioName")
+        scenario_run_id = scenario_run_id or parsed_scenario.get("scenarioRunId")
+    structured_snapshot = snapshot_from_structured_diagnostics(structured_diagnostics)
+    structured_invariant_violations = invariant_violations_from_structured_diagnostics(
+        handle,
+        structured_diagnostics,
+    )
     return Report(
         handle=handle,
         device_id=report.get("deviceId", device_id or "unknown"),
+        app_version=app_version,
+        scenario_name=scenario_name,
+        scenario_run_id=scenario_run_id,
         uploaded_at=report.get("uploadedAt", ""),
-        snapshot=parse_snapshot(sections.get("STATE SNAPSHOT", "")),
+        structured_diagnostics=structured_diagnostics,
+        snapshot=structured_snapshot or parse_snapshot(sections.get("STATE SNAPSHOT", "")),
         state_timeline=parse_timeline_section(handle, "state", sections.get("STATE TIMELINE", "")),
-        invariant_violations=parse_invariant_section(handle, sections.get("INVARIANT VIOLATIONS", "")),
+        invariant_violations=(
+            structured_invariant_violations
+            if structured_diagnostics is not None
+            else parse_invariant_section(handle, sections.get("INVARIANT VIOLATIONS", ""))
+        ),
         backend_invariant_violations=fetch_backend_invariant_events(base_url, handle, insecure, timeout=timeout),
         diagnostics=parse_timeline_section(handle, "diag", sections.get("DIAGNOSTICS", "")),
         wake_events=fetch_wake_events(base_url, handle, insecure, timeout=timeout),
@@ -357,6 +460,142 @@ def parse_snapshot(section: str) -> dict[str, str]:
     return snapshot
 
 
+def parse_structured_diagnostics(section: str) -> dict | None:
+    if not section or section == "<empty>":
+        return None
+    try:
+        payload = json.loads(section)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def snapshot_from_structured_diagnostics(payload: dict | None) -> dict[str, str]:
+    if not payload:
+        return {}
+    projection = payload.get("projection")
+    if not isinstance(projection, dict):
+        return {}
+    selected = projection.get("selectedSession")
+    if not isinstance(selected, dict):
+        return {}
+
+    snapshot: dict[str, str] = {}
+
+    def put(key: str, value: object) -> None:
+        if value is None:
+            snapshot[key] = "none"
+        elif isinstance(value, bool):
+            snapshot[key] = "true" if value else "false"
+        else:
+            snapshot[key] = str(value)
+
+    selected_key_map = {
+        "selectedHandle": "selectedContact",
+        "selectedPhase": "selectedPeerPhase",
+        "selectedPhaseDetail": "selectedPeerPhaseDetail",
+        "relationship": "selectedPeerRelationship",
+        "statusMessage": "selectedPeerStatus",
+        "canTransmitNow": "selectedPeerCanTransmit",
+        "isJoined": "isJoined",
+        "isTransmitting": "isTransmitting",
+        "activeChannelID": "activeChannelID",
+        "pendingAction": "pendingAction",
+        "reconciliationAction": "selectedPeerReconciliationAction",
+        "hadConnectedSessionContinuity": "hadConnectedSessionContinuity",
+        "systemSession": "systemSession",
+        "mediaState": "mediaState",
+        "backendChannelStatus": "backendChannelStatus",
+        "backendReadiness": "backendReadiness",
+        "backendMembership": "backendMembership",
+        "backendRequestRelationship": "backendRequestRelationship",
+        "backendSelfJoined": "backendSelfJoined",
+        "backendPeerJoined": "backendPeerJoined",
+        "backendPeerDeviceConnected": "backendPeerDeviceConnected",
+        "backendActiveTransmitterUserId": "backendActiveTransmitterUserId",
+        "backendActiveTransmitId": "backendActiveTransmitId",
+        "backendActiveTransmitExpiresAt": "backendActiveTransmitExpiresAt",
+        "backendServerTimestamp": "backendServerTimestamp",
+        "remoteAudioReadiness": "remoteAudioReadiness",
+        "remoteWakeCapability": "remoteWakeCapability",
+        "remoteWakeCapabilityKind": "remoteWakeCapabilityKind",
+        "backendCanTransmit": "backendCanTransmit",
+        "firstTalkStartupProfile": "firstTalkStartupProfile",
+        "pttTokenRegistrationKind": "pttTokenRegistrationKind",
+        "incomingWakeActivationState": "incomingWakeActivationState",
+        "incomingWakeBufferedChunkCount": "incomingWakeBufferedChunkCount",
+    }
+    for source_key, snapshot_key in selected_key_map.items():
+        put(snapshot_key, selected.get(source_key))
+
+    put("backendWebSocketConnected", projection.get("isWebSocketConnected"))
+    put("status", projection.get("statusMessage"))
+    put("backendStatus", projection.get("backendStatusMessage"))
+    put("identity", payload.get("handle"))
+
+    contacts = projection.get("contacts")
+    if isinstance(contacts, list):
+        contact_key_map = {
+            "isOnline": "isOnline",
+            "listState": "listState",
+            "badgeStatus": "badgeStatus",
+            "listSection": "listSection",
+            "presencePill": "presencePill",
+            "requestRelationship": "requestRelationship",
+            "hasIncomingRequest": "hasIncomingRequest",
+            "hasOutgoingRequest": "hasOutgoingRequest",
+            "requestCount": "requestCount",
+            "incomingInviteCount": "incomingInviteCount",
+            "outgoingInviteCount": "outgoingInviteCount",
+        }
+        for contact in contacts:
+            if not isinstance(contact, dict):
+                continue
+            handle = contact.get("handle")
+            if not isinstance(handle, str) or not handle:
+                continue
+            for source_key, snapshot_key in contact_key_map.items():
+                put(f"contact[{handle}].{snapshot_key}", contact.get(source_key))
+
+    return snapshot
+
+
+def invariant_violations_from_structured_diagnostics(
+    handle: str,
+    payload: dict | None,
+) -> list[InvariantViolation]:
+    if not payload:
+        return []
+    raw_violations = payload.get("invariantViolations")
+    if not isinstance(raw_violations, list):
+        return []
+    violations: list[InvariantViolation] = []
+    for raw_violation in raw_violations:
+        if not isinstance(raw_violation, dict):
+            continue
+        invariant_id = raw_violation.get("invariantID") or raw_violation.get("invariantId")
+        scope = raw_violation.get("scope")
+        if not isinstance(invariant_id, str) or not isinstance(scope, str):
+            continue
+        message = raw_violation.get("message")
+        metadata = raw_violation.get("metadata")
+        violations.append(
+            InvariantViolation(
+                subject=handle,
+                invariant_id=invariant_id,
+                scope=scope,
+                message=message if isinstance(message, str) else "",
+                source="structured",
+                timestamp=parse_timestamp(str(raw_violation.get("timestamp", ""))),
+                metadata={
+                    str(key): str(value)
+                    for key, value in metadata.items()
+                } if isinstance(metadata, dict) else {},
+            )
+        )
+    return violations
+
+
 def parse_timeline_section(handle: str, prefix: str, section: str) -> list[tuple[datetime, str]]:
     events: list[tuple[datetime, str]] = []
     for line in section.splitlines():
@@ -418,6 +657,22 @@ def parse_timestamp(text: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def parse_backend_instant(text: str) -> datetime | None:
+    text = text.strip()
+    if not text or text == "none" or not text.endswith("Z"):
+        return None
+    without_zone = text[:-1]
+    base, separator, fractional = without_zone.partition(".")
+    base_timestamp = parse_timestamp(base + "Z")
+    if base_timestamp is None or not separator:
+        return base_timestamp
+    digits = "".join(character for character in fractional if character.isdigit())
+    if not digits:
+        return base_timestamp
+    fractional_seconds = int(digits) / (10 ** len(digits))
+    return base_timestamp.replace(microsecond=0) + timedelta(seconds=fractional_seconds)
 
 
 def render_snapshot(report: Report) -> str:
@@ -527,6 +782,7 @@ SELECT
   blob3 AS severity,
   blob5 AS user_handle,
   blob6 AS device_id,
+  blob7 AS session_id,
   blob8 AS channel_id,
   blob11 AS peer_handle,
   blob14 AS invariant_id,
@@ -562,6 +818,8 @@ LIMIT {limit}
             TelemetryEvent(
                 timestamp=timestamp,
                 handle=str(row.get("user_handle") or row.get("device_id") or "unknown"),
+                device_id=str(row.get("device_id") or ""),
+                session_id=str(row.get("session_id") or ""),
                 event_name=str(row.get("event_name") or "unknown"),
                 source=str(row.get("source") or "unknown"),
                 severity=str(row.get("severity") or "unknown"),
@@ -590,6 +848,8 @@ def render_telemetry_events(
             f"event={event.event_name}",
         ]
         for key, value in (
+            ("device_id", event.device_id),
+            ("session_id", event.session_id),
             ("phase", event.phase),
             ("reason", event.reason),
             ("message", event.message),
@@ -610,6 +870,365 @@ def render_telemetry_events(
 
 def sql_string(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def scenario_context_from_app_version(app_version: str) -> dict[str, str]:
+    match = APP_VERSION_SCENARIO_RE.match(app_version.strip())
+    if not match:
+        return {}
+    return {
+        "scenarioName": match.group("name"),
+        "scenarioRunId": match.group("run_id"),
+        "deviceId": match.group("device_id"),
+    }
+
+
+def empty_contexts() -> dict[str, set[str]]:
+    return {dimension: set() for dimension in GROUP_DIMENSION_ORDER}
+
+
+def context_dimension_for_key(key: str) -> str | None:
+    normalized = key.strip()
+    if normalized in {"scenarioRunID", "scenarioRunId", "scenario_run_id"}:
+        return "scenarioRun"
+    if normalized in {
+        "sessionID",
+        "sessionId",
+        "session_id",
+        "webSocketSessionID",
+        "webSocketSessionId",
+    }:
+        return "session"
+    if normalized in {
+        "channelUUID",
+        "channelID",
+        "channelId",
+        "channel_id",
+        "activeChannelID",
+        "activeChannelId",
+        "backendChannelID",
+    }:
+        return "channel"
+    if normalized in {
+        "contactID",
+        "contactId",
+        "contact_id",
+        "selectedContactID",
+        "selectedContactId",
+        "selectedHandle",
+        "systemActiveContactID",
+        "transmitActiveContactID",
+        "peer_handle",
+        "selectedContact",
+    }:
+        return "contact"
+    if normalized in {
+        "attemptID",
+        "attemptId",
+        "attempt_id",
+        "directQuicAttemptId",
+        "directQuicAttemptID",
+    }:
+        return "attempt"
+    return None
+
+
+def normalized_context_value(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().strip(",;")
+    if text.startswith('"') and text.endswith('"') and len(text) >= 2:
+        text = text[1:-1]
+    while text.startswith("Optional(") and text.endswith(")"):
+        text = text[len("Optional("):-1].strip()
+    text = text.strip().strip(",;)").strip('"')
+    if not text or text in {"none", "nil", "null", "unknown", "<missing>"}:
+        return None
+    return text
+
+
+def add_context_value(contexts: dict[str, set[str]], key: str, value: object) -> None:
+    dimension = context_dimension_for_key(key)
+    normalized_value = normalized_context_value(value)
+    if dimension is None or normalized_value is None:
+        return
+    contexts.setdefault(dimension, set()).add(normalized_value)
+
+
+def merge_contexts(*context_sets: dict[str, set[str]]) -> dict[str, set[str]]:
+    merged = empty_contexts()
+    for contexts in context_sets:
+        for dimension, values in contexts.items():
+            if dimension in merged:
+                merged[dimension].update(values)
+    return merged
+
+
+def contexts_from_text(text: str) -> dict[str, set[str]]:
+    contexts = empty_contexts()
+    for match in TEXT_CONTEXT_RE.finditer(text):
+        add_context_value(contexts, match.group("key"), match.group("value"))
+    for match in TEXT_CONTEXT_COLON_RE.finditer(text):
+        add_context_value(contexts, match.group("key"), match.group("value"))
+    return contexts
+
+
+def contexts_from_structured_diagnostics(payload: dict | None) -> dict[str, set[str]]:
+    contexts = empty_contexts()
+    if not payload:
+        return contexts
+
+    add_context_value(contexts, "scenarioRunId", payload.get("scenarioRunId"))
+    scenario_from_app = scenario_context_from_app_version(str(payload.get("appVersion") or ""))
+    add_context_value(contexts, "scenarioRunId", scenario_from_app.get("scenarioRunId"))
+
+    projection = payload.get("projection")
+    if isinstance(projection, dict):
+        local_session = projection.get("localSession")
+        if isinstance(local_session, dict):
+            for key in (
+                "selectedContactID",
+                "selectedHandle",
+                "activeChannelID",
+                "systemActiveContactID",
+                "systemChannelUUID",
+                "transmitActiveContactID",
+            ):
+                add_context_value(contexts, key, local_session.get(key))
+
+        selected = projection.get("selectedSession")
+        if isinstance(selected, dict):
+            add_context_value(contexts, "selectedContact", selected.get("selectedHandle"))
+            add_context_value(contexts, "activeChannelID", selected.get("activeChannelID"))
+
+    direct_quic = payload.get("directQuic")
+    if isinstance(direct_quic, dict):
+        add_context_value(contexts, "attemptID", direct_quic.get("attemptID"))
+        add_context_value(contexts, "channelID", direct_quic.get("channelID"))
+
+    state_captures = payload.get("stateCaptures")
+    if isinstance(state_captures, list):
+        for capture in state_captures:
+            if not isinstance(capture, dict):
+                continue
+            fields = capture.get("fields")
+            if not isinstance(fields, dict):
+                continue
+            for key, value in fields.items():
+                add_context_value(contexts, str(key), value)
+
+    reducer_reports = payload.get("reducerTransitionReports")
+    if isinstance(reducer_reports, list):
+        for report in reducer_reports:
+            if not isinstance(report, dict):
+                continue
+            correlation_ids = report.get("correlationIDs")
+            if isinstance(correlation_ids, dict):
+                for key, value in correlation_ids.items():
+                    add_context_value(contexts, str(key), value)
+            for key in ("previousStateSummary", "nextStateSummary", "eventName"):
+                value = report.get(key)
+                if isinstance(value, str):
+                    contexts = merge_contexts(contexts, contexts_from_text(value))
+            effects = report.get("effectsEmitted")
+            if isinstance(effects, list):
+                for effect in effects:
+                    if isinstance(effect, str):
+                        contexts = merge_contexts(contexts, contexts_from_text(effect))
+
+    return contexts
+
+
+def contexts_from_report(report: Report) -> dict[str, set[str]]:
+    contexts = contexts_from_structured_diagnostics(report.structured_diagnostics)
+    add_context_value(contexts, "scenarioRunId", report.scenario_run_id)
+    add_context_value(contexts, "selectedContact", report.handle)
+    for key in (
+        "selectedContactID",
+        "selectedContact",
+        "activeChannelID",
+        "activeChannelId",
+        "systemActiveContactID",
+        "systemChannelUUID",
+        "transmitActiveContactID",
+    ):
+        add_context_value(contexts, key, report.snapshot.get(key))
+    return merge_contexts(contexts, contexts_from_text(report.app_version))
+
+
+def contexts_from_violation(violation: InvariantViolation) -> dict[str, set[str]]:
+    contexts = contexts_from_text(violation.message)
+    add_context_value(contexts, "selectedContact", violation.subject)
+    for key, value in violation.metadata.items():
+        add_context_value(contexts, key, value)
+    return contexts
+
+
+def contexts_from_telemetry(event: TelemetryEvent) -> dict[str, set[str]]:
+    contexts = empty_contexts()
+    add_context_value(contexts, "selectedContact", event.handle)
+    add_context_value(contexts, "session_id", event.session_id)
+    add_context_value(contexts, "channel_id", event.channel_id)
+    add_context_value(contexts, "peer_handle", event.peer_handle)
+    add_context_value(contexts, "attemptId", metadata_value(event.metadata_text, "attemptId"))
+    add_context_value(contexts, "attemptID", metadata_value(event.metadata_text, "attemptID"))
+    return merge_contexts(contexts, contexts_from_text(event.metadata_text), contexts_from_text(event.message))
+
+
+def metadata_value(metadata_text: str, key: str) -> object:
+    if not metadata_text:
+        return None
+    try:
+        parsed = json.loads(metadata_text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, dict):
+        return parsed.get(key)
+    return None
+
+
+def subject_from_timeline_line(line: str) -> str:
+    match = TIMELINE_SUBJECT_RE.match(line)
+    return match.group("subject") if match else "unknown"
+
+
+def add_contexts_to_groups(
+    groups: dict[tuple[str, str], DiagnosticGroup],
+    contexts: dict[str, set[str]],
+    *,
+    timestamp: datetime | None,
+    subject: str,
+    source: str,
+    line: str,
+    is_violation: bool,
+) -> None:
+    for dimension in GROUP_DIMENSION_ORDER:
+        for value in contexts.get(dimension, set()):
+            key = (dimension, value)
+            group = groups.get(key)
+            if group is None:
+                group = DiagnosticGroup(dimension=dimension, value=value)
+                groups[key] = group
+            group.add(
+                timestamp=timestamp,
+                subject=subject,
+                source=source,
+                line=line,
+                is_violation=is_violation,
+            )
+
+
+def build_diagnostic_groups(
+    reports: Iterable[Report],
+    violations: Iterable[InvariantViolation],
+    telemetry_events: Iterable[TelemetryEvent],
+    timeline: Iterable[tuple[datetime, str]],
+) -> list[DiagnosticGroup]:
+    groups: dict[tuple[str, str], DiagnosticGroup] = {}
+    report_contexts_by_subject: dict[str, dict[str, set[str]]] = {}
+
+    for report in reports:
+        contexts = contexts_from_report(report)
+        report_contexts_by_subject[report.handle] = contexts
+        add_contexts_to_groups(
+            groups,
+            contexts,
+            timestamp=parse_timestamp(report.uploaded_at),
+            subject=report.handle,
+            source="report",
+            line=f"latest diagnostics for {report.handle}",
+            is_violation=False,
+        )
+
+    for violation in violations:
+        base_contexts = report_contexts_by_subject.get(violation.subject, empty_contexts())
+        contexts = merge_contexts(base_contexts, contexts_from_violation(violation))
+        add_contexts_to_groups(
+            groups,
+            contexts,
+            timestamp=violation.timestamp,
+            subject=violation.subject,
+            source=f"invariant:{violation.source}",
+            line=render_violation(violation),
+            is_violation=True,
+        )
+
+    for event in telemetry_events:
+        base_contexts = report_contexts_by_subject.get(event.handle, empty_contexts())
+        contexts = merge_contexts(base_contexts, contexts_from_telemetry(event))
+        add_contexts_to_groups(
+            groups,
+            contexts,
+            timestamp=event.timestamp,
+            subject=event.handle,
+            source="telemetry",
+            line=f"{event.event_name} {event.message}".strip(),
+            is_violation=False,
+        )
+
+    for timestamp, line in timeline:
+        if " [telemetry] " in line:
+            continue
+        subject = subject_from_timeline_line(line)
+        base_contexts = report_contexts_by_subject.get(subject, empty_contexts())
+        contexts = merge_contexts(base_contexts, contexts_from_text(line))
+        add_contexts_to_groups(
+            groups,
+            contexts,
+            timestamp=timestamp,
+            subject=subject,
+            source="timeline",
+            line=line,
+            is_violation=False,
+        )
+
+    return sorted(
+        groups.values(),
+        key=lambda group: (
+            GROUP_DIMENSION_ORDER.index(group.dimension),
+            -(group.event_count + group.violation_count),
+            group.value,
+        ),
+    )
+
+
+def diagnostic_group_payload(group: DiagnosticGroup) -> dict[str, object]:
+    return {
+        "dimension": group.dimension,
+        "value": group.value,
+        "eventCount": group.event_count,
+        "violationCount": group.violation_count,
+        "subjects": sorted(group.subjects),
+        "sources": sorted(group.sources),
+        "firstSeen": group.first_seen.isoformat() if group.first_seen else None,
+        "lastSeen": group.last_seen.isoformat() if group.last_seen else None,
+        "samples": group.samples,
+    }
+
+
+def render_diagnostic_groups(groups: list[DiagnosticGroup], *, limit_per_dimension: int = 12) -> list[str]:
+    if not groups:
+        return ["- none"]
+
+    lines: list[str] = []
+    for dimension in GROUP_DIMENSION_ORDER:
+        dimension_groups = [group for group in groups if group.dimension == dimension]
+        if not dimension_groups:
+            continue
+        lines.append(f"{dimension}:")
+        for group in dimension_groups[:limit_per_dimension]:
+            subjects = ",".join(sorted(group.subjects)) or "none"
+            sources = ",".join(sorted(group.sources)) or "none"
+            first_seen = group.first_seen.isoformat() if group.first_seen else "unknown"
+            last_seen = group.last_seen.isoformat() if group.last_seen else "unknown"
+            lines.append(
+                f"- {group.value} events={group.event_count} violations={group.violation_count} "
+                f"subjects={subjects} sources={sources} first={first_seen} last={last_seen}"
+            )
+        remaining = len(dimension_groups) - limit_per_dimension
+        if remaining > 0:
+            lines.append(f"- ... {remaining} more {dimension} group(s)")
+    return lines if lines else ["- none"]
 
 
 def render_invariant_events(violations: Iterable[InvariantViolation]) -> list[tuple[datetime, str]]:
@@ -638,6 +1257,7 @@ def build_violation(
     message: str,
     source: str = "derived",
     timestamp: datetime | None = None,
+    metadata: dict[str, str] | None = None,
 ) -> InvariantViolation:
     return InvariantViolation(
         subject=subject,
@@ -646,6 +1266,7 @@ def build_violation(
         message=message,
         source=source,
         timestamp=timestamp,
+        metadata=metadata or {},
     )
 
 
@@ -665,6 +1286,10 @@ def analyze_report(report: Report) -> list[InvariantViolation]:
     system_session = snapshot.get("systemSession", "none")
     backend_channel_status = snapshot.get("backendChannelStatus", "none")
     backend_readiness = snapshot.get("backendReadiness", "none")
+    backend_active_transmitter_user_id = snapshot.get("backendActiveTransmitterUserId", "none")
+    backend_active_transmit_id = snapshot.get("backendActiveTransmitId", "none")
+    backend_active_transmit_expires_at = snapshot.get("backendActiveTransmitExpiresAt", "none")
+    backend_server_timestamp = snapshot.get("backendServerTimestamp", "none")
     remote_wake_capability_kind = snapshot.get("remoteWakeCapabilityKind", "unavailable")
     phase_detail = snapshot.get("selectedPeerPhaseDetail", "none")
     pending_action = snapshot.get("pendingAction", "none")
@@ -792,6 +1417,82 @@ def analyze_report(report: Report) -> list[InvariantViolation]:
                 message="selectedPeerPhase=ready while isJoined=false",
             )
         )
+
+    if phase == "receiving" and (not is_joined or system_session == "none"):
+        violations.append(
+            build_violation(
+                subject=report.handle,
+                invariant_id="selected.receiving_without_joined_session",
+                scope="local",
+                message=(
+                    "selectedPeerPhase=receiving without joined local session evidence "
+                    f"isJoined={is_joined} systemSession={system_session} "
+                    f"backendChannelStatus={backend_channel_status} "
+                    f"backendReadiness={backend_readiness}"
+                ),
+                metadata={
+                    "selectedPeerPhase": phase,
+                    "isJoined": str(is_joined),
+                    "systemSession": system_session,
+                    "backendChannelStatus": backend_channel_status,
+                    "backendReadiness": backend_readiness,
+                    "remoteWakeCapabilityKind": remote_wake_capability_kind,
+                },
+            )
+        )
+
+    if phase == "transmitting" and not is_joined:
+        violations.append(
+            build_violation(
+                subject=report.handle,
+                invariant_id="selected.live_projection_after_membership_exit",
+                scope="local",
+                message=(
+                    "selectedPeerPhase=transmitting after local membership exit "
+                    f"isJoined={is_joined} systemSession={system_session} "
+                    f"backendChannelStatus={backend_channel_status} "
+                    f"backendReadiness={backend_readiness}"
+                ),
+                metadata={
+                    "selectedPeerPhase": phase,
+                    "isJoined": str(is_joined),
+                    "systemSession": system_session,
+                    "backendChannelStatus": backend_channel_status,
+                    "backendReadiness": backend_readiness,
+                },
+            )
+        )
+
+    lease_expiration = parse_backend_instant(backend_active_transmit_expires_at)
+    observed_at = parse_timestamp(report.uploaded_at) or datetime.now(timezone.utc)
+    if phase in {"transmitting", "receiving"} and lease_expiration is not None:
+        expired_by_ms = int((observed_at - lease_expiration).total_seconds() * 1000)
+        if expired_by_ms > 5000:
+            violations.append(
+                build_violation(
+                    subject=report.handle,
+                    invariant_id="transmit.live_projection_after_lease_expiry",
+                    scope="convergence",
+                    message=(
+                        "selectedPeerPhase remained live after backend transmit lease expiry "
+                        f"selectedPeerPhase={phase} backendChannelStatus={backend_channel_status} "
+                        f"backendReadiness={backend_readiness} expiredByMs={expired_by_ms}"
+                    ),
+                    metadata={
+                        "selectedPeerPhase": phase,
+                        "backendChannelStatus": backend_channel_status,
+                        "backendReadiness": backend_readiness,
+                        "backendActiveTransmitterUserId": backend_active_transmitter_user_id,
+                        "backendActiveTransmitId": backend_active_transmit_id,
+                        "backendActiveTransmitExpiresAt": backend_active_transmit_expires_at,
+                        "backendServerTimestamp": backend_server_timestamp,
+                        "expiredByMs": str(expired_by_ms),
+                        "graceMs": "5000",
+                        "transmitPhase": snapshot.get("transmitPhase", "none"),
+                        "remoteReceiveActive": snapshot.get("remoteReceiveActive", "none"),
+                    },
+                )
+            )
 
     if phase == "ready" and backend_can_transmit is False:
         violations.append(
@@ -1007,6 +1708,7 @@ def violation_payload(violation: InvariantViolation) -> dict[str, str | None]:
         "message": violation.message,
         "source": violation.source,
         "timestamp": violation.timestamp.isoformat() if violation.timestamp else None,
+        "metadata": violation.metadata,
     }
 
 
@@ -1014,6 +1716,9 @@ def report_payload(report: Report) -> dict[str, object]:
     return {
         "handle": report.handle,
         "deviceId": report.device_id,
+        "appVersion": report.app_version,
+        "scenarioName": report.scenario_name,
+        "scenarioRunId": report.scenario_run_id,
         "uploadedAt": report.uploaded_at,
         "snapshot": report.snapshot,
         "explicitInvariantViolations": [violation_payload(violation) for violation in report.invariant_violations],
@@ -1039,6 +1744,8 @@ def telemetry_payload(event: TelemetryEvent) -> dict[str, object]:
     return {
         "timestamp": event.timestamp.isoformat(),
         "handle": event.handle,
+        "deviceId": event.device_id,
+        "sessionId": event.session_id,
         "eventName": event.event_name,
         "source": event.source,
         "severity": event.severity,
@@ -1107,6 +1814,18 @@ def main() -> int:
             include_heartbeats=args.include_heartbeats,
         )
 
+    timeline = merged_events(
+        reports,
+        telemetry_events,
+        full_metadata=args.full_metadata,
+    )
+    diagnostic_groups = build_diagnostic_groups(
+        reports,
+        violations,
+        telemetry_events,
+        timeline,
+    )
+
     if args.json:
         payload = {
             "reports": [report_payload(report) for report in reports],
@@ -1114,16 +1833,13 @@ def main() -> int:
             "violations": [violation_payload(violation) for violation in violations],
             "telemetryEventCount": len(telemetry_events),
             "telemetryEvents": [telemetry_payload(event) for event in telemetry_events],
+            "diagnosticGroups": [diagnostic_group_payload(group) for group in diagnostic_groups],
             "timeline": [
                 {
                     "timestamp": timestamp.isoformat(),
                     "line": line,
                 }
-                for timestamp, line in merged_events(
-                    reports,
-                    telemetry_events,
-                    full_metadata=args.full_metadata,
-                )
+                for timestamp, line in timeline
             ],
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1152,12 +1868,12 @@ def main() -> int:
         else:
             print("- none")
 
+        print("\nDIAGNOSTIC GROUPS")
+        for line in render_diagnostic_groups(diagnostic_groups):
+            print(line)
+
         print("\nMERGED TIMELINE")
-        for timestamp, line in merged_events(
-            reports,
-            telemetry_events,
-            full_metadata=args.full_metadata,
-        ):
+        for timestamp, line in timeline:
             print(f"{timestamp.isoformat()} {line}")
 
     if args.fail_on_violations and violations:

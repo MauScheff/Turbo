@@ -136,10 +136,10 @@ extension PTTViewModel {
         if let selectedContactId {
             await refreshChannelState(for: selectedContactId)
             await reconcileSelectedSessionIfNeeded()
-            await syncLocalReceiverAudioReadinessSignal(
-                for: selectedContactId,
-                reason: "backend-reconnect"
-            )
+        await syncLocalReceiverAudioReadinessSignal(
+            for: selectedContactId,
+            reason: .backendReconnect
+        )
         }
         captureDiagnosticsState("backend:reconnect-finished")
     }
@@ -202,7 +202,7 @@ extension PTTViewModel {
                     await self.refreshContactSummaries()
                     await self.syncLocalReceiverAudioReadinessSignal(
                         for: contactID,
-                        reason: "backend-signaling-recovery"
+                        reason: .backendSignalingRecovery
                     )
                     self.captureDiagnosticsState("backend-signaling:recovered")
                     return
@@ -237,7 +237,7 @@ extension PTTViewModel {
                 await self.refreshContactSummaries()
                 await self.syncLocalReceiverAudioReadinessSignal(
                     for: contactID,
-                    reason: "backend-signaling-recovery"
+                    reason: .backendSignalingRecovery
                 )
                 self.captureDiagnosticsState("backend-signaling:recovered")
             }
@@ -878,7 +878,7 @@ extension PTTViewModel {
                 for contactID in readinessContactIDs {
                     await syncLocalReceiverAudioReadinessSignal(
                         for: contactID,
-                        reason: "websocket-connected"
+                        reason: .websocketConnected
                     )
                 }
                 if let selectedContactId {

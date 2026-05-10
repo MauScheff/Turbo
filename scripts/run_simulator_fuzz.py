@@ -25,6 +25,7 @@ HTTP_ROUTES = [
     "outgoing-invites",
     "channel-state",
     "channel-readiness",
+    "renew-transmit",
 ]
 SIGNAL_KINDS = [
     "transmit-start",

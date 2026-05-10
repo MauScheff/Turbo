@@ -794,6 +794,7 @@ enum SelectedPeerReducer {
 final class SelectedPeerCoordinator {
     private(set) var state: SelectedPeerSessionState = .initial
     var effectHandler: (@MainActor (SelectedPeerEffect) async -> Void)?
+    var transitionReporter: (@MainActor (ReducerTransitionReport) -> Void)?
     private var queuedEffectTask: Task<Void, Never>?
 
     func reset() {
@@ -803,15 +804,35 @@ final class SelectedPeerCoordinator {
     }
 
     func send(_ event: SelectedPeerEvent) {
+        let previousState = state
         let transition = SelectedPeerReducer.reduce(state: state, event: event)
         state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
         enqueueEffects(transition.effects)
     }
 
     func handle(_ event: SelectedPeerEvent) async {
+        let previousState = state
         let transition = SelectedPeerReducer.reduce(state: state, event: event)
         state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
         await runEffects(transition.effects)
+    }
+
+    private func reportTransition(
+        previousState: SelectedPeerSessionState,
+        event: SelectedPeerEvent,
+        transition: SelectedPeerTransition
+    ) {
+        transitionReporter?(
+            ReducerTransitionReport.make(
+                reducerName: "selected-peer-session",
+                event: event,
+                previousState: previousState,
+                nextState: transition.state,
+                effects: transition.effects
+            )
+        )
     }
 
     private func enqueueEffects(_ effects: [SelectedPeerEffect]) {

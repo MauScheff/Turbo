@@ -35,6 +35,7 @@ private enum AppAudioSessionBootstrapper {
 enum TurboNotificationCategory {
     static let talkRequest = "TURBO_TALK_REQUEST"
     static let acceptTalkRequestAction = "TURBO_ACCEPT_TALK_REQUEST"
+    static let notNowTalkRequestAction = "TURBO_NOT_NOW_TALK_REQUEST"
 
     static func register(on center: UNUserNotificationCenter = .current()) {
         let accept = UNNotificationAction(
@@ -42,9 +43,14 @@ enum TurboNotificationCategory {
             title: "Accept",
             options: [.foreground]
         )
+        let notNow = UNNotificationAction(
+            identifier: notNowTalkRequestAction,
+            title: "Not Now",
+            options: []
+        )
         let category = UNNotificationCategory(
             identifier: talkRequest,
-            actions: [accept],
+            actions: [accept, notNow],
             intentIdentifiers: [],
             options: []
         )
@@ -111,7 +117,10 @@ final class TurboAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         let userInfo = response.notification.request.content.userInfo
         if (userInfo["event"] as? String) == "talk-request" {
             Task { @MainActor in
-                await PTTViewModel.shared.handleTalkRequestNotificationResponse(userInfo: userInfo)
+                await PTTViewModel.shared.handleTalkRequestNotificationResponse(
+                    actionIdentifier: response.actionIdentifier,
+                    userInfo: userInfo
+                )
                 completionHandler()
             }
             return

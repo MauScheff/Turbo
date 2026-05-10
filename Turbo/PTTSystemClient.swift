@@ -13,13 +13,50 @@ enum PTTSystemClientError: LocalizedError {
     }
 }
 
+enum PTTSystemLeaveReason: Equatable {
+    case userInitiated(description: String)
+    case system(description: String)
+    case simulator
+    case other(description: String)
+
+    init(rawDescription: String) {
+        if rawDescription == "simulator" {
+            self = .simulator
+        } else if rawDescription.contains("PTChannelLeaveReason(rawValue: 1)") {
+            self = .userInitiated(description: rawDescription)
+        } else if rawDescription.contains("PTChannelLeaveReason(rawValue: 2)") {
+            self = .system(description: rawDescription)
+        } else {
+            self = .other(description: rawDescription)
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .userInitiated(let description),
+             .system(let description),
+             .other(let description):
+            return description
+        case .simulator:
+            return "simulator"
+        }
+    }
+
+    var isUserInitiated: Bool {
+        if case .userInitiated = self {
+            return true
+        }
+        return false
+    }
+}
+
 @MainActor
 struct PTTSystemClientCallbacks {
     let receivedEphemeralPushToken: (Data) -> Void
     let receivedIncomingPush: (UUID, TurboPTTPushPayload) -> Void
     let willReturnIncomingPushResult: (UUID, TurboPTTPushPayload, String) -> Void
     let didJoinChannel: (UUID, String) -> Void
-    let didLeaveChannel: (UUID, String) -> Void
+    let didLeaveChannel: (UUID, PTTSystemLeaveReason) -> Void
     let failedToJoinChannel: (UUID, Error) -> Void
     let failedToLeaveChannel: (UUID, Error) -> Void
     let didBeginTransmitting: (UUID, String) -> Void
@@ -91,7 +128,7 @@ private final class ApplePTTSystemClientAdapter: NSObject, PTChannelManagerDeleg
     }
 
     func channelManager(_ channelManager: PTChannelManager, didLeaveChannel channelUUID: UUID, reason: PTChannelLeaveReason) {
-        callbacks.didLeaveChannel(channelUUID, String(describing: reason))
+        callbacks.didLeaveChannel(channelUUID, PTTSystemLeaveReason(rawDescription: String(describing: reason)))
     }
 
     func channelManager(_ channelManager: PTChannelManager, failedToJoinChannel channelUUID: UUID, error: any Error) {
@@ -315,7 +352,7 @@ final class SimulatorPTTSystemClient: PTTSystemClientProtocol {
         isTransmitting = false
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 100_000_000)
-            callbacks.didLeaveChannel(channelUUID, "simulator")
+            callbacks.didLeaveChannel(channelUUID, .simulator)
         }
     }
 

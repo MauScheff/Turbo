@@ -712,6 +712,15 @@ struct ContentView: View {
     }
 
     private func handleIncomingURL(_ url: URL) {
+        if let conversationIntent = TurboIncomingLink.conversationOpenIntent(from: url) {
+            route = .live
+            isShowingAddContactSheet = false
+            Task {
+                await viewModel.initializeIfNeeded()
+                await viewModel.handleConversationOpenIntent(conversationIntent)
+            }
+            return
+        }
         guard let reference = TurboIncomingLink.reference(from: url) else { return }
         route = .live
         isShowingAddContactSheet = false

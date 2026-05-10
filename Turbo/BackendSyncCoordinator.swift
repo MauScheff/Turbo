@@ -153,16 +153,38 @@ enum BackendSyncReducer {
 final class BackendSyncCoordinator {
     private(set) var state = BackendSyncSessionState()
     var effectHandler: (@MainActor (BackendSyncEffect) async -> Void)?
+    var transitionReporter: (@MainActor (ReducerTransitionReport) -> Void)?
 
     func send(_ event: BackendSyncEvent) {
-        state = BackendSyncReducer.reduce(state: state, event: event).state
+        let previousState = state
+        let transition = BackendSyncReducer.reduce(state: state, event: event)
+        state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
     }
 
     func handle(_ event: BackendSyncEvent) async {
+        let previousState = state
         let transition = BackendSyncReducer.reduce(state: state, event: event)
         state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
         for effect in transition.effects {
             await effectHandler?(effect)
         }
+    }
+
+    private func reportTransition(
+        previousState: BackendSyncSessionState,
+        event: BackendSyncEvent,
+        transition: BackendSyncTransition
+    ) {
+        transitionReporter?(
+            ReducerTransitionReport.make(
+                reducerName: "backend-sync",
+                event: event,
+                previousState: previousState,
+                nextState: transition.state,
+                effects: transition.effects
+            )
+        )
     }
 }

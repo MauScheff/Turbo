@@ -1,5 +1,152 @@
 import Foundation
 
+enum ReceiverAudioReadinessReason: Equatable, Codable, CustomStringConvertible {
+    case appBackgroundMediaClosed
+    case audioRouteChange
+    case audioRoutePreference(String)
+    case backendReconnect
+    case backendSignalingRecovery
+    case channelRefresh
+    case directQuicReceiverPrewarm
+    case directQuicTransmitPrepare
+    case foregroundTalkPrewarm(String)
+    case incomingPushForeground
+    case mediaState(MediaConnectionState)
+    case networkChange
+    case pttSync
+    case pttWakePostActivationRefresh
+    case receiverPrewarmRequest
+    case remoteAudioEndedKeepalive
+    case telemetryRefresh
+    case websocketConnected
+    case legacy(String)
+
+    init(wireValue: String) {
+        switch wireValue {
+        case "app-background-media-closed":
+            self = .appBackgroundMediaClosed
+        case "audio-route-change":
+            self = .audioRouteChange
+        case "backend-reconnect":
+            self = .backendReconnect
+        case "backend-signaling-recovery":
+            self = .backendSignalingRecovery
+        case "channel-refresh":
+            self = .channelRefresh
+        case "direct-quic-receiver-prewarm":
+            self = .directQuicReceiverPrewarm
+        case "direct-quic-transmit-prepare":
+            self = .directQuicTransmitPrepare
+        case "incoming-push-foreground":
+            self = .incomingPushForeground
+        case "media-idle":
+            self = .mediaState(.idle)
+        case "media-preparing":
+            self = .mediaState(.preparing)
+        case "media-connected":
+            self = .mediaState(.connected)
+        case "media-closed":
+            self = .mediaState(.closed)
+        case "network-change":
+            self = .networkChange
+        case "ptt-sync":
+            self = .pttSync
+        case "ptt-wake:post-activation-refresh":
+            self = .pttWakePostActivationRefresh
+        case "receiver-prewarm-request":
+            self = .receiverPrewarmRequest
+        case "remote-audio-ended-keepalive":
+            self = .remoteAudioEndedKeepalive
+        case "telemetry-refresh":
+            self = .telemetryRefresh
+        case "websocket-connected":
+            self = .websocketConnected
+        default:
+            if wireValue.hasPrefix("audio-route-preference:") {
+                self = .audioRoutePreference(
+                    String(wireValue.dropFirst("audio-route-preference:".count))
+                )
+            } else if wireValue.hasPrefix("foreground-talk-prewarm-") {
+                self = .foregroundTalkPrewarm(
+                    String(wireValue.dropFirst("foreground-talk-prewarm-".count))
+                )
+            } else {
+                self = .legacy(wireValue)
+            }
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self = ReceiverAudioReadinessReason(wireValue: try container.decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(wireValue)
+    }
+
+    var description: String { wireValue }
+
+    var wireValue: String {
+        switch self {
+        case .appBackgroundMediaClosed:
+            return "app-background-media-closed"
+        case .audioRouteChange:
+            return "audio-route-change"
+        case .audioRoutePreference(let reason):
+            return "audio-route-preference:\(reason)"
+        case .backendReconnect:
+            return "backend-reconnect"
+        case .backendSignalingRecovery:
+            return "backend-signaling-recovery"
+        case .channelRefresh:
+            return "channel-refresh"
+        case .directQuicReceiverPrewarm:
+            return "direct-quic-receiver-prewarm"
+        case .directQuicTransmitPrepare:
+            return "direct-quic-transmit-prepare"
+        case .foregroundTalkPrewarm(let reason):
+            return "foreground-talk-prewarm-\(reason)"
+        case .incomingPushForeground:
+            return "incoming-push-foreground"
+        case .mediaState(let state):
+            switch state {
+            case .idle:
+                return "media-idle"
+            case .preparing:
+                return "media-preparing"
+            case .connected:
+                return "media-connected"
+            case .failed(let message):
+                return "media-failed(\(message))"
+            case .closed:
+                return "media-closed"
+            }
+        case .networkChange:
+            return "network-change"
+        case .pttSync:
+            return "ptt-sync"
+        case .pttWakePostActivationRefresh:
+            return "ptt-wake:post-activation-refresh"
+        case .receiverPrewarmRequest:
+            return "receiver-prewarm-request"
+        case .remoteAudioEndedKeepalive:
+            return "remote-audio-ended-keepalive"
+        case .telemetryRefresh:
+            return "telemetry-refresh"
+        case .websocketConnected:
+            return "websocket-connected"
+        case .legacy(let reason):
+            return reason
+        }
+    }
+
+    var isBackgroundMediaClosure: Bool {
+        self == .appBackgroundMediaClosed
+    }
+}
+
 struct ReceiverAudioReadinessIntent: Equatable {
     let contactID: UUID
     let contactHandle: String
@@ -8,11 +155,11 @@ struct ReceiverAudioReadinessIntent: Equatable {
     let currentUserID: String
     let deviceID: String
     let isReady: Bool
-    let reason: String
+    let reason: ReceiverAudioReadinessReason
     let telemetry: CallPeerTelemetry?
 
     var publicationBasis: ReceiverAudioReadinessPublicationBasis {
-        reason == "channel-refresh" ? .channelRefresh : .lifecycle
+        reason == .channelRefresh ? .channelRefresh : .lifecycle
     }
 
     var publishedState: ReceiverAudioReadinessPublication {
@@ -193,14 +340,20 @@ enum ControlPlaneReducer {
 final class ControlPlaneCoordinator {
     private(set) var state = ControlPlaneSessionState()
     var effectHandler: (@MainActor (ControlPlaneEffect) async -> Void)?
+    var transitionReporter: (@MainActor (ReducerTransitionReport) -> Void)?
 
     func send(_ event: ControlPlaneEvent) {
-        state = ControlPlaneReducer.reduce(state: state, event: event).state
+        let previousState = state
+        let transition = ControlPlaneReducer.reduce(state: state, event: event)
+        state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
     }
 
     func handle(_ event: ControlPlaneEvent) async {
+        let previousState = state
         let transition = ControlPlaneReducer.reduce(state: state, event: event)
         state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
         for effect in transition.effects {
             await effectHandler?(effect)
         }
@@ -210,5 +363,21 @@ final class ControlPlaneCoordinator {
         _ publications: [UUID: ReceiverAudioReadinessPublication]
     ) {
         state.replaceLocalReceiverAudioReadinessPublications(publications)
+    }
+
+    private func reportTransition(
+        previousState: ControlPlaneSessionState,
+        event: ControlPlaneEvent,
+        transition: ControlPlaneTransition
+    ) {
+        transitionReporter?(
+            ReducerTransitionReport.make(
+                reducerName: "control-plane",
+                event: event,
+                previousState: previousState,
+                nextState: transition.state,
+                effects: transition.effects
+            )
+        )
     }
 }

@@ -11,6 +11,10 @@ enum TurboIncomingLink {
     private static let legacyBareShareLinkPrefix = "beepbeep.to/p/"
 
     static func reference(from url: URL) -> String? {
+        if let conversationIntent = conversationOpenIntent(from: url) {
+            return conversationIntent.reference
+        }
+
         guard let scheme = url.scheme?.lowercased() else { return nil }
 
         switch scheme {
@@ -21,6 +25,45 @@ enum TurboIncomingLink {
         default:
             return nil
         }
+    }
+
+    static func conversationOpenIntent(from url: URL) -> ConversationOpenIntent? {
+        guard let scheme = url.scheme?.lowercased() else { return nil }
+        guard scheme == "beepbeep" || scheme == "https" || scheme == "http" else { return nil }
+
+        let host = url.host?.lowercased()
+        let pathComponents = url.pathComponents.filter { $0 != "/" }
+        let isConversationURL: Bool
+
+        if scheme == "beepbeep" {
+            isConversationURL = host == "conversation"
+        } else {
+            isConversationURL = host == shareHost && pathComponents.first == "conversation"
+        }
+        guard isConversationURL,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+
+        let queryItems = components.queryItems ?? []
+        func value(_ names: String...) -> String? {
+            for name in names {
+                if let itemValue = queryItems.first(where: { $0.name == name })?.value,
+                   !itemValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return itemValue
+                }
+            }
+            return nil
+        }
+
+        let reference = value("ref", "handle", "contact")
+        let action = value("action").flatMap(ConversationOpenIntentAction.init(rawValue:)) ?? .open
+        return ConversationOpenIntent(
+            reference: reference,
+            inviteID: value("inviteId"),
+            channelID: value("channelId"),
+            action: action
+        )
     }
 
     private static func webReference(from url: URL) -> String? {

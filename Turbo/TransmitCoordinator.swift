@@ -56,8 +56,8 @@ enum TransmitEvent: Equatable {
     case beginFailed(String)
     case releaseRequested
     case systemEnded
-    case stopCompleted
-    case stopFailed(String)
+    case stopCompleted(TransmitTarget)
+    case stopFailed(TransmitTarget?, String)
     case renewalFailed(String)
     case websocketDisconnected
     case systemBeginFailed(String)
@@ -73,6 +73,7 @@ enum TransmitEffect: Equatable {
 struct TransmitTransition: Equatable {
     var state: TransmitSessionState
     var effects: [TransmitEffect] = []
+    var invariantViolationsEmitted: [String] = []
 }
 
 enum TransmitReducer {
@@ -82,6 +83,7 @@ enum TransmitReducer {
     ) -> TransmitTransition {
         var nextState = state
         var effects: [TransmitEffect] = []
+        var invariantViolationsEmitted: [String] = []
 
         switch event {
         case .pressRequested(let request):
@@ -189,13 +191,30 @@ enum TransmitReducer {
                 nextState.activeTarget = nil
             }
 
-        case .stopCompleted:
+        case .stopCompleted(let target):
+            guard stopCompletionMatchesCurrentTarget(state: nextState, target: target) else {
+                invariantViolationsEmitted.append("transmit.stale_end_overrides_newer_epoch")
+                return TransmitTransition(
+                    state: nextState,
+                    effects: effects,
+                    invariantViolationsEmitted: invariantViolationsEmitted
+                )
+            }
             nextState.phase = .idle
             nextState.isPressingTalk = false
             nextState.pendingRequest = nil
             nextState.activeTarget = nil
 
-        case .stopFailed(let message):
+        case .stopFailed(let target, let message):
+            if let target,
+               !stopCompletionMatchesCurrentTarget(state: nextState, target: target) {
+                invariantViolationsEmitted.append("transmit.stale_end_overrides_newer_epoch")
+                return TransmitTransition(
+                    state: nextState,
+                    effects: effects,
+                    invariantViolationsEmitted: invariantViolationsEmitted
+                )
+            }
             nextState.phase = .idle
             nextState.isPressingTalk = false
             nextState.pendingRequest = nil
@@ -203,7 +222,11 @@ enum TransmitReducer {
             nextState.lastError = message
         }
 
-        return TransmitTransition(state: nextState, effects: effects)
+        return TransmitTransition(
+            state: nextState,
+            effects: effects,
+            invariantViolationsEmitted: invariantViolationsEmitted
+        )
     }
 
     private static func canBegin(from state: TransmitSessionState, request: TransmitRequestContext) -> Bool {
@@ -214,16 +237,27 @@ enum TransmitReducer {
             return contactID == request.contactID ? false : false
         }
     }
+
+    private static func stopCompletionMatchesCurrentTarget(
+        state: TransmitSessionState,
+        target: TransmitTarget
+    ) -> Bool {
+        guard let activeTarget = state.activeTarget else { return true }
+        return activeTarget == target
+    }
 }
 
 @MainActor
 final class TransmitCoordinator {
     private(set) var state: TransmitSessionState = .initial
     var effectHandler: (@MainActor (TransmitEffect) async -> Void)?
+    var transitionReporter: (@MainActor (ReducerTransitionReport) -> Void)?
 
     func handle(_ event: TransmitEvent) async {
+        let previousState = state
         let transition = TransmitReducer.reduce(state: state, event: event)
         state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
         for effect in transition.effects {
             await effectHandler?(effect)
         }
@@ -231,5 +265,22 @@ final class TransmitCoordinator {
 
     func reset() {
         state = .initial
+    }
+
+    private func reportTransition(
+        previousState: TransmitSessionState,
+        event: TransmitEvent,
+        transition: TransmitTransition
+    ) {
+        transitionReporter?(
+            ReducerTransitionReport.make(
+                reducerName: "transmit",
+                event: event,
+                previousState: previousState,
+                nextState: transition.state,
+                effects: transition.effects,
+                invariantViolationsEmitted: transition.invariantViolationsEmitted
+            )
+        )
     }
 }

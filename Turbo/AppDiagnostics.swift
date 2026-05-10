@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import OSLog
 
-struct SelectedSessionDiagnosticsSummary: Equatable {
+struct SelectedSessionDiagnosticsSummary: Codable, Equatable {
     let selectedHandle: String?
     let selectedPhase: String
     let selectedPhaseDetail: String
@@ -24,6 +24,10 @@ struct SelectedSessionDiagnosticsSummary: Equatable {
     let backendSelfJoined: Bool?
     let backendPeerJoined: Bool?
     let backendPeerDeviceConnected: Bool?
+    let backendActiveTransmitterUserId: String?
+    let backendActiveTransmitId: String?
+    let backendActiveTransmitExpiresAt: String?
+    let backendServerTimestamp: String?
     let remoteAudioReadiness: String?
     let remoteWakeCapability: String?
     let remoteWakeCapabilityKind: String?
@@ -34,7 +38,7 @@ struct SelectedSessionDiagnosticsSummary: Equatable {
     let incomingWakeBufferedChunkCount: Int?
 }
 
-struct ContactDiagnosticsSummary: Equatable, Identifiable {
+struct ContactDiagnosticsSummary: Codable, Equatable, Identifiable {
     let handle: String
     let isOnline: Bool
     let listState: String
@@ -51,8 +55,500 @@ struct ContactDiagnosticsSummary: Equatable, Identifiable {
     var id: String { handle }
 }
 
-struct StateMachineProjection: Equatable {
+struct LocalSessionDiagnosticsProjection: Codable, Equatable {
+    let selectedContactID: String?
+    let selectedHandle: String?
+    let selectedPeerPhase: String
+    let selectedPeerPhaseDetail: String
+    let selectedPeerRelationship: String
+    let selectedPeerCanTransmit: Bool
+    let isJoined: Bool
+    let isTransmitting: Bool
+    let activeChannelID: String?
+    let systemSession: String
+    let systemActiveContactID: String?
+    let systemChannelUUID: String?
+    let mediaState: String
+    let transmitPhase: String
+    let transmitActiveContactID: String?
+    let transmitPressActive: Bool
+    let transmitExplicitStopRequested: Bool
+    let transmitSystemTransmitting: Bool
+    let incomingWakeActivationState: String?
+    let incomingWakeBufferedChunkCount: Int?
+    let remoteReceiveActive: Bool
+    let remoteReceiveActivityState: String?
+    let receiverAudioReadinessState: String?
+    let pendingAction: String
+    let reconciliationAction: String
+    let hadConnectedSessionContinuity: Bool
+    let controlPlaneReconnectGraceActive: Bool
+    let backendSignalingJoinRecoveryActive: Bool
+    let backendChannelStatus: String?
+    let backendReadiness: String?
+    let backendSelfJoined: Bool?
+    let backendPeerJoined: Bool?
+    let backendPeerDeviceConnected: Bool?
+    let backendActiveTransmitterUserId: String?
+    let backendActiveTransmitId: String?
+    let backendActiveTransmitExpiresAt: String?
+    let backendServerTimestamp: String?
+    let backendCanTransmit: Bool?
+    let remoteAudioReadiness: String?
+    let remoteWakeCapabilityKind: String?
+
+    var derivedInvariantIDs: [String] {
+        derivedInvariantCandidates.map(\.invariantID)
+    }
+
+    var derivedInvariantCandidates: [DiagnosticsInvariantViolationCandidate] {
+        let phase = selectedPeerPhase
+        let phaseDetail = selectedPeerPhaseDetail
+        let backendChannelStatusValue = backendChannelStatus ?? "none"
+        let backendReadinessValue = backendReadiness ?? "none"
+        let remoteWakeCapabilityKindValue = remoteWakeCapabilityKind ?? "unavailable"
+        let remoteAudioReadinessValue = remoteAudioReadiness ?? "unknown"
+        let systemSessionValue = systemSession
+        let backendActiveTransmitIdValue = backendActiveTransmitId ?? "none"
+        let backendActiveTransmitterUserIdValue = backendActiveTransmitterUserId ?? "none"
+
+        var violations: [DiagnosticsInvariantViolationCandidate] = []
+
+        if phase == "ready", isJoined == false {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.ready_without_join",
+                    scope: .local,
+                    message: "selectedPeerPhase=ready while isJoined=false",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "isJoined": String(isJoined),
+                    ]
+                )
+            )
+        }
+
+        if phase == "receiving",
+           (isJoined == false || systemSessionValue == "none") {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.receiving_without_joined_session",
+                    scope: .local,
+                    message: "selectedPeerPhase=receiving without joined local session evidence",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "isJoined": String(isJoined),
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        "remoteWakeCapabilityKind": remoteWakeCapabilityKindValue,
+                    ]
+                )
+            )
+        }
+
+        if phase == "transmitting", isJoined == false {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.live_projection_after_membership_exit",
+                    scope: .local,
+                    message: "selectedPeerPhase=transmitting after local membership exit",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "isJoined": String(isJoined),
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                    ]
+                )
+            )
+        }
+
+        if ["transmitting", "receiving"].contains(phase),
+           let expiry = expiredBackendTransmitLease(graceSeconds: 5.0) {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "transmit.live_projection_after_lease_expiry",
+                    scope: .convergence,
+                    message: "selectedPeerPhase remained live after backend transmit lease expiry",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendActiveTransmitterUserId": backendActiveTransmitterUserIdValue,
+                        "backendActiveTransmitId": backendActiveTransmitIdValue,
+                        "backendActiveTransmitExpiresAt": expiry.expiresAt,
+                        "backendServerTimestamp": backendServerTimestamp ?? "none",
+                        "expiredByMs": String(expiry.expiredByMs),
+                        "graceMs": "5000",
+                        "transmitPhase": transmitPhase,
+                        "remoteReceiveActive": String(remoteReceiveActive),
+                    ]
+                )
+            )
+        }
+
+        let backendIsSelfTransmitting =
+            backendChannelStatusValue == "self-transmitting"
+            || backendReadinessValue == "self-transmitting"
+        if phase == "ready",
+           backendCanTransmit == false,
+           !backendIsSelfTransmitting {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.ready_while_backend_cannot_transmit",
+                    scope: .backend,
+                    message: "selectedPeerPhase=ready while backendCanTransmit=false",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "backendCanTransmit": boolMetadata(backendCanTransmit),
+                    ]
+                )
+            )
+        }
+
+        if backendSelfJoined == true, backendPeerJoined == true, backendPeerDeviceConnected == true {
+            let notLivePhases = Set(["idle", "requested", "incomingRequest"])
+            if notLivePhases.contains(phase) {
+                violations.append(
+                    DiagnosticsInvariantViolationCandidate(
+                        invariantID: "selected.backend_ready_ui_not_live",
+                        scope: .backend,
+                        message: "backend says both sides are ready, but selectedPeerPhase is still not live",
+                        metadata: [
+                            "selectedPeerPhase": phase,
+                            "backendSelfJoined": boolMetadata(backendSelfJoined),
+                            "backendPeerJoined": boolMetadata(backendPeerJoined),
+                            "backendPeerDeviceConnected": boolMetadata(backendPeerDeviceConnected),
+                        ]
+                    )
+                )
+            }
+        }
+
+        if phase == "peerReady",
+           selectedPeerRelationship == "none",
+           pendingAction == "none",
+           isJoined == false,
+           systemSessionValue == "none",
+           backendSelfJoined == true,
+           backendPeerJoined == true,
+           [
+               "inactive",
+               "waiting-for-self",
+               "waiting-for-peer",
+               "ready",
+           ].contains(backendReadinessValue) {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.stale_membership_peer_ready_without_session",
+                    scope: .backend,
+                    message: "backend retained durable channel membership while selectedPeerPhase is peerReady without a local session",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerRelationship": selectedPeerRelationship,
+                        "pendingAction": pendingAction,
+                        "isJoined": String(isJoined),
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        "backendPeerDeviceConnected": boolMetadata(backendPeerDeviceConnected),
+                    ]
+                )
+            )
+        }
+
+        let pendingLocalJoinWithoutSession =
+            pendingAction.contains("joiningLocal(")
+            || pendingAction.contains(".joiningLocal(")
+        let backendMembershipAbsentForPendingLocalAction =
+            backendSelfJoined != true
+            && backendPeerJoined != true
+            && ![
+                "waiting-for-peer",
+                "ready",
+                "self-transmitting",
+                "peer-transmitting",
+            ].contains(backendChannelStatusValue)
+        if pendingLocalJoinWithoutSession,
+           selectedPeerRelationship == "none",
+           isJoined == false,
+           systemSessionValue == "none",
+           backendMembershipAbsentForPendingLocalAction {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_absent_pending_local_action_without_session",
+                    scope: .convergence,
+                    message: "backend membership is absent, but the selected peer still has a pending local session action without local session evidence",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerRelationship": selectedPeerRelationship,
+                        "pendingAction": pendingAction,
+                        "isJoined": String(isJoined),
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                    ]
+                )
+            )
+        }
+
+        if backendPeerJoined == true, backendSelfJoined == false {
+            let disconnectedPhases = Set(["idle", "requested"])
+            if disconnectedPhases.contains(phase) {
+                violations.append(
+                    DiagnosticsInvariantViolationCandidate(
+                        invariantID: "selected.peer_joined_ui_not_connectable",
+                        scope: .backend,
+                        message: "backend says the peer already joined, but selectedPeerPhase is still not connectable",
+                        metadata: [
+                            "selectedPeerPhase": phase,
+                            "backendSelfJoined": boolMetadata(backendSelfJoined),
+                            "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        ]
+                    )
+                )
+            }
+        }
+
+        if backendReadinessValue == "waiting-for-self" {
+            let disconnectedPhases = Set(["idle", "requested", "incomingRequest"])
+            if disconnectedPhases.contains(phase) {
+                violations.append(
+                    DiagnosticsInvariantViolationCandidate(
+                        invariantID: "selected.waiting_for_self_ui_not_connectable",
+                        scope: .backend,
+                        message: "backend says the peer is waiting for self, but selectedPeerPhase is still not connectable",
+                        metadata: [
+                            "selectedPeerPhase": phase,
+                            "backendChannelStatus": backendChannelStatusValue,
+                            "backendReadiness": backendReadinessValue,
+                            "backendSelfJoined": boolMetadata(backendSelfJoined),
+                            "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        ]
+                    )
+                )
+            }
+        }
+
+        let connectableWakeStatuses = Set(["waiting-for-peer", "ready", "transmitting", "receiving"])
+        if remoteWakeCapabilityKindValue == "wake-capable",
+           connectableWakeStatuses.contains(backendChannelStatusValue) {
+            let disconnectedPhases = Set(["idle", "requested"])
+            if disconnectedPhases.contains(phase) {
+                violations.append(
+                    DiagnosticsInvariantViolationCandidate(
+                        invariantID: "selected.peer_wake_capable_ui_not_connectable",
+                        scope: .backend,
+                        message: "backend channel is connectable and peer wake is available, but selectedPeerPhase is still not connectable",
+                        metadata: [
+                            "selectedPeerPhase": phase,
+                            "backendChannelStatus": backendChannelStatusValue,
+                            "backendReadiness": backendReadinessValue,
+                            "remoteWakeCapabilityKind": remoteWakeCapabilityKindValue,
+                        ]
+                    )
+                )
+            }
+        }
+
+        if phase == "waitingForPeer",
+           isJoined == true,
+           hadConnectedSessionContinuity == true,
+           systemSessionValue.hasPrefix("active("),
+           backendSelfJoined == true,
+           backendPeerJoined == true,
+           backendPeerDeviceConnected == true,
+           backendChannelStatusValue == "waiting-for-peer",
+           remoteWakeCapabilityKindValue == "unavailable" {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.joined_session_lost_wake_capability",
+                    scope: .backend,
+                    message: "joined live session regressed to waiting-for-peer without wake capability",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "remoteWakeCapabilityKind": remoteWakeCapabilityKindValue,
+                    ]
+                )
+            )
+        }
+
+        if phase == "waitingForPeer",
+           phaseDetail.contains("localAudioPrewarm"),
+           isJoined == true,
+           hadConnectedSessionContinuity == true,
+           systemSessionValue.hasPrefix("active("),
+           backendReadinessValue == "ready",
+           backendSelfJoined == true,
+           backendPeerJoined == true,
+           remoteAudioReadinessValue == "wakeCapable",
+           remoteWakeCapabilityKindValue == "wake-capable" {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.wake_capable_peer_blocked_on_local_audio_prewarm",
+                    scope: .backend,
+                    message: "peer is wake-capable, but selectedPeerPhase is still waitingForPeer on local audio prewarm",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        "remoteWakeCapabilityKind": remoteWakeCapabilityKindValue,
+                    ]
+                )
+            )
+        }
+
+        if phase == "waitingForPeer",
+           phaseDetail.contains("localSessionTransition"),
+           isJoined == true,
+           hadConnectedSessionContinuity == true,
+           systemSessionValue.hasPrefix("active("),
+           backendReadinessValue == "inactive",
+           backendSelfJoined == false,
+           backendPeerJoined == false {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_inactive_ui_still_joined",
+                    scope: .backend,
+                    message: "backend says the session is inactive, but selectedPeerPhase is still waitingForPeer on a joined local session",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "isJoined": String(isJoined),
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                    ]
+                )
+            )
+        }
+
+        let disconnectingTeardownInFlight =
+            phaseDetail.contains("disconnecting")
+            || pendingAction.contains("reconciledTeardown(")
+
+        if phase == "waitingForPeer",
+           isJoined == true,
+           hadConnectedSessionContinuity == true,
+           systemSessionValue.hasPrefix("active("),
+           !reconciliationAction.hasPrefix("teardownSelectedSession("),
+           !disconnectingTeardownInFlight,
+           backendSelfJoined == false,
+           backendPeerJoined == false {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_membership_absent_ui_still_joined",
+                    scope: .backend,
+                    message: "backend says channel membership is absent, but selectedPeerPhase is still waitingForPeer on a joined local session",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "isJoined": String(isJoined),
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                    ]
+                )
+            )
+        }
+
+        if phase == "waitingForPeer",
+           phaseDetail.contains("remoteAudioPrewarm"),
+           isJoined == true,
+           mediaState == "connected",
+           systemSessionValue.hasPrefix("active("),
+           !backendSignalingJoinRecoveryActive,
+           backendReadinessValue == "ready",
+           backendSelfJoined == true,
+           backendPeerJoined == true,
+           backendPeerDeviceConnected == true,
+           remoteAudioReadinessValue != "waiting",
+           remoteWakeCapabilityKindValue == "wake-capable" {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_ready_missing_remote_audio_signal",
+                    scope: .backend,
+                    message: "backend says the peer is ready and connected, but selectedPeerPhase is still waitingForPeer on remote audio prewarm",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "mediaState": mediaState,
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        "backendPeerDeviceConnected": boolMetadata(backendPeerDeviceConnected),
+                        "remoteAudioReadiness": remoteAudioReadinessValue,
+                        "remoteWakeCapabilityKind": remoteWakeCapabilityKindValue,
+                    ]
+                )
+            )
+        }
+
+        return violations
+    }
+
+    private func expiredBackendTransmitLease(
+        graceSeconds: TimeInterval
+    ) -> (expiresAt: String, expiredByMs: Int)? {
+        guard let backendActiveTransmitExpiresAt,
+              let expiration = Self.parseBackendInstant(backendActiveTransmitExpiresAt) else {
+            return nil
+        }
+        let expiredBy = Date().timeIntervalSince(expiration)
+        guard expiredBy > graceSeconds else { return nil }
+        return (
+            expiresAt: backendActiveTransmitExpiresAt,
+            expiredByMs: Int(expiredBy * 1_000)
+        )
+    }
+
+    private static func parseBackendInstant(_ text: String) -> Date? {
+        guard text.hasSuffix("Z") else { return nil }
+        let withoutZone = String(text.dropLast())
+        let parts = withoutZone.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        let baseText = String(parts[0]) + "Z"
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        guard let baseDate = formatter.date(from: baseText) else { return nil }
+        guard parts.count == 2 else { return baseDate }
+
+        let fractionalDigits = parts[1].prefix { $0 >= "0" && $0 <= "9" }
+        guard !fractionalDigits.isEmpty else { return baseDate }
+        let scale = pow(10.0, Double(fractionalDigits.count))
+        let fractionalSeconds = (Double(fractionalDigits) ?? 0) / scale
+        return baseDate.addingTimeInterval(fractionalSeconds)
+    }
+
+    private func boolMetadata(_ value: Bool?) -> String {
+        value.map(String.init(describing:)) ?? "none"
+    }
+}
+
+struct StateMachineProjection: Codable, Equatable {
     let selectedSession: SelectedSessionDiagnosticsSummary
+    let localSession: LocalSessionDiagnosticsProjection
     let contacts: [ContactDiagnosticsSummary]
     let isWebSocketConnected: Bool
     let statusMessage: String
@@ -63,7 +559,7 @@ struct StateMachineProjection: Equatable {
     }
 }
 
-struct DirectQuicDiagnosticsSummary: Equatable {
+struct DirectQuicDiagnosticsSummary: Codable, Equatable {
     let selectedHandle: String?
     let role: String?
     let identityLabel: String?
@@ -108,6 +604,144 @@ struct DirectQuicDiagnosticsSummary: Equatable {
     let probeControllerReady: Bool
 }
 
+struct DiagnosticsEnvelope: Codable, Equatable {
+    let schemaVersion: Int
+    let appVersion: String
+    let deviceId: String
+    let handle: String
+    let scenarioName: String?
+    let scenarioRunId: String?
+    let timestamp: Date
+    let projection: StateMachineProjection
+    let directQuic: DirectQuicDiagnosticsSummary?
+    let invariantViolations: [DiagnosticsInvariantViolation]
+    let stateCaptures: [DiagnosticsStateCapture]
+    let reducerTransitionReports: [ReducerTransitionReport]
+}
+
+struct ReducerTransitionReport: Codable, Equatable {
+    let reducerName: String
+    let eventName: String
+    let previousStateSummary: String
+    let nextStateSummary: String
+    let effectsEmitted: [String]
+    let invariantViolationsEmitted: [String]
+    let repairIntentsEmitted: [String]
+    let correlationIDs: [String: String]
+
+    init(
+        reducerName: String,
+        eventName: String,
+        previousStateSummary: String,
+        nextStateSummary: String,
+        effectsEmitted: [String] = [],
+        invariantViolationsEmitted: [String] = [],
+        repairIntentsEmitted: [String] = [],
+        correlationIDs: [String: String] = [:]
+    ) {
+        self.reducerName = reducerName
+        self.eventName = eventName
+        self.previousStateSummary = previousStateSummary
+        self.nextStateSummary = nextStateSummary
+        self.effectsEmitted = effectsEmitted
+        self.invariantViolationsEmitted = invariantViolationsEmitted
+        self.repairIntentsEmitted = repairIntentsEmitted
+        self.correlationIDs = correlationIDs
+    }
+
+    static func make<State, Event, Effect>(
+        reducerName: String,
+        event: Event,
+        previousState: State,
+        nextState: State,
+        effects: [Effect],
+        invariantViolationsEmitted: [String] = [],
+        repairIntentsEmitted explicitRepairIntents: [String] = [],
+        correlationIDs explicitCorrelationIDs: [String: String] = [:]
+    ) -> ReducerTransitionReport {
+        let eventSummary = clipped(String(describing: event))
+        let previousSummary = clipped(String(describing: previousState))
+        let nextSummary = clipped(String(describing: nextState))
+        let effectSummaries = effects.map { clipped(String(describing: $0), limit: 240) }
+        let inferredRepairIntents = effectSummaries.filter {
+            $0.localizedCaseInsensitiveContains("repair")
+        }
+        let correlationIDs = extractedCorrelationIDs(
+            from: [eventSummary, previousSummary, nextSummary] + effectSummaries
+        ).merging(explicitCorrelationIDs) { _, explicit in explicit }
+
+        return ReducerTransitionReport(
+            reducerName: reducerName,
+            eventName: eventName(from: eventSummary),
+            previousStateSummary: previousSummary,
+            nextStateSummary: nextSummary,
+            effectsEmitted: effectSummaries,
+            invariantViolationsEmitted: invariantViolationsEmitted,
+            repairIntentsEmitted: explicitRepairIntents + inferredRepairIntents,
+            correlationIDs: correlationIDs
+        )
+    }
+
+    private static func eventName(from eventSummary: String) -> String {
+        if let parenIndex = eventSummary.firstIndex(of: "(") {
+            return String(eventSummary[..<parenIndex])
+        }
+        return eventSummary
+    }
+
+    private static func clipped(_ value: String, limit: Int = 800) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit)) + "..."
+    }
+
+    private static func extractedCorrelationIDs(from values: [String]) -> [String: String] {
+        var ids: [String: String] = [:]
+        for value in values {
+            for key in [
+                "contactID",
+                "contactId",
+                "channelUUID",
+                "channelID",
+                "channelId",
+                "attemptID",
+                "attemptId",
+                "transmitID",
+                "transmitId",
+                "deviceID",
+                "deviceId",
+            ] {
+                if ids[key] == nil,
+                   let extractedValue = extractedCorrelationValue(for: key, in: value) {
+                    ids[key] = extractedValue
+                }
+            }
+        }
+        return ids
+    }
+
+    private static func extractedCorrelationValue(for key: String, in value: String) -> String? {
+        for marker in ["\(key): ", "\(key)="] {
+            guard let markerRange = value.range(of: marker) else { continue }
+            var tail = value[markerRange.upperBound...]
+            if tail.hasPrefix("Optional(") {
+                tail = tail.dropFirst("Optional(".count)
+            }
+            if tail.hasPrefix("\"") {
+                tail = tail.dropFirst()
+                guard let end = tail.firstIndex(of: "\"") else { return nil }
+                return String(tail[..<end])
+            }
+            let end = tail.firstIndex { character in
+                character == "," || character == ")" || character == " "
+            } ?? tail.endIndex
+            let extracted = String(tail[..<end])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            return extracted.isEmpty || extracted == "nil" ? nil : extracted
+        }
+        return nil
+    }
+}
+
 enum DiagnosticsInvariantScope: String, Codable, CaseIterable {
     case local
     case backend
@@ -115,7 +749,7 @@ enum DiagnosticsInvariantScope: String, Codable, CaseIterable {
     case convergence
 }
 
-struct DiagnosticsInvariantViolation: Identifiable, Equatable {
+struct DiagnosticsInvariantViolation: Codable, Identifiable, Equatable {
     let id: UUID
     let timestamp: Date
     let invariantID: String
@@ -160,7 +794,7 @@ enum DiagnosticsSubsystem: String, Codable, CaseIterable {
     case selfCheck = "self-check"
 }
 
-struct DiagnosticsEntry: Identifiable, Equatable {
+struct DiagnosticsEntry: Codable, Identifiable, Equatable {
     let id: UUID
     let timestamp: Date
     let subsystem: DiagnosticsSubsystem
@@ -185,7 +819,7 @@ struct DiagnosticsEntry: Identifiable, Equatable {
     }
 }
 
-struct DiagnosticsStateCapture: Identifiable, Equatable {
+struct DiagnosticsStateCapture: Codable, Identifiable, Equatable {
     let id: UUID
     let timestamp: Date
     let reason: String
@@ -237,6 +871,7 @@ final class DiagnosticsStore {
     private let entryLimit = 200
     private let stateCaptureLimit = 80
     private let invariantViolationLimit = 80
+    private let reducerTransitionReportLimit = 160
     private let logFileURL: URL?
     private static let iso8601TimestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -247,6 +882,7 @@ final class DiagnosticsStore {
     private(set) var entries: [DiagnosticsEntry] = []
     private(set) var stateCaptures: [DiagnosticsStateCapture] = []
     private(set) var invariantViolations: [DiagnosticsInvariantViolation] = []
+    private(set) var reducerTransitionReports: [ReducerTransitionReport] = []
     private(set) var latestErrorEntry: DiagnosticsEntry?
     var onHighSignalEvent: ((DiagnosticsHighSignalEvent) -> Void)?
 
@@ -314,14 +950,26 @@ final class DiagnosticsStore {
         }
     }
 
-    nonisolated func captureState(reason: String, fields: [String: String]) {
+    nonisolated func captureState(
+        reason: String,
+        fields: [String: String],
+        localSessionProjection: LocalSessionDiagnosticsProjection? = nil
+    ) {
         if Thread.isMainThread {
             MainActor.assumeIsolated {
-                self.captureStateOnMain(reason: reason, fields: fields)
+                self.captureStateOnMain(
+                    reason: reason,
+                    fields: fields,
+                    localSessionProjection: localSessionProjection
+                )
             }
         } else {
             Task { @MainActor [weak self] in
-                self?.captureStateOnMain(reason: reason, fields: fields)
+                self?.captureStateOnMain(
+                    reason: reason,
+                    fields: fields,
+                    localSessionProjection: localSessionProjection
+                )
             }
         }
     }
@@ -349,6 +997,18 @@ final class DiagnosticsStore {
                     message: message,
                     metadata: metadata
                 )
+            }
+        }
+    }
+
+    nonisolated func recordReducerTransition(_ report: ReducerTransitionReport) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                self.recordReducerTransitionOnMain(report)
+            }
+        } else {
+            Task { @MainActor [weak self] in
+                self?.recordReducerTransitionOnMain(report)
             }
         }
     }
@@ -381,13 +1041,47 @@ final class DiagnosticsStore {
         entries.removeAll()
         stateCaptures.removeAll()
         invariantViolations.removeAll()
+        reducerTransitionReports.removeAll()
         latestErrorEntry = nil
         guard let logFileURL else { return }
         try? Data().write(to: logFileURL, options: .atomic)
     }
 
-    private func captureStateOnMain(reason: String, fields: [String: String]) {
+    private func recordReducerTransitionOnMain(_ report: ReducerTransitionReport) {
+        reducerTransitionReports.insert(report, at: 0)
+        if reducerTransitionReports.count > reducerTransitionReportLimit {
+            reducerTransitionReports.removeLast(reducerTransitionReports.count - reducerTransitionReportLimit)
+        }
+        for invariantID in report.invariantViolationsEmitted {
+            recordInvariantViolationOnMain(
+                invariantID: invariantID,
+                scope: .local,
+                message: "reducer emitted invariant violation",
+                metadata: report.correlationIDs.merging(
+                    [
+                        "reducerName": report.reducerName,
+                        "eventName": report.eventName,
+                    ],
+                    uniquingKeysWith: { current, _ in current }
+                )
+            )
+        }
+        logger.debug(
+            "transition: \(report.reducerName, privacy: .public) event=\(report.eventName, privacy: .public) effects=\(report.effectsEmitted.count, privacy: .public)"
+        )
+        appendReducerTransitionToDisk(report)
+    }
+
+    private func captureStateOnMain(
+        reason: String,
+        fields: [String: String],
+        localSessionProjection: LocalSessionDiagnosticsProjection?
+    ) {
         if stateCaptures.first?.fields == fields {
+            recordInvariantViolationCandidatesOnMain(
+                reason: reason,
+                candidates: localSessionProjection?.derivedInvariantCandidates ?? []
+            )
             return
         }
 
@@ -410,7 +1104,17 @@ final class DiagnosticsStore {
         )
         appendStateCaptureToDisk(capture)
 
-        for violation in DiagnosticsStore.evaluateSnapshotInvariantViolations(fields: fields) {
+        recordInvariantViolationCandidatesOnMain(
+            reason: reason,
+            candidates: localSessionProjection?.derivedInvariantCandidates ?? []
+        )
+    }
+
+    private func recordInvariantViolationCandidatesOnMain(
+        reason: String,
+        candidates: [DiagnosticsInvariantViolationCandidate]
+    ) {
+        for violation in candidates {
             recordInvariantViolationOnMain(
                 invariantID: violation.invariantID,
                 scope: violation.scope,
@@ -464,10 +1168,13 @@ final class DiagnosticsStore {
         )
     }
 
-    func exportText(snapshot: String? = nil) -> String {
+    func exportText(snapshot: String? = nil, structuredEnvelopeJSON: String? = nil) -> String {
         var sections: [String] = []
         if let snapshot, !snapshot.isEmpty {
             sections.append("STATE SNAPSHOT\n\(snapshot)")
+        }
+        if let structuredEnvelopeJSON, !structuredEnvelopeJSON.isEmpty {
+            sections.append("STRUCTURED DIAGNOSTICS\n\(structuredEnvelopeJSON)")
         }
 
         if stateCaptures.isEmpty {
@@ -496,6 +1203,27 @@ final class DiagnosticsStore {
                 return "[\(timestamp)] [\(violation.invariantID)] [\(violation.scope.rawValue)] \(violation.message)\(metadata)"
             }
             sections.append("INVARIANT VIOLATIONS\n" + lines.joined(separator: "\n"))
+        }
+
+        if reducerTransitionReports.isEmpty {
+            sections.append("REDUCER TRANSITIONS\n<empty>")
+        } else {
+            let lines = reducerTransitionReports.map { report in
+                let effects =
+                    report.effectsEmitted.isEmpty
+                    ? "none"
+                    : report.effectsEmitted.joined(separator: ",")
+                let correlations =
+                    report.correlationIDs.isEmpty
+                    ? ""
+                    : " " + report.correlationIDs.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
+                let invariants =
+                    report.invariantViolationsEmitted.isEmpty
+                    ? "none"
+                    : report.invariantViolationsEmitted.joined(separator: ",")
+                return "[\(report.reducerName)] [\(report.eventName)] effects=\(effects) invariants=\(invariants)\(correlations) from=\(report.previousStateSummary) to=\(report.nextStateSummary)"
+            }
+            sections.append("REDUCER TRANSITIONS\n" + lines.joined(separator: "\n"))
         }
 
         if entries.isEmpty {
@@ -553,372 +1281,32 @@ final class DiagnosticsStore {
         try? handle.write(contentsOf: data)
     }
 
+    private func appendReducerTransitionToDisk(_ report: ReducerTransitionReport) {
+        guard let logFileURL else { return }
+        let effects =
+            report.effectsEmitted.isEmpty
+            ? "none"
+            : report.effectsEmitted.joined(separator: ",")
+        let correlations =
+            report.correlationIDs.isEmpty
+            ? ""
+            : " " + report.correlationIDs.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
+        let line = "[transition] [\(report.reducerName)] [\(report.eventName)] effects=\(effects)\(correlations) from=\(report.previousStateSummary) to=\(report.nextStateSummary)\n"
+        guard let data = line.data(using: .utf8),
+              let handle = try? FileHandle(forWritingTo: logFileURL) else {
+            return
+        }
+        defer {
+            try? handle.close()
+        }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    }
+
     private static func changedKeys(from oldFields: [String: String], to newFields: [String: String]) -> [String] {
         Array(Set(oldFields.keys).union(newFields.keys))
             .filter { oldFields[$0] != newFields[$0] }
             .sorted()
-    }
-
-    private static func evaluateSnapshotInvariantViolations(
-        fields: [String: String]
-    ) -> [DiagnosticsInvariantViolationCandidate] {
-        let phase = fields["selectedPeerPhase"] ?? "none"
-        let backendSelfJoined = snapshotBool(fields, key: "backendSelfJoined")
-        let backendPeerJoined = snapshotBool(fields, key: "backendPeerJoined")
-        let backendPeerDeviceConnected = snapshotBool(fields, key: "backendPeerDeviceConnected")
-        let backendCanTransmit = snapshotBool(fields, key: "backendCanTransmit")
-        let isJoined = snapshotBool(fields, key: "isJoined")
-        let hadConnectedSessionContinuity = snapshotBool(fields, key: "hadConnectedSessionContinuity")
-        let backendChannelStatus = fields["backendChannelStatus"] ?? "none"
-        let backendReadiness = fields["backendReadiness"] ?? "none"
-        let remoteWakeCapabilityKind = fields["remoteWakeCapabilityKind"] ?? "unavailable"
-        let systemSession = fields["systemSession"] ?? "none"
-        let phaseDetail = fields["selectedPeerPhaseDetail"] ?? "none"
-        let mediaState = fields["mediaState"] ?? "none"
-        let selectedPeerRelationship = fields["selectedPeerRelationship"] ?? "none"
-        let pendingAction = fields["pendingAction"] ?? "none"
-
-        var violations: [DiagnosticsInvariantViolationCandidate] = []
-
-        if phase == "ready", isJoined == false {
-            violations.append(
-                DiagnosticsInvariantViolationCandidate(
-                    invariantID: "selected.ready_without_join",
-                    scope: .local,
-                    message: "selectedPeerPhase=ready while isJoined=false",
-                    metadata: [
-                        "selectedPeerPhase": phase,
-                        "isJoined": fields["isJoined"] ?? "none",
-                    ]
-                )
-            )
-        }
-
-        let backendIsSelfTransmitting =
-            backendChannelStatus == "self-transmitting"
-            || backendReadiness == "self-transmitting"
-        if phase == "ready",
-           backendCanTransmit == false,
-           !backendIsSelfTransmitting {
-            violations.append(
-                DiagnosticsInvariantViolationCandidate(
-                    invariantID: "selected.ready_while_backend_cannot_transmit",
-                    scope: .backend,
-                    message: "selectedPeerPhase=ready while backendCanTransmit=false",
-                    metadata: [
-                        "selectedPeerPhase": phase,
-                        "backendCanTransmit": fields["backendCanTransmit"] ?? "none",
-                    ]
-                )
-            )
-        }
-
-        if backendSelfJoined == true, backendPeerJoined == true, backendPeerDeviceConnected == true {
-            let notLivePhases = Set(["idle", "requested", "incomingRequest"])
-            if notLivePhases.contains(phase) {
-                violations.append(
-                    DiagnosticsInvariantViolationCandidate(
-                        invariantID: "selected.backend_ready_ui_not_live",
-                        scope: .backend,
-                        message: "backend says both sides are ready, but selectedPeerPhase is still not live",
-                        metadata: [
-                            "selectedPeerPhase": phase,
-                            "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
-                            "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
-                            "backendPeerDeviceConnected": fields["backendPeerDeviceConnected"] ?? "none",
-                        ]
-                    )
-                )
-            }
-        }
-
-        if phase == "peerReady",
-           selectedPeerRelationship == "none",
-           pendingAction == "none",
-           isJoined == false,
-           systemSession == "none",
-           backendSelfJoined == true,
-           backendPeerJoined == true,
-           [
-               "inactive",
-               "waiting-for-self",
-               "waiting-for-peer",
-               "ready",
-           ].contains(backendReadiness) {
-            violations.append(
-                DiagnosticsInvariantViolationCandidate(
-                    invariantID: "selected.stale_membership_peer_ready_without_session",
-                    scope: .backend,
-                    message: "backend retained durable channel membership while selectedPeerPhase is peerReady without a local session",
-                    metadata: [
-                        "selectedPeerPhase": phase,
-                        "selectedPeerRelationship": selectedPeerRelationship,
-                        "pendingAction": pendingAction,
-                        "isJoined": fields["isJoined"] ?? "none",
-                        "systemSession": systemSession,
-                        "backendChannelStatus": backendChannelStatus,
-                        "backendReadiness": backendReadiness,
-                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
-                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
-                        "backendPeerDeviceConnected": fields["backendPeerDeviceConnected"] ?? "none",
-                    ]
-                )
-            )
-        }
-
-        let pendingLocalJoinWithoutSession =
-            pendingAction.contains("joiningLocal(")
-            || pendingAction.contains(".joiningLocal(")
-        let backendMembershipAbsentForPendingLocalAction =
-            backendSelfJoined != true
-            && backendPeerJoined != true
-            && !["waiting-for-peer", "ready", "self-transmitting", "peer-transmitting"].contains(backendChannelStatus)
-        if pendingLocalJoinWithoutSession,
-           selectedPeerRelationship == "none",
-           isJoined == false,
-           systemSession == "none",
-           backendMembershipAbsentForPendingLocalAction {
-            violations.append(
-                DiagnosticsInvariantViolationCandidate(
-                    invariantID: "selected.backend_absent_pending_local_action_without_session",
-                    scope: .convergence,
-                    message: "backend membership is absent, but the selected peer still has a pending local session action without local session evidence",
-                    metadata: [
-                        "selectedPeerPhase": phase,
-                        "selectedPeerRelationship": selectedPeerRelationship,
-                        "pendingAction": pendingAction,
-                        "isJoined": fields["isJoined"] ?? "none",
-                        "systemSession": systemSession,
-                        "backendChannelStatus": backendChannelStatus,
-                        "backendReadiness": backendReadiness,
-                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
-                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
-                    ]
-                )
-            )
-        }
-
-        if backendPeerJoined == true, backendSelfJoined == false {
-            let disconnectedPhases = Set(["idle", "requested"])
-            if disconnectedPhases.contains(phase) {
-                violations.append(
-                    DiagnosticsInvariantViolationCandidate(
-                        invariantID: "selected.peer_joined_ui_not_connectable",
-                        scope: .backend,
-                        message: "backend says the peer already joined, but selectedPeerPhase is still not connectable",
-                        metadata: [
-                            "selectedPeerPhase": phase,
-                            "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
-                            "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
-                        ]
-                    )
-                )
-            }
-        }
-
-        if backendReadiness == "waiting-for-self" {
-            let disconnectedPhases = Set(["idle", "requested", "incomingRequest"])
-            if disconnectedPhases.contains(phase) {
-                violations.append(
-                    DiagnosticsInvariantViolationCandidate(
-                        invariantID: "selected.waiting_for_self_ui_not_connectable",
-                        scope: .backend,
-                        message: "backend says the peer is waiting for self, but selectedPeerPhase is still not connectable",
-                        metadata: [
-                            "selectedPeerPhase": phase,
-                            "backendChannelStatus": backendChannelStatus,
-                            "backendReadiness": backendReadiness,
-                            "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
-                            "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
-                        ]
-                    )
-                )
-            }
-        }
-
-        let remoteAudioReadiness = fields["remoteAudioReadiness"] ?? "unknown"
-        let connectableWakeStatuses = Set(["waiting-for-peer", "ready", "transmitting", "receiving"])
-        if remoteWakeCapabilityKind == "wake-capable",
-           connectableWakeStatuses.contains(backendChannelStatus) {
-            let disconnectedPhases = Set(["idle", "requested"])
-            if disconnectedPhases.contains(phase) {
-                violations.append(
-                    DiagnosticsInvariantViolationCandidate(
-                        invariantID: "selected.peer_wake_capable_ui_not_connectable",
-                        scope: .backend,
-                        message: "backend channel is connectable and peer wake is available, but selectedPeerPhase is still not connectable",
-                        metadata: [
-                            "selectedPeerPhase": phase,
-                            "backendChannelStatus": backendChannelStatus,
-                            "backendReadiness": backendReadiness,
-                            "remoteWakeCapabilityKind": remoteWakeCapabilityKind,
-                        ]
-                    )
-                )
-            }
-        }
-
-        if phase == "waitingForPeer",
-           isJoined == true,
-           hadConnectedSessionContinuity == true,
-           systemSession.hasPrefix("active("),
-           backendSelfJoined == true,
-           backendPeerJoined == true,
-           backendPeerDeviceConnected == true,
-           backendChannelStatus == "waiting-for-peer",
-           remoteWakeCapabilityKind == "unavailable" {
-            violations.append(
-                DiagnosticsInvariantViolationCandidate(
-                    invariantID: "selected.joined_session_lost_wake_capability",
-                    scope: .backend,
-                    message: "joined live session regressed to waiting-for-peer without wake capability",
-                    metadata: [
-                        "selectedPeerPhase": phase,
-                        "systemSession": systemSession,
-                        "backendChannelStatus": backendChannelStatus,
-                        "backendReadiness": backendReadiness,
-                        "remoteWakeCapabilityKind": remoteWakeCapabilityKind,
-                    ]
-                )
-            )
-        }
-
-        if phase == "waitingForPeer",
-           phaseDetail.contains("localAudioPrewarm"),
-           isJoined == true,
-           hadConnectedSessionContinuity == true,
-           systemSession.hasPrefix("active("),
-           backendReadiness == "ready",
-           backendSelfJoined == true,
-           backendPeerJoined == true,
-           remoteAudioReadiness == "wakeCapable",
-           remoteWakeCapabilityKind == "wake-capable" {
-            violations.append(
-                DiagnosticsInvariantViolationCandidate(
-                    invariantID: "selected.wake_capable_peer_blocked_on_local_audio_prewarm",
-                    scope: .backend,
-                    message: "peer is wake-capable, but selectedPeerPhase is still waitingForPeer on local audio prewarm",
-                    metadata: [
-                        "selectedPeerPhase": phase,
-                        "selectedPeerPhaseDetail": phaseDetail,
-                        "systemSession": systemSession,
-                        "backendChannelStatus": backendChannelStatus,
-                        "backendReadiness": backendReadiness,
-                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
-                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
-                        "remoteWakeCapabilityKind": remoteWakeCapabilityKind,
-                    ]
-                )
-            )
-        }
-
-        if phase == "waitingForPeer",
-           phaseDetail.contains("localSessionTransition"),
-           isJoined == true,
-           hadConnectedSessionContinuity == true,
-           systemSession.hasPrefix("active("),
-           backendReadiness == "inactive",
-           backendSelfJoined == false,
-           backendPeerJoined == false {
-            violations.append(
-                DiagnosticsInvariantViolationCandidate(
-                    invariantID: "selected.backend_inactive_ui_still_joined",
-                    scope: .backend,
-                    message: "backend says the session is inactive, but selectedPeerPhase is still waitingForPeer on a joined local session",
-                    metadata: [
-                        "selectedPeerPhase": phase,
-                        "selectedPeerPhaseDetail": phaseDetail,
-                        "isJoined": fields["isJoined"] ?? "none",
-                        "systemSession": systemSession,
-                        "backendChannelStatus": backendChannelStatus,
-                        "backendReadiness": backendReadiness,
-                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
-                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
-                    ]
-                )
-            )
-        }
-
-        let reconciliationAction = fields["selectedPeerReconciliationAction"] ?? "none"
-        let signalingJoinRecoveryActive =
-            snapshotBool(fields, key: "backendSignalingJoinRecoveryActive") == true
-        let disconnectingTeardownInFlight =
-            phaseDetail.contains("disconnecting")
-            || pendingAction.contains("reconciledTeardown(")
-
-        if phase == "waitingForPeer",
-           isJoined == true,
-           hadConnectedSessionContinuity == true,
-           systemSession.hasPrefix("active("),
-           !reconciliationAction.hasPrefix("teardownSelectedSession("),
-           !disconnectingTeardownInFlight,
-           backendSelfJoined == false,
-           backendPeerJoined == false {
-            violations.append(
-                DiagnosticsInvariantViolationCandidate(
-                    invariantID: "selected.backend_membership_absent_ui_still_joined",
-                    scope: .backend,
-                    message: "backend says channel membership is absent, but selectedPeerPhase is still waitingForPeer on a joined local session",
-                    metadata: [
-                        "selectedPeerPhase": phase,
-                        "selectedPeerPhaseDetail": phaseDetail,
-                        "isJoined": fields["isJoined"] ?? "none",
-                        "systemSession": systemSession,
-                        "backendChannelStatus": backendChannelStatus,
-                        "backendReadiness": backendReadiness,
-                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
-                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
-                    ]
-                )
-            )
-        }
-
-        if phase == "waitingForPeer",
-           phaseDetail.contains("remoteAudioPrewarm"),
-           isJoined == true,
-           mediaState == "connected",
-           systemSession.hasPrefix("active("),
-           !signalingJoinRecoveryActive,
-           backendReadiness == "ready",
-           backendSelfJoined == true,
-           backendPeerJoined == true,
-           backendPeerDeviceConnected == true,
-           remoteAudioReadiness != "waiting",
-           remoteWakeCapabilityKind == "wake-capable" {
-            violations.append(
-                DiagnosticsInvariantViolationCandidate(
-                    invariantID: "selected.backend_ready_missing_remote_audio_signal",
-                    scope: .backend,
-                    message: "backend says the peer is ready and connected, but selectedPeerPhase is still waitingForPeer on remote audio prewarm",
-                    metadata: [
-                        "selectedPeerPhase": phase,
-                        "selectedPeerPhaseDetail": phaseDetail,
-                        "mediaState": mediaState,
-                        "systemSession": systemSession,
-                        "backendChannelStatus": backendChannelStatus,
-                        "backendReadiness": backendReadiness,
-                        "backendSelfJoined": fields["backendSelfJoined"] ?? "none",
-                        "backendPeerJoined": fields["backendPeerJoined"] ?? "none",
-                        "backendPeerDeviceConnected": fields["backendPeerDeviceConnected"] ?? "none",
-                        "remoteAudioReadiness": remoteAudioReadiness,
-                        "remoteWakeCapabilityKind": remoteWakeCapabilityKind,
-                    ]
-                )
-            )
-        }
-
-        return violations
-    }
-
-    private static func snapshotBool(_ fields: [String: String], key: String) -> Bool? {
-        switch fields[key] {
-        case "true":
-            return true
-        case "false":
-            return false
-        default:
-            return nil
-        }
     }
 
     private func refreshLatestErrorEntry(afterRecording entry: DiagnosticsEntry) {
@@ -936,7 +1324,7 @@ final class DiagnosticsStore {
     }
 }
 
-private struct DiagnosticsInvariantViolationCandidate {
+struct DiagnosticsInvariantViolationCandidate: Equatable {
     let invariantID: String
     let scope: DiagnosticsInvariantScope
     let message: String

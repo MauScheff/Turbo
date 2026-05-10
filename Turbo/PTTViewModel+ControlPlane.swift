@@ -11,7 +11,7 @@ import UIKit
 extension PTTViewModel {
     func receiverAudioReadinessIntent(
         for contactID: UUID,
-        reason: String
+        reason: ReceiverAudioReadinessReason
     ) -> ReceiverAudioReadinessIntent? {
         guard let contact = contacts.first(where: { $0.id == contactID }),
               let backend = backendServices,
@@ -22,14 +22,13 @@ extension PTTViewModel {
         }
 
         let applicationState = currentApplicationState()
-        let isBackgroundMediaClosure = reason == "app-background-media-closed"
-        let isReady = isBackgroundMediaClosure
+        let isReady = reason.isBackgroundMediaClosure
             ? false
             : desiredLocalReceiverAudioReadiness(for: contactID)
-        let effectiveReason: String = {
+        let effectiveReason: ReceiverAudioReadinessReason = {
             guard !isReady else { return reason }
             guard applicationState != .active else { return reason }
-            return "app-background-media-closed"
+            return .appBackgroundMediaClosed
         }()
 
         return ReceiverAudioReadinessIntent(
@@ -63,7 +62,7 @@ extension PTTViewModel {
                     "contactId": intent.contactID.uuidString,
                     "handle": intent.contactHandle,
                     "state": intent.isReady ? "ready" : "not-ready",
-                    "reason": intent.reason,
+                    "reason": intent.reason.wireValue,
                 ]
             )
 
@@ -84,7 +83,7 @@ extension PTTViewModel {
         }
 
         if !intent.isReady,
-           intent.reason != "app-background-media-closed",
+           !intent.reason.isBackgroundMediaClosure,
            currentApplicationState() != .active {
             diagnostics.recordInvariantViolation(
                 invariantID: "receiver.background_not_ready_without_wake_reason",
@@ -93,7 +92,7 @@ extension PTTViewModel {
                 metadata: [
                     "contactId": intent.contactID.uuidString,
                     "handle": intent.contactHandle,
-                    "reason": intent.reason,
+                    "reason": intent.reason.wireValue,
                     "applicationState": String(describing: currentApplicationState()),
                 ]
             )
@@ -122,7 +121,7 @@ extension PTTViewModel {
                     "contactId": intent.contactID.uuidString,
                     "handle": intent.contactHandle,
                     "state": intent.isReady ? "ready" : "not-ready",
-                    "reason": intent.reason,
+                    "reason": intent.reason.wireValue,
                 ]
             )
             controlPlaneCoordinator.send(.receiverAudioReadinessPublished(intent))
@@ -141,7 +140,7 @@ extension PTTViewModel {
                     "contactId": intent.contactID.uuidString,
                     "handle": intent.contactHandle,
                     "state": intent.isReady ? "ready" : "not-ready",
-                    "reason": intent.reason,
+                    "reason": intent.reason.wireValue,
                     "error": error.localizedDescription,
                 ]
             )
@@ -169,7 +168,7 @@ extension PTTViewModel {
         }
         await syncLocalReceiverAudioReadinessSignal(
             for: contactID,
-            reason: "ptt-wake:post-activation-refresh"
+            reason: .pttWakePostActivationRefresh
         )
         captureDiagnosticsState("ptt-wake:post-activation-refresh")
         controlPlaneCoordinator.send(.postWakeRepairFinished(contactID: contactID))

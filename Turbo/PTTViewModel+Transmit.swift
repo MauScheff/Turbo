@@ -456,7 +456,7 @@ extension PTTViewModel {
         closeMediaSession()
         await syncLocalReceiverAudioReadinessSignal(
             for: contactID,
-            reason: "app-background-media-closed"
+            reason: .appBackgroundMediaClosed
         )
         updateStatusForSelectedContact()
     }
@@ -547,7 +547,7 @@ extension PTTViewModel {
             ) {
                 await syncLocalReceiverAudioReadinessSignal(
                     for: contactID,
-                    reason: "app-background-media-closed"
+                    reason: .appBackgroundMediaClosed
                 )
             }
         }
@@ -657,7 +657,10 @@ extension PTTViewModel {
         return true
     }
 
-    func syncLocalReceiverAudioReadinessSignal(for contactID: UUID, reason: String) async {
+    func syncLocalReceiverAudioReadinessSignal(
+        for contactID: UUID,
+        reason: ReceiverAudioReadinessReason
+    ) async {
         guard let intent = receiverAudioReadinessIntent(for: contactID, reason: reason) else {
             controlPlaneCoordinator.send(.receiverAudioReadinessContextUnavailable(contactID: contactID))
             return
@@ -965,7 +968,7 @@ extension PTTViewModel {
         }
         await syncLocalReceiverAudioReadinessSignal(
             for: contactID,
-            reason: "foreground-talk-prewarm-\(reason)"
+            reason: .foregroundTalkPrewarm(reason)
         )
         await maybeStartAutomaticDirectQuicProbe(
             for: contactID,
@@ -1347,7 +1350,8 @@ extension PTTViewModel {
 
     func handleSystemOriginatedBeginTransmitIfNeeded(
         channelUUID: UUID,
-        source: String
+        source: String,
+        origin: SystemTransmitBeginOrigin
     ) {
         guard !usesLocalHTTPBackend else { return }
         guard !transmitRuntime.isPressingTalk else { return }
@@ -1361,6 +1365,7 @@ extension PTTViewModel {
                 metadata: [
                     "channelUUID": channelUUID.uuidString,
                     "source": source,
+                    "origin": origin.rawValue,
                     "applicationState": String(describing: UIApplication.shared.applicationState),
                 ]
             )
@@ -1375,12 +1380,13 @@ extension PTTViewModel {
                 "channelUUID": channelUUID.uuidString,
                 "channelId": request.backendChannelID,
                 "source": source,
+                "origin": origin.rawValue,
             ]
         )
         if selectedContactId == nil {
             selectedContactId = request.contactID
         }
-        startTransmitStartupTiming(for: request, source: "system-originated-\(source)")
+        startTransmitStartupTiming(for: request, source: "system-originated-\(origin.rawValue)")
         transmitRuntime.markPressBegan()
         transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
         updateStatusForSelectedContact()
@@ -2264,7 +2270,7 @@ extension PTTViewModel {
             guard request.channelUUID != nil else {
                 let message = "PTT channel is not ready"
                 statusMessage = message
-                await transmitCoordinator.handle(.stopFailed(message))
+                await transmitCoordinator.handle(.stopFailed(target, message))
                 syncTransmitState()
                 return
             }
@@ -3832,7 +3838,8 @@ extension PTTViewModel {
             contactID: request.contactID,
             userID: request.remoteUserID,
             deviceID: peerDeviceID,
-            channelID: request.backendChannelID
+            channelID: request.backendChannelID,
+            transmitID: directQuicAttempt(for: request.contactID)?.attemptId
         )
     }
 
@@ -4065,7 +4072,7 @@ extension PTTViewModel {
         applyPreferredAudioOutputRouteIfPossible()
         _ = currentLocalCallTelemetry(includeAudio: activeChannelId != nil)
         Task { @MainActor [weak self] in
-            await self?.syncActiveCallTelemetryIfNeeded(reason: "audio-route-preference:\(reason)")
+            await self?.syncActiveCallTelemetryIfNeeded(reason: .audioRoutePreference(reason))
         }
         diagnostics.record(
             .media,
@@ -4605,11 +4612,20 @@ extension PTTViewModel {
         source: String
     ) async {
         guard !usesLocalHTTPBackend else { return }
-        guard pttCoordinator.state.isTransmitting else { return }
         guard let systemChannelUUID = pttCoordinator.state.systemChannelUUID,
               channelUUID(for: target.contactID) == systemChannelUUID else {
             return
         }
+
+        let previousPTTState = pttCoordinator.state
+        let endOrigin = SystemTransmitEndOrigin.explicitStopReconciliation(source: source)
+        await pttCoordinator.handle(
+            .didEndTransmitting(
+                channelUUID: systemChannelUUID,
+                origin: endOrigin
+            )
+        )
+        guard pttCoordinator.state != previousPTTState else { return }
 
         diagnostics.record(
             .pushToTalk,
@@ -4618,13 +4634,8 @@ extension PTTViewModel {
                 "contactId": target.contactID.uuidString,
                 "channelUUID": systemChannelUUID.uuidString,
                 "source": source,
+                "origin": endOrigin.kind,
             ]
-        )
-        await pttCoordinator.handle(
-            .didEndTransmitting(
-                channelUUID: systemChannelUUID,
-                source: source
-            )
         )
         syncPTTState()
         captureDiagnosticsState("transmit-stop:reconciled")
@@ -4661,7 +4672,7 @@ extension PTTViewModel {
                 "source": source,
             ]
         )
-        await transmitCoordinator.handle(.stopCompleted)
+        await transmitCoordinator.handle(.stopCompleted(target))
         syncTransmitState()
         directQuicBackendLeaseBypassedContactIDs.remove(target.contactID)
         directQuicBackendLeaseBypassedRequestsByContactID.removeValue(forKey: target.contactID)
@@ -4872,7 +4883,9 @@ extension PTTViewModel {
         guard let backend = backendServices else {
             throw TurboBackendError.invalidConfiguration
         }
-        return try await backend.renewTransmit(channelId: target.channelID, transmitId: target.transmitID)
+        return try await withHTTPTransportFault(route: .renewTransmit) {
+            try await backend.renewTransmit(channelId: target.channelID, transmitId: target.transmitID)
+        }
     }
 
     private func startRenewingTransmit(_ target: TransmitTarget) {
@@ -5012,7 +5025,7 @@ extension PTTViewModel {
             )
         }
         isTransmitting = false
-        await transmitCoordinator.handle(.stopCompleted)
+        await transmitCoordinator.handle(.stopCompleted(target))
         await refreshChannelState(for: target.contactID)
         syncTransmitState()
         updateStatusForSelectedContact()
@@ -5039,7 +5052,7 @@ extension PTTViewModel {
             Task {
                 await syncLocalReceiverAudioReadinessSignal(
                     for: contactID,
-                    reason: "media-\(String(describing: state))"
+                    reason: .mediaState(state)
                 )
             }
         }

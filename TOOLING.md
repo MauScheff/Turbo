@@ -102,6 +102,8 @@ Important backend entrypoints:
 Important operational commands:
 
 - `just deploy`
+- `just deploy-verified`
+- `just postdeploy-check`
 - `just route-probe`
 - `just route-probe-local`
 - `just serve-local`
@@ -114,6 +116,11 @@ Important operational commands:
 - `just simulator-scenario-suite-local`
 - `just simulator-scenario-merge-local`
 - `just simulator-scenario-merge-local-strict`
+- `just reliability-intake <handle> [peer]`
+- `just reliability-intake-shake <handle> <incidentId> [peer]`
+- `just synthetic-conversation-probe`
+- `just slo-dashboard <synthetic_conversation_json>`
+- `just protocol-model-checks`
 - `just swift-test-target <name>`
 - `just reliability-gate-regressions`
 - `just reliability-gate-smoke`
@@ -125,12 +132,25 @@ Important operational commands:
 
 For deploys, the distinction is:
 
-- if no interactive `ucm` process is already occupying the local codebase, use `just deploy`
+- for the normal production release path, use `just deploy-verified`; it deploys,
+  then runs the hosted synthetic conversation canary and SLO dashboard
+- if a deploy already happened and you only need live verification, use
+  `just postdeploy-check`
+- if no interactive `ucm` process is already occupying the local codebase and
+  you deliberately want only the raw backend deploy primitive, use `just deploy`
 - if you are already working inside a live `ucm` session, `just deploy` can block on that codebase lock; in that case keep using the existing codebase session and run `turbo.deploy` there via MCP/UCM
 
 `just deploy` first runs `just backend-schema-drift-test`, which executes `turbo.schemaDrift.check`. This is the lightweight guard against accidentally changing the shape of values stored in Unison Cloud tables without an explicit migration/reset decision. If the guard fails, do not bypass it with an environment rotation as a normal workflow; follow [`MIGRATIONS.md`](/Users/mau/Development/Turbo/MIGRATIONS.md), then either revert the persisted type change, write and prove the migration/repair path, or deliberately approve the new baseline in `turbo.schemaDrift.expectedHashes` in the same change.
 
 In either case, if you changed backend behavior in the local Unison codebase, that change is not live on `https://beepbeep.to` until `turbo.deploy` has actually run.
+
+`just deploy-verified` keeps raw deployment and live verification separate but
+ties them into one human command. A failure after the deploy step means the
+deploy command returned successfully, but the live production surface did not
+meet the hosted conversation SLOs. Inspect the timestamped
+`postdeploy-check.json`, `synthetic-conversation-probe.json`, and
+`slo-dashboard.json` artifacts printed by the command before deciding whether to
+roll forward, roll back, or convert the failure into a regression.
 
 For APNs credentials, keep the `.p8` file outside the repo and expose either `TURBO_APNS_PRIVATE_KEY_PATH` or `TURBO_APNS_PRIVATE_KEY` in the local deploy environment. `turbo.deploy` resolves the path locally when present and stores the PEM text in cloud config as `TURBO_APNS_PRIVATE_KEY`, so deployed backend code should never depend on filesystem access.
 
@@ -179,6 +199,46 @@ Use the reliability gates when you need a named confidence level:
 - `just reliability-gate-full` runs those regressions, the full hosted scenario catalog, and strict merged diagnostics.
 - `just reliability-gate-local` runs those regressions, the full local scenario catalog, and strict local merged diagnostics. Start `just serve-local` first.
 
+Use this command map to keep the reliability workflow small:
+
+| Lane | Command | Status | Use when |
+| --- | --- | --- | --- |
+| Local regression gate | `just reliability-gate-regressions` | Primary | Proving focused code changes before deploy or before deeper scenario work. |
+| Hosted smoke gate | `just reliability-gate-smoke` | Primary | Proving simulator-backed hosted control-plane behavior before a risky release. |
+| Verified deploy | `just deploy-verified` | Primary | Normal production release path. Deploys, then proves the live hosted canary and SLOs. |
+| Postdeploy verification | `just postdeploy-check` | Primary | A deploy already happened, or production feels flaky and needs a fresh canary. |
+| Reliability intake | `just reliability-intake`, `just reliability-intake-shake` | Primary | Starting from a physical-device, debug, TestFlight, production-like, or shake-to-report issue. Writes human/JSON diagnostics and a replay draft when possible. |
+| Lower-level diagnostics merge | `just diagnostics-merge-pair` or `scripts/merged_diagnostics.py --json` | Building block | Reading merged diagnostics directly when you do not need the full intake artifact. |
+| Production replay | `just production-replay` | Primary when diagnostics JSON exists | Turning field evidence into a local replay or scenario draft. |
+| Protocol model check | `just protocol-model-checks` | Primary for protocol changes | Checking distributed interleavings and the matching Swift property tests. |
+| Full hosted/local gates | `just reliability-gate-full`, `just reliability-gate-local` | Primary but expensive | Broad confidence after shared state-machine or backend contract changes. |
+| Synthetic probe and SLO dashboard | `just synthetic-conversation-probe`, `just slo-dashboard` | Building blocks | Running only one half of `postdeploy-check` or combining extra SLO sources. |
+| Route probe | `just route-probe`, `just route-probe-local` | Diagnostic/building block | Debugging route contract details or local websocket behavior. The synthetic conversation probe wraps this for the release canary. |
+| Backend stability probe | `just backend-stability-probe` | Diagnostic | Separating hosted route availability from app/device behavior, especially for Unison Cloud escalation. |
+| Retired production probes | older overlapping hosted probe recipes | Removed | Replaced by `postdeploy-check`; use `route-probe` for lower-level route-contract debugging. |
+| Legacy APNs bridge helpers | `just ptt-apns-bridge`, `just ptt-apns-worker` | Diagnostic/legacy | Debugging old interim wake paths. Prefer the current deployed wake path and diagnostics surface when available. |
+
+Use `just synthetic-conversation-probe` when you want a production-shaped
+two-device control-plane canary without launching the app. It runs the semantic
+route probe with synthetic caller/callee identities, requires the websocket,
+receiver-ready, begin-transmit, push-target, and end-transmit checks to be
+present, and writes per-iteration artifacts plus
+`synthetic-conversation-probe.json` for comparison across runs.
+
+Use `just slo-dashboard <synthetic-conversation-probe.json>` to turn probe
+evidence into a static SLO report. The dashboard writes `slo-dashboard.json`,
+`slo-dashboard.md`, and `reproduce.sh`, then fails when product-facing
+conversation objectives breach their thresholds. The script can also read
+backend stability probe JSON and merged diagnostics JSON directly when a report
+needs to combine route health with invariant health.
+
+Use `just protocol-model-checks` when a change touches core conversation
+protocol rules. It validates the TLA+ communication model, runs TLC with the
+configured safety invariants when `tla2tools.jar` is available, and runs the
+Swift property tests for conversation projection and transport-fault planning.
+Set `TLA2TOOLS_JAR` or pass the jar path as the first recipe argument when the
+jar is not at `/tmp/tla2tools.jar`.
+
 This is the preferred way to iterate and prove:
 
 - request / accept / ready flows
@@ -223,6 +283,19 @@ For physical-device debugging, the expected agent loop is:
 ```bash
 python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 @mau @bau
 ```
+
+For normal intake from a human report, prefer the facade first:
+
+```bash
+just reliability-intake @mau @bau
+just reliability-intake-shake @mau <incidentId> @bau
+```
+
+It writes a timestamped artifact under `/tmp/turbo-reliability-intake/` with a
+summary, human merged diagnostics, JSON merged diagnostics, and a best-effort
+production replay draft when there are enough participants. Use the lower-level
+`merged_diagnostics.py` command directly when you need custom flags or a quick
+terminal read.
 
 For an agent investigation where the result will be saved and searched repeatedly, prefer this default:
 

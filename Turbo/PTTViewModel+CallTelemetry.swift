@@ -49,7 +49,7 @@ extension PTTViewModel {
                 guard self.localCallNetworkInterface != interface else { return }
                 self.localCallNetworkInterface = interface
                 _ = self.currentLocalCallTelemetry(includeAudio: self.activeChannelId != nil)
-                await self.syncActiveCallTelemetryIfNeeded(reason: "network-change")
+                await self.syncActiveCallTelemetryIfNeeded(reason: .networkChange)
             }
         }
         callTelemetryNetworkMonitor = monitor
@@ -62,12 +62,12 @@ extension PTTViewModel {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 _ = self?.currentLocalCallTelemetry(includeAudio: self?.activeChannelId != nil)
-                await self?.syncActiveCallTelemetryIfNeeded(reason: "telemetry-refresh")
+                await self?.syncActiveCallTelemetryIfNeeded(reason: .telemetryRefresh)
             }
         }
     }
 
-    func syncActiveCallTelemetryIfNeeded(reason: String) async {
+    func syncActiveCallTelemetryIfNeeded(reason: ReceiverAudioReadinessReason) async {
         guard let contactID = activeChannelId else { return }
         let hasPublishedReceiverState = localReceiverAudioReadinessPublications[contactID] != nil
         guard desiredLocalReceiverAudioReadiness(for: contactID) || hasPublishedReceiverState else { return }

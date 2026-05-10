@@ -73,15 +73,19 @@ Example alert push for an incoming talk request:
     "aps": {
       "alert": {
         "title": "@avery wants to talk",
-        "body": "Open BeepBeep to respond."
+        "body": "Tap to accept."
       },
       "badge": 2,
-      "sound": "default"
+      "sound": "default",
+      "category": "TURBO_TALK_REQUEST",
+      "interruption-level": "time-sensitive",
+      "mutable-content": 1
     },
     "event": "talk-request",
     "inviteId": "invite-123",
     "fromHandle": "@avery",
-    "channelId": "abc"
+    "channelId": "abc",
+    "deepLink": "beepbeep://conversation?handle=@avery&action=accept&inviteId=invite-123&channelId=abc"
   },
   "pushType": "alert",
   "bundleId": "com.rounded.Turbo",

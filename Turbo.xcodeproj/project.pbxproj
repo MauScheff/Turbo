@@ -21,12 +21,35 @@
 			remoteGlobalIDString = 5CC93AA12F6DE60E00DA3003;
 			remoteInfo = Turbo;
 		};
+		FE9352B84AEB415D9D085735 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5CC93A9A2F6DE60E00DA3003 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7AD1A80D448C41E6AAF4B121;
+			remoteInfo = TalkRequestNotificationService;
+		};
+		4272F4310FCD4614985AAF11 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5CC93A9A2F6DE60E00DA3003 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 18C7F4B290304AA7893AB6D6;
+			remoteInfo = BeepBeepLiveActivityWidget;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXBuildFile section */
+		272D3A9D6E6B4A5480FC6903 /* TalkRequestNotificationService.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = F40D3F48524F48FAAAC8BB9A /* TalkRequestNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		AB060FAD779F4C608A998579 /* BeepBeepLiveActivityWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 9127B7BCA23A4A369169AF0F /* BeepBeepLiveActivityWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A59D16E78629434BA1C16216 /* BeepBeepLiveActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 259617F2522049AF8CBD4E81 /* BeepBeepLiveActivityAttributes.swift */; };
+/* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		5CC93AA22F6DE60E00DA3003 /* BeepBeep: Walkie Talkie.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "BeepBeep: Walkie Talkie.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		5CC93AAF2F6DE60F00DA3003 /* TurboTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TurboTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5CC93AB92F6DE60F00DA3003 /* TurboUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TurboUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F40D3F48524F48FAAAC8BB9A /* TalkRequestNotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TalkRequestNotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		9127B7BCA23A4A369169AF0F /* BeepBeepLiveActivityWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BeepBeepLiveActivityWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		259617F2522049AF8CBD4E81 /* BeepBeepLiveActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Turbo/BeepBeepLiveActivityAttributes.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -36,6 +59,20 @@
 				Info.plist,
 			);
 			target = 5CC93AA12F6DE60E00DA3003 /* BeepBeep */;
+		};
+		6491B92DEAC4457B9F3ACF0A /* Exceptions for "TalkRequestNotificationService" folder in "TalkRequestNotificationService" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 7AD1A80D448C41E6AAF4B121 /* TalkRequestNotificationService */;
+		};
+		BD594E9905A74ED38113F66E /* Exceptions for "BeepBeepLiveActivityWidget" folder in "BeepBeepLiveActivityWidget" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 18C7F4B290304AA7893AB6D6 /* BeepBeepLiveActivityWidget */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -56,6 +93,22 @@
 		5CC93ABC2F6DE60F00DA3003 /* TurboUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = TurboUITests;
+			sourceTree = "<group>";
+		};
+		4977A2010DBF49CAB4FF9B53 /* TalkRequestNotificationService */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				6491B92DEAC4457B9F3ACF0A /* Exceptions for "TalkRequestNotificationService" folder in "TalkRequestNotificationService" target */,
+			);
+			path = TalkRequestNotificationService;
+			sourceTree = "<group>";
+		};
+		32DBF6CACD41450B89B960A2 /* BeepBeepLiveActivityWidget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				BD594E9905A74ED38113F66E /* Exceptions for "BeepBeepLiveActivityWidget" folder in "BeepBeepLiveActivityWidget" target */,
+			);
+			path = BeepBeepLiveActivityWidget;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -82,6 +135,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		8916C63D53C84A4B9C5EFC4D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9DED156F20E0469490344ABB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -89,6 +156,8 @@
 			isa = PBXGroup;
 			children = (
 				5CC93AA42F6DE60E00DA3003 /* Turbo */,
+				4977A2010DBF49CAB4FF9B53 /* TalkRequestNotificationService */,
+				32DBF6CACD41450B89B960A2 /* BeepBeepLiveActivityWidget */,
 				5CC93AB22F6DE60F00DA3003 /* TurboTests */,
 				5CC93ABC2F6DE60F00DA3003 /* TurboUITests */,
 				5CC93AA32F6DE60E00DA3003 /* Products */,
@@ -99,6 +168,8 @@
 			isa = PBXGroup;
 			children = (
 				5CC93AA22F6DE60E00DA3003 /* BeepBeep: Walkie Talkie.app */,
+				F40D3F48524F48FAAAC8BB9A /* TalkRequestNotificationService.appex */,
+				9127B7BCA23A4A369169AF0F /* BeepBeepLiveActivityWidget.appex */,
 				5CC93AAF2F6DE60F00DA3003 /* TurboTests.xctest */,
 				5CC93AB92F6DE60F00DA3003 /* TurboUITests.xctest */,
 			);
@@ -106,6 +177,21 @@
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		9E3870E034EC451D8FF36F80 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				272D3A9D6E6B4A5480FC6903 /* TalkRequestNotificationService.appex in Embed App Extensions */,
+				AB060FAD779F4C608A998579 /* BeepBeepLiveActivityWidget.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXNativeTarget section */
 		5CC93AA12F6DE60E00DA3003 /* BeepBeep */ = {
@@ -115,10 +201,13 @@
 				5CC93A9E2F6DE60E00DA3003 /* Sources */,
 				5CC93A9F2F6DE60E00DA3003 /* Frameworks */,
 				5CC93AA02F6DE60E00DA3003 /* Resources */,
+				9E3870E034EC451D8FF36F80 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				BBAD28B5E97E43768728C373 /* PBXTargetDependency */,
+				AA82C5D6106F4091929C9466 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				5CC93AA42F6DE60E00DA3003 /* Turbo */,
@@ -170,6 +259,46 @@
 			productReference = 5CC93AB92F6DE60F00DA3003 /* TurboUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		7AD1A80D448C41E6AAF4B121 /* TalkRequestNotificationService */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 097632111F5B4E7499366CA4 /* Build configuration list for PBXNativeTarget "TalkRequestNotificationService" */;
+			buildPhases = (
+				433E36A515D146A88ACBB050 /* Sources */,
+				8916C63D53C84A4B9C5EFC4D /* Frameworks */,
+				06049F545FC94CD8B1504F58 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				4977A2010DBF49CAB4FF9B53 /* TalkRequestNotificationService */,
+			);
+			name = TalkRequestNotificationService;
+			productName = TalkRequestNotificationService;
+			productReference = F40D3F48524F48FAAAC8BB9A /* TalkRequestNotificationService.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		18C7F4B290304AA7893AB6D6 /* BeepBeepLiveActivityWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 042DB42ACD0542F6BB0F1F31 /* Build configuration list for PBXNativeTarget "BeepBeepLiveActivityWidget" */;
+			buildPhases = (
+				4CFEFFF8A1554D25B896433F /* Sources */,
+				9DED156F20E0469490344ABB /* Frameworks */,
+				2B0A01F5F055413C96CA34A0 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				32DBF6CACD41450B89B960A2 /* BeepBeepLiveActivityWidget */,
+			);
+			name = BeepBeepLiveActivityWidget;
+			productName = BeepBeepLiveActivityWidget;
+			productReference = 9127B7BCA23A4A369169AF0F /* BeepBeepLiveActivityWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -191,6 +320,12 @@
 						CreatedOnToolsVersion = 26.3;
 						TestTargetID = 5CC93AA12F6DE60E00DA3003;
 					};
+					7AD1A80D448C41E6AAF4B121 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					18C7F4B290304AA7893AB6D6 = {
+						CreatedOnToolsVersion = 26.3;
+					};
 				};
 			};
 			buildConfigurationList = 5CC93A9D2F6DE60E00DA3003 /* Build configuration list for PBXProject "Turbo" */;
@@ -208,6 +343,8 @@
 			projectRoot = "";
 			targets = (
 				5CC93AA12F6DE60E00DA3003 /* BeepBeep */,
+				7AD1A80D448C41E6AAF4B121 /* TalkRequestNotificationService */,
+				18C7F4B290304AA7893AB6D6 /* BeepBeepLiveActivityWidget */,
 				5CC93AAE2F6DE60F00DA3003 /* TurboTests */,
 				5CC93AB82F6DE60F00DA3003 /* TurboUITests */,
 			);
@@ -230,6 +367,20 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		5CC93AB72F6DE60F00DA3003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		06049F545FC94CD8B1504F58 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2B0A01F5F055413C96CA34A0 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -260,6 +411,21 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		433E36A515D146A88ACBB050 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4CFEFFF8A1554D25B896433F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A59D16E78629434BA1C16216 /* BeepBeepLiveActivityAttributes.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -272,6 +438,16 @@
 			isa = PBXTargetDependency;
 			target = 5CC93AA12F6DE60E00DA3003 /* BeepBeep */;
 			targetProxy = 5CC93ABA2F6DE60F00DA3003 /* PBXContainerItemProxy */;
+		};
+		BBAD28B5E97E43768728C373 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7AD1A80D448C41E6AAF4B121 /* TalkRequestNotificationService */;
+			targetProxy = FE9352B84AEB415D9D085735 /* PBXContainerItemProxy */;
+		};
+		AA82C5D6106F4091929C9466 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 18C7F4B290304AA7893AB6D6 /* BeepBeepLiveActivityWidget */;
+			targetProxy = 4272F4310FCD4614985AAF11 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -557,6 +733,114 @@
 			};
 			name = Release;
 		};
+		66C4A0F9403842DAB2A523E6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7MQU7TLQQ2;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TalkRequestNotificationService/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.rounded.Turbo.TalkRequestNotificationService;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		1F5DB96DA3FC47A6A7D52721 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7MQU7TLQQ2;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TalkRequestNotificationService/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.rounded.Turbo.TalkRequestNotificationService;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		025A4BC43DBF439F9ACEF2C4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7MQU7TLQQ2;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BeepBeepLiveActivityWidget/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.rounded.Turbo.BeepBeepLiveActivityWidget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		64FD76DC148640D4A7B40283 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7MQU7TLQQ2;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BeepBeepLiveActivityWidget/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.rounded.Turbo.BeepBeepLiveActivityWidget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -592,6 +876,24 @@
 			buildConfigurations = (
 				5CC93ACA2F6DE60F00DA3003 /* Debug */,
 				5CC93ACB2F6DE60F00DA3003 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		097632111F5B4E7499366CA4 /* Build configuration list for PBXNativeTarget "TalkRequestNotificationService" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				66C4A0F9403842DAB2A523E6 /* Debug */,
+				1F5DB96DA3FC47A6A7D52721 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		042DB42ACD0542F6BB0F1F31 /* Build configuration list for PBXNativeTarget "BeepBeepLiveActivityWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				025A4BC43DBF439F9ACEF2C4 /* Debug */,
+				64FD76DC148640D4A7B40283 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

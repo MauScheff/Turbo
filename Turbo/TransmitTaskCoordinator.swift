@@ -196,12 +196,31 @@ final class TransmitTaskRuntimeState {
 final class TransmitTaskCoordinator {
     private(set) var state = TransmitTaskSessionState()
     var effectHandler: (@MainActor (TransmitTaskEffect) -> Void)?
+    var transitionReporter: (@MainActor (ReducerTransitionReport) -> Void)?
 
     func send(_ event: TransmitTaskEvent) {
+        let previousState = state
         let transition = TransmitTaskReducer.reduce(state: state, event: event)
         state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
         for effect in transition.effects {
             effectHandler?(effect)
         }
+    }
+
+    private func reportTransition(
+        previousState: TransmitTaskSessionState,
+        event: TransmitTaskEvent,
+        transition: TransmitTaskTransition
+    ) {
+        transitionReporter?(
+            ReducerTransitionReport.make(
+                reducerName: "transmit-task",
+                event: event,
+                previousState: previousState,
+                nextState: transition.state,
+                effects: transition.effects
+            )
+        )
     }
 }

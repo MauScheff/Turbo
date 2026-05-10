@@ -119,6 +119,7 @@ enum TransportFaultHTTPRoute: String, CaseIterable {
     case outgoingInvites = "outgoing-invites"
     case channelState = "channel-state"
     case channelReadiness = "channel-readiness"
+    case renewTransmit = "renew-transmit"
 }
 
 struct TransportFaultSignalDeliveryPlan: Equatable {
@@ -1132,7 +1133,7 @@ final class MediaRuntimeState {
     }
 }
 
-enum MediaTransportPathState: String, Equatable {
+enum MediaTransportPathState: String, Codable, Equatable {
     case relay
     case promoting
     case direct

@@ -151,7 +151,7 @@ Represent these repo areas and label what each one is for:
     - `run_simulator_scenarios.py`
     - `merged_diagnostics.py`
     - `route_probe.py`
-    - `prod_probe.py`
+    - `postdeploy_check.py`
     - `send_ptt_apns.py`
     - `ptt_apns_worker.py`
     - `ptt_apns_bridge.py`
@@ -748,7 +748,7 @@ Artifacts and tools:
 - `just simulator-scenario-merge`
 - `just simulator-scenario-merge-strict`
 - `just route-probe`
-- `just prod-probe`
+- `just postdeploy-check`
 
 Important scenarios to name inside the image:
 - `request_accept_ready.json`
@@ -802,7 +802,7 @@ Show the important commands as arrows or operational labels:
 - `just serve-local`
 - `just deploy`
 - `just route-probe`
-- `just prod-probe`
+- `just postdeploy-check`
 - `just simulator-scenario`
 - `just simulator-scenario-local`
 - `just simulator-scenario-merge`

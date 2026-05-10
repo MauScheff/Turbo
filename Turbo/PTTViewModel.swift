@@ -142,6 +142,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     let transmitCoordinator = TransmitCoordinator()
     let transmitTaskCoordinator = TransmitTaskCoordinator()
     let selectedPeerCoordinator = SelectedPeerCoordinator()
+    let liveConversationActivityController = LiveConversationActivityController()
     let selfCheckCoordinator = DevSelfCheckCoordinator()
     let pttSystemPolicyCoordinator = PTTSystemPolicyCoordinator()
     var backendRuntime = BackendRuntimeState()
@@ -272,6 +273,17 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         diagnostics.onHighSignalEvent = { [weak self] event in
             self?.handleHighSignalDiagnosticsEvent(event)
         }
+        let recordReducerTransition: @MainActor (ReducerTransitionReport) -> Void = { [weak self] report in
+            self?.diagnostics.recordReducerTransition(report)
+        }
+        selectedPeerCoordinator.transitionReporter = recordReducerTransition
+        backendSyncCoordinator.transitionReporter = recordReducerTransition
+        controlPlaneCoordinator.transitionReporter = recordReducerTransition
+        receiveExecutionCoordinator.transitionReporter = recordReducerTransition
+        backendCommandCoordinator.transitionReporter = recordReducerTransition
+        pttCoordinator.transitionReporter = recordReducerTransition
+        transmitCoordinator.transitionReporter = recordReducerTransition
+        transmitTaskCoordinator.transitionReporter = recordReducerTransition
         selectedPeerCoordinator.effectHandler = { [weak self] effect in
             await self?.runSelectedPeerEffect(effect)
         }
@@ -423,7 +435,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         )
         for contactID in readinessContactIDs {
             Task {
-                await syncLocalReceiverAudioReadinessSignal(for: contactID, reason: "ptt-sync")
+                await syncLocalReceiverAudioReadinessSignal(for: contactID, reason: .pttSync)
             }
         }
     }
@@ -1050,6 +1062,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             backendSelfJoined: selectedChannelProjection.map { $0.membership.hasLocalMembership },
             backendPeerJoined: selectedChannelProjection.map { $0.membership.hasPeerMembership },
             backendPeerDeviceConnected: selectedChannelProjection.map { $0.membership.peerDeviceConnected },
+            backendActiveTransmitterUserId: selectedChannelProjection?.activeTransmitterUserId,
+            backendActiveTransmitId: selectedChannelProjection?.activeTransmitId,
+            backendActiveTransmitExpiresAt: selectedChannelProjection?.activeTransmitExpiresAt,
+            backendServerTimestamp: selectedChannelProjection?.serverTimestamp,
             remoteAudioReadiness: selectedChannelProjection.map { String(describing: $0.remoteAudioReadiness) },
             remoteWakeCapability: selectedChannelProjection.map { String(describing: $0.remoteWakeCapability) },
             remoteWakeCapabilityKind: selectedChannelProjection.map {
@@ -1071,6 +1087,65 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             incomingWakeBufferedChunkCount: selectedContact.map {
                 pttWakeRuntime.bufferedAudioChunkCount(for: $0.id)
             }
+        )
+    }
+
+    func localSessionDiagnosticsProjection(
+        selectedSession: SelectedSessionDiagnosticsSummary
+    ) -> LocalSessionDiagnosticsProjection {
+        let selectedContactID = selectedContactId
+        let selectedRemoteReceiveActivity = selectedContactID.flatMap {
+            receiveExecutionCoordinator.state.remoteActivityByContactID[$0]
+        }
+        let selectedReceiverAudioReadiness = selectedContactID.flatMap {
+            controlPlaneCoordinator.state.receiverAudioReadinessStates[$0]
+        }
+        let transmitSnapshot = transmitDomainSnapshot
+        let systemState = pttCoordinator.state
+
+        return LocalSessionDiagnosticsProjection(
+            selectedContactID: selectedContactID?.uuidString,
+            selectedHandle: selectedSession.selectedHandle,
+            selectedPeerPhase: selectedSession.selectedPhase,
+            selectedPeerPhaseDetail: selectedSession.selectedPhaseDetail,
+            selectedPeerRelationship: selectedSession.relationship,
+            selectedPeerCanTransmit: selectedSession.canTransmitNow,
+            isJoined: isJoined,
+            isTransmitting: isTransmitting,
+            activeChannelID: activeChannelId?.uuidString,
+            systemSession: selectedSession.systemSession,
+            systemActiveContactID: systemState.activeContactID?.uuidString,
+            systemChannelUUID: systemState.systemChannelUUID?.uuidString,
+            mediaState: selectedSession.mediaState,
+            transmitPhase: String(describing: transmitSnapshot.phase),
+            transmitActiveContactID: transmitSnapshot.activeContactID?.uuidString,
+            transmitPressActive: transmitSnapshot.isPressActive,
+            transmitExplicitStopRequested: transmitSnapshot.explicitStopRequested,
+            transmitSystemTransmitting: transmitSnapshot.isSystemTransmitting,
+            incomingWakeActivationState: selectedSession.incomingWakeActivationState,
+            incomingWakeBufferedChunkCount: selectedSession.incomingWakeBufferedChunkCount,
+            remoteReceiveActive: selectedRemoteReceiveActivity?.isPeerTransmitting == true,
+            remoteReceiveActivityState: selectedRemoteReceiveActivity.map { String(describing: $0) },
+            receiverAudioReadinessState: selectedReceiverAudioReadiness.map { String(describing: $0) },
+            pendingAction: selectedSession.pendingAction,
+            reconciliationAction: selectedSession.reconciliationAction,
+            hadConnectedSessionContinuity: selectedSession.hadConnectedSessionContinuity,
+            controlPlaneReconnectGraceActive: selectedContactID.map {
+                shouldUseLiveCallControlPlaneReconnectGrace(for: $0)
+            } ?? false,
+            backendSignalingJoinRecoveryActive: backendRuntime.signalingJoinRecoveryTask != nil,
+            backendChannelStatus: selectedSession.backendChannelStatus,
+            backendReadiness: selectedSession.backendReadiness,
+            backendSelfJoined: selectedSession.backendSelfJoined,
+            backendPeerJoined: selectedSession.backendPeerJoined,
+            backendPeerDeviceConnected: selectedSession.backendPeerDeviceConnected,
+            backendActiveTransmitterUserId: selectedSession.backendActiveTransmitterUserId,
+            backendActiveTransmitId: selectedSession.backendActiveTransmitId,
+            backendActiveTransmitExpiresAt: selectedSession.backendActiveTransmitExpiresAt,
+            backendServerTimestamp: selectedSession.backendServerTimestamp,
+            backendCanTransmit: selectedSession.backendCanTransmit,
+            remoteAudioReadiness: selectedSession.remoteAudioReadiness,
+            remoteWakeCapabilityKind: selectedSession.remoteWakeCapabilityKind
         )
     }
 
@@ -1110,8 +1185,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     var stateMachineProjection: StateMachineProjection {
-        StateMachineProjection(
-            selectedSession: selectedSessionDiagnosticsSummary,
+        let selectedSession = selectedSessionDiagnosticsSummary
+        return StateMachineProjection(
+            selectedSession: selectedSession,
+            localSession: localSessionDiagnosticsProjection(selectedSession: selectedSession),
             contacts: contactDiagnosticsSummaries,
             isWebSocketConnected: backendRuntime.isWebSocketConnected,
             statusMessage: statusMessage,
@@ -1174,6 +1251,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "backendSelfJoined": selectedSession.backendSelfJoined.map(String.init(describing:)) ?? "none",
             "backendPeerJoined": selectedSession.backendPeerJoined.map(String.init(describing:)) ?? "none",
             "backendPeerDeviceConnected": selectedSession.backendPeerDeviceConnected.map(String.init(describing:)) ?? "none",
+            "backendActiveTransmitterUserId": selectedSession.backendActiveTransmitterUserId ?? "none",
+            "backendActiveTransmitId": selectedSession.backendActiveTransmitId ?? "none",
+            "backendActiveTransmitExpiresAt": selectedSession.backendActiveTransmitExpiresAt ?? "none",
+            "backendServerTimestamp": selectedSession.backendServerTimestamp ?? "none",
             "remoteAudioReadiness": selectedSession.remoteAudioReadiness ?? "unknown",
             "remoteWakeCapability": selectedSession.remoteWakeCapability ?? "unavailable",
             "remoteWakeCapabilityKind": selectedSession.remoteWakeCapabilityKind ?? "unavailable",
@@ -1243,11 +1324,65 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     var diagnosticsTranscript: String {
-        diagnostics.exportText(snapshot: diagnosticsSnapshot)
+        diagnosticsTranscriptText()
+    }
+
+    func diagnosticsEnvelope(
+        appVersion: String,
+        scenarioName: String? = nil,
+        scenarioRunID: String? = nil
+    ) -> DiagnosticsEnvelope {
+        DiagnosticsEnvelope(
+            schemaVersion: 1,
+            appVersion: appVersion,
+            deviceId: backendServices?.deviceID ?? backendConfig?.deviceID ?? "unconfigured",
+            handle: currentDevUserHandle,
+            scenarioName: scenarioName,
+            scenarioRunId: scenarioRunID,
+            timestamp: .now,
+            projection: stateMachineProjection,
+            directQuic: selectedDirectQuicDiagnosticsSummary,
+            invariantViolations: diagnostics.invariantViolations,
+            stateCaptures: diagnostics.stateCaptures,
+            reducerTransitionReports: diagnostics.reducerTransitionReports
+        )
+    }
+
+    func diagnosticsStructuredEnvelopeJSON(
+        appVersion: String,
+        scenarioName: String? = nil,
+        scenarioRunID: String? = nil
+    ) throws -> String {
+        try Self.structuredDiagnosticsEnvelopeJSON(
+            diagnosticsEnvelope(
+                appVersion: appVersion,
+                scenarioName: scenarioName,
+                scenarioRunID: scenarioRunID
+            )
+        )
+    }
+
+    static func structuredDiagnosticsEnvelopeJSON(_ envelope: DiagnosticsEnvelope) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(envelope)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    func diagnosticsTranscriptText(structuredEnvelopeJSON: String? = nil) -> String {
+        diagnostics.exportText(
+            snapshot: diagnosticsSnapshot,
+            structuredEnvelopeJSON: structuredEnvelopeJSON
+        )
     }
 
     func captureDiagnosticsState(_ reason: String) {
-        diagnostics.captureState(reason: reason, fields: diagnosticsStateFields)
+        diagnostics.captureState(
+            reason: reason,
+            fields: diagnosticsStateFields,
+            localSessionProjection: stateMachineProjection.localSession
+        )
         publishDiagnosticsStateTelemetry(reason: reason)
         scheduleAutomaticDiagnosticsPublish(trigger: reason)
     }
@@ -1512,7 +1647,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         applyPreferredAudioOutputRouteIfPossible()
         Task { @MainActor [weak self] in
             await self?.mediaServices.session()?.audioRouteDidChange()
-            await self?.syncActiveCallTelemetryIfNeeded(reason: "audio-route-change")
+            await self?.syncActiveCallTelemetryIfNeeded(reason: .audioRouteChange)
         }
         diagnostics.record(
             .media,

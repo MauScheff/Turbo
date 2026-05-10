@@ -877,7 +877,23 @@ extension PTTViewModel {
                 )
             )
         }
+        reconcileLiveConversationActivity()
         captureDiagnosticsState("selected-status-refresh")
+    }
+
+    func reconcileLiveConversationActivity() {
+        guard let contact = selectedContact else {
+            liveConversationActivityController.endActiveActivity()
+            return
+        }
+
+        let selectedState = selectedPeerCoordinator.state.selectedPeerState
+        let projection = LiveConversationActivityProjection(
+            contact: contact,
+            selectedPeerState: selectedState,
+            localDisplayName: currentProfileName
+        )
+        liveConversationActivityController.reconcile(projection)
     }
 
     func reconcileSelectedConnectionAttemptTimeout() {

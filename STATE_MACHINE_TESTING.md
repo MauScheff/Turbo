@@ -127,6 +127,27 @@ The dedicated reference is
 It covers generator shape, local commands, artifact layout, replay, shrinking,
 oracles, and promotion from fuzz failure to checked-in regression.
 
+## TLA+ formal modeling
+
+Turbo also has a TLA+ lane for protocol-level invariant discovery before a bug
+has a concrete implementation repro. Use it when the question is about
+distributed interleavings, stale projections, dropped/duplicated/reordered
+signals, reconnects, lease expiry, wake targeting, or ownership of shared truth.
+
+The dedicated reference is
+[`TLA_PLUS.md`](/Users/mau/Development/Turbo/TLA_PLUS.md). The current model is
+under [`specs/tla/`](/Users/mau/Development/Turbo/specs/tla). A TLC
+counterexample should be classified as valid, invalid, or underspecified;
+invalid states should become named invariants, lower-level Swift/Unison
+regressions, and deterministic simulator scenarios or fuzz oracles where
+appropriate.
+
+Run `just protocol-model-checks` for the executable harness. It validates the
+TLA+ config, runs TLC against the bounded communication model, then runs the
+Swift property tests that prove the corresponding implementation-side pure
+rules. `reliability-gate-regressions` runs the static model validation so broken
+spec/config wiring is caught even on machines without TLC installed.
+
 ### Fuzz Failure To Regression
 
 When fuzzing finds a failure:
@@ -144,6 +165,63 @@ When fuzzing finds a failure:
 9. Add a lower-level Swift or Unison property regression for the pure rule that
    should prevent the scenario from failing again.
 
+### Production Failure To Replay
+
+When a field or physical-device failure has merged diagnostics JSON:
+
+1. Convert it with
+   `just production-replay /path/to/merged-diagnostics.json /tmp/turbo-production-replay`.
+2. Read `production-replay.json` for the redacted source timeline, invariant
+   IDs, inferred actions, and suggested final expectations.
+3. Run `/tmp/turbo-production-replay/reproduce.sh`.
+4. Treat `scenario-draft.json` as best-effort until strict merged diagnostics
+   reproduces the same invariant.
+5. Minimize noisy or nonessential steps before promoting the replay into
+   `scenarios/`.
+
+### Production Report To Regression
+
+The intended production loop is:
+
+1. The human describes the observed failure in product terms.
+2. The agent collects or asks for the relevant shake-to-report handles/device
+   identities, then runs merged diagnostics.
+3. The agent classifies ownership of the broken fact:
+   - backend/shared truth
+   - client projection or reducer state
+   - Apple/PTT/audio adapter boundary
+   - ambiguous in-flight state that needs a stronger invariant
+4. The agent turns the failure into the narrowest permanent proof:
+   - reducer/property test for a pure app rule
+   - simulator scenario for a distributed app/backend journey
+   - Unison/backend test or route probe fixture for backend-owned truth
+   - TLA+ update when the bug is about interleavings, ordering, or protocol
+     semantics
+   - physical-device checklist only for the Apple or hardware boundary
+5. The agent fixes the owning subsystem, then runs the narrow proof and the
+   appropriate reliability gate.
+6. Before or after release, the agent runs `just postdeploy-check` or
+   `just deploy-verified` so the live hosted surface has a fresh SLO artifact.
+
+This is how a production observation becomes part of Turbo's semantics. The
+goal is not to preserve every tap literally; it is to encode the invariant that
+was violated so the same class of bug fails automatically next time.
+
+### Synthetic Conversation Probes
+
+Use `just synthetic-conversation-probe` for route-level confidence before or
+between app scenario runs. It executes the semantic route probe with synthetic
+caller/callee identities, checks that the two-device conversation loop still
+covers websocket registration, receiver readiness, begin transmit, push target
+selection, and end transmit, and writes iteration artifacts that can be attached
+to a reliability report.
+
+Use `just slo-dashboard <synthetic-conversation-probe.json>` after synthetic
+probes when you need the same evidence expressed as product SLOs. The dashboard
+keeps the route-level checks visible, but the pass/fail surface is phrased as
+conversation success, full-probe latency, critical transition latency, and
+optionally invariant health from merged diagnostics.
+
 ## What You Can Tell The Agent
 
 In simple terms: yes, this machinery is intended to let an agent take a report from physical-device testing and turn it into a deterministic multi-device + backend regression.
@@ -156,6 +234,25 @@ The useful bug report shape is:
 - what order things happened in
 - what should have happened
 - what actually happened
+
+A good instruction to give the agent is:
+
+> I reproduced a production/device issue. The handles were `@a` and `@b`.
+> I used shake-to-report on both devices. Please run reliability intake,
+> classify the owner, convert this into an invariant or regression where
+> possible, fix it, and prove the fix.
+
+The default intake command is:
+
+```bash
+just reliability-intake-shake @a <incidentId> @b
+```
+
+If there is no shake incident, use:
+
+```bash
+just reliability-intake @a @b
+```
 
 Example:
 

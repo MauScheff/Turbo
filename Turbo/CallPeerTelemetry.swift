@@ -100,12 +100,12 @@ struct CallPeerTelemetry: Codable, Equatable {
 
 struct ReceiverAudioReadinessSignalPayload: Codable, Equatable {
     let version: Int
-    let reason: String
+    let reason: ReceiverAudioReadinessReason
     let telemetry: CallPeerTelemetry?
 
     init(
         version: Int = 1,
-        reason: String,
+        reason: ReceiverAudioReadinessReason,
         telemetry: CallPeerTelemetry?
     ) {
         self.version = version
@@ -116,7 +116,10 @@ struct ReceiverAudioReadinessSignalPayload: Codable, Equatable {
     static func decode(from payload: String) -> ReceiverAudioReadinessSignalPayload {
         guard let data = payload.data(using: .utf8),
               let decoded = try? JSONDecoder().decode(ReceiverAudioReadinessSignalPayload.self, from: data) else {
-            return ReceiverAudioReadinessSignalPayload(reason: payload, telemetry: nil)
+            return ReceiverAudioReadinessSignalPayload(
+                reason: ReceiverAudioReadinessReason(wireValue: payload),
+                telemetry: nil
+            )
         }
         return decoded
     }
@@ -124,7 +127,7 @@ struct ReceiverAudioReadinessSignalPayload: Codable, Equatable {
     func wirePayload() -> String {
         guard let data = try? JSONEncoder().encode(self),
               let encoded = String(data: data, encoding: .utf8) else {
-            return reason
+            return reason.wireValue
         }
         return encoded
     }

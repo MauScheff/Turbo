@@ -30,11 +30,18 @@ deploy-force:
   just bump-deploy-stamp
   just deploy
 
-prod-probe:
-  .venv/bin/python scripts/prod_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
+postdeploy-check base="https://beepbeep.to" caller="@quinn" callee="@sasha" iterations="1" output_dir="/tmp/turbo-postdeploy-check" insecure="--insecure":
+  python3 scripts/postdeploy_check.py \
+    --base-url "{{base}}" \
+    --caller "{{caller}}" \
+    --callee "{{callee}}" \
+    --iterations "{{iterations}}" \
+    --output-dir "{{output_dir}}" \
+    {{insecure}}
 
-smoke-probe:
-  .venv/bin/python scripts/smoke_beepbeep.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
+deploy-verified base="https://beepbeep.to" caller="@quinn" callee="@sasha" iterations="1" output_dir="/tmp/turbo-postdeploy-check" insecure="--insecure":
+  just deploy
+  just postdeploy-check "{{base}}" "{{caller}}" "{{callee}}" "{{iterations}}" "{{output_dir}}" "{{insecure}}"
 
 route-probe:
   .venv/bin/python scripts/route_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
@@ -95,6 +102,22 @@ diagnostics-merge base="https://beepbeep.to" handles="" insecure="--insecure":
 
 diagnostics-merge-pair base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" insecure="--insecure":
   python3 scripts/merged_diagnostics.py --base-url "{{base}}" {{insecure}} "{{handle_a}}" "{{handle_b}}"
+
+reliability-intake handle_a handle_b="" base="https://beepbeep.to" surface="auto" incident_id="" insecure="--insecure":
+  python3 scripts/reliability_intake.py \
+    --base-url "{{base}}" \
+    --surface "{{surface}}" \
+    --incident-id "{{incident_id}}" \
+    {{insecure}} \
+    "{{handle_a}}" "{{handle_b}}"
+
+reliability-intake-shake handle incident_id peer="" base="https://beepbeep.to" surface="production" insecure="--insecure":
+  python3 scripts/reliability_intake.py \
+    --base-url "{{base}}" \
+    --surface "{{surface}}" \
+    --incident-id "{{incident_id}}" \
+    {{insecure}} \
+    "{{handle}}" "{{peer}}"
 
 ptt-push-target channel_id base="https://beepbeep.to" handle="@avery":
   curl --fail-with-body -sS \
@@ -232,11 +255,43 @@ simulator-fuzz-replay artifact_dir:
 simulator-fuzz-shrink artifact_dir:
   python3 scripts/run_simulator_fuzz.py shrink --artifact-dir "{{artifact_dir}}"
 
+production-replay diagnostics_json output_dir="/tmp/turbo-production-replay" name="":
+  python3 scripts/convert_production_replay.py \
+    --merged-diagnostics-json "{{diagnostics_json}}" \
+    --output-dir "{{output_dir}}" \
+    --name "{{name}}"
+
+synthetic-conversation-probe base="https://beepbeep.to" caller="@quinn" callee="@sasha" iterations="1" artifact_dir="/tmp/turbo-synthetic-conversation-probe" insecure="--insecure":
+  python3 scripts/synthetic_conversation_probe.py \
+    --base-url "{{base}}" \
+    --caller "{{caller}}" \
+    --callee "{{callee}}" \
+    --iterations "{{iterations}}" \
+    --artifact-dir "{{artifact_dir}}" \
+    {{insecure}}
+
+slo-dashboard synthetic_conversation output_dir="/tmp/turbo-slo-dashboard" name="turbo-slo-dashboard":
+  python3 scripts/slo_dashboard.py \
+    --synthetic-conversation "{{synthetic_conversation}}" \
+    --output-dir "{{output_dir}}" \
+    --name "{{name}}" \
+    --fail-on-breach
+
+protocol-model-checks tla_jar="/tmp/tla2tools.jar" output_dir="/tmp/turbo-protocol-model-checks":
+  python3 scripts/protocol_model_check.py \
+    --tla-jar "{{tla_jar}}" \
+    --output-dir "{{output_dir}}"
+
 swift-test-target name:
   python3 scripts/run_targeted_swift_tests.py --name "{{name}}"
 
 reliability-gate-regressions:
-  python3 -m py_compile scripts/run_simulator_scenarios.py scripts/run_targeted_swift_tests.py scripts/merged_diagnostics.py
+  python3 -m py_compile scripts/run_simulator_scenarios.py scripts/run_targeted_swift_tests.py scripts/merged_diagnostics.py scripts/reliability_intake.py scripts/check_invariant_registry.py scripts/convert_production_replay.py scripts/synthetic_conversation_probe.py scripts/slo_dashboard.py scripts/protocol_model_check.py scripts/postdeploy_check.py
+  python3 scripts/convert_production_replay.py --merged-diagnostics-json fixtures/production_replay/merged_diagnostics.json --output-dir /tmp/turbo-production-replay-smoke --name fixture_production_replay
+  python3 scripts/synthetic_conversation_probe.py --fixture-report fixtures/synthetic_conversation_probe/route_probe_success.json --artifact-dir /tmp/turbo-synthetic-conversation-probe-smoke --iterations 2 --label fixture-smoke
+  python3 scripts/slo_dashboard.py --synthetic-conversation /tmp/turbo-synthetic-conversation-probe-smoke/synthetic-conversation-probe.json --output-dir /tmp/turbo-slo-dashboard-smoke --name fixture-slo-dashboard --fail-on-breach
+  python3 scripts/protocol_model_check.py --skip-tlc --skip-swift-properties --output-dir /tmp/turbo-protocol-model-checks-static
+  python3 scripts/check_invariant_registry.py
   just swift-test-target signalingJoinDriftReassertsRequestedBackendChannelForActiveLocalSession
   just swift-test-target selectedPeerReducerConnectionTimeoutClearsRequesterAutoJoinIdleGap
   just swift-test-target selectedConnectionTimeoutDoesNotInterruptInFlightBackendConnect
@@ -244,7 +299,7 @@ reliability-gate-regressions:
 
 reliability-gate-smoke:
   just reliability-gate-regressions
-  just simulator-scenario "presence_online_projection,request_accept_ready_refresh_stability"
+  just simulator-scenario "presence_online_projection,request_accept_ready_refresh_stability,background_wake_refresh_stability"
   just simulator-scenario-merge-strict
 
 reliability-gate-full:
@@ -256,5 +311,3 @@ reliability-gate-local:
   just reliability-gate-regressions
   just simulator-scenario-suite-local
   just simulator-scenario-merge-local-strict
-
-backend-check: venv prod-probe

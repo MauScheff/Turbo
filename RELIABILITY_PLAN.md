@@ -88,7 +88,7 @@ The reliable system should have this flow:
 
 ### 1. Invariant Registry
 
-Create one checked-in invariant registry and make it the source of truth.
+- [x] Create one checked-in invariant registry and make it the source of truth.
 
 Candidate path:
 
@@ -108,7 +108,7 @@ Each entry should include:
 - `alertPolicy`
 - `status`: planned, active, deprecated
 
-Add a checker:
+- [x] Add a checker that:
 
 - scans Swift, Python, backend-facing artifacts, docs, and tests for invariant
   IDs
@@ -117,22 +117,22 @@ Add a checker:
 - fails when a registered active invariant has no regression or explicit
   exception
 
-Add the checker to:
+- [ ] Add the checker to:
 
-- `just reliability-gate-regressions`
-- CI when available
+- [x] `just reliability-gate-regressions`
+- [ ] CI when available
 
 Definition of done:
 
-- every existing invariant ID is registered
-- `INVARIANTS.md` points to the registry instead of manually duplicating the
+- [x] every existing invariant ID is registered
+- [x] `INVARIANTS.md` points to the registry instead of manually duplicating the
   active catalog
-- app-side diagnostics, merged diagnostics, and tests use IDs that pass the
+- [x] app-side diagnostics, merged diagnostics, and tests use IDs that pass the
   registry checker
 
 ### 2. Structured Diagnostics Spine
 
-Make typed diagnostics the canonical reporting surface.
+- [ ] Make typed diagnostics the canonical reporting surface.
 
 Current useful seed:
 
@@ -144,8 +144,8 @@ Current useful seed:
 
 Plan:
 
-1. Make the main projection types `Codable`.
-2. Add a versioned diagnostics envelope:
+- [x] Make the main projection types `Codable`.
+- [x] Add a versioned diagnostics envelope:
    - schema version
    - app version
    - device ID
@@ -155,21 +155,21 @@ Plan:
    - typed state-machine projection
    - explicit invariant violations
    - reducer transition trace when available
-3. Publish the structured envelope in scenario artifacts.
-4. Keep the text snapshot as a rendered view of the structured envelope.
-5. Update `scripts/merged_diagnostics.py` to prefer structured fields and fall
+- [x] Publish the structured envelope in scenario artifacts.
+- [ ] Keep the text snapshot as a rendered view of the structured envelope.
+- [x] Update `scripts/merged_diagnostics.py` to prefer structured fields and fall
    back to text only for older artifacts.
 
 Definition of done:
 
-- merged diagnostics does not need to parse current state from text snapshots
+- [x] merged diagnostics does not need to parse current state from text snapshots
   when a structured artifact is available
-- scenario artifacts include structured projection JSON
-- strict merged diagnostics can fail from structured invariant data
+- [x] scenario artifacts include structured projection JSON
+- [x] strict merged diagnostics can fail from structured invariant data
 
 ### 3. Scenario Invariant Assertions
 
-Make invariants first-class in the simulator scenario DSL.
+- [x] Make invariants first-class in the simulator scenario DSL.
 
 Add expectation fields such as:
 
@@ -189,14 +189,14 @@ Rules:
 
 Definition of done:
 
-- scenario failures can say which invariant was expected or unexpected
-- new distributed bug regressions require projection assertions plus invariant
+- [x] scenario failures can say which invariant was expected or unexpected
+- [ ] new distributed bug regressions require projection assertions plus invariant
   assertions
-- strict merged diagnostics and scenario assertions agree on invariant outcome
+- [x] strict merged diagnostics and scenario assertions agree on invariant outcome
 
 ### 4. ADT Hardening
 
-Replace remaining boolean and string seams with domain types.
+- [ ] Replace remaining boolean and string seams with domain types.
 
 High-priority targets:
 
@@ -217,15 +217,15 @@ High-priority targets:
 
 Definition of done:
 
-- impossible PTT session combinations are not representable in the core state
-- reason strings do not decide behavior inside reducers
-- recent stuck-transmit and unowned system-begin rules are encoded as typed
+- [x] impossible PTT session combinations are not representable in the core state
+- [x] reason strings do not decide behavior inside reducers
+- [x] recent stuck-transmit and unowned system-begin rules are encoded as typed
   transition rules, not only callback guards
-- tests cover the new illegal-state boundaries
+- [x] tests cover the new illegal-state boundaries
 
 ### 5. Unified Reducer Transition Reporting
 
-Every important coordinator should emit the same transition report shape.
+- [ ] Every important coordinator should emit the same transition report shape.
 
 Transition report fields:
 
@@ -252,114 +252,124 @@ Candidate reducers/coordinators:
 
 Definition of done:
 
-- a two-device failure can be read as a timeline of typed transitions, not a
+- [ ] a two-device failure can be read as a timeline of typed transitions, not a
   pile of unrelated logs
-- merged diagnostics can group events by session, contact, channel, attempt, and
+- [ ] merged diagnostics can group events by session, contact, channel, attempt, and
   scenario run
-- reducer tests can assert transition reports for critical invariants
+- [ ] reducer tests can assert transition reports for critical invariants
 
 ### 6. Backend Contract Parity
 
-Prove the app and backend agree on shared domain variants.
+- [ ] Prove the app and backend agree on shared domain variants.
 
 Plan:
 
-1. Keep Unison domain ADTs as the shared-truth model for backend-owned facts.
-2. Add a backend contract manifest or probe output describing emitted variant
+- [ ] Keep Unison domain ADTs as the shared-truth model for backend-owned facts.
+- [ ] Add a backend contract manifest or probe output describing emitted variant
    kinds and required fields.
-3. Add Swift tests that verify:
+- [ ] Add Swift tests that verify:
    - every backend variant decodes
    - required payload fields are enforced
    - unknown variants fail loudly or are handled by an intentional `unknown`
      compatibility path
-4. Add backend tests or probes that verify contract examples are produced from
+- [ ] Add backend tests or probes that verify contract examples are produced from
    real domain projections.
 
 Definition of done:
 
-- changing a backend variant requires updating the app contract test
-- changing a Swift decoder requires proving backend examples still decode
-- readiness, membership, request relationship, wake readiness, and audio
+- [ ] changing a backend variant requires updating the app contract test
+- [ ] changing a Swift decoder requires proving backend examples still decode
+- [ ] readiness, membership, request relationship, wake readiness, and audio
   readiness remain aligned across app and backend
 
 ### 7. Reliability Gates And Reporting
 
-Make gates explicit confidence levels.
+- [ ] Make gates explicit confidence levels.
 
 Recommended gate stack:
 
-- `reliability-gate-regressions`
+- [ ] `reliability-gate-regressions`
   - Python syntax checks
   - invariant registry check
   - focused Swift regressions
   - backend contract parity tests that do not require a running backend
-- `reliability-gate-smoke`
+- [ ] `reliability-gate-smoke`
   - regressions
   - hosted smoke scenarios
   - strict merged diagnostics
-- `reliability-gate-full`
+- [ ] `reliability-gate-full`
   - regressions
   - full hosted scenario catalog
   - strict merged diagnostics
-- `reliability-gate-local`
+- [ ] `reliability-gate-local`
   - regressions
   - full local websocket scenario catalog
   - strict local merged diagnostics
-- nightly or long-running local gate
+- [ ] nightly or long-running local gate
   - local scenario suite
   - simulator fuzz seeds
   - minimized failure replay
   - production diagnostic replay artifacts when available
+- [x] `postdeploy-check`
+  - hosted synthetic conversation canary
+  - SLO dashboard
+  - timestamped artifacts for agent inspection
+- [x] `deploy-verified`
+  - raw backend deploy
+  - postdeploy hosted canary and SLO proof
 
 Definition of done:
 
-- each gate has a clear purpose and failure interpretation
-- focused development can run the narrowest useful gate
-- long-running gates produce artifacts that can be replayed locally
+- [ ] each gate has a clear purpose and failure interpretation
+- [ ] focused development can run the narrowest useful gate
+- [ ] long-running gates produce artifacts that can be replayed locally
+- [x] the normal production release path has one command that deploys and then
+  verifies the live surface
+- [x] the raw deploy primitive remains available for deliberate low-level use
 
 ### 8. Self-Healing Integration
 
-Connect invariants to bounded repair actions only when safe.
+- [ ] Connect invariants to bounded repair actions only when safe.
 
 For each recoverable invariant:
 
-1. classify ownership:
+- [ ] classify ownership:
    - backend stale
    - app stale
    - Apple-held session stale
    - ambiguous in-flight state
-2. define one idempotent repair action
-3. add suppression rules for valid in-flight states
-4. emit repair diagnostics:
+- [ ] define one idempotent repair action
+- [ ] add suppression rules for valid in-flight states
+- [ ] emit repair diagnostics:
    - repair requested
    - repair executed
    - repair suppressed
    - repair failed
    - repair converged
-5. prove both:
+- [ ] prove both:
    - the invalid state repairs
    - nearby valid in-flight states are not repaired incorrectly
 
 Definition of done:
 
-- repair policies are listed in the invariant registry
-- repair actions are observable in merged diagnostics
-- every active repair has regression coverage
+- [ ] repair policies are listed in the invariant registry
+- [ ] repair actions are observable in merged diagnostics
+- [ ] every active repair has regression coverage
 
 ### 9. Production Replay And SLOs
 
-Turn production evidence into local proof artifacts.
+- [ ] Turn production evidence into local proof artifacts.
 
 Plan:
 
-- add per-session correlation IDs across app, backend, push, and media
-- store enough structured diagnostics to reconstruct a session timeline
-- add scripts that convert production traces into:
+- [ ] add per-session correlation IDs across app, backend, push, and media
+- [ ] store enough structured diagnostics to reconstruct a session timeline
+- [ ] add scripts that convert production traces into:
   - scenario JSON when possible
   - reducer replay fixtures
   - route probe fixtures
   - invariant report fixtures
-- define product-facing SLOs:
+- [ ] define product-facing SLOs:
   - request-to-ready success rate
   - time to ready
   - first transmit success
@@ -370,9 +380,55 @@ Plan:
 
 Definition of done:
 
-- a production failure can become a checked-in replay artifact
-- dashboards report product reliability, not only route-level uptime
-- recurring production invariant IDs have owners and regressions
+- [ ] a production failure can become a checked-in replay artifact
+- [x] dashboards report product reliability, not only route-level uptime
+- [ ] recurring production invariant IDs have owners and regressions
+
+### 10. Workflow Simplification
+
+- [ ] Keep one primary path for each reliability job and demote overlapping
+  tools to diagnostic-only or retirement-candidate status.
+
+Primary paths:
+
+- [x] `just deploy-verified` for normal production releases.
+- [x] `just postdeploy-check` for live hosted canary/SLO verification after an
+  existing deploy.
+- [x] `just diagnostics-merge-pair` or `scripts/merged_diagnostics.py --json`
+  for physical-device/shake-to-report intake.
+- [x] `just production-replay` when merged diagnostics JSON should become a
+  scenario draft or replay artifact.
+- [x] `just reliability-gate-regressions` for focused local confidence.
+- [x] `just protocol-model-checks` for protocol/interleaving changes.
+
+Diagnostic or building-block tools:
+
+- [x] `just synthetic-conversation-probe` and `just slo-dashboard`, now wrapped
+  by `postdeploy-check` for the common path.
+- [x] `just route-probe` and `just route-probe-local`, retained as route-contract
+  diagnostics and as the underlying synthetic canary engine.
+- [x] `just backend-stability-probe`, retained for hosted route availability
+  evidence and Unison Cloud escalation.
+
+Removed overlapping probes:
+
+- [x] old direct production probe recipe
+- [x] old hosted smoke probe recipe
+
+Retirement candidates:
+
+- [ ] legacy APNs bridge helpers once the deployed wake path and diagnostics
+  surface fully replace them
+
+Definition of done:
+
+- [x] tooling docs say which commands are primary, diagnostic-only, and
+  retirement candidates
+- [x] removed hosted-probe commands have no remaining primary docs pointing users
+  at them
+- [ ] remaining retirement candidates have no primary docs pointing users at
+  them
+- [x] older overlapping hosted probes are removed
 
 ## Recommended Execution Order
 
@@ -382,12 +438,12 @@ Goal: make reliability work measurable and non-duplicative.
 
 Do first:
 
-1. Create the invariant registry.
-2. Add the invariant registry checker.
-3. Add the checker to `reliability-gate-regressions`.
-4. Make diagnostics projection types `Codable`.
-5. Publish structured scenario diagnostics artifacts.
-6. Teach merged diagnostics to prefer structured artifacts.
+- [x] Create the invariant registry.
+- [x] Add the invariant registry checker.
+- [x] Add the checker to `reliability-gate-regressions`.
+- [x] Make diagnostics projection types `Codable`.
+- [x] Publish structured scenario diagnostics artifacts.
+- [x] Teach merged diagnostics to prefer structured artifacts.
 
 Why first:
 
@@ -401,12 +457,12 @@ Goal: make the simulator proof loop assert the same rules diagnostics reports.
 
 Do next:
 
-1. Add invariant assertions to scenario expectations.
-2. Update existing ready/request/reconnect scenarios to assert no unexpected
+- [x] Add invariant assertions to scenario expectations.
+- [x] Update existing ready/request/reconnect scenarios to assert no unexpected
    invariant violations.
-3. Add focused scenarios for recent PTT foreground/background regressions where
+- [x] Add focused scenarios for recent PTT foreground/background regressions where
    simulator can model the control-plane part.
-4. Make reliability gates run registry and scenario invariant checks.
+- [x] Make reliability gates run registry and scenario invariant checks.
 
 ### Phase 3: ADT Hardening
 
@@ -414,12 +470,12 @@ Goal: reduce the number of invalid states that can be represented.
 
 Do next:
 
-1. Refactor `PTTSessionState` into a stronger ADT.
-2. Replace receiver audio readiness reason strings with an ADT.
-3. Add a transmit ownership/origin ADT.
-4. Move callback-only stuck-transmit protections into transition-level rules
+- [x] Refactor `PTTSessionState` into a stronger ADT.
+- [x] Replace receiver audio readiness reason strings with an ADT.
+- [x] Add a transmit ownership/origin ADT.
+- [x] Move callback-only stuck-transmit protections into transition-level rules
    where possible.
-5. Add reducer tests and invariant tests for each refactor.
+- [x] Add reducer tests and invariant tests for each refactor.
 
 ### Phase 4: Cross-Coordinator Cohesion
 
@@ -428,11 +484,11 @@ one explainable system.
 
 Do next:
 
-1. Add unified transition reports to reducers.
-2. Add a composed local session projection that derives cross-coordinator
+- [x] Add unified transition reports to reducers.
+- [x] Add a composed local session projection that derives cross-coordinator
    invariants.
-3. Move cross-field checks out of text parsing and into typed projection checks.
-4. Add merged diagnostics grouping by scenario run, session, channel, contact,
+- [x] Move cross-field checks out of text parsing and into typed projection checks.
+- [x] Add merged diagnostics grouping by scenario run, session, channel, contact,
    and attempt.
 
 ### Phase 5: Backend Contract And Repair
@@ -441,10 +497,10 @@ Goal: make app/backend agreement and recoverability explicit.
 
 Do next:
 
-1. Add backend contract parity tests or manifest generation.
-2. Move backend-owned invariant detection into backend seams where missing.
-3. Connect recoverable invariants to self-healing repair policies.
-4. Prove repairs with reducer tests, scenarios, and merged diagnostics.
+- [x] Add backend contract parity tests or manifest generation.
+- [x] Move backend-owned invariant detection into backend seams where missing.
+- [x] Connect recoverable invariants to self-healing repair policies.
+- [x] Prove repairs with reducer tests, scenarios, and merged diagnostics.
 
 ### Phase 6: Production Replay And Formal Confidence
 
@@ -452,25 +508,25 @@ Goal: catch reliability problems before users do and replay those that escape.
 
 Do later:
 
-1. Add production replay conversion.
-2. Add synthetic two-device conversation probes.
-3. Add SLO dashboards.
-4. Add property or model-checking harnesses for the core session protocol.
+- [x] Add production replay conversion.
+- [x] Add synthetic two-device conversation probes.
+- [x] Add SLO dashboards.
+- [x] Add property or model-checking harnesses for the core session protocol.
 
 ## Near-Term Backlog
 
 These are the concrete first tickets that should come out of this plan:
 
-1. Add `invariants/registry.json` with all currently known invariant IDs.
-2. Add `scripts/check_invariant_registry.py`.
-3. Wire registry checking into `just reliability-gate-regressions`.
-4. Make `StateMachineProjection` and nested diagnostics summaries `Codable`.
-5. Add structured projection JSON to simulator diagnostics artifacts.
-6. Update merged diagnostics to read structured artifacts first.
-7. Add `noInvariantViolations` to the simulator scenario DSL.
-8. Refactor `ReceiverAudioReadinessIntent.reason` into an ADT.
-9. Refactor `PTTSessionState` into a session ADT.
-10. Add transmit ownership/origin modeling for system begin callbacks.
+- [x] Add `invariants/registry.json` with all currently known invariant IDs.
+- [x] Add `scripts/check_invariant_registry.py`.
+- [x] Wire registry checking into `just reliability-gate-regressions`.
+- [x] Make `StateMachineProjection` and nested diagnostics summaries `Codable`.
+- [x] Add structured projection JSON to simulator diagnostics artifacts.
+- [x] Update merged diagnostics to read structured artifacts first.
+- [x] Add `noInvariantViolations` to the simulator scenario DSL.
+- [x] Refactor `ReceiverAudioReadinessIntent.reason` into an ADT.
+- [x] Refactor `PTTSessionState` into a session ADT.
+- [x] Add transmit ownership/origin modeling for system begin callbacks.
 
 ## Definition Of Reliable By Design
 

@@ -441,7 +441,7 @@ extension PTTViewModel {
         await prewarmLocalMediaIfNeeded(for: contactID, applicationState: .active)
         await syncLocalReceiverAudioReadinessSignal(
             for: contactID,
-            reason: "incoming-push-foreground"
+            reason: .incomingPushForeground
         )
     }
 
@@ -632,6 +632,11 @@ extension PTTViewModel {
     }
 
     func handleDidLeaveChannel(_ channelUUID: UUID, reason: String) {
+        handleDidLeaveChannel(channelUUID, reason: PTTSystemLeaveReason(rawDescription: reason))
+    }
+
+    func handleDidLeaveChannel(_ channelUUID: UUID, reason: PTTSystemLeaveReason) {
+        let reasonDescription = reason.description
         let contactID = contactId(for: channelUUID)
         let localOnlySuppression = consumeLocalOnlySystemLeave(
             channelUUID: channelUUID,
@@ -645,7 +650,7 @@ extension PTTViewModel {
                     "channelUUID": channelUUID.uuidString,
                     "contactID": localOnlySuppression.contactID.uuidString,
                     "reason": localOnlySuppression.reason,
-                    "leaveReason": reason,
+                    "leaveReason": reasonDescription,
                 ]
             )
         }
@@ -654,7 +659,7 @@ extension PTTViewModel {
             ? sessionCoordinator.autoRejoinContactID(afterLeaving: contactID)
             : nil
         let applicationState = currentApplicationState()
-        let systemLeaveWasUserInitiated = isUserInitiatedPTTLeaveReason(reason)
+        let systemLeaveWasUserInitiated = reason.isUserInitiated
         let shouldTreatLocalSystemLeaveAsExplicitTeardown: Bool = {
             guard applicationState == .active || systemLeaveWasUserInitiated else {
                 return false
@@ -680,7 +685,7 @@ extension PTTViewModel {
                 .didLeaveChannel(
                     channelUUID: channelUUID,
                     contactID: contactID,
-                    reason: reason,
+                    reason: reasonDescription,
                     autoRejoinContactID: autoRejoinContactID
                 )
             )
@@ -703,17 +708,13 @@ extension PTTViewModel {
                 message: "Left channel",
                 metadata: [
                     "channelUUID": channelUUID.uuidString,
-                    "reason": reason,
+                    "reason": reasonDescription,
                     "applicationState": String(describing: applicationState),
                     "systemLeaveWasUserInitiated": String(systemLeaveWasUserInitiated),
                 ]
             )
             captureDiagnosticsState("ptt-callback:left")
         }
-    }
-
-    private func isUserInitiatedPTTLeaveReason(_ reason: String) -> Bool {
-        reason.contains("PTChannelLeaveReason(rawValue: 1)")
     }
 
     func handleFailedToJoinChannel(_ channelUUID: UUID, error: any Error) {
@@ -821,9 +822,19 @@ extension PTTViewModel {
                 return
             }
             let callbackTarget = activeTransmitTarget(for: channelUUID)
+            let beginOrigin = SystemTransmitBeginOrigin.classify(
+                applicationIsActive: currentApplicationState() == .active,
+                hadPendingSystemBegin: hadPendingSystemBegin,
+                hasCallbackTarget: callbackTarget != nil,
+                hasPendingLifecycle: hasPendingTransmitLifecycle(for: channelUUID),
+                runtimeIsPressingTalk: transmitRuntime.isPressingTalk,
+                coordinatorIsPressingTalk: transmitCoordinator.state.isPressingTalk,
+                hasPendingBeginOrActiveTransmit: hasPendingBeginOrActiveTransmit
+            )
             if await rejectSystemTransmitBeginIfPeerIsActive(
                 channelUUID: channelUUID,
                 source: source,
+                origin: beginOrigin,
                 callbackTarget: callbackTarget
             ) {
                 return
@@ -831,6 +842,7 @@ extension PTTViewModel {
             if await rejectForegroundSystemTransmitBeginWithoutLocalIntentIfNeeded(
                 channelUUID: channelUUID,
                 source: source,
+                origin: beginOrigin,
                 callbackTarget: callbackTarget
             ) {
                 return
@@ -841,7 +853,7 @@ extension PTTViewModel {
             await pttCoordinator.handle(
                 .didBeginTransmitting(
                     channelUUID: channelUUID,
-                    source: source
+                    origin: beginOrigin
                 )
             )
             syncPTTState()
@@ -859,6 +871,7 @@ extension PTTViewModel {
                 metadata: [
                     "channelUUID": channelUUID.uuidString,
                     "source": source,
+                    "origin": beginOrigin.rawValue,
                     "applicationState": String(describing: UIApplication.shared.applicationState),
                     "activeContactId": (callbackTarget?.contactID ?? contactId(for: channelUUID))?.uuidString ?? "none",
                     "activeChannelId": callbackTarget?.channelID ?? "none",
@@ -877,16 +890,18 @@ extension PTTViewModel {
                 metadata: [
                     "channelUUID": channelUUID.uuidString,
                     "source": source,
+                    "origin": beginOrigin.rawValue,
                     "activeContactId": (callbackTarget?.contactID ?? contactId(for: channelUUID))?.uuidString ?? "none",
                     "activeChannelId": callbackTarget?.channelID ?? "none",
                     "backendWebSocketConnected": String(backendRuntime.isWebSocketConnected),
                 ],
                 channelId: callbackTarget?.channelID
             )
-            if callbackTarget == nil {
+            if callbackTarget == nil, beginOrigin.isSystemOriginated {
                 handleSystemOriginatedBeginTransmitIfNeeded(
                     channelUUID: channelUUID,
-                    source: source
+                    source: source,
+                    origin: beginOrigin
                 )
             }
             await startAppleBeganWarmDirectQuicCaptureIfPossible(
@@ -900,16 +915,11 @@ extension PTTViewModel {
     func rejectForegroundSystemTransmitBeginWithoutLocalIntentIfNeeded(
         channelUUID: UUID,
         source: String,
+        origin: SystemTransmitBeginOrigin,
         callbackTarget: TransmitTarget?
     ) async -> Bool {
         guard callbackTarget == nil else { return false }
-        guard currentApplicationState() == .active else { return false }
-        guard !hasPendingTransmitLifecycle(for: channelUUID) else { return false }
-        guard !transmitRuntime.isPressingTalk,
-              !transmitCoordinator.state.isPressingTalk,
-              !hasPendingBeginOrActiveTransmit else {
-            return false
-        }
+        guard origin.isRejectedForegroundUnownedBegin else { return false }
 
         let contactID = contactId(for: channelUUID)
         diagnostics.recordInvariantViolation(
@@ -920,6 +930,7 @@ extension PTTViewModel {
                 "channelUUID": channelUUID.uuidString,
                 "contactId": contactID?.uuidString ?? "none",
                 "source": source,
+                "origin": origin.rawValue,
                 "applicationState": String(describing: currentApplicationState()),
                 "pttServiceStatus": lastReportedPTTServiceStatus.map(String.init(describing:)) ?? "none",
                 "pttServiceStatusReason": lastReportedPTTServiceStatusReason ?? "none",
@@ -935,6 +946,7 @@ extension PTTViewModel {
                 "channelUUID": channelUUID.uuidString,
                 "contactId": contactID?.uuidString ?? "none",
                 "source": source,
+                "origin": origin.rawValue,
             ]
         )
         transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
@@ -950,6 +962,7 @@ extension PTTViewModel {
     private func rejectSystemTransmitBeginIfPeerIsActive(
         channelUUID: UUID,
         source: String,
+        origin: SystemTransmitBeginOrigin,
         callbackTarget: TransmitTarget?
     ) async -> Bool {
         guard callbackTarget == nil else { return false }
@@ -969,6 +982,7 @@ extension PTTViewModel {
                 "channelUUID": channelUUID.uuidString,
                 "contactId": contactID.uuidString,
                 "source": source,
+                "origin": origin.rawValue,
                 "backendChannelStatus": channelSnapshot?.status?.rawValue ?? "none",
                 "backendReadiness": channelSnapshot?.readinessStatus?.kind ?? "none",
                 "backendCanTransmit": String(channelSnapshot?.canTransmit ?? false),
@@ -983,6 +997,7 @@ extension PTTViewModel {
                 "channelUUID": channelUUID.uuidString,
                 "contactId": contactID.uuidString,
                 "source": source,
+                "origin": origin.rawValue,
                 "backendChannelStatus": channelSnapshot?.status?.rawValue ?? "none",
                 "backendReadiness": channelSnapshot?.readinessStatus?.kind ?? "none",
                 "backendCanTransmit": String(channelSnapshot?.canTransmit ?? false),
@@ -1006,9 +1021,13 @@ extension PTTViewModel {
         Task {
             let matchingActiveTarget = activeTransmitTarget(for: channelUUID)
             let hasPendingLifecycle = hasPendingTransmitLifecycle(for: channelUUID)
+            let runtimeHadSystemLifecycle = transmitRuntime.hasSystemTransmitLifecycle
+            let systemWasTransmitting =
+                pttCoordinator.state.isTransmitting
+                && pttCoordinator.state.systemChannelUUID == channelUUID
             let transmitDurationMilliseconds = transmitRuntime.currentSystemTransmitDurationMilliseconds()
             let applicationState = currentApplicationState()
-            guard transmitRuntime.hasSystemTransmitLifecycle else {
+            guard runtimeHadSystemLifecycle || systemWasTransmitting else {
                 diagnostics.record(
                     .pushToTalk,
                     message: "Ignored duplicate system transmit end callback",
@@ -1017,11 +1036,14 @@ extension PTTViewModel {
                         "source": source,
                         "hasMatchingActiveTarget": String(matchingActiveTarget != nil),
                         "hasPendingLifecycle": String(hasPendingLifecycle),
+                        "runtimeHadSystemLifecycle": String(runtimeHadSystemLifecycle),
+                        "systemWasTransmitting": String(systemWasTransmitting),
                         "applicationState": String(describing: applicationState),
                     ]
                 )
                 return
             }
+            let endOrigin = SystemTransmitEndOrigin.systemCallback(source: source)
             let endDisposition = transmitRuntime.handleSystemTransmitEnded(
                 applicationStateIsActive: applicationState == .active,
                 matchingActiveTarget: matchingActiveTarget
@@ -1029,7 +1051,7 @@ extension PTTViewModel {
             await pttCoordinator.handle(
                 .didEndTransmitting(
                     channelUUID: channelUUID,
-                    source: source
+                    origin: endOrigin
                 )
             )
             syncPTTState()
@@ -1050,10 +1072,13 @@ extension PTTViewModel {
                 metadata: [
                     "channelUUID": channelUUID.uuidString,
                     "source": source,
+                    "origin": endOrigin.kind,
                     "transmitPressActive": String(transmitRuntime.isPressingTalk),
                     "explicitStopRequested": String(transmitRuntime.explicitStopRequested),
                     "hasMatchingActiveTarget": String(matchingActiveTarget != nil),
                     "hasPendingLifecycle": String(hasPendingLifecycle),
+                    "runtimeHadSystemLifecycle": String(runtimeHadSystemLifecycle),
+                    "systemWasTransmitting": String(systemWasTransmitting),
                     "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
                     "applicationState": String(describing: applicationState),
                     "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
@@ -1074,6 +1099,7 @@ extension PTTViewModel {
                 metadata: [
                     "channelUUID": channelUUID.uuidString,
                     "source": source,
+                    "origin": endOrigin.kind,
                     "systemTransmitDurationMs": transmitDurationMilliseconds.map(String.init) ?? "unknown",
                     "activeContactId": matchingActiveTarget?.contactID.uuidString ?? "none",
                     "activeChannelId": matchingActiveTarget?.channelID ?? "none",

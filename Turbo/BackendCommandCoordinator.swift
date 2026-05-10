@@ -134,16 +134,38 @@ enum BackendCommandReducer {
 final class BackendCommandCoordinator {
     private(set) var state = BackendCommandState.initial
     var effectHandler: (@MainActor (BackendCommandEffect) async -> Void)?
+    var transitionReporter: (@MainActor (ReducerTransitionReport) -> Void)?
 
     func send(_ event: BackendCommandEvent) {
-        state = BackendCommandReducer.reduce(state: state, event: event).state
+        let previousState = state
+        let transition = BackendCommandReducer.reduce(state: state, event: event)
+        state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
     }
 
     func handle(_ event: BackendCommandEvent) async {
+        let previousState = state
         let transition = BackendCommandReducer.reduce(state: state, event: event)
         state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
         for effect in transition.effects {
             await effectHandler?(effect)
         }
+    }
+
+    private func reportTransition(
+        previousState: BackendCommandState,
+        event: BackendCommandEvent,
+        transition: BackendCommandTransition
+    ) {
+        transitionReporter?(
+            ReducerTransitionReport.make(
+                reducerName: "backend-command",
+                event: event,
+                previousState: previousState,
+                nextState: transition.state,
+                effects: transition.effects
+            )
+        )
     }
 }

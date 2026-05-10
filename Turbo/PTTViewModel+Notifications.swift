@@ -133,6 +133,20 @@ extension PTTViewModel {
         )
     }
 
+    func handleTalkRequestNotificationResponse(
+        actionIdentifier: String,
+        userInfo: [AnyHashable: Any]
+    ) async {
+        switch actionIdentifier {
+        case TurboNotificationCategory.acceptTalkRequestAction:
+            await handleTalkRequestNotificationAcceptResponse(userInfo: userInfo)
+        case TurboNotificationCategory.notNowTalkRequestAction:
+            await handleTalkRequestNotificationNotNowResponse(userInfo: userInfo)
+        default:
+            await handleTalkRequestNotificationResponse(userInfo: userInfo)
+        }
+    }
+
     func handleTalkRequestNotificationResponse(userInfo: [AnyHashable: Any]) async {
         let metadata = talkRequestNotificationDiagnostics(userInfo: userInfo)
         diagnostics.record(
@@ -140,29 +154,112 @@ extension PTTViewModel {
             message: "Talk request notification opened",
             metadata: metadata
         )
+        await openTalkRequestNotification(
+            userInfo: userInfo,
+            reason: "notification-open",
+            shouldAccept: true
+        )
+    }
+
+    func handleTalkRequestNotificationAcceptResponse(userInfo: [AnyHashable: Any]) async {
+        let metadata = talkRequestNotificationDiagnostics(userInfo: userInfo)
+        diagnostics.record(
+            .pushToTalk,
+            message: "Talk request notification accepted",
+            metadata: metadata
+        )
+        await openTalkRequestNotification(
+            userInfo: userInfo,
+            reason: "notification-accept",
+            shouldAccept: true
+        )
+    }
+
+    func handleTalkRequestNotificationNotNowResponse(userInfo: [AnyHashable: Any]) async {
+        let metadata = talkRequestNotificationDiagnostics(userInfo: userInfo)
+        diagnostics.record(
+            .pushToTalk,
+            message: "Talk request notification declined",
+            metadata: metadata
+        )
+        await refreshContactSummaries()
+        await refreshInvites()
+
+        guard let backend = backendServices else {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Cannot decline talk request notification before backend is ready",
+                metadata: metadata
+            )
+            return
+        }
+
+        let inviteID = (userInfo["inviteId"] as? String)
+            ?? talkRequestNotificationHandle(from: userInfo)
+                .flatMap { contactMatchingNormalizedHandle($0) }
+                .flatMap { incomingInviteByContactID[$0.id]?.inviteId }
+        guard let inviteID else {
+            diagnostics.record(
+                .pushToTalk,
+                level: .notice,
+                message: "Cannot decline talk request notification without invite",
+                metadata: metadata
+            )
+            return
+        }
+
+        do {
+            _ = try await backend.declineInvite(inviteId: inviteID)
+            await refreshInvites()
+            await refreshContactSummaries()
+            clearTalkRequestNotifications()
+            if let handle = talkRequestNotificationHandle(from: userInfo),
+               let contact = contactMatchingNormalizedHandle(handle) {
+                markTalkRequestSurfaceOpened(for: contact.id, inviteID: inviteID)
+            }
+            captureDiagnosticsState("talk-request:notification-not-now")
+        } catch {
+            diagnostics.record(
+                .backend,
+                level: .error,
+                message: "Decline talk request notification failed",
+                metadata: metadata.merging(
+                    ["error": error.localizedDescription],
+                    uniquingKeysWith: { _, new in new }
+                )
+            )
+        }
+    }
+
+    func openTalkRequestNotification(
+        userInfo: [AnyHashable: Any],
+        reason: String,
+        shouldAccept: Bool
+    ) async {
         guard let handle = talkRequestNotificationHandle(from: userInfo) else { return }
         let immediateContact = openCachedTalkRequestContactFromNotification(
             handle: handle,
-            reason: "notification-open-immediate"
+            reason: "\(reason)-immediate"
         )
-        await refreshRequestStateAfterTalkRequestNotification(userInfo: userInfo, reason: "notification-open")
+        await refreshRequestStateAfterTalkRequestNotification(userInfo: userInfo, reason: reason)
         let shouldJoin = openTalkRequestFromNotification(
             handle: handle,
-            reason: "notification-open",
-            allowsJoin: backendServices != nil,
+            reason: reason,
+            allowsJoin: shouldAccept && backendServices != nil,
             cachedContact: immediateContact
         )
         if backendServices == nil {
             pendingTalkRequestNotificationHandle = handle
-            pendingTalkRequestNotificationShouldJoin = true
+            pendingTalkRequestNotificationShouldJoin = shouldAccept
             diagnostics.record(
                 .pushToTalk,
                 message: "Queued talk request notification open until backend is ready",
-                metadata: ["handle": handle, "shouldJoin": "true"]
+                metadata: ["handle": handle, "shouldAccept": String(shouldAccept)]
             )
             return
         }
-        if !shouldJoin {
+        if shouldAccept && !shouldJoin {
             await openContact(reference: handle)
         }
     }
@@ -394,6 +491,7 @@ extension PTTViewModel {
             "fromHandle": talkRequestNotificationHandle(from: userInfo) ?? "none",
             "inviteId": (userInfo["inviteId"] as? String) ?? "none",
             "channelId": (userInfo["channelId"] as? String) ?? "none",
+            "deepLink": (userInfo["deepLink"] as? String) ?? "none",
         ]
     }
 }

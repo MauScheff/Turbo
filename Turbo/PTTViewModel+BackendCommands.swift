@@ -245,6 +245,9 @@ extension PTTViewModel {
         createdInvite: TurboInviteResponse?,
         currentChannel: ChannelReadinessSnapshot?
     ) -> BackendJoinExecutionPlan {
+        if currentChannel?.membership.hasLocalMembership == true {
+            return .joinSession
+        }
         if request.relationship.isIncomingRequest {
             return .joinSession
         }

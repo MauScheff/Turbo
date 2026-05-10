@@ -29,9 +29,11 @@ For the repo-wide workflow and architectural intent behind these scenarios, read
 - `presence_open_peer_projection`
   - fresh-contact projection regression: opening a peer before any direct channel exists must still surface backend presence correctly, so the selected peer shows online instead of offline
 - `foreground-ptt`
-  - canonical foreground control-plane path: both peers open, converge to `ready`, then each side transmits once and returns to `ready`
+  - canonical foreground control-plane path: both peers open, converge to `ready`, then each side transmits once and returns to `ready`; asserts the foreground system-begin and transmit-startup invariants stay absent
 - `background_wake_refresh_stability`
-  - one ready peer backgrounds and publishes `receiver-not-ready(app-background-media-closed)`; the foreground peer must degrade to `wakeReady`, and explicit refresh/reconcile must preserve that wake-capable state instead of regressing to `waitingForPeer`
+  - one ready peer backgrounds and publishes `receiver-not-ready(app-background-media-closed)`; the foreground peer must degrade to `wakeReady`, and explicit refresh/reconcile must preserve that wake-capable state instead of regressing to `waitingForPeer`; asserts the background receiver-readiness invariant stays absent
+- `background_wake_transmit_does_not_project_receiver`
+  - local-only wake-target regression: a foreground peer starts transmit while the receiver is background/wake-capable; the receiver must not directly project `receiving` without joined/session evidence, and strict diagnostics must keep `selected.receiving_without_joined_session` absent
 - `peer_disconnect_before_second_join`
   - recipient accepts and joins first, then disconnects before the requester finishes the second join; both sides must converge back to idle without a stuck half-session
 - `request_accept_ready`
@@ -58,6 +60,10 @@ For the repo-wide workflow and architectural intent behind these scenarios, read
   - local-only transport-fault regression: the receiver processes a duplicated `transmit-stop` websocket signal and must still converge back to `ready` without tearing down the live session incorrectly
 - `reordered_transmit_signals_refresh_recovery`
   - local-only transport-fault regression: the receiver reorders the next `transmit-start` and `transmit-stop` websocket notices; explicit refresh and reconciliation must still restore both peers to `ready`
+- `stale_transmit_stop_completion_emits_invariant`
+  - local-only expected-invariant regression: injects an old transmit stop completion against a newer active transmit target and asserts diagnostics emit `transmit.stale_end_overrides_newer_epoch`; use non-strict merged diagnostics for this scenario because the invariant is intentional
+- `lease_expiry_renewal_delay_recovers`
+  - local-only lease-fault regression: the sender delays the first `renew-transmit` past the backend's active transmit lease expiry, diagnostics must not emit `transmit.live_projection_after_lease_expiry`, and the delayed renewal failure must converge both peers back to `ready`
 - `backend_reconnect_ready_session_recovery`
   - one participant reconnects the full backend control plane while already `ready`; both sides must refresh, reconcile, and recover the same ready session without drifting off the backend `readiness` or `audioReadiness` contract
 - `restart_ready_session_recovery`
@@ -134,7 +140,7 @@ The DSL now also supports transport-fault actions at the backend adapter boundar
 - `resetTransportFaults`
   - clears all configured HTTP and websocket transport faults for that actor
 - `setHTTPDelay`
-  - delays the next `count` requests for a typed route such as `contact-summaries`, `incoming-invites`, `outgoing-invites`, `channel-state`, or `channel-readiness`
+  - delays the next `count` requests for a typed route such as `contact-summaries`, `incoming-invites`, `outgoing-invites`, `channel-state`, `channel-readiness`, or `renew-transmit`
 - `setWebSocketSignalDelay`
   - delays the next `count` inbound websocket deliveries for a typed `signalKind`
 - `dropNextWebSocketSignals`
@@ -143,8 +149,28 @@ The DSL now also supports transport-fault actions at the backend adapter boundar
   - duplicates the next `count` inbound websocket deliveries for a typed `signalKind`
 - `reorderNextWebSocketSignals`
   - buffers the next `count` inbound websocket deliveries for an optional `signalKind`, then flushes them in reverse order to model cross-delivery reordering
+- `captureDiagnostics`
+  - records an explicit diagnostics state capture and re-runs derived invariant checks, including time-sensitive checks whose fields may not have changed
+- `injectStaleTransmitStopCompletion`
+  - test-only reducer injection used by expected-invariant scenarios; it constructs a newer active transmit target, delivers an older stop completion, and requires the reducer/diagnostics path to report `transmit.stale_end_overrides_newer_epoch`
 
 These actions are intentionally typed and limited. If a route or signal kind is not part of the checked-in contract, the scenario runner fails instead of accepting arbitrary strings.
+
+Scenario expectations can also assert invariant outcomes for each actor. These
+checks are measured from the start of the current step, which lets a scenario
+prove both "this bug emitted the expected invariant" and "the recovery step did
+not emit it again":
+
+- `noInvariantViolations`
+  - when `true`, no new invariant violations may be emitted by that actor during
+    the step
+- `expectInvariant`
+  - list of invariant IDs that must be emitted during the step
+- `eventuallyNoInvariant`
+  - list of invariant IDs that must not be emitted during the step
+- `allowInvariantDuringStep`
+  - list of invariant IDs exempted from `noInvariantViolations`; use this only
+    for an intentional, bounded violation that the scenario is proving
 
 Compact reference:
 
@@ -160,6 +186,15 @@ Compact reference:
   - requires `count >= 2`, optional `signalKind`
 - `resetTransportFaults`
   - no extra fields; clears all configured HTTP and websocket delivery faults for that actor
+- `captureDiagnostics`
+  - no extra fields; records a diagnostics capture and re-runs derived invariant checks
+- `injectStaleTransmitStopCompletion`
+  - no extra fields; test-only reducer injection for the stale stop completion invariant
+- `noInvariantViolations`
+  - expectation field; fails the step if an unexpected invariant ID is emitted
+    after the step starts
+- `expectInvariant`, `eventuallyNoInvariant`, `allowInvariantDuringStep`
+  - expectation fields; values are registered invariant ID lists
 
 Current typed HTTP routes:
 
@@ -168,6 +203,7 @@ Current typed HTTP routes:
 - `outgoing-invites`
 - `channel-state`
 - `channel-readiness`
+- `renew-transmit`
 
 Current typed websocket signal kinds:
 
@@ -180,6 +216,11 @@ When you add or rename a checked-in scenario JSON file, update this README and v
 
 - `just simulator-scenario <scenario>`
 - `just simulator-scenario-merge`
+
+For scenarios whose purpose is to prove a named invariant is emitted, use the
+focused run and normal merge output. Do not use the strict merge variant for
+that focused run unless the scenario has been converted from detection to
+absence/regression proof.
 
 ## Generated Scenario Inputs
 
@@ -223,6 +264,64 @@ clear name and README entry.
 For the full generator, artifact, replay, shrink, and promotion workflow, read
 [`SIMULATOR_FUZZING.md`](/Users/mau/Development/Turbo/SIMULATOR_FUZZING.md).
 
+## Production Replay Conversion
+
+Use production replay conversion when `scripts/merged_diagnostics.py --json`
+captures a real failure that should become a local proof artifact:
+
+```bash
+just production-replay /path/to/merged-diagnostics.json /tmp/turbo-production-replay
+```
+
+The converter writes `production-replay.json`, `scenario-draft.json`,
+`metadata.json`, and `reproduce.sh`. The draft scenario uses safe replay handles
+by default and keeps source identities redacted in the replay metadata. Treat the
+draft as an approximation: run `reproduce.sh`, inspect strict merged diagnostics,
+then minimize and promote only stable regressions into checked-in scenarios.
+
+## Synthetic Conversation Probes
+
+Use the synthetic two-device probe when you need a backend/control-plane canary
+without launching simulator app instances:
+
+```bash
+just synthetic-conversation-probe https://beepbeep.to @quinn @sasha 1 /tmp/turbo-synthetic-conversation-probe --insecure
+```
+
+The wrapper runs `scripts/route_probe.py --json`, requires the conversation
+checks that prove websocket registration, receiver readiness, begin transmit,
+push target selection, and end transmit, then writes per-iteration reports plus
+`synthetic-conversation-probe.json`. This complements simulator scenarios:
+probes prove route semantics quickly, while scenarios prove the app projection
+and diagnostics loop.
+
+## SLO Dashboards
+
+For the normal hosted verification path, prefer the combined command:
+
+```bash
+just postdeploy-check
+```
+
+It runs the synthetic conversation probe, generates the SLO dashboard, and
+writes a timestamped `postdeploy-check.json` artifact that points to both lower
+level reports. Use `just deploy-verified` when you also want the deploy step in
+the same command.
+
+Turn a synthetic probe summary into a static product-facing SLO dashboard:
+
+```bash
+just slo-dashboard /tmp/turbo-synthetic-conversation-probe/synthetic-conversation-probe.json /tmp/turbo-slo-dashboard
+```
+
+The dashboard enforces conversation success rate, full-probe p95 latency, and
+critical check p95 latency for receiver readiness, begin transmit, push target
+selection, and end transmit. It writes `slo-dashboard.json`, `slo-dashboard.md`,
+and `reproduce.sh`, and exits nonzero when an objective breaches. Use
+`scripts/slo_dashboard.py` directly when you also want to include backend
+stability probe output or merged diagnostics invariant counts in the same
+report.
+
 ## Local backend loop
 
 When production-backed scenario runs are noisy because the hosted backend is returning intermittent `internal server error`, use the local control-plane path:
@@ -260,4 +359,7 @@ Scenario runs publish explicit diagnostics artifacts after the scenario complete
 
 Normal debug builds may also auto-publish diagnostics during development, but simulator scenario view models disable that automatic publishing so the scenario-tagged artifact remains the authoritative write for the scenario lane.
 
-The merged diagnostics analyzer now reads explicit `INVARIANT VIOLATIONS` transcript sections, derives additional pair-level rules, and supports `--json` plus `--fail-on-violations` for agent and automation workflows.
+The merged diagnostics analyzer now reads structured diagnostics first, falls
+back to explicit `INVARIANT VIOLATIONS` transcript sections for older artifacts,
+derives additional pair-level rules, and supports `--json` plus
+`--fail-on-violations` for agent and automation workflows.

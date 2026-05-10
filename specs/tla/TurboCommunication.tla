@@ -1,0 +1,460 @@
+--------------------------- MODULE TurboCommunication ---------------------------
+EXTENDS Naturals, FiniteSets, Sequences, TLC
+
+\* A small control-plane model for Turbo direct-channel communication.
+\*
+\* This is intentionally not a model of audio, APNs internals, HTTP, SwiftUI, or
+\* Unison storage. It models the protocol facts that decide whether a device may
+\* transmit, whether another device can be targeted, and how stale or unreliable
+\* control messages interact with client projections.
+
+CONSTANTS
+  Devices,
+  Channels,
+  NoDevice,
+  MaxInboxLength,
+  MaxEpoch
+
+ASSUME NoDevice \notin Devices
+ASSUME MaxInboxLength \in Nat
+ASSUME MaxEpoch \in Nat
+
+VARIABLES
+  members,
+  presence,
+  receiverReady,
+  wakeToken,
+  activeTransmit,
+  transmitEpoch,
+  inbox,
+  knownTransmit,
+  knownEpoch,
+  clientPhase
+
+vars ==
+  << members,
+     presence,
+     receiverReady,
+     wakeToken,
+     activeTransmit,
+     transmitEpoch,
+     inbox,
+     knownTransmit,
+     knownEpoch,
+     clientPhase >>
+
+PresenceValues == {"offline", "joined"}
+PhaseValues ==
+  {"notJoined", "joining", "preparingAudio", "ready", "transmitting", "receiving"}
+MessageKinds == {"TransmitStarted", "TransmitEnded"}
+TransmitValue == Devices \cup {NoDevice}
+Message ==
+  [ kind: MessageKinds,
+    channel: Channels,
+    sender: TransmitValue,
+    epoch: 0..MaxEpoch ]
+
+NoTransmit == [c \in Channels |-> NoDevice]
+ZeroEpoch == [c \in Channels |-> 0]
+EmptyInbox == [d \in Devices |-> <<>>]
+
+IsMember(d, c) == d \in members[c]
+IsJoined(d, c) == IsMember(d, c) /\ presence[d][c] = "joined"
+IsAddressable(d, c) == IsMember(d, c) /\ (IsJoined(d, c) \/ wakeToken[d][c])
+HasAddressablePeer(d, c) ==
+  \E peer \in Devices :
+    peer # d /\ IsAddressable(peer, c)
+
+CanReceiveTransmit(receiver, c) ==
+  IsMember(receiver, c) /\
+    ((IsJoined(receiver, c) /\ receiverReady[receiver][c]) \/ wakeToken[receiver][c])
+
+CanBeginTransmit(sender, c) ==
+  /\ activeTransmit[c] = NoDevice
+  /\ IsJoined(sender, c)
+  /\ \E receiver \in Devices :
+       receiver # sender /\ CanReceiveTransmit(receiver, c)
+
+PhaseAfterNoTransmit(d, c) ==
+  IF ~IsMember(d, c) THEN "notJoined"
+  ELSE IF IsJoined(d, c) /\ receiverReady[d][c] THEN "ready"
+  ELSE IF IsJoined(d, c) THEN "preparingAudio"
+  ELSE "joining"
+
+PhaseFromBackend(d, c) ==
+  IF ~IsMember(d, c) THEN "notJoined"
+  ELSE IF activeTransmit[c] = d THEN "transmitting"
+  ELSE IF activeTransmit[c] \in Devices
+       /\ activeTransmit[c] # d
+       /\ IsJoined(d, c)
+       /\ IsMember(activeTransmit[c], c)
+       THEN "receiving"
+  ELSE PhaseAfterNoTransmit(d, c)
+
+TransmitStarted(c, sender, epoch) ==
+  [kind |-> "TransmitStarted", channel |-> c, sender |-> sender, epoch |-> epoch]
+
+TransmitEnded(c, sender, epoch) ==
+  [kind |-> "TransmitEnded", channel |-> c, sender |-> sender, epoch |-> epoch]
+
+AppendIfSpace(queue, message) ==
+  IF Len(queue) < MaxInboxLength THEN Append(queue, message) ELSE queue
+
+NotifyPeers(c, sender, message) ==
+  [d \in Devices |->
+    IF d # sender /\ IsMember(d, c)
+    THEN AppendIfSpace(inbox[d], message)
+    ELSE inbox[d]]
+
+NotifyMembers(c, message) ==
+  [d \in Devices |->
+    IF IsMember(d, c)
+    THEN AppendIfSpace(inbox[d], message)
+    ELSE inbox[d]]
+
+Init ==
+  /\ members = [c \in Channels |-> {}]
+  /\ presence = [d \in Devices |-> [c \in Channels |-> "offline"]]
+  /\ receiverReady = [d \in Devices |-> [c \in Channels |-> FALSE]]
+  /\ wakeToken = [d \in Devices |-> [c \in Channels |-> FALSE]]
+  /\ activeTransmit = NoTransmit
+  /\ transmitEpoch = ZeroEpoch
+  /\ inbox = EmptyInbox
+  /\ knownTransmit = [d \in Devices |-> NoTransmit]
+  /\ knownEpoch = [d \in Devices |-> ZeroEpoch]
+  /\ clientPhase = [d \in Devices |-> [c \in Channels |-> "notJoined"]]
+
+JoinChannel(d, c) ==
+  /\ ~IsMember(d, c)
+  /\ members' = [members EXCEPT ![c] = @ \cup {d}]
+  /\ presence' = [presence EXCEPT ![d][c] = "joined"]
+  /\ UNCHANGED << receiverReady,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  inbox,
+                  knownTransmit,
+                  knownEpoch,
+                  clientPhase >>
+
+LeaveChannel(d, c) ==
+  /\ IsMember(d, c)
+  /\ members' = [members EXCEPT ![c] = @ \ {d}]
+  /\ presence' = [presence EXCEPT ![d][c] = "offline"]
+  /\ receiverReady' = [receiverReady EXCEPT ![d][c] = FALSE]
+  /\ wakeToken' = [wakeToken EXCEPT ![d][c] = FALSE]
+  \* This initial model is for direct channels. If a member leaves while a
+  \* transmit is active, the active transmit is no longer valid.
+  /\ activeTransmit' = [activeTransmit EXCEPT ![c] = NoDevice]
+  /\ inbox' =
+       IF activeTransmit[c] # NoDevice
+       THEN NotifyMembers(c, TransmitEnded(c, activeTransmit[c], transmitEpoch[c]))
+       ELSE inbox
+  /\ knownTransmit' = [knownTransmit EXCEPT ![d][c] = NoDevice]
+  /\ knownEpoch' = [knownEpoch EXCEPT ![d][c] = transmitEpoch[c]]
+  /\ clientPhase' = [clientPhase EXCEPT ![d][c] = "notJoined"]
+  /\ UNCHANGED transmitEpoch
+
+UploadWakeToken(d, c) ==
+  /\ IsMember(d, c)
+  /\ wakeToken' = [wakeToken EXCEPT ![d][c] = TRUE]
+  /\ UNCHANGED << members,
+                  presence,
+                  receiverReady,
+                  activeTransmit,
+                  transmitEpoch,
+                  inbox,
+                  knownTransmit,
+                  knownEpoch,
+                  clientPhase >>
+
+AddressableAfterTokenClear(receiver, tokenOwner, c) ==
+  IsMember(receiver, c) /\
+    (IF receiver = tokenOwner
+    THEN IsJoined(receiver, c)
+    ELSE IsJoined(receiver, c) \/ wakeToken[receiver][c])
+
+ShouldClearTransmitAfterTokenClear(tokenOwner, c) ==
+  activeTransmit[c] # NoDevice /\
+    ~(\E receiver \in Devices :
+        receiver # activeTransmit[c] /\
+        AddressableAfterTokenClear(receiver, tokenOwner, c))
+
+ClearWakeToken(d, c) ==
+  /\ wakeToken[d][c]
+  /\ wakeToken' = [wakeToken EXCEPT ![d][c] = FALSE]
+  /\ activeTransmit' =
+       [activeTransmit EXCEPT ![c] =
+         IF ShouldClearTransmitAfterTokenClear(d, c) THEN NoDevice ELSE @]
+  /\ UNCHANGED << members,
+                  presence,
+                  receiverReady,
+                  transmitEpoch,
+                  inbox,
+                  knownTransmit,
+                  knownEpoch,
+                  clientPhase >>
+
+MarkReceiverReady(d, c) ==
+  /\ IsJoined(d, c)
+  /\ receiverReady' = [receiverReady EXCEPT ![d][c] = TRUE]
+  /\ UNCHANGED << members,
+                  presence,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  inbox,
+                  knownTransmit,
+                  knownEpoch,
+                  clientPhase >>
+
+MarkReceiverNotReady(d, c) ==
+  /\ IsMember(d, c)
+  /\ receiverReady' = [receiverReady EXCEPT ![d][c] = FALSE]
+  /\ UNCHANGED << members,
+                  presence,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  inbox,
+                  knownTransmit,
+                  knownEpoch,
+                  clientPhase >>
+
+AddressableAfterDisconnect(receiver, disconnected, c) ==
+  IsMember(receiver, c) /\
+    (IF receiver = disconnected
+    THEN wakeToken[receiver][c]
+    ELSE IsJoined(receiver, c) \/ wakeToken[receiver][c])
+
+ShouldClearTransmitAfterDisconnect(disconnected, c) ==
+  activeTransmit[c] # NoDevice /\
+    ( activeTransmit[c] = disconnected \/
+      ~(\E receiver \in Devices :
+          receiver # activeTransmit[c] /\
+          AddressableAfterDisconnect(receiver, disconnected, c)) )
+
+Disconnect(d, c) ==
+  /\ IsJoined(d, c)
+  /\ presence' = [presence EXCEPT ![d][c] = "offline"]
+  /\ receiverReady' = [receiverReady EXCEPT ![d][c] = FALSE]
+  /\ activeTransmit' =
+       [activeTransmit EXCEPT ![c] =
+         IF ShouldClearTransmitAfterDisconnect(d, c) THEN NoDevice ELSE @]
+  /\ inbox' =
+       IF ShouldClearTransmitAfterDisconnect(d, c)
+       THEN NotifyMembers(c, TransmitEnded(c, activeTransmit[c], transmitEpoch[c]))
+       ELSE inbox
+  /\ knownTransmit' = [knownTransmit EXCEPT ![d][c] = NoDevice]
+  /\ knownEpoch' = [knownEpoch EXCEPT ![d][c] = transmitEpoch[c]]
+  /\ clientPhase' = [clientPhase EXCEPT ![d][c] = PhaseAfterNoTransmit(d, c)]
+  /\ UNCHANGED << members,
+                  wakeToken,
+                  transmitEpoch >>
+
+Reconnect(d, c) ==
+  /\ IsMember(d, c)
+  /\ presence[d][c] = "offline"
+  /\ presence' = [presence EXCEPT ![d][c] = "joined"]
+  /\ UNCHANGED << members,
+                  receiverReady,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  inbox,
+                  knownTransmit,
+                  knownEpoch,
+                  clientPhase >>
+
+BeginTransmit(sender, c) ==
+  /\ CanBeginTransmit(sender, c)
+  /\ transmitEpoch[c] < MaxEpoch
+  /\ activeTransmit' = [activeTransmit EXCEPT ![c] = sender]
+  /\ transmitEpoch' = [transmitEpoch EXCEPT ![c] = @ + 1]
+  /\ inbox' = NotifyPeers(c, sender, TransmitStarted(c, sender, transmitEpoch[c] + 1))
+  /\ knownTransmit' = [knownTransmit EXCEPT ![sender][c] = sender]
+  /\ knownEpoch' = [knownEpoch EXCEPT ![sender][c] = transmitEpoch[c] + 1]
+  /\ clientPhase' = [clientPhase EXCEPT ![sender][c] = "transmitting"]
+  /\ UNCHANGED << members, presence, receiverReady, wakeToken >>
+
+EndTransmit(sender, c) ==
+  /\ activeTransmit[c] = sender
+  /\ activeTransmit' = [activeTransmit EXCEPT ![c] = NoDevice]
+  /\ inbox' = NotifyPeers(c, sender, TransmitEnded(c, sender, transmitEpoch[c]))
+  /\ knownTransmit' = [knownTransmit EXCEPT ![sender][c] = NoDevice]
+  /\ knownEpoch' = [knownEpoch EXCEPT ![sender][c] = transmitEpoch[c]]
+  /\ clientPhase' =
+       [clientPhase EXCEPT ![sender][c] = PhaseAfterNoTransmit(sender, c)]
+  /\ UNCHANGED << members, presence, receiverReady, wakeToken, transmitEpoch >>
+
+ExpireTransmit(c) ==
+  /\ activeTransmit[c] # NoDevice
+  /\ activeTransmit' = [activeTransmit EXCEPT ![c] = NoDevice]
+  /\ inbox' = NotifyMembers(c, TransmitEnded(c, activeTransmit[c], transmitEpoch[c]))
+  /\ UNCHANGED << members,
+                  presence,
+                  receiverReady,
+                  wakeToken,
+                  transmitEpoch,
+                  knownTransmit,
+                  knownEpoch,
+                  clientPhase >>
+
+DeliverSignal(d) ==
+  /\ Len(inbox[d]) > 0
+  /\ LET message == Head(inbox[d]) IN
+       /\ inbox' = [inbox EXCEPT ![d] = Tail(@)]
+       /\ IF message.kind = "TransmitStarted"
+             /\ message.sender \in Devices
+             /\ message.sender # d
+             /\ activeTransmit[message.channel] = message.sender
+             /\ transmitEpoch[message.channel] = message.epoch
+             /\ IsJoined(d, message.channel)
+          THEN
+            /\ knownTransmit' =
+                 [knownTransmit EXCEPT ![d][message.channel] = message.sender]
+            /\ knownEpoch' =
+                 [knownEpoch EXCEPT ![d][message.channel] = message.epoch]
+            /\ clientPhase' =
+                 [clientPhase EXCEPT ![d][message.channel] = "receiving"]
+          ELSE IF message.kind = "TransmitEnded"
+               /\ message.sender \in Devices
+               /\ knownTransmit[d][message.channel] = message.sender
+               /\ knownEpoch[d][message.channel] = message.epoch
+               /\ activeTransmit[message.channel] = NoDevice
+               /\ transmitEpoch[message.channel] = message.epoch
+          THEN
+            /\ knownTransmit' =
+                 [knownTransmit EXCEPT ![d][message.channel] = NoDevice]
+            /\ knownEpoch' =
+                 [knownEpoch EXCEPT ![d][message.channel] = message.epoch]
+            /\ clientPhase' =
+                 [clientPhase EXCEPT ![d][message.channel] =
+                   PhaseAfterNoTransmit(d, message.channel)]
+          ELSE
+            /\ UNCHANGED << knownTransmit, knownEpoch, clientPhase >>
+  /\ UNCHANGED << members,
+                  presence,
+                  receiverReady,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch >>
+
+DropSignal(d) ==
+  /\ Len(inbox[d]) > 0
+  /\ inbox' = [inbox EXCEPT ![d] = Tail(@)]
+  /\ UNCHANGED << members,
+                  presence,
+                  receiverReady,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  knownTransmit,
+                  knownEpoch,
+                  clientPhase >>
+
+DuplicateSignal(d) ==
+  /\ Len(inbox[d]) > 0
+  /\ Len(inbox[d]) < MaxInboxLength
+  /\ inbox' = [inbox EXCEPT ![d] = Append(@, Head(@))]
+  /\ UNCHANGED << members,
+                  presence,
+                  receiverReady,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  knownTransmit,
+                  knownEpoch,
+                  clientPhase >>
+
+RefreshClient(d, c) ==
+  /\ knownTransmit' = [knownTransmit EXCEPT ![d][c] = activeTransmit[c]]
+  /\ knownEpoch' = [knownEpoch EXCEPT ![d][c] = transmitEpoch[c]]
+  /\ clientPhase' = [clientPhase EXCEPT ![d][c] = PhaseFromBackend(d, c)]
+  /\ UNCHANGED << members,
+                  presence,
+                  receiverReady,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  inbox >>
+
+Next ==
+  \/ \E d \in Devices, c \in Channels : JoinChannel(d, c)
+  \/ \E d \in Devices, c \in Channels : LeaveChannel(d, c)
+  \/ \E d \in Devices, c \in Channels : UploadWakeToken(d, c)
+  \/ \E d \in Devices, c \in Channels : ClearWakeToken(d, c)
+  \/ \E d \in Devices, c \in Channels : MarkReceiverReady(d, c)
+  \/ \E d \in Devices, c \in Channels : MarkReceiverNotReady(d, c)
+  \/ \E d \in Devices, c \in Channels : Disconnect(d, c)
+  \/ \E d \in Devices, c \in Channels : Reconnect(d, c)
+  \/ \E d \in Devices, c \in Channels : BeginTransmit(d, c)
+  \/ \E d \in Devices, c \in Channels : EndTransmit(d, c)
+  \/ \E c \in Channels : ExpireTransmit(c)
+  \/ \E d \in Devices : DeliverSignal(d)
+  \/ \E d \in Devices : DropSignal(d)
+  \/ \E d \in Devices : DuplicateSignal(d)
+  \/ \E d \in Devices, c \in Channels : RefreshClient(d, c)
+
+Spec == Init /\ [][Next]_vars
+
+TypeOK ==
+  /\ members \in [Channels -> SUBSET Devices]
+  /\ presence \in [Devices -> [Channels -> PresenceValues]]
+  /\ receiverReady \in [Devices -> [Channels -> BOOLEAN]]
+  /\ wakeToken \in [Devices -> [Channels -> BOOLEAN]]
+  /\ activeTransmit \in [Channels -> TransmitValue]
+  /\ transmitEpoch \in [Channels -> 0..MaxEpoch]
+  /\ inbox \in [Devices -> Seq(Message)]
+  /\ knownTransmit \in [Devices -> [Channels -> TransmitValue]]
+  /\ knownEpoch \in [Devices -> [Channels -> 0..MaxEpoch]]
+  /\ clientPhase \in [Devices -> [Channels -> PhaseValues]]
+
+DirectChannelCardinality ==
+  \A c \in Channels : Cardinality(members[c]) <= 2
+
+WakeTokenRequiresMembership ==
+  \A d \in Devices, c \in Channels :
+    wakeToken[d][c] => IsMember(d, c)
+
+ReceiverReadyRequiresJoinedPresence ==
+  \A d \in Devices, c \in Channels :
+    receiverReady[d][c] => IsJoined(d, c)
+
+ActiveTransmitterIsJoinedMember ==
+  \A c \in Channels :
+    activeTransmit[c] # NoDevice => IsJoined(activeTransmit[c], c)
+
+ActiveTransmitHasAddressablePeer ==
+  \A c \in Channels :
+    activeTransmit[c] # NoDevice =>
+      HasAddressablePeer(activeTransmit[c], c)
+
+ReceivingHasLocalTransmitEvidence ==
+  \A d \in Devices, c \in Channels :
+    clientPhase[d][c] = "receiving" =>
+      /\ knownTransmit[d][c] \in Devices
+      /\ knownTransmit[d][c] # d
+      /\ IsMember(d, c)
+
+TransmittingHasLocalTransmitEvidence ==
+  \A d \in Devices, c \in Channels :
+    clientPhase[d][c] = "transmitting" =>
+      knownTransmit[d][c] = d
+
+LiveProjectionHasCurrentEpochEvidence ==
+  \A d \in Devices, c \in Channels :
+    clientPhase[d][c] \in {"transmitting", "receiving"} =>
+      knownEpoch[d][c] = transmitEpoch[c]
+
+DisconnectedClientIsNotLive ==
+  \A d \in Devices, c \in Channels :
+    ~IsJoined(d, c) =>
+      clientPhase[d][c] \notin {"transmitting", "receiving"}
+
+NotJoinedProjectionRequiresNonMembership ==
+  \A d \in Devices, c \in Channels :
+    clientPhase[d][c] = "notJoined" =>
+      ~IsMember(d, c) \/ knownTransmit[d][c] = NoDevice
+
+===============================================================================

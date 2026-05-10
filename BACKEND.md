@@ -110,9 +110,16 @@ If the backend can project stale, contradictory, or one-sided session truth, fix
 
 Deploy / probe:
 
+- `just deploy-verified`
+- `just postdeploy-check`
 - `just deploy`
 - `just route-probe`
 - `just reset-all https://beepbeep.to`
+
+Use `just deploy-verified` for the normal hosted release path: it runs the raw
+deploy and then verifies the live synthetic conversation SLOs. Use
+`just postdeploy-check` when the deploy already happened and you only need live
+hosted verification.
 
 Use `just deploy` when no interactive `ucm` process is already holding the local codebase.
 If you are already working inside a live `ucm` session, `just deploy` can block on the codebase lock; run `turbo.deploy` from that existing MCP/UCM session instead.

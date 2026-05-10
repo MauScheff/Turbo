@@ -48,6 +48,9 @@ The desired workflow is:
 
 ## Current rule surfaces
 
+- checked-in invariant catalog:
+  - `invariants/registry.json`
+  - `scripts/check_invariant_registry.py`
 - app-side snapshot and projection checks:
   - `Turbo/AppDiagnostics.swift`
 - merged multi-device and convergence checks:
@@ -56,6 +59,11 @@ The desired workflow is:
   - `scenarios/*.json`
   - `TurboTests/TurboTests.swift`
   - `STATE_MACHINE_TESTING.md`
+
+Treat `invariants/registry.json` as the source of truth for active invariant
+IDs, ownership, detector locations, evidence fields, repair policy, and known
+regression gaps. This document explains how to model and emit invariant rules;
+it should not grow a separate hand-maintained active catalog.
 
 ## Rule anatomy
 

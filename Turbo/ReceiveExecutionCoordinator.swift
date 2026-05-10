@@ -185,10 +185,13 @@ final class ReceiveExecutionRuntimeState {
 final class ReceiveExecutionCoordinator {
     private(set) var state = ReceiveExecutionSessionState()
     var effectHandler: (@MainActor (ReceiveExecutionEffect) -> Void)?
+    var transitionReporter: (@MainActor (ReducerTransitionReport) -> Void)?
 
     func send(_ event: ReceiveExecutionEvent) {
+        let previousState = state
         let transition = ReceiveExecutionReducer.reduce(state: state, event: event)
         state = transition.state
+        reportTransition(previousState: previousState, event: event, transition: transition)
         for effect in transition.effects {
             effectHandler?(effect)
         }
@@ -196,5 +199,21 @@ final class ReceiveExecutionCoordinator {
 
     func replaceRemoteTransmittingContactIDs(_ contactIDs: Set<UUID>) {
         state.replaceRemoteTransmittingContactIDs(contactIDs)
+    }
+
+    private func reportTransition(
+        previousState: ReceiveExecutionSessionState,
+        event: ReceiveExecutionEvent,
+        transition: ReceiveExecutionTransition
+    ) {
+        transitionReporter?(
+            ReducerTransitionReport.make(
+                reducerName: "receive-execution",
+                event: event,
+                previousState: previousState,
+                nextState: transition.state,
+                effects: transition.effects
+            )
+        )
     }
 }
