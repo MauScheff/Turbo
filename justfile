@@ -44,7 +44,10 @@ deploy-verified base="https://beepbeep.to" caller="@quinn" callee="@sasha" itera
   just postdeploy-check "{{base}}" "{{caller}}" "{{callee}}" "{{iterations}}" "{{output_dir}}" "{{insecure}}"
 
 testflight:
-  python3 scripts/start_testflight_release.py
+  direnv exec . python3 scripts/start_testflight_release.py
+
+testflight-assign build_id:
+  direnv exec . python3 scripts/start_testflight_release.py --skip-git-checks --assign-build-id "{{build_id}}"
 
 route-probe:
   .venv/bin/python scripts/route_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure

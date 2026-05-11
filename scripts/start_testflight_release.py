@@ -182,7 +182,10 @@ class AppStoreConnect:
                 timeout=30,
                 context=self.context,
             ) as response:
-                return json.loads(response.read().decode("utf-8"))
+                text = response.read().decode("utf-8")
+                if not text:
+                    return {}
+                return json.loads(text)
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
             raise ReleaseError(
@@ -310,6 +313,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Bypass clean/pushed git checks. Intended only for API smoke testing.",
     )
+    parser.add_argument(
+        "--assign-build-id",
+        help="Skip Xcode Cloud and assign an existing processed App Store Connect build ID.",
+    )
     return parser.parse_args()
 
 
@@ -322,18 +329,23 @@ def main() -> int:
 
         credentials = read_credentials()
         api = AppStoreConnect(make_token(credentials))
-        build_run_id = start_build(api, args.workflow_id)
-        print(f"Started Xcode Cloud build run: {build_run_id}", flush=True)
 
-        if args.no_wait:
-            return 0
+        if args.assign_build_id:
+            build_id = args.assign_build_id
+            print(f"Assigning existing App Store Connect build: {build_id}", flush=True)
+        else:
+            build_run_id = start_build(api, args.workflow_id)
+            print(f"Started Xcode Cloud build run: {build_run_id}", flush=True)
 
-        poll_build_run(api, build_run_id, args.build_timeout_minutes * 60)
-        build_ids = build_ids_for_run(api, build_run_id)
-        if not build_ids:
-            raise ReleaseError("Xcode Cloud run succeeded but no App Store build was linked.")
-        build_id = build_ids[-1]
-        poll_processed_build(api, build_id, args.processing_timeout_minutes * 60)
+            if args.no_wait:
+                return 0
+
+            poll_build_run(api, build_run_id, args.build_timeout_minutes * 60)
+            build_ids = build_ids_for_run(api, build_run_id)
+            if not build_ids:
+                raise ReleaseError("Xcode Cloud run succeeded but no App Store build was linked.")
+            build_id = build_ids[-1]
+            poll_processed_build(api, build_id, args.processing_timeout_minutes * 60)
 
         beta_group_id = args.beta_group_id
         if beta_group_id is None and args.beta_group_name:
