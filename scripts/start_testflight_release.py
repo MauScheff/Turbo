@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -144,6 +145,13 @@ def make_token(credentials: Credentials) -> str:
 class AppStoreConnect:
     def __init__(self, token: str) -> None:
         self.token = token
+        self.context = ssl.create_default_context()
+        try:
+            import certifi  # type: ignore
+
+            self.context = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            pass
 
     def request(
         self,
@@ -162,13 +170,21 @@ class AppStoreConnect:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=30,
+                context=self.context,
+            ) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
             raise ReleaseError(
                 f"App Store Connect API {method} {path} failed "
                 f"with HTTP {error.code}:\n{detail}"
+            ) from error
+        except urllib.error.URLError as error:
+            raise ReleaseError(
+                f"App Store Connect API {method} {path} failed: {error.reason}"
             ) from error
 
 
