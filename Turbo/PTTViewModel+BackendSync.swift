@@ -317,7 +317,7 @@ extension PTTViewModel {
             return fetched.settingRemoteAudioReadiness(.waiting)
         }()
         guard let existing else { return effectiveFetched }
-        guard case .wakeCapable(let existingTargetDeviceId) = existing.remoteWakeCapability else {
+        guard case .wakeCapable = existing.remoteWakeCapability else {
             return effectiveFetched
         }
 
@@ -353,7 +353,15 @@ extension PTTViewModel {
 
         var merged = effectiveFetched
 
+        let fetchedWakeCapabilityStillPresent: Bool = {
+            if case .wakeCapable = effectiveFetched.remoteWakeCapability {
+                return true
+            }
+            return false
+        }()
+
         if existing.remoteAudioReadiness == .wakeCapable,
+           fetchedWakeCapabilityStillPresent,
            !suppressWakeCapableAudioReadiness {
             switch effectiveFetched.remoteAudioReadiness {
             case .waiting, .unknown:
@@ -361,12 +369,6 @@ extension PTTViewModel {
             case .ready, .wakeCapable:
                 break
             }
-        }
-
-        if case .unavailable = effectiveFetched.remoteWakeCapability {
-            merged = merged.settingRemoteWakeCapability(
-                .wakeCapable(targetDeviceId: existingTargetDeviceId)
-            )
         }
 
         return merged
@@ -2036,6 +2038,13 @@ extension PTTViewModel {
                         senderDeviceId: envelope.fromDeviceId
                     )
                 }
+                Task {
+                    await connectMediaRelayForReceiveIfNeeded(
+                        contactID: contactID,
+                        channelID: envelope.channelId,
+                        peerDeviceID: envelope.fromDeviceId
+                    )
+                }
                 recordWakeReceiveTiming(
                     stage: "backend-peer-transmitting-observed",
                     contactID: contactID,
@@ -2596,6 +2605,10 @@ extension PTTViewModel {
                 await prewarmForegroundTalkPathIfNeeded(
                     for: contactID,
                     reason: "channel-ready"
+                )
+                await prejoinMediaRelayForReadyChannelIfNeeded(
+                    contactID: contactID,
+                    channelReadiness: effectiveChannelReadiness
                 )
                 if shouldRequestAutomaticDirectQuicProbe(for: contactID) {
                     await maybeStartAutomaticDirectQuicProbe(

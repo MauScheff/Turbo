@@ -630,6 +630,472 @@ nonisolated enum DirectQuicWireCodec {
     }
 }
 
+nonisolated struct TurboMediaRelayClientConfig: Codable, Equatable, Sendable {
+    let host: String
+    let quicPort: UInt16
+    let tcpPort: UInt16
+    let token: String
+
+    var isConfigured: Bool {
+        !host.isEmpty
+    }
+}
+
+nonisolated enum TurboMediaRelayTransport: String, Codable, Equatable, Sendable {
+    case quic
+    case tcpTls = "tcp-tls"
+}
+
+nonisolated enum TurboMediaRelayFrame: Codable, Equatable {
+    case join(
+        sessionId: String,
+        deviceId: String,
+        peerDeviceId: String,
+        token: String
+    )
+    case joinAck(
+        sessionId: String,
+        deviceId: String,
+        transport: TurboMediaRelayTransport
+    )
+    case audio(
+        sessionId: String,
+        senderDeviceId: String,
+        sequenceNumber: UInt64,
+        sentAtMs: Int64,
+        payload: String
+    )
+    case peerUnavailable(sessionId: String, deviceId: String)
+    case error(message: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case sessionId = "session_id"
+        case deviceId = "device_id"
+        case peerDeviceId = "peer_device_id"
+        case senderDeviceId = "sender_device_id"
+        case sequenceNumber = "sequence_number"
+        case sentAtMs = "sent_at_ms"
+        case payload
+        case token
+        case transport
+        case message
+    }
+
+    private enum FrameType: String, Codable {
+        case join
+        case joinAck = "join-ack"
+        case audio
+        case peerUnavailable = "peer-unavailable"
+        case error
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .join(let sessionId, let deviceId, let peerDeviceId, let token):
+            try container.encode(FrameType.join, forKey: .type)
+            try container.encode(sessionId, forKey: .sessionId)
+            try container.encode(deviceId, forKey: .deviceId)
+            try container.encode(peerDeviceId, forKey: .peerDeviceId)
+            try container.encode(token, forKey: .token)
+        case .joinAck(let sessionId, let deviceId, let transport):
+            try container.encode(FrameType.joinAck, forKey: .type)
+            try container.encode(sessionId, forKey: .sessionId)
+            try container.encode(deviceId, forKey: .deviceId)
+            try container.encode(transport, forKey: .transport)
+        case .audio(let sessionId, let senderDeviceId, let sequenceNumber, let sentAtMs, let payload):
+            try container.encode(FrameType.audio, forKey: .type)
+            try container.encode(sessionId, forKey: .sessionId)
+            try container.encode(senderDeviceId, forKey: .senderDeviceId)
+            try container.encode(sequenceNumber, forKey: .sequenceNumber)
+            try container.encode(sentAtMs, forKey: .sentAtMs)
+            try container.encode(payload, forKey: .payload)
+        case .peerUnavailable(let sessionId, let deviceId):
+            try container.encode(FrameType.peerUnavailable, forKey: .type)
+            try container.encode(sessionId, forKey: .sessionId)
+            try container.encode(deviceId, forKey: .deviceId)
+        case .error(let message):
+            try container.encode(FrameType.error, forKey: .type)
+            try container.encode(message, forKey: .message)
+        }
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(FrameType.self, forKey: .type) {
+        case .join:
+            self = .join(
+                sessionId: try container.decode(String.self, forKey: .sessionId),
+                deviceId: try container.decode(String.self, forKey: .deviceId),
+                peerDeviceId: try container.decode(String.self, forKey: .peerDeviceId),
+                token: try container.decode(String.self, forKey: .token)
+            )
+        case .joinAck:
+            self = .joinAck(
+                sessionId: try container.decode(String.self, forKey: .sessionId),
+                deviceId: try container.decode(String.self, forKey: .deviceId),
+                transport: try container.decode(TurboMediaRelayTransport.self, forKey: .transport)
+            )
+        case .audio:
+            self = .audio(
+                sessionId: try container.decode(String.self, forKey: .sessionId),
+                senderDeviceId: try container.decode(String.self, forKey: .senderDeviceId),
+                sequenceNumber: try container.decode(UInt64.self, forKey: .sequenceNumber),
+                sentAtMs: try container.decode(Int64.self, forKey: .sentAtMs),
+                payload: try container.decode(String.self, forKey: .payload)
+            )
+        case .peerUnavailable:
+            self = .peerUnavailable(
+                sessionId: try container.decode(String.self, forKey: .sessionId),
+                deviceId: try container.decode(String.self, forKey: .deviceId)
+            )
+        case .error:
+            self = .error(message: try container.decode(String.self, forKey: .message))
+        }
+    }
+}
+
+nonisolated enum TurboMediaRelayCodec {
+    private static let newline = Data([0x0A])
+
+    static func encode(_ frame: TurboMediaRelayFrame) throws -> Data {
+        var data = try JSONEncoder().encode(frame)
+        data.append(newline)
+        return data
+    }
+
+    static func decodeAvailable(from buffer: inout Data) throws -> [TurboMediaRelayFrame] {
+        var decoded: [TurboMediaRelayFrame] = []
+        while let delimiterRange = buffer.firstRange(of: newline) {
+            let frame = buffer.subdata(in: 0 ..< delimiterRange.lowerBound)
+            buffer.removeSubrange(0 ..< delimiterRange.upperBound)
+            guard !frame.isEmpty else { continue }
+            decoded.append(try JSONDecoder().decode(TurboMediaRelayFrame.self, from: frame))
+        }
+        return decoded
+    }
+}
+
+nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
+    private let config: TurboMediaRelayClientConfig
+    private let sessionId: String
+    private let localDeviceId: String
+    private let peerDeviceId: String
+    private let onIncomingAudioPayload: @Sendable (String) async -> Void
+    private let reportEvent: (@Sendable (String, [String: String]) async -> Void)?
+    private let queue = DispatchQueue(label: "turbo.media-relay-client")
+    private let lock = NSLock()
+    private var connection: NWConnection?
+    private var receiveBuffer = Data()
+    private var selectedTransport: TurboMediaRelayTransport?
+    private var sequenceNumber: UInt64 = 0
+    private var peerUnavailable = false
+
+    init(
+        config: TurboMediaRelayClientConfig,
+        sessionId: String,
+        localDeviceId: String,
+        peerDeviceId: String,
+        onIncomingAudioPayload: @escaping @Sendable (String) async -> Void,
+        reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil
+    ) {
+        self.config = config
+        self.sessionId = sessionId
+        self.localDeviceId = localDeviceId
+        self.peerDeviceId = peerDeviceId
+        self.onIncomingAudioPayload = onIncomingAudioPayload
+        self.reportEvent = reportEvent
+    }
+
+    func connect() async throws -> TurboMediaRelayTransport {
+        do {
+            let transport = try await connect(using: .quic)
+            await report("Media relay QUIC connected", metadata: baseMetadata(transport: transport))
+            return transport
+        } catch {
+            await report(
+                "Media relay QUIC failed; trying TCP/TLS",
+                metadata: baseMetadata(transport: .quic).merging(
+                    ["error": error.localizedDescription],
+                    uniquingKeysWith: { _, new in new }
+                )
+            )
+            let transport = try await connect(using: .tcpTls)
+            await report("Media relay TCP/TLS connected", metadata: baseMetadata(transport: transport))
+            return transport
+        }
+    }
+
+    func sendAudioPayload(_ payload: String) async throws {
+        let frame = TurboMediaRelayFrame.audio(
+            sessionId: sessionId,
+            senderDeviceId: localDeviceId,
+            sequenceNumber: nextSequenceNumber(),
+            sentAtMs: Int64(Date().timeIntervalSince1970 * 1_000),
+            payload: payload
+        )
+        let connection = lock.withLock { self.connection }
+        guard let connection else {
+            throw DirectQuicProbeError.connectionFailed("media relay is not connected")
+        }
+        if lock.withLock({ peerUnavailable }) {
+            throw DirectQuicProbeError.connectionFailed("media relay peer is unavailable")
+        }
+        try await send(frame, on: connection)
+    }
+
+    func close() {
+        let connection = lock.withLock { () -> NWConnection? in
+            let connection = self.connection
+            self.connection = nil
+            self.receiveBuffer.removeAll(keepingCapacity: false)
+            self.selectedTransport = nil
+            self.peerUnavailable = false
+            return connection
+        }
+        connection?.cancel()
+    }
+
+    private func connect(using transport: TurboMediaRelayTransport) async throws -> TurboMediaRelayTransport {
+        close()
+        let connection = NWConnection(
+            host: NWEndpoint.Host(config.host),
+            port: NWEndpoint.Port(rawValue: port(for: transport)) ?? .https,
+            using: parameters(for: transport)
+        )
+        try await startConnection(connection, transport: transport)
+        try await send(
+            .join(
+                sessionId: sessionId,
+                deviceId: localDeviceId,
+                peerDeviceId: peerDeviceId,
+                token: config.token
+            ),
+            on: connection
+        )
+        let ack = try await receiveNextFrame(on: connection)
+        guard case .joinAck(let sessionId, let deviceId, let ackTransport) = ack,
+              sessionId == self.sessionId,
+              deviceId == localDeviceId else {
+            throw DirectQuicProbeError.proofFailed("media relay join acknowledgement was invalid")
+        }
+        lock.withLock {
+            self.connection = connection
+            self.selectedTransport = ackTransport
+            self.receiveBuffer.removeAll(keepingCapacity: false)
+            self.peerUnavailable = false
+        }
+        receiveFrames(on: connection)
+        return ackTransport
+    }
+
+    private func parameters(for transport: TurboMediaRelayTransport) -> NWParameters {
+        switch transport {
+        case .quic:
+            let quicOptions = NWProtocolQUIC.Options(alpn: ["turbo-relay-v1"])
+            sec_protocol_options_set_min_tls_protocol_version(
+                quicOptions.securityProtocolOptions,
+                .TLSv13
+            )
+            return NWParameters(quic: quicOptions)
+        case .tcpTls:
+            let tlsOptions = NWProtocolTLS.Options()
+            sec_protocol_options_set_min_tls_protocol_version(
+                tlsOptions.securityProtocolOptions,
+                .TLSv13
+            )
+            return NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+        }
+    }
+
+    private func port(for transport: TurboMediaRelayTransport) -> UInt16 {
+        switch transport {
+        case .quic:
+            return config.quicPort
+        case .tcpTls:
+            return config.tcpPort
+        }
+    }
+
+    private func startConnection(
+        _ connection: NWConnection,
+        transport: TurboMediaRelayTransport
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let gate = ContinuationGate()
+            connection.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    gate.resume { continuation.resume() }
+                case .failed(let error):
+                    gate.resume {
+                        continuation.resume(
+                            throwing: DirectQuicProbeError.connectionFailed(error.localizedDescription)
+                        )
+                    }
+                case .cancelled:
+                    gate.resume {
+                        continuation.resume(
+                            throwing: DirectQuicProbeError.connectionFailed("cancelled")
+                        )
+                    }
+                case .waiting(let error):
+                    Task {
+                        await self?.report(
+                            "Media relay connection waiting",
+                            metadata: self?.baseMetadata(transport: transport).merging(
+                                ["error": error.localizedDescription],
+                                uniquingKeysWith: { _, new in new }
+                            ) ?? [:]
+                        )
+                    }
+                case .setup, .preparing:
+                    break
+                @unknown default:
+                    break
+                }
+            }
+            connection.start(queue: queue)
+        }
+    }
+
+    private func send(_ frame: TurboMediaRelayFrame, on connection: NWConnection) async throws {
+        let content = try TurboMediaRelayCodec.encode(frame)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: content, completion: .contentProcessed { error in
+                if let error {
+                    continuation.resume(
+                        throwing: DirectQuicProbeError.proofFailed(error.localizedDescription)
+                    )
+                } else {
+                    continuation.resume()
+                }
+            })
+        }
+    }
+
+    private func receiveNextFrame(on connection: NWConnection) async throws -> TurboMediaRelayFrame {
+        var buffer = Data()
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TurboMediaRelayFrame, Error>) in
+            func receiveNextChunk() {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 8_192) { data, _, isComplete, error in
+                    if let error {
+                        continuation.resume(
+                            throwing: DirectQuicProbeError.proofFailed(error.localizedDescription)
+                        )
+                        return
+                    }
+                    if let data, !data.isEmpty {
+                        buffer.append(data)
+                        do {
+                            if let decoded = try TurboMediaRelayCodec.decodeAvailable(from: &buffer).first {
+                                continuation.resume(returning: decoded)
+                                return
+                            }
+                        } catch {
+                            continuation.resume(throwing: error)
+                            return
+                        }
+                    }
+                    if isComplete {
+                        continuation.resume(
+                            throwing: DirectQuicProbeError.proofFailed("media relay closed before response")
+                        )
+                        return
+                    }
+                    receiveNextChunk()
+                }
+            }
+            receiveNextChunk()
+        }
+    }
+
+    private func receiveFrames(on connection: NWConnection) {
+        guard lock.withLock({ self.connection === connection }) else { return }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if let error {
+                Task {
+                    await self.report(
+                        "Media relay receive failed",
+                        metadata: self.baseMetadata().merging(
+                            ["error": error.localizedDescription],
+                            uniquingKeysWith: { _, new in new }
+                        )
+                    )
+                }
+                return
+            }
+            if let data, !data.isEmpty {
+                let result = self.lock.withLock { () -> Result<[TurboMediaRelayFrame], Error> in
+                    self.receiveBuffer.append(data)
+                    do {
+                        return .success(try TurboMediaRelayCodec.decodeAvailable(from: &self.receiveBuffer))
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+                switch result {
+                case .success(let frames):
+                    for frame in frames {
+                        if case .audio(_, _, _, _, let payload) = frame {
+                            Task {
+                                await self.onIncomingAudioPayload(payload)
+                            }
+                        } else if case .peerUnavailable = frame {
+                            self.lock.withLock {
+                                self.peerUnavailable = true
+                            }
+                            Task {
+                                await self.report(
+                                    "Media relay peer unavailable",
+                                    metadata: self.baseMetadata()
+                                )
+                            }
+                        }
+                    }
+                case .failure(let error):
+                    Task {
+                        await self.report(
+                            "Media relay frame decode failed",
+                            metadata: self.baseMetadata().merging(
+                                ["error": error.localizedDescription],
+                                uniquingKeysWith: { _, new in new }
+                            )
+                        )
+                    }
+                    return
+                }
+            }
+            guard !isComplete else { return }
+            self.receiveFrames(on: connection)
+        }
+    }
+
+    private func nextSequenceNumber() -> UInt64 {
+        lock.withLock {
+            sequenceNumber += 1
+            return sequenceNumber
+        }
+    }
+
+    private func baseMetadata(transport: TurboMediaRelayTransport? = nil) -> [String: String] {
+        let selected = transport ?? lock.withLock { selectedTransport }
+        return [
+            "sessionId": sessionId,
+            "localDeviceId": localDeviceId,
+            "peerDeviceId": peerDeviceId,
+            "host": config.host,
+            "transport": selected?.rawValue ?? "none",
+        ]
+    }
+
+    private func report(_ message: String, metadata: [String: String]) async {
+        await reportEvent?(message, metadata)
+    }
+}
+
 nonisolated enum DirectQuicHostCandidateGatherer {
     static func gatherCandidates(
         port: UInt16,

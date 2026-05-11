@@ -43,6 +43,11 @@ CORE_SCENARIO_ACTION_TYPES = {
     "disconnect",
     "restartApp",
 }
+POST_TRANSMIT_PERTURBATIONS = [
+    "normal_stop",
+    "sender_disconnect",
+    "wake_token_revocation",
+]
 INVALID_SCENARIO_FAILURE_MARKERS = [
     "Caught error: Scenario references unknown actor",
     "Caught error: openPeer requires",
@@ -446,27 +451,123 @@ def generate_scenario(
 
     transmitter = rng.choice(["a", "b"])
     receiver = peer_for(transmitter)
+    post_transmit_perturbation = rng.choices(
+        POST_TRANSMIT_PERTURBATIONS,
+        weights=[55, 25, 20],
+        k=1,
+    )[0]
+
+    if post_transmit_perturbation == "wake_token_revocation":
+        steps.append(
+            step(
+                "receiver backgrounds before wake-token transmit",
+                [{"actor": receiver, "type": "backgroundApp"}] + maybe_refreshes(rng, actor=transmitter),
+                expect={
+                    transmitter: {
+                        "selectedHandle": handle_for(receiver, handle_a, handle_b),
+                        "isJoined": True,
+                        "eventuallyNoInvariant": ["channel.active_transmit_without_addressable_peer"],
+                    },
+                    receiver: {
+                        "selectedHandle": handle_for(transmitter, handle_a, handle_b),
+                        "isJoined": True,
+                        "eventuallyNoInvariant": ["channel.active_transmit_without_addressable_peer"],
+                    },
+                },
+            )
+        )
+
+    transmit_expect: dict[str, Any] = {
+        transmitter: {
+            "selectedHandle": handle_for(receiver, handle_a, handle_b),
+            "phase": "transmitting",
+            "isJoined": True,
+            "isTransmitting": True,
+        }
+    }
+    if post_transmit_perturbation != "wake_token_revocation":
+        transmit_expect[receiver] = {
+            "selectedHandle": handle_for(transmitter, handle_a, handle_b),
+            "phase": "receiving",
+            "isJoined": True,
+        }
+
     steps.append(
         step(
             f"{transmitter} begins transmitting",
             transmit_faults_for_receiver(rng, receiver)
             + [{"actor": transmitter, "type": "beginTransmit"}]
             + maybe_refreshes(rng, actor=receiver),
-            expect={
-                transmitter: {
-                    "selectedHandle": handle_for(receiver, handle_a, handle_b),
-                    "phase": "transmitting",
-                    "isJoined": True,
-                    "isTransmitting": True,
-                },
-                receiver: {
-                    "selectedHandle": handle_for(transmitter, handle_a, handle_b),
-                    "phase": "receiving",
-                    "isJoined": True,
-                },
-            },
+            expect=transmit_expect,
         )
     )
+
+    if post_transmit_perturbation == "sender_disconnect":
+        steps.append(
+            step(
+                "active transmitter disconnects while live",
+                [{"actor": transmitter, "type": "disconnect"}]
+                + both_refreshes()
+                + [
+                    {"actor": "a", "type": "reconcileSelectedSession"},
+                    {"actor": "b", "type": "reconcileSelectedSession"},
+                    {"actor": "a", "type": "captureDiagnostics", "delayMilliseconds": 500},
+                    {"actor": "b", "type": "captureDiagnostics", "delayMilliseconds": 500},
+                ],
+                expect={
+                    "a": {
+                        "selectedHandle": handle_b,
+                        "isJoined": False,
+                        "isTransmitting": False,
+                        "eventuallyNoInvariant": [
+                            "channel.active_transmit_sender_presence_drift",
+                            "channel.active_transmit_without_addressable_peer",
+                            "selected.live_projection_after_membership_exit",
+                        ],
+                    },
+                    "b": {
+                        "selectedHandle": handle_a,
+                        "isJoined": False,
+                        "isTransmitting": False,
+                        "eventuallyNoInvariant": [
+                            "channel.active_transmit_sender_presence_drift",
+                            "channel.active_transmit_without_addressable_peer",
+                            "selected.live_projection_after_membership_exit",
+                        ],
+                    },
+                },
+            )
+        )
+        return scenario_payload(name, base_url, handle_a, handle_b, device_id_a, device_id_b, steps)
+
+    if post_transmit_perturbation == "wake_token_revocation":
+        steps.append(
+            step(
+                "receiver wake token revocation clears addressability",
+                [{"actor": receiver, "type": "revokeEphemeralToken"}]
+                + maybe_refreshes(rng, actor=transmitter)
+                + [
+                    {"actor": transmitter, "type": "refreshChannelState", "delayMilliseconds": 500},
+                    {"actor": "a", "type": "captureDiagnostics", "delayMilliseconds": 800},
+                    {"actor": "b", "type": "captureDiagnostics", "delayMilliseconds": 800},
+                ],
+                expect={
+                    transmitter: {
+                        "selectedHandle": handle_for(receiver, handle_a, handle_b),
+                        "isJoined": True,
+                        "isTransmitting": False,
+                        "eventuallyNoInvariant": ["channel.active_transmit_without_addressable_peer"],
+                    },
+                    receiver: {
+                        "selectedHandle": handle_for(transmitter, handle_a, handle_b),
+                        "isJoined": True,
+                        "eventuallyNoInvariant": ["channel.active_transmit_without_addressable_peer"],
+                    },
+                },
+            )
+        )
+        return scenario_payload(name, base_url, handle_a, handle_b, device_id_a, device_id_b, steps)
+
     steps.append(
         step(
             f"{transmitter} ends transmitting",
@@ -495,6 +596,18 @@ def generate_scenario(
         )
     )
 
+    return scenario_payload(name, base_url, handle_a, handle_b, device_id_a, device_id_b, steps)
+
+
+def scenario_payload(
+    name: str,
+    base_url: str,
+    handle_a: str,
+    handle_b: str,
+    device_id_a: str,
+    device_id_b: str,
+    steps: list[dict[str, Any]],
+) -> dict[str, Any]:
     return {
         "name": name,
         "baseURL": base_url,

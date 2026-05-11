@@ -15,11 +15,12 @@ They sit one level above those proof loops: if TLC finds a counterexample, turn
 the abstract event trace into a checked-in simulator scenario and a repo-native
 regression.
 
-## Current Spec
+## Current Specs
 
 `TurboCommunication.tla` models the direct-channel communication kernel:
 
 - direct channel membership
+- request, decline, accept, and local join success/failure
 - joined/offline device presence
 - receiver audio readiness
 - token-backed wake addressability
@@ -35,10 +36,26 @@ product surface, and small traces are much easier to promote into
 duplicate delivery remains a finite model instead of an infinite queue-growth
 exercise.
 
+`TurboSessionGeneration.tla` models a narrower restart/session-generation
+kernel:
+
+- app session generation increments on restart
+- joined presence and active-channel facts carry generation evidence
+- receiver-ready facts carry generation evidence
+- active transmit requires a current-session joined sender
+- backend snapshots are only accepted when their generation and membership
+  evidence match the current app session
+
+This is deliberately separate from `TurboCommunication.tla`. Session generation
+is a high-risk protocol boundary, but mixing it into the full signal-delivery
+model made the state space too broad for the default check.
+
 ## Repo Mapping
 
 | TLA+ variable | Repo owner |
 | --- | --- |
+| `request` | backend invite/request relationship |
+| `localJoinIntent` | Swift pending local PTT join action |
 | `members` | `turbo.store.memberships` |
 | `presence` | `turbo.store.presence` |
 | `receiverReady` | `turbo.store.receiverAudioReadiness` |
@@ -49,6 +66,16 @@ exercise.
 | `knownTransmit` | Swift selected-session/backend snapshot projection |
 | `knownEpoch` | Swift selected-session/backend freshness projection |
 | `clientPhase` | Swift selected peer/session phase projection |
+
+`TurboSessionGeneration.tla` adds:
+
+| TLA+ variable | Repo owner |
+| --- | --- |
+| `sessionGeneration` | app/backend session identity and reconnect ownership |
+| `connected` | app websocket/session liveness abstraction |
+| `presenceGeneration` | backend/app evidence that presence belongs to the current app session |
+| `activeChannelGeneration` | backend/app evidence that active-channel projection belongs to the current app session |
+| `receiverReadyGeneration` | backend/app evidence that readiness belongs to the current app session |
 
 The spec intentionally abstracts over HTTP, Unison storage mechanics, SwiftUI,
 audio frames, PushToTalk system UI, and APNs internals.
@@ -63,6 +90,12 @@ just protocol-model-checks
 
 That validates this config, runs TLC, and runs the Swift property tests that
 cover the implementation-side projection and transport-fault rules.
+
+Run the focused session-generation model with:
+
+```sh
+just protocol-session-generation-model-check
+```
 
 Install or download `tla2tools.jar` if you want to run TLC directly, then run
 from this directory:
@@ -108,6 +141,13 @@ The first model checks:
 - a client can only project `transmitting` with local transmit evidence
 - a disconnected client cannot project `receiving` or `transmitting`
 
+The session-generation model checks:
+
+- joined presence must belong to the current app session and current membership
+- active channel must belong to the current app session and current membership
+- receiver readiness must belong to a current joined session
+- active transmit must be owned by a current joined sender
+
 These are deliberately conservative first-pass rules. Stronger convergence
 properties should be added after the safety model is stable.
 
@@ -137,14 +177,23 @@ invariant work.
 
 ## Last Verified
 
-Verified on 2026-05-10 with TLC 2.19:
+`TurboCommunication.tla` verified on 2026-05-10 with TLC 2.19:
 
 ```text
-12505583 states generated
-750841 distinct states found
+63332923 states generated
+3437005 distinct states found
 0 states left on queue
 No error has been found
 ```
 
 The same result is captured by `scripts/protocol_model_check.py` in
-`/tmp/turbo-protocol-model-checks-tlc/protocol-model-checks.json`.
+`/tmp/turbo-protocol-model-checks-accept-join-transmit/protocol-model-checks.json`.
+
+`TurboSessionGeneration.tla` verified on 2026-05-10 with TLC 2.19:
+
+```text
+9057 states generated
+892 distinct states found
+0 states left on queue
+No error has been found
+```

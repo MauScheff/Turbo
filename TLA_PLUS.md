@@ -39,7 +39,7 @@ decision in the repo's normal proof surfaces.
 
 ## Current Model
 
-The initial model lives in:
+The communication model lives in:
 
 - [`specs/tla/TurboCommunication.tla`](specs/tla/TurboCommunication.tla)
 - [`specs/tla/TurboCommunication.cfg`](specs/tla/TurboCommunication.cfg)
@@ -48,6 +48,7 @@ The initial model lives in:
 It models the direct-channel communication kernel:
 
 - direct channel membership
+- request, decline, accept, and local join success/failure
 - joined/offline presence
 - receiver audio readiness
 - token-backed wake addressability
@@ -58,6 +59,16 @@ It models the direct-channel communication kernel:
 It intentionally abstracts over audio frames, SwiftUI, HTTP serialization,
 Unison storage mechanics, PushToTalk system UI, and APNs internals.
 
+The restart/session-generation model lives in:
+
+- [`specs/tla/TurboSessionGeneration.tla`](specs/tla/TurboSessionGeneration.tla)
+- [`specs/tla/TurboSessionGeneration.cfg`](specs/tla/TurboSessionGeneration.cfg)
+
+It models app session generations, current-session presence, active-channel
+projection, receiver readiness, active transmit ownership, and guarded backend
+snapshot replay. It is intentionally separate from the full communication model
+so the default communication check stays tractable.
+
 ## Run It
 
 Use the repo harness when you want both the model check and the Swift
@@ -65,6 +76,12 @@ implementation-side property tests:
 
 ```sh
 just protocol-model-checks
+```
+
+Run the focused session-generation model without Swift property tests:
+
+```sh
+just protocol-session-generation-model-check
 ```
 
 The recipe assumes `tla2tools.jar` is at `/tmp/tla2tools.jar`. If it lives

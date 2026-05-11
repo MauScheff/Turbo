@@ -38,6 +38,8 @@
 	<array>
 		<string>INStartCallIntent</string>
 	</array>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>TurboBackendBaseURL</key>
 	<string>https://beepbeep.to</string>
 	<key>TurboDevUserHandle</key>

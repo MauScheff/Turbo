@@ -317,6 +317,10 @@ enum SelectedPeerReducer {
             nextState.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest = true
         }
         if shouldClearRequesterAutoJoinShortcut(state: nextState) {
+            if nextState.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest,
+               let contactID = nextState.selection?.contactID {
+                nextState.interruptedConnectionAttemptContactID = contactID
+            }
             nextState.requesterAutoJoinOnPeerAcceptanceArmed = false
             nextState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = false
             nextState.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest = false
@@ -514,11 +518,10 @@ enum SelectedPeerReducer {
         }
 
         switch state.selectedPeerState.phase {
-        case .idle, .requested, .incomingRequest, .peerReady, .wakeReady, .ready,
-             .startingTransmit, .transmitting, .receiving, .blockedByOtherSession,
+        case .wakeReady, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession,
              .systemMismatch:
             state.interruptedConnectionAttemptContactID = nil
-        case .waitingForPeer, .localJoinFailed:
+        case .idle, .requested, .incomingRequest, .peerReady, .waitingForPeer, .localJoinFailed:
             break
         }
     }
@@ -577,9 +580,7 @@ enum SelectedPeerReducer {
             guard channel.membership == .absent else { return false }
             if state.requesterAutoJoinOnPeerAcceptanceArmed,
                !state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight {
-                // Acceptance can briefly project as relationship=none with idle channel
-                // before peer readiness appears; keep the requester latch through that gap.
-                return false
+                return state.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest
             }
         } else if state.requesterAutoJoinOnPeerAcceptanceArmed,
                   !state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight,
@@ -700,6 +701,9 @@ enum SelectedPeerReducer {
         guard !state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight else { return false }
         guard state.relationship.isOutgoingRequest else { return false }
         guard state.selection != nil else { return false }
+        if state.interruptedConnectionAttemptContactID == state.selection?.contactID {
+            return false
+        }
         guard state.pendingAction.pendingConnectContactID == nil else { return false }
         guard state.pendingAction.pendingJoinContactID == nil else { return false }
         guard !state.pendingConnectAcceptedIncomingRequest else { return false }
@@ -732,6 +736,9 @@ enum SelectedPeerReducer {
         guard state.requesterAutoJoinOnPeerAcceptanceEnabled else { return false }
         guard state.requesterAutoJoinOnPeerAcceptanceArmed
                 || state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight else { return false }
+        if state.interruptedConnectionAttemptContactID == state.selection?.contactID {
+            return false
+        }
         if state.requesterAutoJoinOnPeerAcceptanceArmed {
             guard state.pendingAction.pendingConnectContactID == nil else { return false }
             guard state.pendingAction.pendingJoinContactID == nil else { return false }
@@ -824,6 +831,9 @@ final class SelectedPeerCoordinator {
         event: SelectedPeerEvent,
         transition: SelectedPeerTransition
     ) {
+        guard transition.state != previousState || !transition.effects.isEmpty else {
+            return
+        }
         transitionReporter?(
             ReducerTransitionReport.make(
                 reducerName: "selected-peer-session",

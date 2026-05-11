@@ -4415,7 +4415,8 @@ extension PTTViewModel {
 
             if let self {
                 let directTransport = await MainActor.run { () -> DirectQuicProbeController? in
-                    guard self.shouldUseDirectQuicAudioTransport(for: target.contactID) else {
+                    guard !TurboMediaRelayDebugOverride.isForced(),
+                          self.shouldUseDirectQuicAudioTransport(for: target.contactID) else {
                         return nil
                     }
                     return self.mediaRuntime.directQuicProbeController
@@ -4437,8 +4438,32 @@ extension PTTViewModel {
                                 ]
                             )
                         }
-                        try await relaySend()
+                    }
+                }
+
+                if let relayClient = await self.mediaRelayClientForAudioSend(target: target) {
+                    do {
+                        try await relayClient.sendAudioPayload(transportPayload)
                         return
+                    } catch {
+                        await MainActor.run {
+                            self.diagnostics.record(
+                                .media,
+                                level: .error,
+                                message: "Media relay audio send failed; falling back to WebSocket relay",
+                                metadata: [
+                                    "contactId": target.contactID.uuidString,
+                                    "channelId": target.channelID,
+                                    "error": error.localizedDescription,
+                                ]
+                            )
+                            let key = MediaRelayConnectionKey(
+                                sessionID: target.channelID,
+                                localDeviceID: fromDeviceID,
+                                peerDeviceID: target.deviceID
+                            )
+                            self.mediaRuntime.clearMediaRelayClient(matching: key)
+                        }
                     }
                 }
             }
@@ -4454,10 +4479,252 @@ extension PTTViewModel {
                 "contactId": target.contactID.uuidString,
                 "channelId": target.channelID,
                 "deviceId": target.deviceID,
-                "transport": shouldUseDirectQuicAudioTransport(for: target.contactID) ? "direct-quic" : "relay-websocket",
+                "transport": configuredOutgoingAudioTransportLabel(for: target.contactID),
                 "directQuicActive": String(shouldUseDirectQuicTransport(for: target.contactID)),
+                "mediaRelayEnabled": String(TurboMediaRelayDebugOverride.isEnabled()),
+                "mediaRelayForced": String(TurboMediaRelayDebugOverride.isForced()),
+                "mediaRelayConfigured": String(TurboMediaRelayDebugOverride.config()?.isConfigured == true),
                 "selection": "dynamic",
             ]
+        )
+    }
+
+    func configuredOutgoingAudioTransportLabel(for contactID: UUID) -> String {
+        if TurboMediaRelayDebugOverride.isForced() {
+            return "media-relay-forced"
+        }
+        if shouldUseDirectQuicAudioTransport(for: contactID) {
+            return "direct-quic"
+        }
+        if TurboMediaRelayDebugOverride.isEnabled() {
+            return "media-relay-standby"
+        }
+        return "relay-websocket"
+    }
+
+    func mediaRelayClientForAudioSend(target: TransmitTarget) async -> TurboMediaRelayClient? {
+        await mediaRelayClientIfEnabled(
+            contactID: target.contactID,
+            channelID: target.channelID,
+            peerDeviceID: target.deviceID,
+            missingConfigMessage: "Media relay skipped because relay config is missing",
+            connectingMessage: "Connecting media relay",
+            selectedMessage: "Media relay selected",
+            failureMessage: "Media relay connection failed; falling back to WebSocket relay",
+            fromUserIDForIncoming: { target.userID }
+        )
+    }
+
+    func connectMediaRelayForReceiveIfNeeded(
+        contactID: UUID,
+        channelID: String,
+        peerDeviceID: String
+    ) async {
+        _ = await mediaRelayClientIfEnabled(
+            contactID: contactID,
+            channelID: channelID,
+            peerDeviceID: peerDeviceID,
+            missingConfigMessage: "Media relay receive prejoin skipped because relay config is missing",
+            connectingMessage: "Prejoining media relay for receive",
+            selectedMessage: "Media relay receive prejoin selected",
+            failureMessage: "Media relay receive prejoin failed",
+            fromUserIDForIncoming: { [weak self] in
+                await MainActor.run {
+                    self?.contacts.first(where: { $0.id == contactID })?.remoteUserId ?? ""
+                }
+            }
+        )
+    }
+
+    func mediaRelayClientIfEnabled(
+        contactID: UUID,
+        channelID: String,
+        peerDeviceID: String,
+        missingConfigMessage: String,
+        connectingMessage: String,
+        selectedMessage: String,
+        failureMessage: String,
+        fromUserIDForIncoming: @escaping @Sendable () async -> String
+    ) async -> TurboMediaRelayClient? {
+        let shouldAttempt = await MainActor.run {
+            TurboMediaRelayDebugOverride.isEnabled() || TurboMediaRelayDebugOverride.isForced()
+        }
+        guard shouldAttempt else { return nil }
+        guard let config = await MainActor.run(body: { TurboMediaRelayDebugOverride.config() }) else {
+            await MainActor.run {
+                diagnostics.record(
+                    .media,
+                    level: .error,
+                    message: missingConfigMessage,
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelID,
+                        "peerDeviceId": peerDeviceID,
+                    ]
+                )
+            }
+            return nil
+        }
+        let localDeviceId = await MainActor.run { backendServices?.deviceID ?? "" }
+        guard !localDeviceId.isEmpty else {
+            await MainActor.run {
+                diagnostics.record(
+                    .media,
+                    level: .error,
+                    message: "Media relay skipped because local device id is missing",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelID,
+                        "peerDeviceId": peerDeviceID,
+                    ]
+                )
+            }
+            return nil
+        }
+        let key = MediaRelayConnectionKey(
+            sessionID: channelID,
+            localDeviceID: localDeviceId,
+            peerDeviceID: peerDeviceID
+        )
+        let start = await MainActor.run {
+            mediaRuntime.mediaRelayConnectionStart(for: key)
+        }
+        switch start {
+        case .existingClient(let client):
+            return client
+        case .existingAttempt(let attempt):
+            return await attempt.wait()
+        case .newAttempt(let attempt):
+            return await connectNewMediaRelayClient(
+                attempt: attempt,
+                config: config,
+                contactID: contactID,
+                channelID: channelID,
+                peerDeviceID: peerDeviceID,
+                localDeviceID: localDeviceId,
+                connectingMessage: connectingMessage,
+                selectedMessage: selectedMessage,
+                failureMessage: failureMessage,
+                fromUserIDForIncoming: fromUserIDForIncoming
+            )
+        }
+    }
+
+    func connectNewMediaRelayClient(
+        attempt: MediaRelayConnectionAttempt,
+        config: TurboMediaRelayClientConfig,
+        contactID: UUID,
+        channelID: String,
+        peerDeviceID: String,
+        localDeviceID: String,
+        connectingMessage: String,
+        selectedMessage: String,
+        failureMessage: String,
+        fromUserIDForIncoming: @escaping @Sendable () async -> String
+    ) async -> TurboMediaRelayClient? {
+        let client = TurboMediaRelayClient(
+            config: config,
+            sessionId: channelID,
+            localDeviceId: localDeviceID,
+            peerDeviceId: peerDeviceID,
+            onIncomingAudioPayload: { [weak self] payload in
+                let fromUserID = await fromUserIDForIncoming()
+                await self?.handleIncomingAudioPayload(
+                    payload,
+                    channelID: channelID,
+                    fromUserID: fromUserID,
+                    fromDeviceID: peerDeviceID,
+                    contactID: contactID,
+                    incomingAudioTransport: .directQuic
+                )
+            },
+            reportEvent: { [weak self] message, metadata in
+                await MainActor.run {
+                    self?.diagnostics.record(.media, message: message, metadata: metadata)
+                }
+            }
+        )
+        await MainActor.run {
+            diagnostics.record(
+                .media,
+                message: connectingMessage,
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "peerDeviceId": peerDeviceID,
+                    "host": config.host,
+                    "quicPort": String(config.quicPort),
+                    "tcpPort": String(config.tcpPort),
+                    "forced": String(TurboMediaRelayDebugOverride.isForced()),
+                ]
+            )
+        }
+        do {
+            let transport = try await client.connect()
+            let accepted = await MainActor.run {
+                mediaRuntime.finishMediaRelayConnectionAttempt(attempt, client: client)
+            }
+            guard accepted else { return nil }
+            await MainActor.run {
+                mediaRuntime.updateTransportPathState(.fastRelay)
+                diagnostics.record(
+                    .media,
+                    message: selectedMessage,
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelID,
+                        "peerDeviceId": peerDeviceID,
+                        "transport": transport.rawValue,
+                    ]
+                )
+            }
+            return client
+        } catch {
+            await MainActor.run {
+                _ = mediaRuntime.finishMediaRelayConnectionAttempt(attempt, client: nil)
+                diagnostics.record(
+                    .media,
+                    level: .error,
+                    message: failureMessage,
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelID,
+                        "peerDeviceId": peerDeviceID,
+                        "error": error.localizedDescription,
+                    ]
+                )
+            }
+            return nil
+        }
+    }
+
+    func prejoinMediaRelayForReadyChannelIfNeeded(
+        contactID: UUID,
+        channelReadiness: TurboChannelReadinessResponse?
+    ) async {
+        let shouldAttempt = await MainActor.run {
+            TurboMediaRelayDebugOverride.isEnabled() || TurboMediaRelayDebugOverride.isForced()
+        }
+        guard shouldAttempt else { return }
+        guard let channelReadiness,
+              let peerDeviceID = channelReadiness.peerTargetDeviceId,
+              !peerDeviceID.isEmpty else {
+            await MainActor.run {
+                diagnostics.record(
+                    .media,
+                    message: "Media relay ready-channel prejoin skipped because peer target device is missing",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelReadiness?.channelId ?? "none",
+                    ]
+                )
+            }
+            return
+        }
+        await connectMediaRelayForReceiveIfNeeded(
+            contactID: contactID,
+            channelID: channelReadiness.channelId,
+            peerDeviceID: peerDeviceID
         )
     }
 

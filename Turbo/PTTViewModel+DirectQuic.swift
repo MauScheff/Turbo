@@ -30,6 +30,7 @@ extension PTTViewModel {
     }
 
     func shouldUseDirectQuicTransport(for contactID: UUID) -> Bool {
+        guard !TurboMediaRelayDebugOverride.isForced() else { return false }
         guard mediaRuntime.directQuicProbeController != nil else { return false }
         return mediaRuntime.directQuicUpgrade.attempt(for: contactID)?.isDirectActive == true
     }
@@ -561,6 +562,9 @@ extension PTTViewModel {
         if isDirectPathRelayOnlyForced {
             return "relay-only-forced"
         }
+        if TurboMediaRelayDebugOverride.isForced() {
+            return "media-relay-forced"
+        }
         if isDirectQuicAutoUpgradeDisabledForDebug {
             return "auto-upgrade-disabled"
         }
@@ -632,6 +636,9 @@ extension PTTViewModel {
     func directQuicFirstTalkWarmupBlockReason(for contactID: UUID) -> String? {
         if isDirectPathRelayOnlyForced {
             return "relay-only-forced"
+        }
+        if TurboMediaRelayDebugOverride.isForced() {
+            return "media-relay-forced"
         }
         if isDirectQuicAutoUpgradeDisabledForDebug {
             return "auto-upgrade-disabled"
@@ -1036,6 +1043,90 @@ extension PTTViewModel {
             ? "Direct path auto-upgrade disabled"
             : "Direct path auto-upgrade enabled"
         captureDiagnosticsState("direct-quic:debug-auto-upgrade")
+    }
+
+    func setMediaRelayEnabledForDebug(_ isEnabled: Bool) {
+        let previousValue = TurboMediaRelayDebugOverride.isEnabled()
+        TurboMediaRelayDebugOverride.setEnabled(isEnabled)
+
+        diagnostics.record(
+            .media,
+            message: "Media relay override updated from diagnostics",
+            metadata: [
+                "selectedContact": selectedContact?.handle ?? "none",
+                "previousValue": String(previousValue),
+                "newValue": String(isEnabled),
+                "configured": String(TurboMediaRelayDebugOverride.config()?.isConfigured == true),
+            ]
+        )
+
+        if !isEnabled {
+            TurboMediaRelayDebugOverride.setForced(false)
+            mediaRuntime.replaceMediaRelayClient(with: nil)
+        }
+
+        statusMessage = isEnabled ? "Media relay enabled" : "Media relay disabled"
+        captureDiagnosticsState("media-relay:debug-enabled")
+    }
+
+    func setMediaRelayForcedForDebug(_ isForced: Bool) {
+        let previousValue = TurboMediaRelayDebugOverride.isForced()
+        TurboMediaRelayDebugOverride.setForced(isForced)
+        if isForced {
+            TurboMediaRelayDebugOverride.setEnabled(true)
+            mediaRuntime.updateTransportPathState(.relay)
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Media relay force override updated from diagnostics",
+            metadata: [
+                "selectedContact": selectedContact?.handle ?? "none",
+                "previousValue": String(previousValue),
+                "newValue": String(isForced),
+                "configured": String(TurboMediaRelayDebugOverride.config()?.isConfigured == true),
+            ]
+        )
+
+        if isForced {
+            Task {
+                await cancelSelectedDirectQuicAttemptForDebug(reason: "media-relay-forced")
+            }
+        } else {
+            mediaRuntime.replaceMediaRelayClient(with: nil)
+        }
+
+        statusMessage = isForced ? "Media relay forced" : "Media relay force disabled"
+        captureDiagnosticsState("media-relay:debug-forced")
+    }
+
+    func setMediaRelayConfigForDebug(
+        host: String,
+        quicPort: UInt16,
+        tcpPort: UInt16,
+        token: String
+    ) {
+        let sanitizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sanitizedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        TurboMediaRelayDebugOverride.setConfig(
+            host: sanitizedHost,
+            quicPort: quicPort,
+            tcpPort: tcpPort,
+            token: sanitizedToken
+        )
+        mediaRuntime.replaceMediaRelayClient(with: nil)
+        diagnostics.record(
+            .media,
+            message: "Media relay config updated from diagnostics",
+            metadata: [
+                "host": sanitizedHost,
+                "quicPort": String(quicPort),
+                "tcpPort": String(tcpPort),
+                "hasToken": String(!sanitizedToken.isEmpty),
+            ]
+        )
+        statusMessage = "Media relay config saved"
+        captureDiagnosticsState("media-relay:debug-config")
     }
 
     func setDirectQuicTransmitStartupPolicyForDebug(
@@ -2110,6 +2201,7 @@ extension PTTViewModel {
     ) async {
         let isUpgradeAllowed =
             !isDirectPathRelayOnlyForced
+            && !TurboMediaRelayDebugOverride.isForced()
             && (
                 backendAdvertisesDirectQuicUpgrade
                     || allowDebugBypassWithoutBackendAdvertisement

@@ -43,6 +43,9 @@ deploy-verified base="https://beepbeep.to" caller="@quinn" callee="@sasha" itera
   just deploy
   just postdeploy-check "{{base}}" "{{caller}}" "{{callee}}" "{{iterations}}" "{{output_dir}}" "{{insecure}}"
 
+testflight:
+  python3 scripts/start_testflight_release.py
+
 route-probe:
   .venv/bin/python scripts/route_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
 
@@ -281,6 +284,14 @@ protocol-model-checks tla_jar="/tmp/tla2tools.jar" output_dir="/tmp/turbo-protoc
   python3 scripts/protocol_model_check.py \
     --tla-jar "{{tla_jar}}" \
     --output-dir "{{output_dir}}"
+
+protocol-session-generation-model-check tla_jar="/tmp/tla2tools.jar" output_dir="/tmp/turbo-protocol-session-generation-model-check":
+  python3 scripts/protocol_model_check.py \
+    --module TurboSessionGeneration \
+    --config TurboSessionGeneration.cfg \
+    --tla-jar "{{tla_jar}}" \
+    --output-dir "{{output_dir}}" \
+    --skip-swift-properties
 
 swift-test-target name:
   python3 scripts/run_targeted_swift_tests.py --name "{{name}}"

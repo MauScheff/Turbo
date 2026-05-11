@@ -21,18 +21,34 @@ DEFAULT_SWIFT_PROPERTY_TESTS = (
     "conversationProjectionProperties",
     "transportFaultPlannerProperties",
 )
-REQUIRED_TLA_INVARIANTS = (
+TURBO_COMMUNICATION_REQUIRED_TLA_INVARIANTS = (
     "TypeOK",
     "DirectChannelCardinality",
+    "RequestEndpointsAreValid",
+    "PendingRequestHasNoMembership",
+    "LocalJoinIntentRequiresMembership",
     "WakeTokenRequiresMembership",
     "ReceiverReadyRequiresJoinedPresence",
     "ActiveTransmitterIsJoinedMember",
     "ActiveTransmitHasAddressablePeer",
+    "BeginTransmitRequiresAcceptedOrExplicitMembership",
+    "ActiveTransmitRequiresBothDirectMembers",
     "ReceivingHasLocalTransmitEvidence",
     "TransmittingHasLocalTransmitEvidence",
     "DisconnectedClientIsNotLive",
     "NotJoinedProjectionRequiresNonMembership",
 )
+TURBO_SESSION_GENERATION_REQUIRED_TLA_INVARIANTS = (
+    "TypeOK",
+    "JoinedPresenceUsesCurrentSession",
+    "ActiveChannelUsesCurrentSession",
+    "ReceiverReadyUsesCurrentSession",
+    "ActiveTransmitterUsesCurrentSession",
+)
+REQUIRED_TLA_INVARIANTS_BY_MODULE = {
+    "TurboCommunication": TURBO_COMMUNICATION_REQUIRED_TLA_INVARIANTS,
+    "TurboSessionGeneration": TURBO_SESSION_GENERATION_REQUIRED_TLA_INVARIANTS,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,7 +135,8 @@ def validate_tla_config(spec_path: Path, config_path: Path) -> dict[str, Any]:
     defined_operators = set(re.findall(r"^([A-Za-z][A-Za-z0-9_]*)\s*==", spec_text, re.MULTILINE))
     configured_invariants = parse_configured_invariants(config_text)
     missing_definitions = sorted(name for name in configured_invariants if name not in defined_operators)
-    missing_required = sorted(name for name in REQUIRED_TLA_INVARIANTS if name not in configured_invariants)
+    required_invariants = REQUIRED_TLA_INVARIANTS_BY_MODULE.get(spec_path.stem, ())
+    missing_required = sorted(name for name in required_invariants if name not in configured_invariants)
     has_specification = "SPECIFICATION Spec" in config_text and "Spec ==" in spec_text
     ok = not missing_definitions and not missing_required and has_specification
     return {

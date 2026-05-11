@@ -27,9 +27,17 @@ struct TurboDiagnosticsView: View {
     let onSetRelayOnlyForced: (Bool) -> Void
     let onSetDirectQuicAutoUpgradeDisabled: (Bool) -> Void
     let onSetDirectQuicTransmitStartupPolicy: (DirectQuicTransmitStartupPolicy) -> Void
+    let onSetMediaRelayEnabled: (Bool) -> Void
+    let onSetMediaRelayForced: (Bool) -> Void
+    let onSetMediaRelayConfig: (String, UInt16, UInt16, String) -> Void
     let onForceDirectQuicProbe: () -> Void
     let onClearDirectQuicRetryBackoff: () -> Void
     let onCancelDirectQuicAttempt: () -> Void
+
+    @State private var draftMediaRelayHost: String = ""
+    @State private var draftMediaRelayQuicPort: String = "9443"
+    @State private var draftMediaRelayTcpPort: String = "9444"
+    @State private var draftMediaRelayToken: String = ""
 
     var body: some View {
         List {
@@ -140,6 +148,15 @@ struct TurboDiagnosticsView: View {
                     diagnosticsRow("Path state", directQuic.transportPathState.label)
                     diagnosticsRow("Relay-only override", directQuic.relayOnlyOverride ? "on" : "off")
                     diagnosticsRow("Auto-upgrade", directQuic.autoUpgradeDisabled ? "off" : "on")
+                    diagnosticsRow("Media relay enabled", directQuic.mediaRelayEnabled ? "yes" : "no")
+                    diagnosticsRow("Media relay forced", directQuic.mediaRelayForced ? "yes" : "no")
+                    diagnosticsRow("Media relay configured", directQuic.mediaRelayConfigured ? "yes" : "no")
+                    diagnosticsRow("Media relay active", directQuic.mediaRelayActive ? "yes" : "no")
+                    diagnosticsRow("Media relay host", directQuic.mediaRelayHost ?? "none")
+                    diagnosticsRow(
+                        "Media relay ports",
+                        "\(directQuic.mediaRelayQuicPort.map(String.init) ?? "none") / \(directQuic.mediaRelayTcpPort.map(String.init) ?? "none")"
+                    )
                     diagnosticsRow("Backend advertised", directQuic.backendAdvertisesUpgrade ? "yes" : "no")
                     diagnosticsRow("Effective upgrade", directQuic.effectiveUpgradeEnabled ? "yes" : "no")
                     diagnosticsRow("Probe controller", directQuic.probeControllerReady ? "ready" : "idle")
@@ -194,6 +211,57 @@ struct TurboDiagnosticsView: View {
                         Text("Speculative foreground").tag(DirectQuicTransmitStartupPolicy.speculativeForeground)
                     }
                     .disabled(isRunningDirectQuicDebugAction)
+
+                    Toggle(
+                        "Enable media relay",
+                        isOn: Binding(
+                            get: { directQuic.mediaRelayEnabled },
+                            set: onSetMediaRelayEnabled
+                        )
+                    )
+                    .disabled(isRunningDirectQuicDebugAction)
+
+                    Toggle(
+                        "Force media relay",
+                        isOn: Binding(
+                            get: { directQuic.mediaRelayForced },
+                            set: onSetMediaRelayForced
+                        )
+                    )
+                    .disabled(isRunningDirectQuicDebugAction || !directQuic.mediaRelayEnabled)
+
+                    TextField("Relay host", text: $draftMediaRelayHost)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .onAppear {
+                            if draftMediaRelayHost.isEmpty {
+                                draftMediaRelayHost = directQuic.mediaRelayHost ?? "relay.beepbeep.to"
+                            }
+                            draftMediaRelayQuicPort = directQuic.mediaRelayQuicPort.map(String.init) ?? "9443"
+                            draftMediaRelayTcpPort = directQuic.mediaRelayTcpPort.map(String.init) ?? "9444"
+                        }
+                    HStack {
+                        TextField("QUIC port", text: $draftMediaRelayQuicPort)
+                            .keyboardType(.numberPad)
+                        TextField("TCP port", text: $draftMediaRelayTcpPort)
+                            .keyboardType(.numberPad)
+                    }
+                    SecureField("Relay token optional", text: $draftMediaRelayToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    Button {
+                        let quicPort = UInt16(draftMediaRelayQuicPort) ?? 9443
+                        let tcpPort = UInt16(draftMediaRelayTcpPort) ?? 9444
+                        onSetMediaRelayConfig(
+                            draftMediaRelayHost.isEmpty ? "relay.beepbeep.to" : draftMediaRelayHost,
+                            quicPort,
+                            tcpPort,
+                            draftMediaRelayToken
+                        )
+                    } label: {
+                        Label("Save media relay config", systemImage: "square.and.arrow.down")
+                    }
 
                     Text("PKCS#12 controls are a developer fallback. Production Direct QUIC uses the generated local identity and backend fingerprint registration.")
                         .font(.caption)
@@ -494,6 +562,9 @@ struct TurboDiagnosticsSheet: View {
     let onSetRelayOnlyForced: (Bool) -> Void
     let onSetDirectQuicAutoUpgradeDisabled: (Bool) -> Void
     let onSetDirectQuicTransmitStartupPolicy: (DirectQuicTransmitStartupPolicy) -> Void
+    let onSetMediaRelayEnabled: (Bool) -> Void
+    let onSetMediaRelayForced: (Bool) -> Void
+    let onSetMediaRelayConfig: (String, UInt16, UInt16, String) -> Void
     let onForceDirectQuicProbe: () -> Void
     let onClearDirectQuicRetryBackoff: () -> Void
     let onCancelDirectQuicAttempt: () -> Void
@@ -532,6 +603,9 @@ struct TurboDiagnosticsSheet: View {
                 onSetRelayOnlyForced: onSetRelayOnlyForced,
                 onSetDirectQuicAutoUpgradeDisabled: onSetDirectQuicAutoUpgradeDisabled,
                 onSetDirectQuicTransmitStartupPolicy: onSetDirectQuicTransmitStartupPolicy,
+                onSetMediaRelayEnabled: onSetMediaRelayEnabled,
+                onSetMediaRelayForced: onSetMediaRelayForced,
+                onSetMediaRelayConfig: onSetMediaRelayConfig,
                 onForceDirectQuicProbe: onForceDirectQuicProbe,
                 onClearDirectQuicRetryBackoff: onClearDirectQuicRetryBackoff,
                 onCancelDirectQuicAttempt: onCancelDirectQuicAttempt

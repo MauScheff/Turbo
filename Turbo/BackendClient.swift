@@ -336,6 +336,14 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         )
     }
 
+    func revokeEphemeralToken(channelId: String) async throws -> TurboRevokeTokenResponse {
+        try await request(
+            path: "/v1/channels/\(channelId)/ephemeral-token/revoke",
+            method: "POST",
+            body: TurboDeviceOnlyRequest(deviceId: config.deviceID)
+        )
+    }
+
     func beginTransmit(channelId: String) async throws -> TurboBeginTransmitResponse {
         try await request(
             path: "/v1/channels/\(channelId)/begin-transmit",
@@ -740,6 +748,10 @@ private struct TurboChannelDeviceRequest: Encodable {
         self.deviceId = deviceId
         self.transmitId = transmitId
     }
+}
+
+private struct TurboDeviceOnlyRequest: Encodable {
+    let deviceId: String
 }
 
 private struct TurboEphemeralTokenRequest: Encodable {

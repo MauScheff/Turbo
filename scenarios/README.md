@@ -34,6 +34,10 @@ For the repo-wide workflow and architectural intent behind these scenarios, read
   - one ready peer backgrounds and publishes `receiver-not-ready(app-background-media-closed)`; the foreground peer must degrade to `wakeReady`, and explicit refresh/reconcile must preserve that wake-capable state instead of regressing to `waitingForPeer`; asserts the background receiver-readiness invariant stays absent
 - `background_wake_transmit_does_not_project_receiver`
   - local-only wake-target regression: a foreground peer starts transmit while the receiver is background/wake-capable; the receiver must not directly project `receiving` without joined/session evidence, and strict diagnostics must keep `selected.receiving_without_joined_session` absent
+- `wake_token_revocation_clears_active_transmit`
+  - local-only wake-target regression: a foreground sender begins transmit through a background receiver's wake token, then token revocation must clear backend active transmit instead of leaving an unaddressable active sender
+- `active_transmit_sender_disconnect_clears_transmit`
+  - local-only membership-loss regression: a sender disconnects while actively transmitting, and backend/client projections must clear transmit instead of leaving a live sender after membership exit
 - `peer_disconnect_before_second_join`
   - recipient accepts and joins first, then disconnects before the requester finishes the second join; both sides must converge back to idle without a stuck half-session
 - `request_accept_ready`
@@ -153,6 +157,8 @@ The DSL now also supports transport-fault actions at the backend adapter boundar
   - records an explicit diagnostics state capture and re-runs derived invariant checks, including time-sensitive checks whose fields may not have changed
 - `injectStaleTransmitStopCompletion`
   - test-only reducer injection used by expected-invariant scenarios; it constructs a newer active transmit target, delivers an older stop completion, and requires the reducer/diagnostics path to report `transmit.stale_end_overrides_newer_epoch`
+- `revokeEphemeralToken`
+  - test/local backend action that revokes the selected channel's ephemeral PTT token for the actor's current device and refreshes selected channel state
 
 These actions are intentionally typed and limited. If a route or signal kind is not part of the checked-in contract, the scenario runner fails instead of accepting arbitrary strings.
 
@@ -190,6 +196,8 @@ Compact reference:
   - no extra fields; records a diagnostics capture and re-runs derived invariant checks
 - `injectStaleTransmitStopCompletion`
   - no extra fields; test-only reducer injection for the stale stop completion invariant
+- `revokeEphemeralToken`
+  - no extra fields; requires a selected backend channel
 - `noInvariantViolations`
   - expectation field; fails the step if an unexpected invariant ID is emitted
     after the step starts

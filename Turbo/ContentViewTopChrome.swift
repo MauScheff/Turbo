@@ -165,6 +165,12 @@ struct TurboTransportPathInfoModal: View {
                     tint: .orange,
                     description: "Audio passes through BeepBeep when direct is not available."
                 )
+
+                TurboTransportPathInfoRow(
+                    state: .fastRelay,
+                    tint: .teal,
+                    description: "Low-latency relayed audio through BeepBeep when direct is blocked."
+                )
             }
 
             Text("Your audio is end-to-end encrypted on both paths, so not even BeepBeep can listen. We use the fastest connection available automatically.")

@@ -44,6 +44,20 @@
       "status": "active"
     },
     {
+      "id": "channel.active_transmit_without_addressable_peer",
+      "scope": "backend",
+      "owner": "backend",
+      "authoritativeSeam": "turbo.service.channels active transmit projection",
+      "predicate": "Backend active transmit exists while the selected peer is neither joined nor wake-addressable.",
+      "evidenceFields": ["backendChannelStatus", "backendReadiness", "backendPeerJoined", "remoteWakeCapabilityKind", "backendActiveTransmitterUserId", "backendActiveTransmitId"],
+      "detectors": ["Turbo/AppDiagnostics.swift", "scripts/merged_diagnostics.py"],
+      "regressions": ["TurboTests/TurboTests.swift", "specs/tla/TurboCommunication.tla"],
+      "repairPolicy": "backend repair",
+      "repairAction": "Membership loss, token loss, and local join failure must clear active transmit when they remove the only addressable receiver.",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
       "id": "channel.connecting_without_membership_or_request",
       "scope": "backend",
       "owner": "backend",
@@ -332,6 +346,20 @@
       "regressions": ["TurboTests/TurboTests.swift"],
       "repairPolicy": "app repair",
       "repairAction": "completeAbsentBackendMembershipRecoveryIfLocalSessionEnded clears stale pending join/leave state when backend membership is already absent.",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
+      "id": "selected.backend_idle_without_local_evidence_still_connecting",
+      "scope": "convergence",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/AppDiagnostics.swift",
+      "predicate": "Backend is idle or absent, no local session or pending action exists, and requester auto-join is not armed while selected peer still projects a connecting pending-join state.",
+      "evidenceFields": ["selectedPeerPhase", "selectedPeerPhaseDetail", "selectedPeerAutoJoinArmed", "pendingAction", "isJoined", "systemSession", "backendChannelStatus", "backendSelfJoined", "backendPeerJoined"],
+      "detectors": ["Turbo/AppDiagnostics.swift"],
+      "regressions": ["TurboTests/TurboTests.swift", "scenarios/request_decline.json"],
+      "repairPolicy": "app repair",
+      "repairAction": "SelectedPeerReducer clears requester auto-join when backend request relationship and membership are absent, then preserves interruption evidence to block stale requester auto-join rearming.",
       "alertPolicy": "diagnostics",
       "status": "active"
     },

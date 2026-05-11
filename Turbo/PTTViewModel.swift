@@ -666,7 +666,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     var effectiveDirectQuicUpgradeEnabled: Bool {
-        backendAdvertisesDirectQuicUpgrade && !isDirectPathRelayOnlyForced
+        backendAdvertisesDirectQuicUpgrade
+            && !isDirectPathRelayOnlyForced
+            && !TurboMediaRelayDebugOverride.isForced()
     }
 
     var selectedDirectQuicDiagnosticsSummary: DirectQuicDiagnosticsSummary {
@@ -678,6 +680,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             mediaRuntime.directQuicUpgrade.retryBackoffRemaining(for: $0).map { Int($0 * 1_000) }
         }
         let directQuicPolicy = backendServices?.directQuicPolicy
+        let mediaRelayConfig = TurboMediaRelayDebugOverride.config()
         let localDeviceID = backendServices?.deviceID
         let peerDeviceID = attempt?.peerDeviceID ?? contactID.flatMap { directQuicPeerDeviceID(for: $0) }
         let identityStatus = DirectQuicIdentityConfiguration.status()
@@ -710,6 +713,13 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             relayOnlyOverride: isDirectPathRelayOnlyForced,
             autoUpgradeDisabled: isDirectQuicAutoUpgradeDisabledForDebug,
             transmitStartupPolicy: directQuicTransmitStartupPolicy,
+            mediaRelayEnabled: TurboMediaRelayDebugOverride.isEnabled(),
+            mediaRelayForced: TurboMediaRelayDebugOverride.isForced(),
+            mediaRelayConfigured: mediaRelayConfig?.isConfigured == true,
+            mediaRelayHost: mediaRelayConfig?.host,
+            mediaRelayQuicPort: mediaRelayConfig.map { Int($0.quicPort) },
+            mediaRelayTcpPort: mediaRelayConfig.map { Int($0.tcpPort) },
+            mediaRelayActive: mediaRuntime.mediaRelayClient != nil,
             backendAdvertisesUpgrade: backendAdvertisesDirectQuicUpgrade,
             effectiveUpgradeEnabled: effectiveDirectQuicUpgradeEnabled,
             transportPathState: mediaTransportPathState,
@@ -1110,6 +1120,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             selectedPeerPhaseDetail: selectedSession.selectedPhaseDetail,
             selectedPeerRelationship: selectedSession.relationship,
             selectedPeerCanTransmit: selectedSession.canTransmitNow,
+            selectedPeerAutoJoinArmed: selectedPeerCoordinator.state
+                .requesterAutoJoinOnPeerAcceptanceArmed,
             isJoined: isJoined,
             isTransmitting: isTransmitting,
             activeChannelID: activeChannelId?.uuidString,

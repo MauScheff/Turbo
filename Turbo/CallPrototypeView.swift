@@ -253,13 +253,13 @@ struct TurboCallPrototypeView: View {
     private var hasVisibleCallContext: Bool {
         localVolumeWarningText != nil
             || peerTelemetry?.hasVisibleContext == true
-            || isDirectTransportActive
+            || transportPathLabel != nil
     }
 
     private var peerConnectionStatusText: String? {
         let parts = [
             peerTelemetry?.connection?.displayName,
-            isDirectTransportActive ? "Direct" : nil
+            transportPathLabel
         ].compactMap { $0 }
         guard !parts.isEmpty else { return nil }
         return "\(contactShortName)’s connection · \(parts.joined(separator: " · "))"
@@ -268,14 +268,36 @@ struct TurboCallPrototypeView: View {
     private var peerConnectionStatusAccessibilityLabel: String {
         let parts = [
             peerTelemetry?.connection?.displayName,
-            isDirectTransportActive ? "direct" : nil
+            transportPathAccessibilityLabel
         ].compactMap { $0 }
         guard !parts.isEmpty else { return "\(contact.name)'s connection" }
         return "\(contact.name)'s connection, \(parts.joined(separator: ", "))"
     }
 
-    private var isDirectTransportActive: Bool {
-        transportPathState == .direct
+    private var transportPathLabel: String? {
+        switch transportPathState {
+        case .direct:
+            return "Direct"
+        case .fastRelay:
+            return "Fast Relay"
+        case .relay:
+            return "Relayed"
+        case .promoting, .recovering, .none:
+            return nil
+        }
+    }
+
+    private var transportPathAccessibilityLabel: String? {
+        switch transportPathState {
+        case .direct:
+            return "direct"
+        case .fastRelay:
+            return "fast relay"
+        case .relay:
+            return "relayed"
+        case .promoting, .recovering, .none:
+            return nil
+        }
     }
 
     private var callContextColor: Color {

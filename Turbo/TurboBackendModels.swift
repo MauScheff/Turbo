@@ -1023,6 +1023,197 @@ enum TurboDirectPathDebugOverride {
     }
 }
 
+enum TurboMediaRelayDebugOverride {
+    static let enabledStorageKey = "TurboDebugMediaRelayEnabled"
+    static let enabledLaunchArgument = "-TurboDebugMediaRelayEnabled"
+    static let enabledEnvironmentKey = "TURBO_DEBUG_MEDIA_RELAY_ENABLED"
+    static let forceStorageKey = "TurboDebugForceMediaRelay"
+    static let forceLaunchArgument = "-TurboDebugForceMediaRelay"
+    static let forceEnvironmentKey = "TURBO_DEBUG_FORCE_MEDIA_RELAY"
+    static let hostStorageKey = "TurboDebugMediaRelayHost"
+    static let hostEnvironmentKey = "TURBO_MEDIA_RELAY_HOST"
+    static let quicPortStorageKey = "TurboDebugMediaRelayQuicPort"
+    static let quicPortEnvironmentKey = "TURBO_MEDIA_RELAY_QUIC_PORT"
+    static let tcpPortStorageKey = "TurboDebugMediaRelayTcpPort"
+    static let tcpPortEnvironmentKey = "TURBO_MEDIA_RELAY_TCP_PORT"
+    static let tokenStorageKey = "TurboDebugMediaRelayToken"
+    static let tokenEnvironmentKey = "TURBO_MEDIA_RELAY_TOKEN"
+
+    static func isEnabled(
+        processInfo: ProcessInfo = .processInfo,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        if let override = explicitBooleanValue(
+            storageKey: enabledStorageKey,
+            launchArgument: enabledLaunchArgument,
+            environmentKey: enabledEnvironmentKey,
+            processInfo: processInfo,
+            defaults: defaults
+        ) {
+            return override
+        }
+        return true
+    }
+
+    static func isExplicitlyEnabled(
+        processInfo: ProcessInfo = .processInfo,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        booleanValue(
+            storageKey: enabledStorageKey,
+            launchArgument: enabledLaunchArgument,
+            environmentKey: enabledEnvironmentKey,
+            processInfo: processInfo,
+            defaults: defaults
+        )
+    }
+
+    static func setEnabled(_ isEnabled: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(isEnabled, forKey: enabledStorageKey)
+    }
+
+    static func isForced(
+        processInfo: ProcessInfo = .processInfo,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        booleanValue(
+            storageKey: forceStorageKey,
+            launchArgument: forceLaunchArgument,
+            environmentKey: forceEnvironmentKey,
+            processInfo: processInfo,
+            defaults: defaults
+        )
+    }
+
+    static func setForced(_ isForced: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(isForced, forKey: forceStorageKey)
+    }
+
+    static func setConfig(
+        host: String,
+        quicPort: UInt16,
+        tcpPort: UInt16,
+        token: String,
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.set(host, forKey: hostStorageKey)
+        defaults.set(Int(quicPort), forKey: quicPortStorageKey)
+        defaults.set(Int(tcpPort), forKey: tcpPortStorageKey)
+        defaults.set(token, forKey: tokenStorageKey)
+    }
+
+    static func clearConfig(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: hostStorageKey)
+        defaults.removeObject(forKey: quicPortStorageKey)
+        defaults.removeObject(forKey: tcpPortStorageKey)
+        defaults.removeObject(forKey: tokenStorageKey)
+    }
+
+    static func config(
+        processInfo: ProcessInfo = .processInfo,
+        defaults: UserDefaults = .standard
+    ) -> TurboMediaRelayClientConfig? {
+        let environment = processInfo.environment
+        let host = environment[hostEnvironmentKey]
+            ?? defaults.string(forKey: hostStorageKey)
+            ?? "relay.beepbeep.to"
+        let token = environment[tokenEnvironmentKey]
+            ?? defaults.string(forKey: tokenStorageKey)
+            ?? ""
+        guard !host.isEmpty else { return nil }
+        let quicPort = portValue(
+            environmentValue: environment[quicPortEnvironmentKey],
+            storedValue: defaults.object(forKey: quicPortStorageKey),
+            fallback: 9443
+        )
+        let tcpPort = portValue(
+            environmentValue: environment[tcpPortEnvironmentKey],
+            storedValue: defaults.object(forKey: tcpPortStorageKey),
+            fallback: 9444
+        )
+        return TurboMediaRelayClientConfig(
+            host: host,
+            quicPort: quicPort,
+            tcpPort: tcpPort,
+            token: token
+        )
+    }
+
+    private static func booleanValue(
+        storageKey: String,
+        launchArgument: String,
+        environmentKey: String,
+        processInfo: ProcessInfo,
+        defaults: UserDefaults
+    ) -> Bool {
+        explicitBooleanValue(
+            storageKey: storageKey,
+            launchArgument: launchArgument,
+            environmentKey: environmentKey,
+            processInfo: processInfo,
+            defaults: defaults
+        ) ?? false
+    }
+
+    private static func explicitBooleanValue(
+        storageKey: String,
+        launchArgument: String,
+        environmentKey: String,
+        processInfo: ProcessInfo,
+        defaults: UserDefaults
+    ) -> Bool? {
+        let arguments = processInfo.arguments
+        if let launchArgumentValue = launchArgumentValue(launchArgument, in: arguments),
+           let parsed = parseBoolean(launchArgumentValue) {
+            return parsed
+        }
+        if arguments.contains(launchArgument) {
+            return true
+        }
+        if let environmentValue = processInfo.environment[environmentKey],
+           let parsed = parseBoolean(environmentValue) {
+            return parsed
+        }
+        guard defaults.object(forKey: storageKey) != nil else { return nil }
+        return defaults.bool(forKey: storageKey)
+    }
+
+    private static func portValue(
+        environmentValue: String?,
+        storedValue: Any?,
+        fallback: UInt16
+    ) -> UInt16 {
+        if let environmentValue,
+           let parsed = UInt16(environmentValue) {
+            return parsed
+        }
+        if let storedValue = storedValue as? Int,
+           let parsed = UInt16(exactly: storedValue) {
+            return parsed
+        }
+        return fallback
+    }
+
+    private static func launchArgumentValue(_ launchArgument: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: launchArgument),
+              arguments.indices.contains(index + 1) else {
+            return nil
+        }
+        return arguments[index + 1]
+    }
+
+    private static func parseBoolean(_ rawValue: String) -> Bool? {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return nil
+        }
+    }
+}
+
 enum DirectQuicTransmitStartupPolicy: String, Codable, Equatable, Hashable, Sendable {
     case appleGated = "apple-gated"
     case speculativeForeground = "speculative-foreground"
@@ -2634,6 +2825,12 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
 struct TurboTokenResponse: Decodable {
     let channelId: String
     let token: String
+    let status: String
+}
+
+struct TurboRevokeTokenResponse: Decodable {
+    let channelId: String
+    let deviceId: String
     let status: String
 }
 

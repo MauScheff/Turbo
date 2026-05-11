@@ -184,3 +184,5 @@ For current architecture work, treat `/v1/channels/{channelId}/readiness/{device
 - `wakeReadiness` answers "if the peer is disconnected, does the backend currently know a wake-capable device target for this channel?"
 
 Do not make the app infer wake capability only from disconnected presence plus local token assumptions.
+
+Token revocation is backend-owned. `POST /v1/channels/{channelId}/ephemeral-token/revoke` removes the current device's channel-scoped PTT token and APNs environment row. If that token was the active transmit target's only non-ready wake path, the backend clears active transmit so the channel cannot remain live without an addressable receiver.

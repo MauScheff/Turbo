@@ -654,6 +654,57 @@ struct MediaEncryptionSession {
     }
 }
 
+struct MediaRelayConnectionKey: Equatable {
+    let sessionID: String
+    let localDeviceID: String
+    let peerDeviceID: String
+}
+
+final class MediaRelayConnectionAttempt {
+    let key: MediaRelayConnectionKey
+    private let lock = NSLock()
+    private var isFinished = false
+    private var client: TurboMediaRelayClient?
+    private var continuations: [CheckedContinuation<TurboMediaRelayClient?, Never>] = []
+
+    init(key: MediaRelayConnectionKey) {
+        self.key = key
+    }
+
+    func wait() async -> TurboMediaRelayClient? {
+        await withCheckedContinuation { continuation in
+            let resolvedClient = lock.withLock { () -> TurboMediaRelayClient?? in
+                if isFinished {
+                    return .some(client)
+                }
+                continuations.append(continuation)
+                return nil
+            }
+            if let resolvedClient {
+                continuation.resume(returning: resolvedClient)
+            }
+        }
+    }
+
+    func finish(_ client: TurboMediaRelayClient?) {
+        let pending = lock.withLock { () -> [CheckedContinuation<TurboMediaRelayClient?, Never>] in
+            guard !isFinished else { return [] }
+            isFinished = true
+            self.client = client
+            let pending = continuations
+            continuations = []
+            return pending
+        }
+        pending.forEach { $0.resume(returning: client) }
+    }
+}
+
+enum MediaRelayConnectionStart {
+    case existingClient(TurboMediaRelayClient)
+    case existingAttempt(MediaRelayConnectionAttempt)
+    case newAttempt(MediaRelayConnectionAttempt)
+}
+
 final class MediaRuntimeState {
     var session: MediaSession?
     var contactID: UUID?
@@ -661,6 +712,9 @@ final class MediaRuntimeState {
     var transportPathState: MediaTransportPathState = .relay
     let directQuicUpgrade = DirectQuicUpgradeRuntimeState()
     var directQuicProbeController: DirectQuicProbeController?
+    var mediaRelayClient: TurboMediaRelayClient?
+    private var mediaRelayConnectionKey: MediaRelayConnectionKey?
+    private var mediaRelayConnectionAttempt: MediaRelayConnectionAttempt?
     var directQuicPromotionTimeoutTask: Task<Void, Never>?
     var directQuicAutoProbeTask: Task<Void, Never>?
     private var firstTalkDirectQuicGraceEntries: [(contactID: UUID, grace: FirstTalkDirectQuicGrace)] = []
@@ -774,6 +828,11 @@ final class MediaRuntimeState {
             directQuicAutoProbeTask = nil
             directQuicProbeController?.cancel(reason: "media-runtime-reset")
             directQuicProbeController = nil
+            mediaRelayConnectionAttempt?.finish(nil)
+            mediaRelayConnectionAttempt = nil
+            mediaRelayConnectionKey = nil
+            mediaRelayClient?.close()
+            mediaRelayClient = nil
         }
         firstTalkDirectQuicGraceExpiryTasks.forEach { $0.task.cancel() }
         firstTalkDirectQuicGraceExpiryTasks = []
@@ -952,6 +1011,66 @@ final class MediaRuntimeState {
     func replaceDirectQuicProbeController(with controller: DirectQuicProbeController?) {
         directQuicProbeController?.cancel(reason: "replaced")
         directQuicProbeController = controller
+    }
+
+    func replaceMediaRelayClient(with client: TurboMediaRelayClient?) {
+        mediaRelayConnectionAttempt?.finish(nil)
+        mediaRelayConnectionAttempt = nil
+        mediaRelayConnectionKey = nil
+        if mediaRelayClient !== client {
+            mediaRelayClient?.close()
+        }
+        mediaRelayClient = client
+    }
+
+    func mediaRelayConnectionStart(for key: MediaRelayConnectionKey) -> MediaRelayConnectionStart {
+        if let mediaRelayClient,
+           mediaRelayConnectionKey == key {
+            return .existingClient(mediaRelayClient)
+        }
+        if let mediaRelayConnectionAttempt,
+           mediaRelayConnectionAttempt.key == key {
+            return .existingAttempt(mediaRelayConnectionAttempt)
+        }
+        mediaRelayConnectionAttempt?.finish(nil)
+        if mediaRelayConnectionKey != key {
+            mediaRelayClient?.close()
+            mediaRelayClient = nil
+            mediaRelayConnectionKey = nil
+        }
+        let attempt = MediaRelayConnectionAttempt(key: key)
+        mediaRelayConnectionAttempt = attempt
+        return .newAttempt(attempt)
+    }
+
+    func finishMediaRelayConnectionAttempt(
+        _ attempt: MediaRelayConnectionAttempt,
+        client: TurboMediaRelayClient?
+    ) -> Bool {
+        guard mediaRelayConnectionAttempt === attempt else {
+            client?.close()
+            attempt.finish(nil)
+            return false
+        }
+        mediaRelayConnectionAttempt = nil
+        guard let client else {
+            attempt.finish(nil)
+            return true
+        }
+        if mediaRelayClient !== client {
+            mediaRelayClient?.close()
+        }
+        mediaRelayClient = client
+        mediaRelayConnectionKey = attempt.key
+        attempt.finish(client)
+        return true
+    }
+
+    func clearMediaRelayClient(matching key: MediaRelayConnectionKey) {
+        guard mediaRelayConnectionKey == key else { return }
+        mediaRelayClient?.close()
+        mediaRelayClient = nil
+        mediaRelayConnectionKey = nil
     }
 
     func receiverPrewarmRequestID(for contactID: UUID) -> String {
@@ -1135,6 +1254,7 @@ final class MediaRuntimeState {
 
 enum MediaTransportPathState: String, Codable, Equatable {
     case relay
+    case fastRelay = "fast-relay"
     case promoting
     case direct
     case recovering
@@ -1143,6 +1263,8 @@ enum MediaTransportPathState: String, Codable, Equatable {
         switch self {
         case .relay:
             return "Relayed"
+        case .fastRelay:
+            return "Fast Relay"
         case .promoting:
             return "Promoting"
         case .direct:
@@ -1154,7 +1276,7 @@ enum MediaTransportPathState: String, Codable, Equatable {
 
     var showsSecureIcon: Bool {
         switch self {
-        case .relay, .direct:
+        case .relay, .fastRelay, .direct:
             return true
         case .promoting, .recovering:
             return false
@@ -1370,6 +1492,10 @@ struct BackendServices {
             token: token,
             apnsEnvironment: apnsEnvironment
         )
+    }
+
+    func revokeEphemeralToken(channelId: String) async throws -> TurboRevokeTokenResponse {
+        try await client.revokeEphemeralToken(channelId: channelId)
     }
 
     func beginTransmit(channelId: String) async throws -> TurboBeginTransmitResponse {

@@ -618,6 +618,8 @@ extension PTTViewModel {
         switch mediaTransportPathState {
         case .direct:
             return .direct
+        case .fastRelay:
+            return .fastRelay
         case .relay, .promoting, .recovering:
             return .relay
         }

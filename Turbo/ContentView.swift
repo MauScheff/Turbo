@@ -262,6 +262,9 @@ struct ContentView: View {
                 onSetRelayOnlyForced: setDirectPathRelayOnlyForced,
                 onSetDirectQuicAutoUpgradeDisabled: setDirectQuicAutoUpgradeDisabled,
                 onSetDirectQuicTransmitStartupPolicy: setDirectQuicTransmitStartupPolicy,
+                onSetMediaRelayEnabled: setMediaRelayEnabled,
+                onSetMediaRelayForced: setMediaRelayForced,
+                onSetMediaRelayConfig: setMediaRelayConfig,
                 onForceDirectQuicProbe: forceDirectQuicProbeFromDiagnostics,
                 onClearDirectQuicRetryBackoff: clearDirectQuicRetryBackoffFromDiagnostics,
                 onCancelDirectQuicAttempt: cancelDirectQuicAttemptFromDiagnostics
@@ -406,6 +409,8 @@ struct ContentView: View {
         switch state {
         case .relay:
             return .orange
+        case .fastRelay:
+            return .teal
         case .promoting:
             return .blue
         case .direct:
@@ -1044,6 +1049,28 @@ struct ContentView: View {
 
     private func setDirectQuicTransmitStartupPolicy(_ policy: DirectQuicTransmitStartupPolicy) {
         viewModel.setDirectQuicTransmitStartupPolicyForDebug(policy)
+    }
+
+    private func setMediaRelayEnabled(_ isEnabled: Bool) {
+        viewModel.setMediaRelayEnabledForDebug(isEnabled)
+    }
+
+    private func setMediaRelayForced(_ isForced: Bool) {
+        viewModel.setMediaRelayForcedForDebug(isForced)
+    }
+
+    private func setMediaRelayConfig(
+        host: String,
+        quicPort: UInt16,
+        tcpPort: UInt16,
+        token: String
+    ) {
+        viewModel.setMediaRelayConfigForDebug(
+            host: host,
+            quicPort: quicPort,
+            tcpPort: tcpPort,
+            token: token
+        )
     }
 
     private func importDirectQuicIdentityFromDiagnostics(fileURL: URL, password: String) {

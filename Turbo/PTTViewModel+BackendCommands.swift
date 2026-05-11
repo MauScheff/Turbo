@@ -308,7 +308,8 @@ extension PTTViewModel {
     }
 
     func openContact(reference: String) async {
-        let normalizedReference = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedReference = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedReference = TurboIncomingLink.publicID(from: trimmedReference) ?? trimmedReference
         guard !normalizedReference.isEmpty else { return }
         guard backendServices != nil else {
             backendStatusMessage = "Backend unavailable"

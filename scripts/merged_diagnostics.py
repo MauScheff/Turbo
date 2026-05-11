@@ -1494,6 +1494,40 @@ def analyze_report(report: Report) -> list[InvariantViolation]:
                 )
             )
 
+    backend_has_active_transmit = (
+        backend_active_transmit_id != "none"
+        or backend_channel_status in {"self-transmitting", "peer-transmitting"}
+        or backend_readiness in {"self-transmitting", "peer-transmitting"}
+    )
+    if (
+        backend_has_active_transmit
+        and backend_peer_joined is False
+        and remote_wake_capability_kind != "wake-capable"
+    ):
+        violations.append(
+            build_violation(
+                subject=report.handle,
+                invariant_id="channel.active_transmit_without_addressable_peer",
+                scope="backend",
+                message=(
+                    "backend active transmit has no joined or wake-addressable selected peer "
+                    f"backendChannelStatus={backend_channel_status} "
+                    f"backendReadiness={backend_readiness} "
+                    f"backendPeerJoined={backend_peer_joined} "
+                    f"remoteWakeCapabilityKind={remote_wake_capability_kind}"
+                ),
+                metadata={
+                    "selectedPeerPhase": phase,
+                    "backendChannelStatus": backend_channel_status,
+                    "backendReadiness": backend_readiness,
+                    "backendPeerJoined": str(backend_peer_joined),
+                    "remoteWakeCapabilityKind": remote_wake_capability_kind,
+                    "backendActiveTransmitterUserId": backend_active_transmitter_user_id,
+                    "backendActiveTransmitId": backend_active_transmit_id,
+                },
+            )
+        )
+
     if phase == "ready" and backend_can_transmit is False:
         violations.append(
             build_violation(

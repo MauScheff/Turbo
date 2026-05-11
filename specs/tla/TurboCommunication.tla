@@ -20,6 +20,8 @@ ASSUME MaxInboxLength \in Nat
 ASSUME MaxEpoch \in Nat
 
 VARIABLES
+  request,
+  localJoinIntent,
   members,
   presence,
   receiverReady,
@@ -32,7 +34,9 @@ VARIABLES
   clientPhase
 
 vars ==
-  << members,
+  << request,
+     localJoinIntent,
+     members,
      presence,
      receiverReady,
      wakeToken,
@@ -48,6 +52,12 @@ PhaseValues ==
   {"notJoined", "joining", "preparingAudio", "ready", "transmitting", "receiving"}
 MessageKinds == {"TransmitStarted", "TransmitEnded"}
 TransmitValue == Devices \cup {NoDevice}
+RequestStatusValues == {"none", "requested"}
+Request ==
+  [status: RequestStatusValues,
+   requester: TransmitValue,
+   recipient: TransmitValue,
+   channel: Channels]
 Message ==
   [ kind: MessageKinds,
     channel: Channels,
@@ -57,6 +67,8 @@ Message ==
 NoTransmit == [c \in Channels |-> NoDevice]
 ZeroEpoch == [c \in Channels |-> 0]
 EmptyInbox == [d \in Devices |-> <<>>]
+NoRequest == [status |-> "none", requester |-> NoDevice, recipient |-> NoDevice, channel |-> CHOOSE c \in Channels : TRUE]
+NoLocalJoinIntent == [d \in Devices |-> [c \in Channels |-> FALSE]]
 
 IsMember(d, c) == d \in members[c]
 IsJoined(d, c) == IsMember(d, c) /\ presence[d][c] = "joined"
@@ -74,6 +86,18 @@ CanBeginTransmit(sender, c) ==
   /\ IsJoined(sender, c)
   /\ \E receiver \in Devices :
        receiver # sender /\ CanReceiveTransmit(receiver, c)
+
+AddressableAfterMembershipLoss(receiver, lostMember, c) ==
+  receiver # lostMember /\
+    IsMember(receiver, c) /\
+    (IsJoined(receiver, c) \/ wakeToken[receiver][c])
+
+ShouldClearTransmitAfterMembershipLoss(lostMember, c) ==
+  activeTransmit[c] # NoDevice /\
+    ( activeTransmit[c] = lostMember \/
+      ~(\E receiver \in Devices :
+          receiver # activeTransmit[c] /\
+          AddressableAfterMembershipLoss(receiver, lostMember, c)) )
 
 PhaseAfterNoTransmit(d, c) ==
   IF ~IsMember(d, c) THEN "notJoined"
@@ -113,6 +137,8 @@ NotifyMembers(c, message) ==
     ELSE inbox[d]]
 
 Init ==
+  /\ request = NoRequest
+  /\ localJoinIntent = NoLocalJoinIntent
   /\ members = [c \in Channels |-> {}]
   /\ presence = [d \in Devices |-> [c \in Channels |-> "offline"]]
   /\ receiverReady = [d \in Devices |-> [c \in Channels |-> FALSE]]
@@ -124,11 +150,117 @@ Init ==
   /\ knownEpoch = [d \in Devices |-> ZeroEpoch]
   /\ clientPhase = [d \in Devices |-> [c \in Channels |-> "notJoined"]]
 
+RequestConnection(requester, recipient, c) ==
+  /\ requester # recipient
+  /\ request.status = "none"
+  /\ members[c] = {}
+  /\ request' =
+       [status |-> "requested",
+        requester |-> requester,
+        recipient |-> recipient,
+        channel |-> c]
+  /\ clientPhase' = [clientPhase EXCEPT ![requester][c] = "joining"]
+  /\ UNCHANGED << localJoinIntent,
+                  members,
+                  presence,
+                  receiverReady,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  inbox,
+                  knownTransmit,
+                  knownEpoch >>
+
+DeclineRequest(recipient, c) ==
+  /\ request.status = "requested"
+  /\ request.recipient = recipient
+  /\ request.channel = c
+  /\ request' = NoRequest
+  /\ clientPhase' =
+       [clientPhase EXCEPT
+         ![request.requester][c] = "notJoined",
+         ![recipient][c] = "notJoined"]
+  /\ UNCHANGED << localJoinIntent,
+                  members,
+                  presence,
+                  receiverReady,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  inbox,
+                  knownTransmit,
+                  knownEpoch >>
+
+AcceptRequest(recipient, c) ==
+  /\ request.status = "requested"
+  /\ request.recipient = recipient
+  /\ request.channel = c
+  /\ members[c] = {}
+  /\ request' = NoRequest
+  /\ members' = [members EXCEPT ![c] = {request.requester, recipient}]
+  /\ localJoinIntent' =
+       [localJoinIntent EXCEPT
+         ![request.requester][c] = TRUE,
+         ![recipient][c] = TRUE]
+  /\ clientPhase' =
+       [clientPhase EXCEPT
+         ![request.requester][c] = "joining",
+         ![recipient][c] = "joining"]
+  /\ UNCHANGED << presence,
+                  receiverReady,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  inbox,
+                  knownTransmit,
+                  knownEpoch >>
+
+CompleteLocalJoin(d, c) ==
+  /\ IsMember(d, c)
+  /\ localJoinIntent[d][c]
+  /\ presence' = [presence EXCEPT ![d][c] = "joined"]
+  /\ localJoinIntent' = [localJoinIntent EXCEPT ![d][c] = FALSE]
+  /\ clientPhase' = [clientPhase EXCEPT ![d][c] = PhaseAfterNoTransmit(d, c)]
+  /\ UNCHANGED << request,
+                  members,
+                  receiverReady,
+                  wakeToken,
+                  activeTransmit,
+                  transmitEpoch,
+                  inbox,
+                  knownTransmit,
+                  knownEpoch >>
+
+FailLocalJoin(d, c) ==
+  /\ IsMember(d, c)
+  /\ localJoinIntent[d][c]
+  /\ localJoinIntent' = [localJoinIntent EXCEPT ![d][c] = FALSE]
+  /\ members' = [members EXCEPT ![c] = @ \ {d}]
+  /\ presence' = [presence EXCEPT ![d][c] = "offline"]
+  /\ receiverReady' = [receiverReady EXCEPT ![d][c] = FALSE]
+  /\ wakeToken' = [wakeToken EXCEPT ![d][c] = FALSE]
+  /\ request' =
+       IF request.channel = c THEN NoRequest ELSE request
+  /\ activeTransmit' =
+       [activeTransmit EXCEPT ![c] =
+         IF ShouldClearTransmitAfterMembershipLoss(d, c) THEN NoDevice ELSE @]
+  /\ inbox' =
+       IF ShouldClearTransmitAfterMembershipLoss(d, c)
+       THEN NotifyMembers(c, TransmitEnded(c, activeTransmit[c], transmitEpoch[c]))
+       ELSE inbox
+  /\ knownTransmit' = [knownTransmit EXCEPT ![d][c] = NoDevice]
+  /\ knownEpoch' = [knownEpoch EXCEPT ![d][c] = transmitEpoch[c]]
+  /\ clientPhase' = [clientPhase EXCEPT ![d][c] = "notJoined"]
+  /\ UNCHANGED transmitEpoch
+
 JoinChannel(d, c) ==
   /\ ~IsMember(d, c)
+  /\ request.status = "none"
   /\ members' = [members EXCEPT ![c] = @ \cup {d}]
   /\ presence' = [presence EXCEPT ![d][c] = "joined"]
-  /\ UNCHANGED << receiverReady,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  receiverReady,
                   wakeToken,
                   activeTransmit,
                   transmitEpoch,
@@ -141,13 +273,18 @@ LeaveChannel(d, c) ==
   /\ IsMember(d, c)
   /\ members' = [members EXCEPT ![c] = @ \ {d}]
   /\ presence' = [presence EXCEPT ![d][c] = "offline"]
+  /\ localJoinIntent' = [localJoinIntent EXCEPT ![d][c] = FALSE]
   /\ receiverReady' = [receiverReady EXCEPT ![d][c] = FALSE]
   /\ wakeToken' = [wakeToken EXCEPT ![d][c] = FALSE]
+  /\ request' =
+       IF request.channel = c THEN NoRequest ELSE request
   \* This initial model is for direct channels. If a member leaves while a
   \* transmit is active, the active transmit is no longer valid.
-  /\ activeTransmit' = [activeTransmit EXCEPT ![c] = NoDevice]
+  /\ activeTransmit' =
+       [activeTransmit EXCEPT ![c] =
+         IF ShouldClearTransmitAfterMembershipLoss(d, c) THEN NoDevice ELSE @]
   /\ inbox' =
-       IF activeTransmit[c] # NoDevice
+       IF ShouldClearTransmitAfterMembershipLoss(d, c)
        THEN NotifyMembers(c, TransmitEnded(c, activeTransmit[c], transmitEpoch[c]))
        ELSE inbox
   /\ knownTransmit' = [knownTransmit EXCEPT ![d][c] = NoDevice]
@@ -158,7 +295,9 @@ LeaveChannel(d, c) ==
 UploadWakeToken(d, c) ==
   /\ IsMember(d, c)
   /\ wakeToken' = [wakeToken EXCEPT ![d][c] = TRUE]
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   presence,
                   receiverReady,
                   activeTransmit,
@@ -186,7 +325,9 @@ ClearWakeToken(d, c) ==
   /\ activeTransmit' =
        [activeTransmit EXCEPT ![c] =
          IF ShouldClearTransmitAfterTokenClear(d, c) THEN NoDevice ELSE @]
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   presence,
                   receiverReady,
                   transmitEpoch,
@@ -198,7 +339,9 @@ ClearWakeToken(d, c) ==
 MarkReceiverReady(d, c) ==
   /\ IsJoined(d, c)
   /\ receiverReady' = [receiverReady EXCEPT ![d][c] = TRUE]
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   presence,
                   wakeToken,
                   activeTransmit,
@@ -211,7 +354,9 @@ MarkReceiverReady(d, c) ==
 MarkReceiverNotReady(d, c) ==
   /\ IsMember(d, c)
   /\ receiverReady' = [receiverReady EXCEPT ![d][c] = FALSE]
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   presence,
                   wakeToken,
                   activeTransmit,
@@ -248,7 +393,9 @@ Disconnect(d, c) ==
   /\ knownTransmit' = [knownTransmit EXCEPT ![d][c] = NoDevice]
   /\ knownEpoch' = [knownEpoch EXCEPT ![d][c] = transmitEpoch[c]]
   /\ clientPhase' = [clientPhase EXCEPT ![d][c] = PhaseAfterNoTransmit(d, c)]
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   wakeToken,
                   transmitEpoch >>
 
@@ -256,7 +403,9 @@ Reconnect(d, c) ==
   /\ IsMember(d, c)
   /\ presence[d][c] = "offline"
   /\ presence' = [presence EXCEPT ![d][c] = "joined"]
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   receiverReady,
                   wakeToken,
                   activeTransmit,
@@ -275,7 +424,7 @@ BeginTransmit(sender, c) ==
   /\ knownTransmit' = [knownTransmit EXCEPT ![sender][c] = sender]
   /\ knownEpoch' = [knownEpoch EXCEPT ![sender][c] = transmitEpoch[c] + 1]
   /\ clientPhase' = [clientPhase EXCEPT ![sender][c] = "transmitting"]
-  /\ UNCHANGED << members, presence, receiverReady, wakeToken >>
+  /\ UNCHANGED << request, localJoinIntent, members, presence, receiverReady, wakeToken >>
 
 EndTransmit(sender, c) ==
   /\ activeTransmit[c] = sender
@@ -285,13 +434,15 @@ EndTransmit(sender, c) ==
   /\ knownEpoch' = [knownEpoch EXCEPT ![sender][c] = transmitEpoch[c]]
   /\ clientPhase' =
        [clientPhase EXCEPT ![sender][c] = PhaseAfterNoTransmit(sender, c)]
-  /\ UNCHANGED << members, presence, receiverReady, wakeToken, transmitEpoch >>
+  /\ UNCHANGED << request, localJoinIntent, members, presence, receiverReady, wakeToken, transmitEpoch >>
 
 ExpireTransmit(c) ==
   /\ activeTransmit[c] # NoDevice
   /\ activeTransmit' = [activeTransmit EXCEPT ![c] = NoDevice]
   /\ inbox' = NotifyMembers(c, TransmitEnded(c, activeTransmit[c], transmitEpoch[c]))
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   presence,
                   receiverReady,
                   wakeToken,
@@ -333,7 +484,9 @@ DeliverSignal(d) ==
                    PhaseAfterNoTransmit(d, message.channel)]
           ELSE
             /\ UNCHANGED << knownTransmit, knownEpoch, clientPhase >>
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   presence,
                   receiverReady,
                   wakeToken,
@@ -343,7 +496,9 @@ DeliverSignal(d) ==
 DropSignal(d) ==
   /\ Len(inbox[d]) > 0
   /\ inbox' = [inbox EXCEPT ![d] = Tail(@)]
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   presence,
                   receiverReady,
                   wakeToken,
@@ -357,7 +512,9 @@ DuplicateSignal(d) ==
   /\ Len(inbox[d]) > 0
   /\ Len(inbox[d]) < MaxInboxLength
   /\ inbox' = [inbox EXCEPT ![d] = Append(@, Head(@))]
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   presence,
                   receiverReady,
                   wakeToken,
@@ -371,7 +528,9 @@ RefreshClient(d, c) ==
   /\ knownTransmit' = [knownTransmit EXCEPT ![d][c] = activeTransmit[c]]
   /\ knownEpoch' = [knownEpoch EXCEPT ![d][c] = transmitEpoch[c]]
   /\ clientPhase' = [clientPhase EXCEPT ![d][c] = PhaseFromBackend(d, c)]
-  /\ UNCHANGED << members,
+  /\ UNCHANGED << request,
+                  localJoinIntent,
+                  members,
                   presence,
                   receiverReady,
                   wakeToken,
@@ -380,6 +539,12 @@ RefreshClient(d, c) ==
                   inbox >>
 
 Next ==
+  \/ \E requester \in Devices, recipient \in Devices, c \in Channels :
+       RequestConnection(requester, recipient, c)
+  \/ \E recipient \in Devices, c \in Channels : DeclineRequest(recipient, c)
+  \/ \E recipient \in Devices, c \in Channels : AcceptRequest(recipient, c)
+  \/ \E d \in Devices, c \in Channels : CompleteLocalJoin(d, c)
+  \/ \E d \in Devices, c \in Channels : FailLocalJoin(d, c)
   \/ \E d \in Devices, c \in Channels : JoinChannel(d, c)
   \/ \E d \in Devices, c \in Channels : LeaveChannel(d, c)
   \/ \E d \in Devices, c \in Channels : UploadWakeToken(d, c)
@@ -399,6 +564,8 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
+  /\ request \in Request
+  /\ localJoinIntent \in [Devices -> [Channels -> BOOLEAN]]
   /\ members \in [Channels -> SUBSET Devices]
   /\ presence \in [Devices -> [Channels -> PresenceValues]]
   /\ receiverReady \in [Devices -> [Channels -> BOOLEAN]]
@@ -412,6 +579,23 @@ TypeOK ==
 
 DirectChannelCardinality ==
   \A c \in Channels : Cardinality(members[c]) <= 2
+
+RequestEndpointsAreValid ==
+  /\ request.status = "none" =>
+       /\ request.requester = NoDevice
+       /\ request.recipient = NoDevice
+  /\ request.status = "requested" =>
+       /\ request.requester \in Devices
+       /\ request.recipient \in Devices
+       /\ request.requester # request.recipient
+
+PendingRequestHasNoMembership ==
+  request.status = "requested" =>
+    members[request.channel] = {}
+
+LocalJoinIntentRequiresMembership ==
+  \A d \in Devices, c \in Channels :
+    localJoinIntent[d][c] => IsMember(d, c)
 
 WakeTokenRequiresMembership ==
   \A d \in Devices, c \in Channels :
@@ -429,6 +613,16 @@ ActiveTransmitHasAddressablePeer ==
   \A c \in Channels :
     activeTransmit[c] # NoDevice =>
       HasAddressablePeer(activeTransmit[c], c)
+
+BeginTransmitRequiresAcceptedOrExplicitMembership ==
+  \A c \in Channels :
+    activeTransmit[c] # NoDevice =>
+      request.status = "none"
+
+ActiveTransmitRequiresBothDirectMembers ==
+  \A c \in Channels :
+    activeTransmit[c] # NoDevice =>
+      Cardinality(members[c]) = 2
 
 ReceivingHasLocalTransmitEvidence ==
   \A d \in Devices, c \in Channels :

@@ -62,6 +62,7 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
     let selectedPeerPhaseDetail: String
     let selectedPeerRelationship: String
     let selectedPeerCanTransmit: Bool
+    let selectedPeerAutoJoinArmed: Bool
     let isJoined: Bool
     let isTransmitting: Bool
     let activeChannelID: String?
@@ -192,6 +193,33 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
             )
         }
 
+        let backendHasActiveTransmit =
+            backendActiveTransmitIdValue != "none"
+            || backendChannelStatusValue == "self-transmitting"
+            || backendChannelStatusValue == "peer-transmitting"
+            || backendReadinessValue == "self-transmitting"
+            || backendReadinessValue == "peer-transmitting"
+        if backendHasActiveTransmit,
+           backendPeerJoined == false,
+           remoteWakeCapabilityKindValue != "wake-capable" {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "channel.active_transmit_without_addressable_peer",
+                    scope: .backend,
+                    message: "backend active transmit has no joined or wake-addressable selected peer",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        "remoteWakeCapabilityKind": remoteWakeCapabilityKindValue,
+                        "backendActiveTransmitterUserId": backendActiveTransmitterUserIdValue,
+                        "backendActiveTransmitId": backendActiveTransmitIdValue,
+                    ]
+                )
+            )
+        }
+
         let backendIsSelfTransmitting =
             backendChannelStatusValue == "self-transmitting"
             || backendReadinessValue == "self-transmitting"
@@ -289,6 +317,41 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
                     metadata: [
                         "selectedPeerPhase": phase,
                         "selectedPeerRelationship": selectedPeerRelationship,
+                        "pendingAction": pendingAction,
+                        "isJoined": String(isJoined),
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                    ]
+                )
+            )
+        }
+
+        let backendIdleWithoutMembership =
+            backendSelfJoined != true
+            && backendPeerJoined != true
+            && ["idle", "none"].contains(backendChannelStatusValue)
+            && ["inactive", "none"].contains(backendReadinessValue)
+        if phase == "waitingForPeer",
+           phaseDetail.contains("pendingJoin"),
+           selectedPeerRelationship == "none",
+           selectedPeerAutoJoinArmed == false,
+           pendingAction == "none",
+           isJoined == false,
+           systemSessionValue == "none",
+           backendIdleWithoutMembership {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_idle_without_local_evidence_still_connecting",
+                    scope: .convergence,
+                    message: "backend is idle without local session evidence, but selected peer is still connecting",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "selectedPeerRelationship": selectedPeerRelationship,
+                        "selectedPeerAutoJoinArmed": String(selectedPeerAutoJoinArmed),
                         "pendingAction": pendingAction,
                         "isJoined": String(isJoined),
                         "systemSession": systemSessionValue,
@@ -571,6 +634,13 @@ struct DirectQuicDiagnosticsSummary: Codable, Equatable {
     let relayOnlyOverride: Bool
     let autoUpgradeDisabled: Bool
     let transmitStartupPolicy: DirectQuicTransmitStartupPolicy
+    let mediaRelayEnabled: Bool
+    let mediaRelayForced: Bool
+    let mediaRelayConfigured: Bool
+    let mediaRelayHost: String?
+    let mediaRelayQuicPort: Int?
+    let mediaRelayTcpPort: Int?
+    let mediaRelayActive: Bool
     let backendAdvertisesUpgrade: Bool
     let effectiveUpgradeEnabled: Bool
     let transportPathState: MediaTransportPathState
