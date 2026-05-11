@@ -265,10 +265,31 @@ def poll_processed_build(api: AppStoreConnect, build_id: str, timeout_seconds: i
 def find_beta_group_id(api: AppStoreConnect, app_id: str, group_name: str) -> str:
     params = urllib.parse.urlencode({"filter[app]": app_id, "limit": "200"})
     response = api.request("GET", f"/betaGroups?{params}")
+    matching_groups = []
     for group in response.get("data", []):
         if group.get("attributes", {}).get("name") == group_name:
-            return group["id"]
-    raise ReleaseError(f"No TestFlight beta group named {group_name!r} found for app {app_id}.")
+            matching_groups.append(group)
+    if not matching_groups:
+        raise ReleaseError(f"No TestFlight beta group named {group_name!r} found for app {app_id}.")
+
+    external_groups = [
+        group
+        for group in matching_groups
+        if not group.get("attributes", {}).get("isInternalGroup", False)
+    ]
+    if len(external_groups) == 1:
+        return external_groups[0]["id"]
+    if len(matching_groups) == 1:
+        return matching_groups[0]["id"]
+
+    details = ", ".join(
+        f"{group['id']} internal={group.get('attributes', {}).get('isInternalGroup')}"
+        for group in matching_groups
+    )
+    raise ReleaseError(
+        f"Multiple TestFlight beta groups named {group_name!r} matched: {details}. "
+        "Set TESTFLIGHT_BETA_GROUP_ID to choose one explicitly."
+    )
 
 
 def add_build_to_beta_group(api: AppStoreConnect, build_id: str, beta_group_id: str) -> None:
