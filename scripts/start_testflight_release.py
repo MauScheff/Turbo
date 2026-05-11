@@ -44,7 +44,14 @@ def b64url(data: bytes) -> str:
 
 def run(cmd: list[str]) -> str:
     try:
-        return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT).strip()
+        return subprocess.check_output(
+            cmd,
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+        ).strip()
+    except subprocess.TimeoutExpired as error:
+        raise ReleaseError(f"{' '.join(cmd)} timed out.") from error
     except subprocess.CalledProcessError as error:
         raise ReleaseError(f"{' '.join(cmd)} failed:\n{error.output.strip()}") from error
 
@@ -214,7 +221,10 @@ def poll_build_run(api: AppStoreConnect, build_run_id: str, timeout_seconds: int
         attrs = response["data"]["attributes"]
         progress = attrs.get("executionProgress")
         completion = attrs.get("completionStatus")
-        print(f"Xcode Cloud build run: progress={progress} completion={completion}")
+        print(
+            f"Xcode Cloud build run: progress={progress} completion={completion}",
+            flush=True,
+        )
         if completion == "SUCCEEDED":
             return
         if completion and completion != "SUCCEEDED":
@@ -236,9 +246,12 @@ def poll_processed_build(api: AppStoreConnect, build_id: str, timeout_seconds: i
         processing = attrs.get("processingState")
         version = attrs.get("version")
         number = attrs.get("uploadedDate") or attrs.get("buildNumber") or build_id
-        print(f"App Store Connect build: version={version} id={build_id} state={processing}")
+        print(
+            f"App Store Connect build: version={version} id={build_id} state={processing}",
+            flush=True,
+        )
         if processing in (None, "VALID"):
-            print(f"Build is processed: {number}")
+            print(f"Build is processed: {number}", flush=True)
             return
         if processing in ("FAILED", "INVALID"):
             raise ReleaseError(f"Build processing failed: {processing}")
@@ -305,12 +318,12 @@ def main() -> int:
     try:
         if not args.skip_git_checks:
             branch, commit = require_clean_pushed_git()
-            print(f"Releasing pushed commit {commit} from {branch}.")
+            print(f"Releasing pushed commit {commit} from {branch}.", flush=True)
 
         credentials = read_credentials()
         api = AppStoreConnect(make_token(credentials))
         build_run_id = start_build(api, args.workflow_id)
-        print(f"Started Xcode Cloud build run: {build_run_id}")
+        print(f"Started Xcode Cloud build run: {build_run_id}", flush=True)
 
         if args.no_wait:
             return 0
@@ -330,9 +343,15 @@ def main() -> int:
 
         if beta_group_id:
             add_build_to_beta_group(api, build_id, beta_group_id)
-            print(f"Added build {build_id} to TestFlight beta group {beta_group_id}.")
+            print(
+                f"Added build {build_id} to TestFlight beta group {beta_group_id}.",
+                flush=True,
+            )
         else:
-            print("No TestFlight beta group configured; build was not assigned to a group.")
+            print(
+                "No TestFlight beta group configured; build was not assigned to a group.",
+                flush=True,
+            )
         return 0
     except ReleaseError as error:
         print(f"error: {error}", file=sys.stderr)
