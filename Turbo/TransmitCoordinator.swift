@@ -32,6 +32,20 @@ struct TransmitTarget: Equatable, Sendable {
     }
 }
 
+struct ForegroundDirectTransmitDelegation: Equatable, Sendable {
+    let grantID: String
+    let request: TransmitRequestContext
+    let target: TransmitTarget
+    let reason: String
+    let grantedAt: Date
+
+    func matches(_ target: TransmitTarget) -> Bool {
+        self.target.contactID == target.contactID
+            && self.target.channelID == target.channelID
+            && self.target.deviceID == target.deviceID
+    }
+}
+
 enum TransmitPhase: Equatable {
     case idle
     case requesting(contactID: UUID)

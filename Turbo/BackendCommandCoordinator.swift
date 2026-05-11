@@ -15,6 +15,7 @@ struct BackendJoinRequest: Equatable {
     let contactID: UUID
     let handle: String
     let intent: BackendJoinIntent
+    let operationID: String?
     let relationship: PairRelationshipState
     let existingRemoteUserID: String?
     let existingBackendChannelID: String?
@@ -22,6 +23,32 @@ struct BackendJoinRequest: Equatable {
     let outgoingInvite: TurboInviteResponse?
     let requestCooldownRemaining: Int?
     let usesLocalHTTPBackend: Bool
+
+    init(
+        contactID: UUID,
+        handle: String,
+        intent: BackendJoinIntent,
+        operationID: String? = nil,
+        relationship: PairRelationshipState,
+        existingRemoteUserID: String?,
+        existingBackendChannelID: String?,
+        incomingInvite: TurboInviteResponse?,
+        outgoingInvite: TurboInviteResponse?,
+        requestCooldownRemaining: Int?,
+        usesLocalHTTPBackend: Bool
+    ) {
+        self.contactID = contactID
+        self.handle = handle
+        self.intent = intent
+        self.operationID = operationID
+        self.relationship = relationship
+        self.existingRemoteUserID = existingRemoteUserID
+        self.existingBackendChannelID = existingBackendChannelID
+        self.incomingInvite = incomingInvite
+        self.outgoingInvite = outgoingInvite
+        self.requestCooldownRemaining = requestCooldownRemaining
+        self.usesLocalHTTPBackend = usesLocalHTTPBackend
+    }
 }
 
 struct BackendLeaveRequest: Equatable {

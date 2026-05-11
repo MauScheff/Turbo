@@ -457,8 +457,9 @@ extension PTTViewModel {
             )
             client.connectWebSocket()
             backendSyncCoordinator.send(.bootstrapCompleted(mode: runtimeConfig.mode, handle: session.handle))
-            await refreshContactSummaries()
-            await refreshInvites()
+            async let contactSummaries: Void = refreshContactSummaries()
+            async let invites: Void = refreshInvites()
+            _ = await (contactSummaries, invites)
             await openPendingTalkRequestNotificationIfNeeded()
             startBackendPollingIfNeeded()
             statusMessage = selectedContact == nil ? "Ready to connect" : statusMessage

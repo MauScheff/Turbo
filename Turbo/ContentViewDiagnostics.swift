@@ -39,6 +39,24 @@ struct TurboDiagnosticsView: View {
     @State private var draftMediaRelayTcpPort: String = "9444"
     @State private var draftMediaRelayToken: String = ""
 
+    private var activeInvariantCandidates: [DiagnosticsInvariantViolationCandidate] {
+        projection.localSession.derivedInvariantCandidates
+    }
+
+    private var activeInvariantIDs: Set<String> {
+        Set(activeInvariantCandidates.map(\.invariantID))
+    }
+
+    private var visibleEntries: [DiagnosticsEntry] {
+        entries.filter { entry in
+            guard entry.subsystem == .invariant else {
+                return true
+            }
+            guard let invariantID = entry.metadata["invariantID"] else { return false }
+            return activeInvariantIDs.contains(invariantID)
+        }
+    }
+
     var body: some View {
         List {
             if let uploadStatus {
@@ -110,6 +128,28 @@ struct TurboDiagnosticsView: View {
                 diagnosticsRow("Backend can transmit", boolText(projection.selectedSession.backendCanTransmit))
                 diagnosticsRow("Active channel", projection.selectedSession.activeChannelID ?? "none")
                 diagnosticsRow("WebSocket", projection.isWebSocketConnected ? "connected" : "disconnected")
+            }
+
+            Section("Active invariants") {
+                if activeInvariantCandidates.isEmpty {
+                    diagnosticsRow("Current", "none")
+                } else {
+                    ForEach(activeInvariantCandidates, id: \.invariantID) { invariant in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(invariant.invariantID)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.red)
+                            Text(invariant.message)
+                                .font(.caption)
+                            if !invariant.metadata.isEmpty {
+                                Text(invariant.metadata.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: "\n"))
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
             }
 
             Section("Audio") {
@@ -345,10 +385,10 @@ struct TurboDiagnosticsView: View {
                 }
             }
 
-            if entries.isEmpty {
-                ContentUnavailableView("No diagnostics yet", systemImage: "waveform.path.ecg")
+            if visibleEntries.isEmpty {
+                ContentUnavailableView("No active diagnostics entries", systemImage: "waveform.path.ecg")
             } else {
-                ForEach(entries) { entry in
+                ForEach(visibleEntries) { entry in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text(entry.subsystem.rawValue.uppercased())

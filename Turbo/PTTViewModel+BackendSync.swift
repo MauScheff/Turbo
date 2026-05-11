@@ -1266,7 +1266,33 @@ extension PTTViewModel {
             await refreshInvites()
         case .refreshChannelState(let contactID):
             await refreshChannelState(for: contactID)
+        case .refreshForegroundControlPlane(let selectedContactID):
+            await refreshForegroundControlPlane(selectedContactID: selectedContactID)
         }
+    }
+
+    func refreshForegroundControlPlane(selectedContactID: UUID?) async {
+        let canRefreshSelectedChannelImmediately = selectedContactID.flatMap { contactID in
+            contacts.first(where: { $0.id == contactID })?.backendChannelId
+        } != nil
+
+        if let selectedContactID, canRefreshSelectedChannelImmediately {
+            async let summaries: Void = refreshContactSummaries()
+            async let invites: Void = refreshInvites()
+            async let channel: Void = refreshChannelState(for: selectedContactID)
+            _ = await (summaries, invites, channel)
+            return
+        }
+
+        async let summaries: Void = refreshContactSummaries()
+        async let invites: Void = refreshInvites()
+        _ = await (summaries, invites)
+
+        guard let selectedContactID else { return }
+        guard contacts.first(where: { $0.id == selectedContactID })?.backendChannelId != nil else {
+            return
+        }
+        await refreshChannelState(for: selectedContactID)
     }
 
     func scheduleIncomingSignalDelivery(_ envelope: TurboSignalEnvelope) {

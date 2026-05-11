@@ -41,6 +41,7 @@ enum BackendSyncEffect: Equatable {
     case refreshContactSummaries
     case refreshInvites
     case refreshChannelState(UUID)
+    case refreshForegroundControlPlane(selectedContactID: UUID?)
 }
 
 struct BackendSyncTransition: Equatable {
@@ -73,10 +74,11 @@ enum BackendSyncReducer {
 
         case .pollRequested(let selectedContactID):
             if nextState.syncState.hasEstablishedConnection {
-                effects = [.ensureWebSocketConnected, .heartbeatPresence, .refreshContactSummaries, .refreshInvites]
-                if let selectedContactID {
-                    effects.append(.refreshChannelState(selectedContactID))
-                }
+                effects = [
+                    .ensureWebSocketConnected,
+                    .heartbeatPresence,
+                    .refreshForegroundControlPlane(selectedContactID: selectedContactID),
+                ]
             } else {
                 effects = [.bootstrapIfNeeded]
             }
@@ -88,14 +90,10 @@ enum BackendSyncReducer {
             case .connecting:
                 break
             case .connected:
-                if let selectedContactID {
-                    effects.append(contentsOf: [
-                        .heartbeatPresence,
-                        .refreshContactSummaries,
-                        .refreshInvites,
-                        .refreshChannelState(selectedContactID),
-                    ])
-                }
+                effects.append(contentsOf: [
+                    .heartbeatPresence,
+                    .refreshForegroundControlPlane(selectedContactID: selectedContactID),
+                ])
             }
 
         case .contactSummariesUpdated(let updates):

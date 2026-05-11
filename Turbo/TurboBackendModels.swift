@@ -988,7 +988,7 @@ enum TurboDirectPathDebugOverride {
             }
             return parsed
         }
-        return .appleGated
+        return .speculativeForeground
     }
 
     static func setTransmitStartupPolicy(

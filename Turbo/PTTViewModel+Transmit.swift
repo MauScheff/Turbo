@@ -1054,11 +1054,46 @@ extension PTTViewModel {
     }
 
     func isBackendLeaseBypassedTransmitTarget(_ target: TransmitTarget) -> Bool {
-        directQuicBackendLeaseBypassedContactIDs.contains(target.contactID)
+        foregroundDirectTransmitDelegationsByContactID[target.contactID]?.matches(target) == true
     }
 
     func directQuicBackendLeaseBypassedRequest(for contactID: UUID) -> TransmitRequestContext? {
-        directQuicBackendLeaseBypassedRequestsByContactID[contactID]
+        foregroundDirectTransmitDelegationsByContactID[contactID]?.request
+    }
+
+    func storeForegroundDirectTransmitDelegation(
+        request: TransmitRequestContext,
+        target: TransmitTarget,
+        reason: String
+    ) -> ForegroundDirectTransmitDelegation {
+        let delegation = ForegroundDirectTransmitDelegation(
+            grantID: UUID().uuidString.lowercased(),
+            request: request,
+            target: target,
+            reason: reason,
+            grantedAt: Date()
+        )
+        foregroundDirectTransmitDelegationsByContactID[target.contactID] = delegation
+        return delegation
+    }
+
+    func clearForegroundDirectTransmitDelegation(
+        for contactID: UUID,
+        reason: String
+    ) {
+        guard let delegation = foregroundDirectTransmitDelegationsByContactID.removeValue(forKey: contactID) else {
+            return
+        }
+        diagnostics.record(
+            .media,
+            message: "Cleared foreground Direct QUIC transmit delegation",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": delegation.target.channelID,
+                "grantId": delegation.grantID,
+                "reason": reason,
+            ]
+        )
     }
 
     func directQuicBackendLeaseBypassTarget(
@@ -1791,8 +1826,23 @@ extension PTTViewModel {
                     )
                     return
                 }
-                directQuicBackendLeaseBypassedContactIDs.insert(target.contactID)
-                directQuicBackendLeaseBypassedRequestsByContactID[target.contactID] = request
+                let delegation = storeForegroundDirectTransmitDelegation(
+                    request: request,
+                    target: target,
+                    reason: "begin-transmit-lease-bypass"
+                )
+                diagnostics.record(
+                    .media,
+                    message: "Started foreground Direct QUIC transmit delegation",
+                    metadata: [
+                        "contactId": target.contactID.uuidString,
+                        "channelId": target.channelID,
+                        "targetDeviceId": target.deviceID,
+                        "grantId": delegation.grantID,
+                        "reason": delegation.reason,
+                        "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
+                    ]
+                )
                 transmitRuntime.syncActiveTarget(target)
                 configureOutgoingAudioRoute(target: target)
                 await transmitCoordinator.handle(.beginSucceeded(target, request))
@@ -4487,6 +4537,29 @@ extension PTTViewModel {
                 "selection": "dynamic",
             ]
         )
+        preconnectMediaRelayForAudioSendIfNeeded(target: target)
+    }
+
+    func preconnectMediaRelayForAudioSendIfNeeded(target: TransmitTarget) {
+        let shouldAttempt =
+            TurboMediaRelayDebugOverride.isEnabled()
+            || TurboMediaRelayDebugOverride.isForced()
+        guard shouldAttempt else { return }
+        guard TurboMediaRelayDebugOverride.config()?.isConfigured == true else { return }
+        diagnostics.record(
+            .media,
+            message: "Preconnecting media relay for audio send",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "peerDeviceId": target.deviceID,
+                "forced": String(TurboMediaRelayDebugOverride.isForced()),
+            ]
+        )
+        Task { [weak self] in
+            guard let self else { return }
+            _ = await self.mediaRelayClientForAudioSend(target: target)
+        }
     }
 
     func configuredOutgoingAudioTransportLabel(for contactID: UUID) -> String {
@@ -4565,7 +4638,9 @@ extension PTTViewModel {
             }
             return nil
         }
-        let localDeviceId = await MainActor.run { backendServices?.deviceID ?? "" }
+        let localDeviceId = await MainActor.run {
+            backendServices?.deviceID ?? backendConfig?.deviceID ?? ""
+        }
         guard !localDeviceId.isEmpty else {
             await MainActor.run {
                 diagnostics.record(
@@ -4831,6 +4906,19 @@ extension PTTViewModel {
             }
 
             if wakeCapablePeer && waitedNanoseconds >= wakeRecoveryGraceNanoseconds {
+                if transmitRuntime.isPressingTalk {
+                    diagnostics.record(
+                        .media,
+                        message: "Wake-capable receiver grace elapsed; releasing outbound audio send gate",
+                        metadata: [
+                            "contactId": target.contactID.uuidString,
+                            "channelId": target.channelID,
+                            "waitedMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+                            "wakeRecoveryGraceMilliseconds": String(wakeRecoveryGraceNanoseconds / 1_000_000),
+                        ]
+                    )
+                    return true
+                }
                 if !transmitRuntime.isPressingTalk,
                    waitedNanoseconds
                     < wakeRecoveryGraceNanoseconds + postReleaseWakeRecoveryGraceNanoseconds {
@@ -4941,8 +5029,10 @@ extension PTTViewModel {
         )
         await transmitCoordinator.handle(.stopCompleted(target))
         syncTransmitState()
-        directQuicBackendLeaseBypassedContactIDs.remove(target.contactID)
-        directQuicBackendLeaseBypassedRequestsByContactID.removeValue(forKey: target.contactID)
+        clearForegroundDirectTransmitDelegation(
+            for: target.contactID,
+            reason: "\(source)-completed-locally"
+        )
         updateStatusForSelectedContact()
         captureDiagnosticsState("transmit-stop:completed-locally")
     }
@@ -4998,8 +5088,10 @@ extension PTTViewModel {
                         target: target,
                         source: "explicit-stop-direct-quic-lease-bypass"
                     )
-                    directQuicBackendLeaseBypassedContactIDs.remove(target.contactID)
-                    directQuicBackendLeaseBypassedRequestsByContactID.removeValue(forKey: target.contactID)
+                    clearForegroundDirectTransmitDelegation(
+                        for: target.contactID,
+                        reason: "explicit-stop-direct-quic-lease-bypass"
+                    )
                     await refreshChannelState(for: target.contactID)
                     updateStatusForSelectedContact()
                     return
@@ -5085,8 +5177,10 @@ extension PTTViewModel {
                     "channelId": target.channelID,
                 ]
             )
-            directQuicBackendLeaseBypassedContactIDs.remove(target.contactID)
-            directQuicBackendLeaseBypassedRequestsByContactID.removeValue(forKey: target.contactID)
+            clearForegroundDirectTransmitDelegation(
+                for: target.contactID,
+                reason: "abort-direct-quic-lease-bypass"
+            )
             await finalizeExplicitTransmitStopLocallyIfNeeded(
                 target: target,
                 source: "abort-direct-quic-lease-bypass"

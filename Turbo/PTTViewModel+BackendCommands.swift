@@ -348,6 +348,7 @@ extension PTTViewModel {
             contactID: contact.id,
             handle: contact.handle,
             intent: intent,
+            operationID: backendJoinOperationID(for: contact, intent: intent),
             relationship: relationshipState(for: contact.id),
             existingRemoteUserID: contact.remoteUserId,
             existingBackendChannelID: contact.backendChannelId,
@@ -367,6 +368,7 @@ extension PTTViewModel {
             contactID: contact.id,
             handle: contact.handle,
             intent: .joinReadyPeer,
+            operationID: backendJoinOperationID(for: contact, intent: .joinReadyPeer),
             relationship: relationshipState(for: contact.id),
             existingRemoteUserID: contact.remoteUserId,
             existingBackendChannelID: contact.backendChannelId,
@@ -818,7 +820,8 @@ extension PTTViewModel {
             )
             let invite = try await backend.createInvite(
                 otherHandle: identityQuery.otherHandle,
-                otherUserId: identityQuery.otherUserId
+                otherUserId: identityQuery.otherUserId,
+                operationId: request.operationID
             )
             createdInvite = invite
             applyInviteMetadata(invite, to: &contact)
@@ -923,6 +926,7 @@ extension PTTViewModel {
             contactID: refreshedContact.id,
             handle: refreshedContact.handle,
             intent: request.intent,
+            operationID: request.operationID,
             relationship: relationshipState(for: refreshedContact.id),
             existingRemoteUserID: refreshedContact.remoteUserId,
             existingBackendChannelID: refreshedContact.backendChannelId,
@@ -931,6 +935,20 @@ extension PTTViewModel {
             requestCooldownRemaining: requestCooldownRemaining(for: refreshedContact.id),
             usesLocalHTTPBackend: request.usesLocalHTTPBackend
         )
+    }
+
+    func backendJoinOperationID(for contact: Contact, intent: BackendJoinIntent) -> String? {
+        guard intent == .requestConnection else { return nil }
+        let stablePeerKey = contact.remoteUserId ?? Contact.normalizedHandle(contact.handle)
+        let channelKey = contact.backendChannelId ?? "no-channel"
+        let deviceKey = backendServices?.deviceID ?? backendConfig?.deviceID ?? "no-device"
+        return [
+            "connect",
+            deviceKey,
+            contact.id.uuidString.lowercased(),
+            stablePeerKey,
+            channelKey,
+        ].joined(separator: ":")
     }
 
     func prepareBackendJoinControlPlaneIfNeeded(

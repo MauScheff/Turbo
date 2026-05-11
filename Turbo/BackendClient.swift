@@ -292,11 +292,20 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         )
     }
 
-    func createInvite(otherHandle: String? = nil, otherUserId: String? = nil) async throws -> TurboInviteResponse {
+    func createInvite(
+        otherHandle: String? = nil,
+        otherUserId: String? = nil,
+        operationId: String? = nil
+    ) async throws -> TurboInviteResponse {
         try await request(
             path: "/v1/invites",
             method: "POST",
-            body: TurboCreateInviteRequest(otherHandle: otherHandle, otherUserId: otherUserId, deviceId: config.deviceID)
+            body: TurboCreateInviteRequest(
+                otherHandle: otherHandle,
+                otherUserId: otherUserId,
+                deviceId: config.deviceID,
+                operationId: operationId
+            )
         )
     }
 
@@ -724,6 +733,7 @@ private struct TurboCreateInviteRequest: Encodable {
     let otherHandle: String?
     let otherUserId: String?
     let deviceId: String
+    let operationId: String?
 }
 
 private struct TurboResolveIdentityRequest: Encodable {

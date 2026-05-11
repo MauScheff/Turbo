@@ -19,6 +19,7 @@ DEFAULT_BASE_URL = "http://localhost:8090/s/turbo"
 DEFAULT_ROOT = Path("/tmp/turbo-scenario-fuzz")
 DEFAULT_HANDLE_A = "@avery"
 DEFAULT_HANDLE_B = "@blake"
+MIN_FREE_BYTES_FOR_FUZZ_RUN = 4 * 1024 * 1024 * 1024
 HTTP_ROUTES = [
     "contact-summaries",
     "incoming-invites",
@@ -131,6 +132,7 @@ def main() -> int:
 
 
 def run_batch(config: FuzzRunConfig) -> int:
+    ensure_free_space(config.artifact_root, MIN_FREE_BYTES_FOR_FUZZ_RUN)
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     run_dir = config.artifact_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -777,6 +779,18 @@ def metadata(artifact_dir: Path) -> dict[str, Any]:
 def require_artifact(artifact_dir: Path) -> None:
     if not (artifact_dir / "metadata.json").exists() or not (artifact_dir / "scenario.json").exists():
         raise SystemExit(f"not a fuzz artifact directory: {artifact_dir}")
+
+
+def ensure_free_space(path: Path, required_bytes: int) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    free_bytes = shutil.disk_usage(path).free
+    if free_bytes < required_bytes:
+        required_gib = required_bytes / (1024 * 1024 * 1024)
+        free_gib = free_bytes / (1024 * 1024 * 1024)
+        raise SystemExit(
+            "not enough free disk for simulator fuzz artifacts: "
+            f"{free_gib:.1f} GiB available, {required_gib:.1f} GiB required at {path}"
+        )
 
 
 def write_json(path: Path, payload: Any) -> None:

@@ -173,8 +173,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var lastReportedPTTDescriptorReason: String?
     var localOnlySystemLeaveSuppressions: [UUID: LocalOnlySystemLeaveSuppression] = [:]
     var systemTransmitBeginRecoveryAttemptsByChannelUUID: [UUID: Int] = [:]
-    var directQuicBackendLeaseBypassedContactIDs: Set<UUID> = []
-    var directQuicBackendLeaseBypassedRequestsByContactID: [UUID: TransmitRequestContext] = [:]
+    var foregroundDirectTransmitDelegationsByContactID: [UUID: ForegroundDirectTransmitDelegation] = [:]
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
     private var diagnosticsAutoPublishPendingTrigger: String?
     private let diagnosticsAutoPublishDelayNanoseconds: UInt64 = 8_000_000_000
@@ -608,8 +607,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     func tearDownTransmitRuntime(resetCoordinator: Bool) {
         transmitTaskCoordinator.send(.reset)
         transmitRuntime.reset()
-        directQuicBackendLeaseBypassedContactIDs.removeAll()
-        directQuicBackendLeaseBypassedRequestsByContactID.removeAll()
+        foregroundDirectTransmitDelegationsByContactID.removeAll()
         if resetCoordinator {
             transmitCoordinator.reset()
             syncTransmitState()
@@ -963,45 +961,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     private func shouldSurfaceTopChromeDiagnosticsError(_ entry: DiagnosticsEntry) -> Bool {
-        if entry.subsystem == .invariant,
-           let invariantID = entry.metadata["invariantID"] {
-            let selectedSession = selectedSessionDiagnosticsSummary
-            switch invariantID {
-            case "selected.wake_capable_peer_blocked_on_local_audio_prewarm":
-                return selectedSession.selectedPhase == "waitingForPeer"
-                    && selectedSession.selectedPhaseDetail.contains("localAudioPrewarm")
-                    && selectedSession.systemSession.hasPrefix("active(")
-                    && selectedSession.backendReadiness == "ready"
-                    && selectedSession.backendSelfJoined == true
-                    && selectedSession.backendPeerJoined == true
-                    && selectedSession.remoteAudioReadiness == "wakeCapable"
-                    && selectedSession.remoteWakeCapabilityKind == "wake-capable"
-            case "selected.backend_ready_missing_remote_audio_signal":
-                return selectedSession.selectedPhase == "waitingForPeer"
-                    && selectedSession.selectedPhaseDetail.contains("remoteAudioPrewarm")
-                    && selectedSession.mediaState == "connected"
-                    && selectedSession.backendReadiness == "ready"
-                    && selectedSession.backendSelfJoined == true
-                    && selectedSession.backendPeerJoined == true
-                    && selectedSession.backendPeerDeviceConnected == true
-                    && selectedSession.remoteAudioReadiness != "waiting"
-                    && selectedSession.remoteWakeCapabilityKind == "wake-capable"
-                    && backendRuntime.signalingJoinRecoveryTask == nil
-            case "selected.backend_absent_pending_local_action_without_session":
-                let pendingAction = selectedSession.pendingAction
-                guard selectedSession.selectedPhase == "waitingForPeer",
-                      selectedSession.relationship == "none",
-                      !selectedSession.isJoined,
-                      selectedSession.systemSession == "none",
-                      selectedSession.backendSelfJoined != true,
-                      selectedSession.backendPeerJoined != true else {
-                    return false
-                }
-                return pendingAction.contains("joiningLocal(")
-                    || pendingAction.contains(".joiningLocal(")
-            default:
-                break
-            }
+        if entry.subsystem == .invariant {
+            guard let invariantID = entry.metadata["invariantID"] else { return false }
+            return stateMachineProjection.localSession.derivedInvariantIDs.contains(invariantID)
         }
 
         switch (entry.subsystem, entry.message) {
@@ -1015,18 +977,6 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             return !pttSystemClient.isReady
         case (.media, "Direct QUIC media path lost"):
             return false
-        case (.invariant, "backend says the peer is ready and connected, but selectedPeerPhase is still waitingForPeer on remote audio prewarm"):
-            let selectedSession = selectedSessionDiagnosticsSummary
-            return selectedSession.selectedPhase == "waitingForPeer"
-                && selectedSession.selectedPhaseDetail.contains("remoteAudioPrewarm")
-                && selectedSession.mediaState == "connected"
-                && selectedSession.backendReadiness == "ready"
-                && selectedSession.backendSelfJoined == true
-                && selectedSession.backendPeerJoined == true
-                && selectedSession.backendPeerDeviceConnected == true
-                && selectedSession.remoteAudioReadiness != "waiting"
-                && selectedSession.remoteWakeCapabilityKind == "wake-capable"
-                && backendRuntime.signalingJoinRecoveryTask == nil
         default:
             return true
         }

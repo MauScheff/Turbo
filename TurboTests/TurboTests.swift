@@ -1201,7 +1201,7 @@ struct TurboTests {
                 arguments: [],
                 environment: [:],
                 defaults: defaults
-            ) == .appleGated
+            ) == .speculativeForeground
         )
 
         defaults.set(
@@ -11147,6 +11147,29 @@ struct TurboTests {
         #expect(plan == .joinSession)
     }
 
+    @MainActor
+    @Test func backendJoinOperationIDIsStableForSingleConnectIntent() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: UUID(),
+            backendChannelId: "channel-123",
+            remoteUserId: "peer-user"
+        )
+
+        let first = viewModel.backendJoinOperationID(for: contact, intent: .requestConnection)
+        let second = viewModel.backendJoinOperationID(for: contact, intent: .requestConnection)
+
+        #expect(first == second)
+        #expect(first?.contains(contactID.uuidString.lowercased()) == true)
+        #expect(first?.contains("peer-user") == true)
+        #expect(viewModel.backendJoinOperationID(for: contact, intent: .joinReadyPeer) == nil)
+    }
+
     @Test func channelReadinessDecodeFailsWithoutNestedContract() {
         let data = Data(
             """
@@ -12445,7 +12468,11 @@ struct TurboTests {
             deviceID: "peer-device",
             channelID: "channel-123"
         )
-        viewModel.directQuicBackendLeaseBypassedContactIDs.insert(contactID)
+        _ = viewModel.storeForegroundDirectTransmitDelegation(
+            request: request,
+            target: target,
+            reason: "test-pre-backend"
+        )
         viewModel.transmitRuntime.syncActiveTarget(target)
         await viewModel.transmitCoordinator.handle(.beginSucceeded(target, request))
         viewModel.syncTransmitState()
@@ -13026,7 +13053,7 @@ struct TurboTests {
 
         #expect(pttClient.beginTransmitRequests == [channelUUID])
         #expect(viewModel.transmitCoordinator.state.activeTarget?.deviceID == "peer-device")
-        #expect(viewModel.directQuicBackendLeaseBypassedContactIDs.contains(contactID))
+        #expect(viewModel.foregroundDirectTransmitDelegationsByContactID[contactID] != nil)
         #expect(mediaSession.startSendingAudioCallCount == 0)
         #expect(mediaSession.closedDeactivateAudioSessionFlags == [true])
         #expect(
@@ -13177,7 +13204,7 @@ struct TurboTests {
         try await Task.sleep(nanoseconds: 200_000_000)
 
         #expect(pttClient.beginTransmitRequests == [channelUUID])
-        #expect(viewModel.directQuicBackendLeaseBypassedContactIDs.contains(contactID))
+        #expect(viewModel.foregroundDirectTransmitDelegationsByContactID[contactID] != nil)
         #expect(mediaSession.startSendingAudioCallCount == 1)
         #expect(mediaSession.closedDeactivateAudioSessionFlags.isEmpty)
         #expect(
@@ -23774,9 +23801,7 @@ struct TurboTests {
             transition.effects == [
                 .ensureWebSocketConnected,
                 .heartbeatPresence,
-                .refreshContactSummaries,
-                .refreshInvites,
-                .refreshChannelState(contactID)
+                .refreshForegroundControlPlane(selectedContactID: contactID)
             ]
         )
     }
@@ -23792,9 +23817,7 @@ struct TurboTests {
         #expect(
             transition.effects == [
                 .heartbeatPresence,
-                .refreshContactSummaries,
-                .refreshInvites,
-                .refreshChannelState(contactID)
+                .refreshForegroundControlPlane(selectedContactID: contactID)
             ]
         )
     }
@@ -24186,9 +24209,7 @@ struct TurboTests {
             capturedEffects == [
                 .ensureWebSocketConnected,
                 .heartbeatPresence,
-                .refreshContactSummaries,
-                .refreshInvites,
-                .refreshChannelState(contactID)
+                .refreshForegroundControlPlane(selectedContactID: contactID)
             ]
         )
     }
@@ -26234,7 +26255,7 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func outgoingAudioSendGateDoesNotReleaseWakeGraceWhileTalkIsStillActive() async {
+    @Test func outgoingAudioSendGateReleasesWakeGraceWhileTalkIsStillActive() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let channelUUID = UUID()
@@ -26312,6 +26333,11 @@ struct TurboTests {
         )
         #expect(
             viewModel.diagnosticsTranscript.contains(
+                "Wake-capable receiver grace elapsed; releasing outbound audio send gate"
+            )
+        )
+        #expect(
+            !viewModel.diagnosticsTranscript.contains(
                 "Remote receiver audio became ready; releasing outbound audio send gate"
             )
         )
@@ -31865,6 +31891,28 @@ struct TurboTests {
             metadata: [
                 "invariantID": "selected.backend_absent_pending_local_action_without_session",
                 "pendingAction": "leave(BeepBeep.PendingLeaveAction.explicit(contactID: Optional(123)))",
+            ]
+        )
+
+        #expect(viewModel.topChromeDiagnosticsErrorText == nil)
+    }
+
+    @MainActor
+    @Test func recoveredStaleMembershipPeerReadyInvariantDoesNotSurfaceInTopChrome() {
+        let viewModel = PTTViewModel()
+        viewModel.diagnostics.clear()
+
+        viewModel.diagnostics.record(
+            .invariant,
+            level: .error,
+            message: "backend retained durable channel membership while selectedPeerPhase is peerReady without a local session",
+            metadata: [
+                "invariantID": "selected.stale_membership_peer_ready_without_session",
+                "selectedPeerPhase": "peerReady",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "isJoined": "false",
+                "systemSession": "none",
             ]
         )
 

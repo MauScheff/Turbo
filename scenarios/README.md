@@ -262,6 +262,10 @@ Use the local websocket backend for high-volume fuzzing:
 3. Run `just simulator-fuzz-local-overnight 12345 500` for a longer pass.
 4. On failure, use the printed replay and shrink commands.
 
+The fuzz runner requires at least 4 GiB free at the artifact root before a batch
+starts. xcodebuild result bundles and simulator caches can otherwise turn a
+passing seed into an infrastructure failure while writing artifacts.
+
 Each seed directory stores:
 
 - `scenario.json`

@@ -1457,9 +1457,14 @@ struct BackendServices {
 
     func createInvite(
         otherHandle: String? = nil,
-        otherUserId: String? = nil
+        otherUserId: String? = nil,
+        operationId: String? = nil
     ) async throws -> TurboInviteResponse {
-        try await client.createInvite(otherHandle: otherHandle, otherUserId: otherUserId)
+        try await client.createInvite(
+            otherHandle: otherHandle,
+            otherUserId: otherUserId,
+            operationId: operationId
+        )
     }
 
     func incomingInvites() async throws -> [TurboInviteResponse] {

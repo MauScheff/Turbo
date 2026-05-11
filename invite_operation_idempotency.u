@@ -1,0 +1,125 @@
+type turbo.store.invites.internal.PendingInviteReusePlan
+  = ReusePendingInvite
+  | RefreshPendingInvite
+
+turbo.store.invites.internal.pendingInviteReusePlan :
+  Optional Text -> PendingInviteReusePlan
+turbo.store.invites.internal.pendingInviteReusePlan = cases
+  Some _ -> ReusePendingInvite
+  None   -> RefreshPendingInvite
+
+test> turbo.store.invites.internal.pendingInviteReusePlan.tests.examples = verify do
+  ensureEqual
+    ReusePendingInvite
+    (turbo.store.invites.internal.pendingInviteReusePlan (Some "connect-op-1"))
+  ensureEqual
+    RefreshPendingInvite
+    (turbo.store.invites.internal.pendingInviteReusePlan None)
+
+turbo.store.invites.createOrReuseWithOperationId :
+  Database
+  -> UserId
+  -> UserId
+  -> ChannelId
+  -> Optional Text
+  -> '{Exception, Storage, Remote, Random} Invite
+turbo.store.invites.createOrReuseWithOperationId
+  db fromUserId toUserId channelId operationId =
+  do
+    use Nat +
+    use OrderedTable write
+    use OrderedTable.write tx
+    use invites.tables byId
+    existing = pendingFromTo db fromUserId toUserId channelId ()
+    match existing with
+      Some (Invite inviteId existingFromUserId existingToUserId existingChannelId status requestCount createdAt updatedAt) ->
+        match turbo.store.invites.internal.pendingInviteReusePlan operationId with
+          ReusePendingInvite -> Invite inviteId existingFromUserId existingToUserId existingChannelId status requestCount createdAt updatedAt
+          RefreshPendingInvite ->
+            table = byId db
+            byToCreatedAt = tables.byToCreatedAt db
+            byFromCreatedAt = tables.byFromCreatedAt db
+            updatedAt = now!
+            updated = Invite inviteId existingFromUserId existingToUserId existingChannelId status (requestCount + 1) createdAt (Some updatedAt)
+            _ = write table inviteId updated
+            _ = write byToCreatedAt (existingToUserId, createdAt, inviteId) updated
+            _ = write byFromCreatedAt (existingFromUserId, createdAt, inviteId) updated
+            updated
+      None ->
+        table = byId db
+        byToCreatedAt = tables.byToCreatedAt db
+        byFromCreatedAt = tables.byFromCreatedAt db
+        now = now!
+        transact (OrderedTable.database table) do
+          inviteId = InviteId.fromText (Random.bytes 20 |> Bytes.base32Hex)
+          invite = Invite inviteId fromUserId toUserId channelId Pending 1 now None
+          _ = tx table inviteId invite
+          _ = tx byToCreatedAt (toUserId, now, inviteId) invite
+          _ = tx byFromCreatedAt (fromUserId, now, inviteId) invite
+          invite
+
+turbo.service.invites.create : Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.invites.create db = do
+  use Map get
+  use Parser /
+  use Text ==
+  use UserId toText
+  use object empty
+  noCapture POST (s "v1" / s "invites")
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      currentUserHandle =
+        (User _ handleText _ _ _) = currentUser
+        handleText
+      fields = decodeJson (Decoder.object Decoder.text)
+      operationId = get "operationId" fields
+      senderDeviceId = match get "deviceId" fields with
+        Some senderDeviceIdText -> DeviceId.fromText senderDeviceIdText
+        None                    -> DeviceId.fromText "invite-request"
+      resolvedOther = match get "otherUserId" fields with
+        Some otherUserIdText -> Some (UserId.fromText otherUserIdText)
+        None                 ->
+          match get "otherHandle" fields with
+            None             -> None
+            Some otherHandle ->
+              match getByHandle db otherHandle () with
+                None                            -> None
+                Some (User otherUserId _ _ _ _) -> Some otherUserId
+      match resolvedOther with
+        None             -> badRequest.json (empty |> addText "error" "missing otherUserId or otherHandle")
+        Some otherUserId ->
+          if toText otherUserId == toText currentUserId then badRequest.json (empty |> addText "error" "cannot invite self")
+          else
+            channel = getOrCreateDirect db currentUserId otherUserId ()
+            channelId =
+              (DirectChannel channelId _ _ _) = channel
+              channelId
+            invite = createOrReuseWithOperationId db currentUserId otherUserId channelId operationId ()
+            inviteId =
+              (Invite inviteId _ _ _ _ _ _ _) = invite
+              inviteId
+            requestCount =
+              (Invite _ _ _ _ _ requestCount _ _) = invite
+              requestCount
+            badgeCount = pendingIncomingInviteBadgeCount (listIncomingPending db otherUserId ())
+            alertableDevices = listAlertableForUser db otherUserId ()
+            _ =
+              List.foreach
+                (cases
+                  Device targetDeviceId _ _ _ (Some alertPushToken) _ _ ->
+                    alertApnsEnvironment = getAlert db otherUserId targetDeviceId ()
+                    sendInviteAlertPush db channelId inviteId requestCount badgeCount currentUserHandle currentUserId senderDeviceId otherUserId targetDeviceId alertApnsEnvironment alertPushToken ()
+                  _                                                     -> ()) alertableDevices
+            availability = users.availability db otherUserId ()
+            inviteJson = internal.inviteJson db currentUserId invite ()
+            ok.json
+              (inviteJson
+                |> addText "targetAvailability" (availabilityText availability)
+                |> addOptionalText "operationId" operationId
+                |> (addBoolean "shouldAutoJoinPeer" match availability with
+                  Available -> true
+                  _         -> false))
