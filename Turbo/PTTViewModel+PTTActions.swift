@@ -467,6 +467,9 @@ extension PTTViewModel {
         guard let activeSystemChannelUUID = pttCoordinator.state.systemChannelUUID else { return }
         sessionCoordinator.markExplicitLeave(contactID: selectedContactId)
         if let selectedContactId {
+            backendRuntime.clearBackendJoinSettling(for: selectedContactId)
+        }
+        if let selectedContactId {
             clearRemoteAudioActivity(for: selectedContactId)
         }
         diagnostics.record(.channel, message: "Ending system session", metadata: ["channelUUID": activeSystemChannelUUID.uuidString])
@@ -521,6 +524,9 @@ extension PTTViewModel {
         }()
         stopAutomaticAudioRouteMonitoring(reason: "disconnect")
         sessionCoordinator.markExplicitLeave(contactID: disconnectContactID)
+        if let disconnectContactID {
+            backendRuntime.clearBackendJoinSettling(for: disconnectContactID)
+        }
         scheduleDisconnectRecovery(
             contactID: disconnectContactID,
             channelUUID: disconnectChannelUUID,
@@ -726,6 +732,7 @@ extension PTTViewModel {
         case .teardownLocalSession(let contactID):
             guard selectedContactId == contactID else { return }
             sessionCoordinator.markReconciledTeardown(contactID: contactID)
+            backendRuntime.clearBackendJoinSettling(for: contactID)
             diagnostics.record(
                 .state,
                 message: "Tearing down invalid local session after system mismatch",
@@ -738,6 +745,7 @@ extension PTTViewModel {
                   let contact = contacts.first(where: { $0.id == contactID }),
                   let backendChannelId = contact.backendChannelId else { return }
             sessionCoordinator.markReconciledTeardown(contactID: contactID)
+            backendRuntime.clearBackendJoinSettling(for: contactID)
             diagnostics.record(
                 .state,
                 message: "Clearing stale backend membership without local session evidence",

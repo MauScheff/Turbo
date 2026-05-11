@@ -4713,6 +4713,26 @@ extension PTTViewModel {
                     incomingAudioTransport: .directQuic
                 )
             },
+            onDisconnected: { [weak self] in
+                guard let viewModel = self else { return }
+                await MainActor.run {
+                    let key = MediaRelayConnectionKey(
+                        sessionID: channelID,
+                        localDeviceID: localDeviceID,
+                        peerDeviceID: peerDeviceID
+                    )
+                    viewModel.mediaRuntime.clearMediaRelayClient(matching: key)
+                    viewModel.diagnostics.record(
+                        .media,
+                        message: "Media relay disconnected; returning to WebSocket relay",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "channelId": channelID,
+                            "peerDeviceId": peerDeviceID,
+                        ]
+                    )
+                }
+            },
             reportEvent: { [weak self] message, metadata in
                 await MainActor.run {
                     self?.diagnostics.record(.media, message: message, metadata: metadata)

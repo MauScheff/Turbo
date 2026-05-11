@@ -210,6 +210,15 @@ extension PTTViewModel {
         }
 
         do {
+            if let handle = talkRequestNotificationHandle(from: userInfo),
+               let contact = contactMatchingNormalizedHandle(handle) {
+                markIncomingRequestHandledLocally(
+                    contactID: contact.id,
+                    invite: incomingInviteByContactID[contact.id],
+                    relationship: relationshipState(for: contact.id),
+                    reason: "decline-notification"
+                )
+            }
             _ = try await backend.declineInvite(inviteId: inviteID)
             await refreshInvites()
             await refreshContactSummaries()

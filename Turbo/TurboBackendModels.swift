@@ -33,6 +33,17 @@ enum TurboRequestRelationship: Equatable {
             return false
         }
     }
+
+    var removingIncomingRequest: TurboRequestRelationship {
+        switch self {
+        case .incoming:
+            return .none
+        case .mutual(let requestCount):
+            return .outgoing(requestCount: requestCount)
+        case .none, .outgoing:
+            return self
+        }
+    }
 }
 
 enum TurboSummaryBadgeStatus: Equatable {

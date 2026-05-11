@@ -25,6 +25,12 @@ from typing import Any
 
 DEFAULT_WORKFLOW_ID = "9195fc7c-1e0c-4a16-a3f0-daf74ecdd554"
 API_BASE = "https://api.appstoreconnect.apple.com/v1"
+DEFAULT_WHAT_TO_TEST = (
+    "Try adding a contact, sending and receiving talk requests, connecting in "
+    "the foreground and background, and talking for a while. If you need "
+    "someone to test with, add @mau by username and try speaking with me. If "
+    "something breaks, shake your phone to send a report so we can fix it."
+)
 
 
 class ReleaseError(Exception):
@@ -300,6 +306,81 @@ def add_build_to_beta_group(api: AppStoreConnect, build_id: str, beta_group_id: 
     )
 
 
+def set_what_to_test(
+    api: AppStoreConnect,
+    build_id: str,
+    locale: str,
+    what_to_test: str,
+) -> None:
+    response = api.request("GET", f"/builds/{build_id}/betaBuildLocalizations")
+    existing = None
+    for localization in response.get("data", []):
+        if localization.get("attributes", {}).get("locale") == locale:
+            existing = localization
+            break
+
+    if existing:
+        api.request(
+            "PATCH",
+            f"/betaBuildLocalizations/{existing['id']}",
+            {
+                "data": {
+                    "type": "betaBuildLocalizations",
+                    "id": existing["id"],
+                    "attributes": {"whatsNew": what_to_test},
+                }
+            },
+        )
+    else:
+        api.request(
+            "POST",
+            "/betaBuildLocalizations",
+            {
+                "data": {
+                    "type": "betaBuildLocalizations",
+                    "attributes": {
+                        "locale": locale,
+                        "whatsNew": what_to_test,
+                    },
+                    "relationships": {
+                        "build": {
+                            "data": {
+                                "type": "builds",
+                                "id": build_id,
+                            }
+                        }
+                    },
+                }
+            },
+        )
+
+
+def submit_for_beta_review(api: AppStoreConnect, build_id: str) -> str:
+    existing = api.request("GET", f"/builds/{build_id}/betaAppReviewSubmission")
+    if existing.get("data"):
+        submission = existing["data"]
+        return submission["id"]
+
+    response = api.request(
+        "POST",
+        "/betaAppReviewSubmissions",
+        {
+            "data": {
+                "type": "betaAppReviewSubmissions",
+                "relationships": {
+                    "build": {
+                        "data": {
+                            "type": "builds",
+                            "id": build_id,
+                        }
+                    }
+                },
+            }
+        },
+    )
+    return response["data"]["id"]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -338,6 +419,21 @@ def parse_args() -> argparse.Namespace:
         "--assign-build-id",
         help="Skip Xcode Cloud and assign an existing processed App Store Connect build ID.",
     )
+    parser.add_argument(
+        "--what-to-test",
+        default=os.environ.get("TESTFLIGHT_WHAT_TO_TEST", DEFAULT_WHAT_TO_TEST),
+        help="Text to put in TestFlight's What to Test field.",
+    )
+    parser.add_argument(
+        "--locale",
+        default=os.environ.get("TESTFLIGHT_LOCALE", "en-US"),
+        help="Beta build localization locale.",
+    )
+    parser.add_argument(
+        "--skip-beta-review-submit",
+        action="store_true",
+        help="Add the build to the group but do not submit it for external beta review.",
+    )
     return parser.parse_args()
 
 
@@ -375,11 +471,19 @@ def main() -> int:
             beta_group_id = find_beta_group_id(api, args.app_id, args.beta_group_name)
 
         if beta_group_id:
+            set_what_to_test(api, build_id, args.locale, args.what_to_test)
+            print(f"Set TestFlight What to Test text for {args.locale}.", flush=True)
             add_build_to_beta_group(api, build_id, beta_group_id)
             print(
                 f"Added build {build_id} to TestFlight beta group {beta_group_id}.",
                 flush=True,
             )
+            if not args.skip_beta_review_submit:
+                submission_id = submit_for_beta_review(api, build_id)
+                print(
+                    f"Submitted build {build_id} for external beta review: {submission_id}.",
+                    flush=True,
+                )
         else:
             print(
                 "No TestFlight beta group configured; build was not assigned to a group.",

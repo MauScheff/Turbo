@@ -96,7 +96,9 @@ private final class ApplePTTSystemClientAdapter: NSObject, PTChannelManagerDeleg
     }
 
     func channelManager(_ channelManager: PTChannelManager, receivedEphemeralPushToken token: Data) {
-        callbacks.receivedEphemeralPushToken(token)
+        Task { @MainActor [callbacks] in
+            callbacks.receivedEphemeralPushToken(token)
+        }
     }
 
     func handleIncomingPush(channelUUID: UUID, payload: TurboPTTPushPayload) -> PTPushResult {
@@ -113,7 +115,9 @@ private final class ApplePTTSystemClientAdapter: NSObject, PTChannelManagerDeleg
             resultDescription = "leaveChannel"
         }
 
-        callbacks.willReturnIncomingPushResult(channelUUID, payload, resultDescription)
+        Task { @MainActor [callbacks] in
+            callbacks.willReturnIncomingPushResult(channelUUID, payload, resultDescription)
+        }
 
         // Return the system result first and defer app-owned bookkeeping so the
         // PushToTalk wake callback stays on the fast path.
@@ -124,43 +128,63 @@ private final class ApplePTTSystemClientAdapter: NSObject, PTChannelManagerDeleg
     }
 
     func channelManager(_ channelManager: PTChannelManager, didJoinChannel channelUUID: UUID, reason: PTChannelJoinReason) {
-        callbacks.didJoinChannel(channelUUID, String(describing: reason))
+        Task { @MainActor [callbacks] in
+            callbacks.didJoinChannel(channelUUID, String(describing: reason))
+        }
     }
 
     func channelManager(_ channelManager: PTChannelManager, didLeaveChannel channelUUID: UUID, reason: PTChannelLeaveReason) {
-        callbacks.didLeaveChannel(channelUUID, PTTSystemLeaveReason(rawDescription: String(describing: reason)))
+        Task { @MainActor [callbacks] in
+            callbacks.didLeaveChannel(channelUUID, PTTSystemLeaveReason(rawDescription: String(describing: reason)))
+        }
     }
 
     func channelManager(_ channelManager: PTChannelManager, failedToJoinChannel channelUUID: UUID, error: any Error) {
-        callbacks.failedToJoinChannel(channelUUID, error)
+        Task { @MainActor [callbacks] in
+            callbacks.failedToJoinChannel(channelUUID, error)
+        }
     }
 
     func channelManager(_ channelManager: PTChannelManager, failedToLeaveChannel channelUUID: UUID, error: any Error) {
-        callbacks.failedToLeaveChannel(channelUUID, error)
+        Task { @MainActor [callbacks] in
+            callbacks.failedToLeaveChannel(channelUUID, error)
+        }
     }
 
     func channelManager(_ channelManager: PTChannelManager, channelUUID: UUID, didBeginTransmittingFrom source: PTChannelTransmitRequestSource) {
-        callbacks.didBeginTransmitting(channelUUID, String(describing: source))
+        Task { @MainActor [callbacks] in
+            callbacks.didBeginTransmitting(channelUUID, String(describing: source))
+        }
     }
 
     func channelManager(_ channelManager: PTChannelManager, channelUUID: UUID, didEndTransmittingFrom source: PTChannelTransmitRequestSource) {
-        callbacks.didEndTransmitting(channelUUID, String(describing: source))
+        Task { @MainActor [callbacks] in
+            callbacks.didEndTransmitting(channelUUID, String(describing: source))
+        }
     }
 
     func channelManager(_ channelManager: PTChannelManager, failedToBeginTransmittingInChannel channelUUID: UUID, error: any Error) {
-        callbacks.failedToBeginTransmitting(channelUUID, error)
+        Task { @MainActor [callbacks] in
+            callbacks.failedToBeginTransmitting(channelUUID, error)
+        }
     }
 
     func channelManager(_ channelManager: PTChannelManager, failedToStopTransmittingInChannel channelUUID: UUID, error: any Error) {
-        callbacks.failedToStopTransmitting(channelUUID, error)
+        Task { @MainActor [callbacks] in
+            callbacks.failedToStopTransmitting(channelUUID, error)
+        }
     }
 
     func channelManager(_ channelManager: PTChannelManager, didActivate audioSession: AVAudioSession) {
-        callbacks.didActivateAudioSession(audioSession)
+        Task { @MainActor [callbacks] in
+            callbacks.didActivateAudioSession(audioSession)
+        }
     }
 
     func channelManager(_ channelManager: PTChannelManager, didDeactivate audioSession: AVAudioSession) {
-        callbacks.didDeactivateAudioSession(audioSession)
+        Task { @MainActor [callbacks] in
+            callbacks.didDeactivateAudioSession(audioSession)
+        }
     }
 
     func incomingPushResult(channelManager: PTChannelManager, channelUUID: UUID, pushPayload: [String : Any]) -> PTPushResult {

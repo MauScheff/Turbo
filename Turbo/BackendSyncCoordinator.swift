@@ -32,6 +32,7 @@ enum BackendSyncEvent: Equatable {
     case invitesPartiallyUpdated(incoming: [BackendInviteUpdate]?, outgoing: [BackendInviteUpdate]?, now: Date)
     case invitesFailed(String)
     case outgoingInviteSeeded(contactID: UUID, invite: TurboInviteResponse, now: Date)
+    case incomingRequestHandled(contactID: UUID, invite: TurboInviteResponse?, requestCount: Int, now: Date)
 }
 
 enum BackendSyncEffect: Equatable {
@@ -141,6 +142,13 @@ enum BackendSyncReducer {
             nextState.syncState.requestCooldownDeadlines[contactID] = now.addingTimeInterval(30)
             nextState.syncState.requestCooldownSourceKeys[contactID] =
                 "\(invite.inviteId)|\(invite.requestCount)|\(invite.updatedAt ?? invite.createdAt)"
+
+        case .incomingRequestHandled(let contactID, let invite, let requestCount, _):
+            nextState.syncState.markIncomingRequestHandled(
+                contactID: contactID,
+                invite: invite,
+                requestCount: requestCount
+            )
         }
 
         return BackendSyncTransition(state: nextState, effects: effects)

@@ -527,6 +527,11 @@ extension PTTViewModel {
                     "backendChannelStatus": backendSyncCoordinator.state.syncState.channelStates[contactID]?.status ?? "none",
                 ]
             )
+            markLocalOnlySystemLeave(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "stale-join-after-backend-membership-loss"
+            )
             try? pttSystemClient.leaveChannel(channelUUID: channelUUID)
             statusMessage = "Disconnecting..."
             captureDiagnosticsState("ptt-callback:joined-blocked-by-membership-loss")
@@ -537,6 +542,7 @@ extension PTTViewModel {
             if let contactID,
                sessionCoordinator.pendingJoinContactID == contactID {
                 sessionCoordinator.clearAfterSuccessfulJoin(for: contactID)
+                backendRuntime.clearBackendJoinSettling(for: contactID)
                 updateStatusForSelectedContact()
                 diagnostics.record(
                     .pushToTalk,
@@ -575,6 +581,7 @@ extension PTTViewModel {
                     if let contactID {
                         if self.sessionCoordinator.pendingJoinContactID == contactID {
                             self.sessionCoordinator.clearAfterSuccessfulJoin(for: contactID)
+                            self.backendRuntime.clearBackendJoinSettling(for: contactID)
                             self.updateStatusForSelectedContact()
                             self.diagnostics.record(
                                 .pushToTalk,
@@ -606,6 +613,9 @@ extension PTTViewModel {
     }
 
     func shouldIgnoreDidJoinAfterBackendMembershipLoss(contactID: UUID) -> Bool {
+        guard !shouldPreservePendingLocalJoinDuringBackendJoinSettling(for: contactID) else {
+            return false
+        }
         guard sessionCoordinator.pendingAction.pendingJoinContactID != contactID,
               sessionCoordinator.pendingAction.pendingConnectContactID != contactID else {
             return false
@@ -653,6 +663,23 @@ extension PTTViewModel {
                     "leaveReason": reasonDescription,
                 ]
             )
+            if !reason.isUserInitiated,
+               case .active(let activeContactID, let activeChannelUUID) = pttCoordinator.state.systemSessionState,
+               activeContactID == localOnlySuppression.contactID,
+               activeChannelUUID == channelUUID {
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Ignored stale local-only PTT leave after session restored",
+                    metadata: [
+                        "channelUUID": channelUUID.uuidString,
+                        "contactID": localOnlySuppression.contactID.uuidString,
+                        "reason": localOnlySuppression.reason,
+                        "leaveReason": reasonDescription,
+                    ]
+                )
+                captureDiagnosticsState("ptt-callback:left-local-only-stale-ignored")
+                return
+            }
         }
         let autoRejoinContactID =
             localOnlySuppression == nil
@@ -748,6 +775,7 @@ extension PTTViewModel {
             )
             if let contactID {
                 sessionCoordinator.clearPendingJoin(for: contactID)
+                backendRuntime.clearBackendJoinSettling(for: contactID)
             }
             syncPTTState()
             updateStatusForSelectedContact()

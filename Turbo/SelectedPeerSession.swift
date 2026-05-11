@@ -664,6 +664,17 @@ enum SelectedPeerReducer {
         guard state.interruptedConnectionAttemptContactID == contactID else { return false }
         guard !state.isJoined, state.activeChannelID == nil else { return false }
         guard state.systemSessionState == .none else { return false }
+        if case .restoreLocalSession(contactID) = state.reconciliationAction {
+            return false
+        }
+        if state.localRestoreDispatchInFlightContactID == contactID {
+            return false
+        }
+        if state.pendingAction.pendingJoinContactID == contactID,
+           state.channel?.membership.hasPeerMembership == true,
+           state.localJoinFailure?.contactID != contactID {
+            return false
+        }
         switch state.selectedPeerState.detail {
         case .waitingForPeer(reason: .pendingJoin),
              .waitingForPeer(reason: .backendSessionTransition),

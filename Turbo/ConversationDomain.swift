@@ -905,6 +905,57 @@ struct ChannelReadinessSnapshot: Equatable {
         }
     }
 
+    init(
+        membership: TurboChannelMembership,
+        requestRelationship: TurboRequestRelationship,
+        canTransmit: Bool,
+        status: ConversationState?,
+        readinessStatus: TurboChannelReadinessStatus?,
+        activeTransmitterUserId: String?,
+        activeTransmitId: String?,
+        activeTransmitExpiresAt: String?,
+        serverTimestamp: String?,
+        localHasActiveDevice: Bool,
+        localAudioReadiness: RemoteAudioReadinessState,
+        remoteAudioReadiness: RemoteAudioReadinessState,
+        remoteWakeCapability: RemoteWakeCapabilityState
+    ) {
+        self.membership = membership
+        self.requestRelationship = requestRelationship
+        self.canTransmit = canTransmit
+        self.status = status
+        self.readinessStatus = readinessStatus
+        self.activeTransmitterUserId = activeTransmitterUserId
+        self.activeTransmitId = activeTransmitId
+        self.activeTransmitExpiresAt = activeTransmitExpiresAt
+        self.serverTimestamp = serverTimestamp
+        self.localHasActiveDevice = localHasActiveDevice
+        self.localAudioReadiness = localAudioReadiness
+        self.remoteAudioReadiness = remoteAudioReadiness
+        self.remoteWakeCapability = remoteWakeCapability
+    }
+
+    func replacingRequestRelationship(
+        _ requestRelationship: TurboRequestRelationship,
+        status: ConversationState?
+    ) -> ChannelReadinessSnapshot {
+        ChannelReadinessSnapshot(
+            membership: membership,
+            requestRelationship: requestRelationship,
+            canTransmit: canTransmit,
+            status: status,
+            readinessStatus: readinessStatus,
+            activeTransmitterUserId: activeTransmitterUserId,
+            activeTransmitId: activeTransmitId,
+            activeTransmitExpiresAt: activeTransmitExpiresAt,
+            serverTimestamp: serverTimestamp,
+            localHasActiveDevice: localHasActiveDevice,
+            localAudioReadiness: localAudioReadiness,
+            remoteAudioReadiness: remoteAudioReadiness,
+            remoteWakeCapability: remoteWakeCapability
+        )
+    }
+
     var remoteAudioReadyForLiveTransmit: Bool {
         switch remoteAudioReadiness {
         case .ready:
@@ -2176,11 +2227,6 @@ private extension ConversationDerivationContext {
         if sessionTransmitReady && peerSignalIsTransmitting {
             return .receiving
         }
-        if backendSignalingJoinRecoveryActive,
-           !shouldPreserveConnectedReadinessDuringControlPlaneTransition {
-            return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
-        }
-
         if shouldPreferWakeReadyDespiteStalePeerConnectivity {
             guard directMediaPathActive || localRelayTransportReady else {
                 return .waiting(reason: .localTransportWarmup, statusMessage: "Connecting...")
@@ -2189,6 +2235,15 @@ private extension ConversationDerivationContext {
         }
 
         let authoritativeBackendReady = backendReadyAuthoritativelySatisfiesRemoteAudio
+        let authoritativeRecoveryReady =
+            authoritativeBackendReady
+            || backendReadyAuthoritativelySatisfiesWakeCapability
+
+        if backendSignalingJoinRecoveryActive,
+           !shouldPreserveConnectedReadinessDuringControlPlaneTransition,
+           !authoritativeRecoveryReady {
+            return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
+        }
 
         if shouldPreserveConnectedReadinessDuringControlPlaneTransition,
            controlPlaneReconnectGraceActive,
@@ -2379,7 +2434,7 @@ private extension ConversationDerivationContext {
         guard selectedContactID == contactID,
               localSessionReadiness == .aligned,
               localTransmit == .idle,
-              !backendSignalingJoinRecoveryActive,
+              (!backendSignalingJoinRecoveryActive || backendReadyAuthoritativelySatisfiesRemoteAudio),
               case .both(_, let canTransmit, _) = backendChannelReadiness,
               effectivePeerDeviceConnectedForTransmit else {
             return false
@@ -2430,6 +2485,19 @@ private extension ConversationDerivationContext {
         case .unavailable:
             return remoteAudioReadinessState == .ready
         }
+    }
+
+    var backendReadyAuthoritativelySatisfiesWakeCapability: Bool {
+        guard case .both(let peerDeviceConnected, let canTransmit, let readinessStatus) = backendChannelReadiness,
+              readinessStatus == .ready,
+              peerDeviceConnected,
+              canTransmit,
+              remoteAudioReadinessState == .wakeCapable,
+              case .wakeCapable = remoteWakeCapabilityState else {
+            return false
+        }
+
+        return true
     }
 
     var startingTransmitStage: StartingTransmitStage? {

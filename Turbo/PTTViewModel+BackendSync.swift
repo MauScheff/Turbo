@@ -2558,12 +2558,28 @@ extension PTTViewModel {
                 !systemSessionMatches(contactID)
                 && !(isJoined && activeChannelId == contactID)
             let leaveWasInFlight = sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
-            sessionCoordinator.reconcileAfterChannelRefresh(
-                for: contactID,
-                effectiveChannelState: effectiveChannelState,
-                localSessionEstablished: localSessionEstablished,
-                localSessionCleared: localSessionCleared
-            )
+            let shouldPreserveSettlingBackendJoin =
+                !effectiveChannelState.membership.hasLocalMembership
+                && shouldPreservePendingLocalJoinDuringBackendJoinSettling(for: contactID)
+            if shouldPreserveSettlingBackendJoin {
+                diagnostics.record(
+                    .state,
+                    message: "Preserved pending local join during settling backend channel refresh",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": backendChannelId,
+                        "backendMembership": String(describing: effectiveChannelState.membership),
+                        "backendStatus": effectiveChannelState.status,
+                    ]
+                )
+            } else {
+                sessionCoordinator.reconcileAfterChannelRefresh(
+                    for: contactID,
+                    effectiveChannelState: effectiveChannelState,
+                    localSessionEstablished: localSessionEstablished,
+                    localSessionCleared: localSessionCleared
+                )
+            }
             if leaveWasInFlight,
                !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
                 replaceDisconnectRecoveryTask(with: nil)

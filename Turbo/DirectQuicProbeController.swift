@@ -783,6 +783,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
     private let localDeviceId: String
     private let peerDeviceId: String
     private let onIncomingAudioPayload: @Sendable (String) async -> Void
+    private let onDisconnected: (@Sendable () async -> Void)?
     private let reportEvent: (@Sendable (String, [String: String]) async -> Void)?
     private let queue = DispatchQueue(label: "turbo.media-relay-client")
     private let lock = NSLock()
@@ -798,6 +799,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         localDeviceId: String,
         peerDeviceId: String,
         onIncomingAudioPayload: @escaping @Sendable (String) async -> Void,
+        onDisconnected: (@Sendable () async -> Void)? = nil,
         reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil
     ) {
         self.config = config
@@ -805,6 +807,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         self.localDeviceId = localDeviceId
         self.peerDeviceId = peerDeviceId
         self.onIncomingAudioPayload = onIncomingAudioPayload
+        self.onDisconnected = onDisconnected
         self.reportEvent = reportEvent
     }
 
@@ -1024,6 +1027,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
                             uniquingKeysWith: { _, new in new }
                         )
                     )
+                    await self.onDisconnected?()
                 }
                 return
             }
@@ -1068,7 +1072,12 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
                     return
                 }
             }
-            guard !isComplete else { return }
+            guard !isComplete else {
+                Task {
+                    await self.onDisconnected?()
+                }
+                return
+            }
             self.receiveFrames(on: connection)
         }
     }

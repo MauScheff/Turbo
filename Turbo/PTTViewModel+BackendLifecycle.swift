@@ -207,6 +207,26 @@ extension PTTViewModel {
                     self.captureDiagnosticsState("backend-signaling:recovered")
                     return
                 }
+                if self.shouldReassertBackendJoinAfterSignalingDrift(for: contactID) {
+                    self.diagnostics.record(
+                        .backend,
+                        message: "Reasserting backend join after signaling drift notice",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "handle": contact.handle,
+                            "notice": message,
+                        ]
+                    )
+                    await self.reassertBackendJoin(for: contact)
+                    await self.refreshChannelState(for: contactID)
+                    await self.refreshContactSummaries()
+                    await self.syncLocalReceiverAudioReadinessSignal(
+                        for: contactID,
+                        reason: .backendSignalingRecovery
+                    )
+                    self.captureDiagnosticsState("backend-signaling:recovered")
+                    return
+                }
                 await self.refreshChannelState(for: contactID)
                 guard self.shouldReassertBackendJoinAfterSignalingDrift(for: contactID) else {
                     self.diagnostics.record(
@@ -283,7 +303,12 @@ extension PTTViewModel {
             return nil
         }
 
-        guard systemSessionMatches(contactID) || (isJoined && activeChannelId == contactID) else {
+        let localSessionAppearsActive =
+            systemSessionMatches(contactID)
+            || (isJoined && activeChannelId == contactID)
+            || sessionCoordinator.pendingAction.pendingJoinContactID == contactID
+
+        guard localSessionAppearsActive else {
             return nil
         }
 

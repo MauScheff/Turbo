@@ -1096,6 +1096,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                 shouldUseLiveCallControlPlaneReconnectGrace(for: $0)
             } ?? false,
             backendSignalingJoinRecoveryActive: backendRuntime.signalingJoinRecoveryTask != nil,
+            backendJoinSettling: selectedContactID.map {
+                backendJoinIsSettling(for: $0)
+            } ?? false,
             backendChannelStatus: selectedSession.backendChannelStatus,
             backendReadiness: selectedSession.backendReadiness,
             backendSelfJoined: selectedSession.backendSelfJoined,
@@ -1180,6 +1183,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             ),
             "hadConnectedSessionContinuity": String(selectedSession.hadConnectedSessionContinuity),
             "backendSignalingJoinRecoveryActive": String(backendRuntime.signalingJoinRecoveryTask != nil),
+            "backendJoinSettling": String(
+                selectedContactId.map { backendJoinIsSettling(for: $0) } ?? false
+            ),
             "activeChannelId": activeChannelId?.uuidString ?? "none",
             "isJoined": String(isJoined),
             "isTransmitting": String(isTransmitting),

@@ -4266,7 +4266,7 @@ struct TurboTests {
         #expect(state.canTransmitNow)
     }
 
-    @Test func selectedPeerStateWaitsDuringBackendSignalingJoinRecovery() {
+    @Test func selectedPeerStateUsesAuthoritativeBackendReadyDuringBackendSignalingJoinRecovery() {
         let contactID = UUID()
         let state = ConversationStateMachine.selectedPeerState(
             for: ConversationDerivationContext(
@@ -4293,9 +4293,79 @@ struct TurboTests {
             relationship: .none
         )
 
+        #expect(state.phase == .ready)
+        #expect(state.detail == .ready)
+        #expect(state.statusMessage == "Connected")
+        #expect(state.canTransmitNow)
+    }
+
+    @Test func selectedPeerStateStillWaitsDuringBackendSignalingJoinRecoveryBeforeBackendReady() {
+        let contactID = UUID()
+        let state = ConversationStateMachine.selectedPeerState(
+            for: ConversationDerivationContext(
+                contactID: contactID,
+                selectedContactID: contactID,
+                baseState: .ready,
+                contactName: "Blake",
+                contactIsOnline: true,
+                isJoined: true,
+                activeChannelID: contactID,
+                systemSessionMatchesContact: true,
+                systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+                pendingAction: .none,
+                localJoinFailure: nil,
+                mediaState: .connected,
+                localMediaWarmupState: .ready,
+                localRelayTransportReady: true,
+                backendSignalingJoinRecoveryActive: true,
+                channel: ChannelReadinessSnapshot(
+                    channelState: makeChannelState(status: .waitingForPeer, canTransmit: false),
+                    readiness: makeChannelReadiness(status: .waitingForSelf, remoteAudioReadiness: .ready)
+                )
+            ),
+            relationship: .none
+        )
+
         #expect(state.phase == .waitingForPeer)
         #expect(state.detail == .waitingForPeer(reason: .backendSessionTransition))
         #expect(state.statusMessage == "Connecting...")
+        #expect(state.canTransmitNow == false)
+    }
+
+    @Test func selectedPeerStateShowsWakeReadyDuringBackendSignalingJoinRecoveryWhenBackendReadyAndPeerWakeCapable() {
+        let contactID = UUID()
+        let state = ConversationStateMachine.selectedPeerState(
+            for: ConversationDerivationContext(
+                contactID: contactID,
+                selectedContactID: contactID,
+                baseState: .ready,
+                contactName: "Blake",
+                contactIsOnline: true,
+                isJoined: true,
+                activeChannelID: contactID,
+                systemSessionMatchesContact: true,
+                systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+                pendingAction: .none,
+                localJoinFailure: nil,
+                mediaState: .connected,
+                localMediaWarmupState: .ready,
+                localRelayTransportReady: true,
+                backendSignalingJoinRecoveryActive: true,
+                channel: ChannelReadinessSnapshot(
+                    channelState: makeChannelState(status: .ready, canTransmit: true),
+                    readiness: makeChannelReadiness(
+                        status: .ready,
+                        remoteAudioReadiness: .wakeCapable,
+                        remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+                    )
+                )
+            ),
+            relationship: .none
+        )
+
+        #expect(state.phase == .wakeReady)
+        #expect(state.statusMessage == "Hold to talk to wake Blake")
+        #expect(state.allowsHoldToTalk)
         #expect(state.canTransmitNow == false)
     }
 
@@ -8213,6 +8283,107 @@ struct TurboTests {
         #expect(retry.effects == [.requestConnection(contactID: contactID)])
     }
 
+    @Test func selectedPeerReducerSuppressesInterruptedCopyDuringBackendRestore() {
+        let contactID = UUID()
+        let selection = SelectedPeerSelection(
+            contactID: contactID,
+            contactName: "Avery",
+            contactIsOnline: true
+        )
+        let requestedState = reduceSelectedPeerState([
+            .selectedContactChanged(selection),
+            .relationshipUpdated(.outgoingRequest(requestCount: 1)),
+            .baseStateUpdated(.requested),
+            .channelUpdated(
+                ChannelReadinessSnapshot(
+                    channelState: makeChannelState(
+                        status: .requested,
+                        canTransmit: false,
+                        selfJoined: false,
+                        peerJoined: false,
+                        peerDeviceConnected: false,
+                        hasOutgoingRequest: true
+                    )
+                )
+            ),
+            .localSessionUpdated(
+                isJoined: false,
+                activeChannelID: nil,
+                pendingAction: .none,
+                pendingConnectAcceptedIncomingRequest: false,
+                localJoinFailure: nil
+            ),
+            .shortcutPolicyUpdated(requesterAutoJoinOnPeerAcceptanceEnabled: true),
+            .systemSessionUpdated(.none, matchesSelectedContact: false)
+        ])
+
+        let acceptedGap = [
+            .relationshipUpdated(.none),
+            .baseStateUpdated(.idle),
+            .channelUpdated(
+                ChannelReadinessSnapshot(
+                    channelState: makeChannelState(
+                        status: .idle,
+                        canTransmit: false,
+                        selfJoined: false,
+                        peerJoined: false,
+                        peerDeviceConnected: false
+                    )
+                )
+            )
+        ].reduce(requestedState) { state, event in
+            SelectedPeerReducer.reduce(state: state, event: event).state
+        }
+
+        #expect(acceptedGap.interruptedConnectionAttemptContactID == contactID)
+
+        let backendRestoreCandidate = SelectedPeerReducer.reduce(
+            state: acceptedGap,
+            event: .channelUpdated(
+                ChannelReadinessSnapshot(
+                    channelState: makeChannelState(
+                        status: .waitingForPeer,
+                        canTransmit: false,
+                        selfJoined: true,
+                        peerJoined: true,
+                        peerDeviceConnected: true
+                    ),
+                    readiness: makeChannelReadiness(
+                        status: .waitingForSelf,
+                        selfHasActiveDevice: true,
+                        peerHasActiveDevice: true,
+                        remoteAudioReadiness: .wakeCapable,
+                        remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+                    )
+                )
+            )
+        ).state
+
+        #expect(backendRestoreCandidate.reconciliationAction == .restoreLocalSession(contactID: contactID))
+        #expect(backendRestoreCandidate.selectedPeerState.phase == .waitingForPeer)
+        #expect(backendRestoreCandidate.selectedPeerState.statusMessage == "Connecting...")
+
+        let restoreTransition = SelectedPeerReducer.reduce(
+            state: backendRestoreCandidate,
+            event: .reconcileRequested
+        )
+        #expect(restoreTransition.effects == [.restoreLocalSession(contactID: contactID)])
+
+        let restoreInFlight = SelectedPeerReducer.reduce(
+            state: restoreTransition.state,
+            event: .localSessionUpdated(
+                isJoined: false,
+                activeChannelID: nil,
+                pendingAction: .connect(.joiningLocal(contactID: contactID)),
+                pendingConnectAcceptedIncomingRequest: false,
+                localJoinFailure: nil
+            )
+        ).state
+
+        #expect(restoreInFlight.selectedPeerState.phase == .waitingForPeer)
+        #expect(restoreInFlight.selectedPeerState.statusMessage == "Connecting...")
+    }
+
     @MainActor
     @Test func selectedConnectionTimeoutDoesNotInterruptInFlightBackendConnect() {
         let contactID = UUID()
@@ -11148,7 +11319,7 @@ struct TurboTests {
     }
 
     @MainActor
-    @Test func backendJoinOperationIDIsStableForSingleConnectIntent() {
+    @Test func backendJoinOperationIDsSeparateConnectAndJoinCommands() {
         let viewModel = PTTViewModel()
         let contactID = UUID()
         let contact = Contact(
@@ -11161,13 +11332,17 @@ struct TurboTests {
             remoteUserId: "peer-user"
         )
 
-        let first = viewModel.backendJoinOperationID(for: contact, intent: .requestConnection)
-        let second = viewModel.backendJoinOperationID(for: contact, intent: .requestConnection)
+        let connect = viewModel.backendConnectOperationID(for: contact, intent: .requestConnection)
+        let nextConnect = viewModel.backendConnectOperationID(for: contact, intent: .requestConnection)
+        let join = viewModel.backendChannelJoinOperationID(for: contact, intent: .requestConnection)
 
-        #expect(first == second)
-        #expect(first?.contains(contactID.uuidString.lowercased()) == true)
-        #expect(first?.contains("peer-user") == true)
-        #expect(viewModel.backendJoinOperationID(for: contact, intent: .joinReadyPeer) == nil)
+        #expect(connect != nil)
+        #expect(join != nil)
+        #expect(connect != nextConnect)
+        #expect(connect?.contains(contactID.uuidString.lowercased()) == true)
+        #expect(connect?.contains("peer-user") == true)
+        #expect(join?.contains("channel-123") == true)
+        #expect(viewModel.backendConnectOperationID(for: contact, intent: .joinReadyPeer) == nil)
     }
 
     @Test func channelReadinessDecodeFailsWithoutNestedContract() {
@@ -14512,6 +14687,39 @@ struct TurboTests {
 
         #expect(runtime.transportPathState == .relay)
         #expect(runtime.directQuicUpgrade.attempt(for: contactID) == nil)
+    }
+
+    @Test func clearingActiveMediaRelayClientFallsBackToRelayPath() {
+        let runtime = MediaRuntimeState()
+        let key = MediaRelayConnectionKey(
+            sessionID: "channel-1",
+            localDeviceID: "local-device",
+            peerDeviceID: "peer-device"
+        )
+        let client = TurboMediaRelayClient(
+            config: TurboMediaRelayClientConfig(
+                host: "relay.example.test",
+                quicPort: 9443,
+                tcpPort: 9444,
+                token: "token"
+            ),
+            sessionId: key.sessionID,
+            localDeviceId: key.localDeviceID,
+            peerDeviceId: key.peerDeviceID,
+            onIncomingAudioPayload: { _ in }
+        )
+
+        guard case .newAttempt(let attempt) = runtime.mediaRelayConnectionStart(for: key) else {
+            Issue.record("expected new media relay connection attempt")
+            return
+        }
+        #expect(runtime.finishMediaRelayConnectionAttempt(attempt, client: client))
+        runtime.updateTransportPathState(.fastRelay)
+
+        runtime.clearMediaRelayClient(matching: key)
+
+        #expect(runtime.mediaRelayClient == nil)
+        #expect(runtime.transportPathState == .relay)
     }
 
     @Test func mediaRuntimeResetPreservingDirectQuicKeepsReceiverFreshness() {
@@ -24756,6 +24964,120 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func acceptedIncomingRequestSuppressesStaleRequestResurface() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let invite = makeInvite(
+            direction: "incoming",
+            inviteId: "invite-1",
+            fromHandle: "@avery",
+            toHandle: "@self",
+            requestCount: 1,
+            createdAt: "2026-04-08T00:00:00Z"
+        )
+        let contact = Contact(
+            id: contactID,
+            name: "Avery",
+            handle: "@avery",
+            isOnline: true,
+            channelId: UUID(),
+            backendChannelId: invite.channelId,
+            remoteUserId: invite.fromUserId
+        )
+        viewModel.contacts = [contact]
+        viewModel.applyAuthenticatedBackendSession(
+            client: TurboBackendClient(config: makeUnreachableBackendConfig()),
+            userID: "user-self",
+            mode: "cloud"
+        )
+        viewModel.backendCommandCoordinator.effectHandler = { _ in }
+        viewModel.backendSyncCoordinator.send(
+            .contactSummariesUpdated([
+                BackendContactSummaryUpdate(
+                    contactID: contactID,
+                    summary: makeContactSummary(
+                        channelId: invite.channelId,
+                        hasIncomingRequest: true,
+                        requestCount: 1,
+                        badgeStatus: "incoming"
+                    )
+                )
+            ])
+        )
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [BackendInviteUpdate(contactID: contactID, invite: invite)],
+                outgoing: [],
+                now: .now
+            )
+        )
+
+        #expect(viewModel.relationshipState(for: contactID).isIncomingRequest)
+
+        viewModel.requestBackendJoin(for: contact)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(viewModel.incomingInviteByContactID[contactID] == nil)
+        #expect(viewModel.relationshipState(for: contactID) == .none)
+        #expect(!viewModel.backendSyncCoordinator.state.syncState.requestContactIDs.contains(contactID))
+
+        viewModel.backendSyncCoordinator.send(
+            .contactSummariesUpdated([
+                BackendContactSummaryUpdate(
+                    contactID: contactID,
+                    summary: makeContactSummary(
+                        channelId: invite.channelId,
+                        hasIncomingRequest: true,
+                        requestCount: 1,
+                        badgeStatus: "incoming"
+                    )
+                )
+            ])
+        )
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [BackendInviteUpdate(contactID: contactID, invite: invite)],
+                outgoing: [],
+                now: .now
+            )
+        )
+
+        #expect(viewModel.activeIncomingTalkRequest == nil)
+        #expect(viewModel.relationshipState(for: contactID) == .none)
+
+        let newerInvite = makeInvite(
+            direction: "incoming",
+            inviteId: "invite-2",
+            fromHandle: "@avery",
+            toHandle: "@self",
+            requestCount: 2,
+            createdAt: "2026-04-08T00:00:10Z"
+        )
+        viewModel.backendSyncCoordinator.send(
+            .contactSummariesUpdated([
+                BackendContactSummaryUpdate(
+                    contactID: contactID,
+                    summary: makeContactSummary(
+                        channelId: newerInvite.channelId,
+                        hasIncomingRequest: true,
+                        requestCount: 2,
+                        badgeStatus: "incoming"
+                    )
+                )
+            ])
+        )
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [BackendInviteUpdate(contactID: contactID, invite: newerInvite)],
+                outgoing: [],
+                now: .now
+            )
+        )
+
+        #expect(viewModel.relationshipState(for: contactID) == .incomingRequest(requestCount: 2))
+    }
+
+    @MainActor
     @Test func foregroundTalkRequestNotificationWithoutIncomingRequestStillEmitsProjectionInvariant() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -27002,6 +27324,120 @@ struct TurboTests {
         await Task.yield()
 
         #expect(capturedEffects.isEmpty)
+    }
+
+    @MainActor
+    @Test func signalingJoinDriftNoticeReassertsBackendJoinForPendingLocalJoin() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: UUID(),
+            backendChannelId: "channel",
+            remoteUserId: "peer-user"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        viewModel.sessionCoordinator.queueJoin(contactID: contactID)
+
+        var capturedEffects: [BackendCommandEffect] = []
+        viewModel.backendCommandCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        viewModel.handleBackendServerNotice("signaling sender device is not joined to this channel")
+
+        await Task.yield()
+        await Task.yield()
+
+        #expect(capturedEffects.contains(
+            .join(
+                BackendJoinRequest(
+                    contactID: contactID,
+                    handle: "@blake",
+                    intent: .joinReadyPeer,
+                    relationship: .none,
+                    existingRemoteUserID: "peer-user",
+                    existingBackendChannelID: "channel",
+                    incomingInvite: nil,
+                    outgoingInvite: nil,
+                    requestCooldownRemaining: nil,
+                    usesLocalHTTPBackend: false
+                )
+            )
+        ))
+    }
+
+    @MainActor
+    @Test func signalingJoinDriftNoticeReassertsBeforeRefreshingLiveCachedChannel() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: UUID(),
+            backendChannelId: "channel",
+            remoteUserId: "peer-user"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        viewModel.sessionCoordinator.queueJoin(contactID: contactID)
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(
+                    status: .waitingForPeer,
+                    canTransmit: false,
+                    selfJoined: true,
+                    peerJoined: true,
+                    peerDeviceConnected: true
+                )
+            )
+        )
+
+        var capturedEffects: [BackendCommandEffect] = []
+        viewModel.backendCommandCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        viewModel.handleBackendServerNotice("signaling sender device is not joined to this channel")
+
+        await Task.yield()
+        await Task.yield()
+
+        #expect(capturedEffects.contains(
+            .join(
+                BackendJoinRequest(
+                    contactID: contactID,
+                    handle: "@blake",
+                    intent: .joinReadyPeer,
+                    relationship: .none,
+                    existingRemoteUserID: "peer-user",
+                    existingBackendChannelID: "channel",
+                    incomingInvite: nil,
+                    outgoingInvite: nil,
+                    requestCooldownRemaining: nil,
+                    usesLocalHTTPBackend: false
+                )
+            )
+        ))
     }
 
     @MainActor
@@ -29995,6 +30431,205 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func absentBackendMembershipDoesNotClearPendingLocalJoinWhileBackendJoinIsSettling() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: "channel",
+                remoteUserId: "user-avery"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.sessionCoordinator.queueJoin(contactID: contactID)
+        viewModel.backendRuntime.markBackendJoinSettling(for: contactID)
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(
+                    status: .idle,
+                    canTransmit: false,
+                    selfJoined: false,
+                    peerJoined: false,
+                    peerDeviceConnected: false
+                )
+            )
+        )
+
+        viewModel.syncSelectedPeerSession()
+
+        #expect(viewModel.sessionCoordinator.pendingJoinContactID == contactID)
+        #expect(
+            viewModel.diagnostics.entries.contains {
+                $0.message == "Deferred absent backend membership recovery while backend join is settling"
+            }
+        )
+        #expect(
+            !viewModel.diagnostics.entries.contains {
+                $0.message == "Recovered local session state after backend membership became absent"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func acceptedBackendJoinPreservesPendingLocalJoinDuringHostedVisibilityLag() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: "channel",
+                remoteUserId: "user-avery"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.sessionCoordinator.queueJoin(contactID: contactID)
+        viewModel.backendRuntime.markBackendJoinSettling(
+            for: contactID,
+            now: Date(timeIntervalSinceNow: -12)
+        )
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(
+                    status: .idle,
+                    canTransmit: false,
+                    selfJoined: false,
+                    peerJoined: false,
+                    peerDeviceConnected: false
+                )
+            )
+        )
+
+        viewModel.syncSelectedPeerSession()
+
+        #expect(viewModel.sessionCoordinator.pendingJoinContactID == contactID)
+        #expect(viewModel.selectedPeerState(for: contactID).phase == .waitingForPeer)
+        #expect(
+            !viewModel.diagnostics.entries.contains {
+                $0.message == "Recovered local session state after backend membership became absent"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func acceptedBackendJoinProjectionMarksLocalMembershipBeforeHostedRefresh() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Avery",
+            handle: "@avery",
+            isOnline: true,
+            channelId: UUID(),
+            backendChannelId: "channel",
+            remoteUserId: "user-avery"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        viewModel.applyAuthenticatedBackendSession(
+            client: client,
+            userID: "user-self",
+            mode: "cloud"
+        )
+        viewModel.contacts = [contact]
+        viewModel.selectedContactId = contactID
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(
+                    status: .waitingForPeer,
+                    canTransmit: false,
+                    selfJoined: false,
+                    peerJoined: true,
+                    peerDeviceConnected: true
+                )
+            )
+        )
+
+        guard let backend = viewModel.backendServices else {
+            Issue.record("expected backend services")
+            return
+        }
+        viewModel.applyAcceptedBackendJoinProjection(for: contact, backend: backend)
+
+        let projected = viewModel.backendSyncCoordinator.state.syncState.channelStates[contactID]
+        #expect(projected?.membership == .both(peerDeviceConnected: true))
+        #expect(projected?.status == ConversationState.waitingForPeer.rawValue)
+        #expect(projected?.canTransmit == false)
+        #expect(
+            viewModel.diagnostics.entries.contains {
+                $0.message == "Applied accepted backend join projection"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func expiredBackendJoinSettlingClearsStalePendingLocalJoinEvenWithActiveJoinOperation() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: "channel",
+                remoteUserId: "user-avery"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.sessionCoordinator.queueJoin(contactID: contactID)
+        viewModel.backendRuntime.markBackendJoinSettling(
+            for: contactID,
+            now: Date(timeIntervalSinceNow: -30)
+        )
+        let request = BackendJoinRequest(
+            contactID: contactID,
+            handle: "@avery",
+            intent: .joinReadyPeer,
+            relationship: .none,
+            existingRemoteUserID: "user-avery",
+            existingBackendChannelID: "channel",
+            incomingInvite: nil,
+            outgoingInvite: nil,
+            requestCooldownRemaining: nil,
+            usesLocalHTTPBackend: false
+        )
+        viewModel.backendCommandCoordinator.send(.joinRequested(request))
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(
+                    status: .idle,
+                    canTransmit: false,
+                    selfJoined: false,
+                    peerJoined: false,
+                    peerDeviceConnected: false
+                )
+            )
+        )
+
+        viewModel.syncSelectedPeerSession()
+
+        #expect(viewModel.sessionCoordinator.pendingJoinContactID == nil)
+        #expect(
+            viewModel.diagnostics.entries.contains {
+                $0.message == "Recovered local session state after backend membership became absent"
+            }
+        )
+    }
+
+    @MainActor
     @Test func receivedEphemeralTokenUsesResolvedSystemChannelBackendWhenActiveChannelIsUnset() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -31022,6 +31657,7 @@ struct TurboTests {
             hadConnectedSessionContinuity: true,
             controlPlaneReconnectGraceActive: false,
             backendSignalingJoinRecoveryActive: false,
+            backendJoinSettling: false,
             backendChannelStatus: "ready",
             backendReadiness: "ready",
             backendSelfJoined: true,
@@ -31152,6 +31788,39 @@ struct TurboTests {
         #expect(
             store.latestError?.message
                 == "backend membership is absent, but the selected peer still has a pending local session action without local session evidence"
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsSuppressesBackendAbsentPendingLocalActionInvariantDuringBackendJoinSettling() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "waitingForPeer",
+                "selectedPeerPhaseDetail": "waitingForPeer(reason: BeepBeep.SelectedPeerWaitingReason.pendingJoin)",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "connect(BeepBeep.PendingConnectAction.joiningLocal(contactID: 123))",
+                "isJoined": "false",
+                "isTransmitting": "false",
+                "systemSession": "none",
+                "backendJoinSettling": "true",
+                "backendChannelStatus": "idle",
+                "backendReadiness": "inactive",
+                "backendSelfJoined": "false",
+                "backendPeerJoined": "false",
+                "backendPeerDeviceConnected": "false",
+                "selectedPeerStatus": "Connecting..."
+            ]
+        )
+
+        #expect(
+            !store.invariantViolations.contains {
+                $0.invariantID == "selected.backend_absent_pending_local_action_without_session"
+            }
         )
     }
 
@@ -32218,6 +32887,65 @@ struct TurboTests {
         #expect(viewModel.statusMessage == "Disconnecting...")
         #expect(
             viewModel.diagnostics.entries.contains {
+                $0.message == "Ignoring stale PTT join after backend membership loss"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func didJoinDuringSettlingBackendJoinIsNotRejectedByStaleAbsentMembership() async {
+        let client = RecordingPTTSystemClient()
+        let viewModel = PTTViewModel(pttSystemClient: client)
+        let contactID = UUID()
+        let channelUUID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.sessionCoordinator.queueJoin(contactID: contactID)
+        viewModel.backendRuntime.markBackendJoinSettling(for: contactID)
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: TurboChannelStateResponse(
+                    channelId: "channel-123",
+                    selfUserId: "self",
+                    peerUserId: "peer",
+                    peerHandle: "@avery",
+                    selfOnline: true,
+                    peerOnline: true,
+                    selfJoined: false,
+                    peerJoined: false,
+                    peerDeviceConnected: false,
+                    hasIncomingRequest: false,
+                    hasOutgoingRequest: false,
+                    requestCount: 0,
+                    activeTransmitterUserId: nil,
+                    transmitLeaseExpiresAt: nil,
+                    status: ConversationState.idle.rawValue,
+                    canTransmit: false
+                )
+            )
+        )
+
+        viewModel.handleDidJoinChannel(channelUUID, reason: "test")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(client.leaveRequests.isEmpty)
+        #expect(viewModel.pttCoordinator.state.isJoined)
+        #expect(viewModel.isJoined)
+        #expect(viewModel.sessionCoordinator.pendingJoinContactID == nil)
+        #expect(!viewModel.backendRuntime.isBackendJoinSettling(for: contactID))
+        #expect(
+            !viewModel.diagnostics.entries.contains {
                 $0.message == "Ignoring stale PTT join after backend membership loss"
             }
         )
@@ -35060,6 +35788,7 @@ private func makeLocalSessionDiagnosticsProjection(
         hadConnectedSessionContinuity: diagnosticsBool(fields["hadConnectedSessionContinuity"]) ?? false,
         controlPlaneReconnectGraceActive: diagnosticsBool(fields["controlPlaneReconnectGraceActive"]) ?? false,
         backendSignalingJoinRecoveryActive: diagnosticsBool(fields["backendSignalingJoinRecoveryActive"]) ?? false,
+        backendJoinSettling: diagnosticsBool(fields["backendJoinSettling"]) ?? false,
         backendChannelStatus: optionalDiagnosticsString(fields["backendChannelStatus"]),
         backendReadiness: optionalDiagnosticsString(fields["backendReadiness"]),
         backendSelfJoined: diagnosticsBool(fields["backendSelfJoined"]),

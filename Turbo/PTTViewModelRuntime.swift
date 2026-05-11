@@ -9,6 +9,8 @@ import CryptoKit
 import Foundation
 
 final class BackendRuntimeState {
+    private static let backendJoinSettlingTTL: TimeInterval = 20
+
     var pollTask: Task<Void, Never>?
     var bootstrapRetryTask: Task<Void, Never>?
     var signalingJoinRecoveryTask: Task<Void, Never>?
@@ -23,6 +25,7 @@ final class BackendRuntimeState {
     var mode: String = "unknown"
     var telemetryEnabled: Bool = false
     var trackedContactIDs: Set<UUID> = []
+    private var backendJoinSettlingStartedAtByContactID: [UUID: Date] = [:]
     var transportFaults = TransportFaultRuntimeState()
 
     var hasClient: Bool {
@@ -71,6 +74,7 @@ final class BackendRuntimeState {
         signalingJoinRecoveryTask = nil
         pollTask?.cancel()
         pollTask = nil
+        backendJoinSettlingStartedAtByContactID.removeAll()
     }
 
     func replaceConfig(with config: TurboBackendConfig?) {
@@ -110,6 +114,36 @@ final class BackendRuntimeState {
 
     func clearTrackedContacts() {
         trackedContactIDs = []
+    }
+
+    func markBackendJoinSettling(for contactID: UUID, now: Date = Date()) {
+        pruneExpiredBackendJoinSettling(now: now)
+        backendJoinSettlingStartedAtByContactID[contactID] = now
+    }
+
+    func clearBackendJoinSettling(for contactID: UUID) {
+        backendJoinSettlingStartedAtByContactID[contactID] = nil
+    }
+
+    func isBackendJoinSettling(
+        for contactID: UUID,
+        now: Date = Date(),
+        ttl: TimeInterval = BackendRuntimeState.backendJoinSettlingTTL
+    ) -> Bool {
+        pruneExpiredBackendJoinSettling(now: now, ttl: ttl)
+        guard let startedAt = backendJoinSettlingStartedAtByContactID[contactID] else {
+            return false
+        }
+        return now.timeIntervalSince(startedAt) < ttl
+    }
+
+    private func pruneExpiredBackendJoinSettling(
+        now: Date,
+        ttl: TimeInterval = BackendRuntimeState.backendJoinSettlingTTL
+    ) {
+        backendJoinSettlingStartedAtByContactID = backendJoinSettlingStartedAtByContactID.filter { _, startedAt in
+            now.timeIntervalSince(startedAt) < ttl
+        }
     }
 }
 
@@ -1071,6 +1105,9 @@ final class MediaRuntimeState {
         mediaRelayClient?.close()
         mediaRelayClient = nil
         mediaRelayConnectionKey = nil
+        if transportPathState == .fastRelay {
+            transportPathState = .relay
+        }
     }
 
     func receiverPrewarmRequestID(for contactID: UUID) -> String {
@@ -1439,12 +1476,12 @@ struct BackendServices {
         try await client.directChannel(otherHandle: otherHandle, otherUserId: otherUserId)
     }
 
-    func joinChannel(channelId: String) async throws -> TurboJoinResponse {
-        try await client.joinChannel(channelId: channelId)
+    func joinChannel(channelId: String, operationId: String? = nil) async throws -> TurboJoinResponse {
+        try await client.joinChannel(channelId: channelId, operationId: operationId)
     }
 
-    func leaveChannel(channelId: String) async throws -> TurboLeaveResponse {
-        try await client.leaveChannel(channelId: channelId)
+    func leaveChannel(channelId: String, operationId: String? = nil) async throws -> TurboLeaveResponse {
+        try await client.leaveChannel(channelId: channelId, operationId: operationId)
     }
 
     func channelState(channelId: String) async throws -> TurboChannelStateResponse {

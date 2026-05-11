@@ -85,6 +85,7 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
     let hadConnectedSessionContinuity: Bool
     let controlPlaneReconnectGraceActive: Bool
     let backendSignalingJoinRecoveryActive: Bool
+    let backendJoinSettling: Bool
     let backendChannelStatus: String?
     let backendReadiness: String?
     let backendSelfJoined: Bool?
@@ -308,6 +309,7 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
            selectedPeerRelationship == "none",
            isJoined == false,
            systemSessionValue == "none",
+           !backendJoinSettling,
            backendMembershipAbsentForPendingLocalAction {
             violations.append(
                 DiagnosticsInvariantViolationCandidate(
@@ -320,6 +322,7 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
                         "pendingAction": pendingAction,
                         "isJoined": String(isJoined),
                         "systemSession": systemSessionValue,
+                        "backendJoinSettling": String(backendJoinSettling),
                         "backendChannelStatus": backendChannelStatusValue,
                         "backendReadiness": backendReadinessValue,
                         "backendSelfJoined": boolMetadata(backendSelfJoined),

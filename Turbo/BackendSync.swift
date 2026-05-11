@@ -8,11 +8,78 @@ struct BackendSyncState: Equatable {
     var channelReadiness: [UUID: TurboChannelReadinessResponse] = [:]
     var incomingInvites: [UUID: TurboInviteResponse] = [:]
     var outgoingInvites: [UUID: TurboInviteResponse] = [:]
+    var handledIncomingInviteSourceKeys: [UUID: Set<String>] = [:]
+    var handledIncomingRequestCounts: [UUID: Int] = [:]
     var requestCooldownDeadlines: [UUID: Date] = [:]
     var requestCooldownSourceKeys: [UUID: String] = [:]
 
-    private func requestCooldownSourceKey(for invite: TurboInviteResponse) -> String {
+    static func inviteSourceKey(for invite: TurboInviteResponse) -> String {
         "\(invite.inviteId)|\(invite.requestCount)|\(invite.updatedAt ?? invite.createdAt)"
+    }
+
+    private func requestCooldownSourceKey(for invite: TurboInviteResponse) -> String {
+        Self.inviteSourceKey(for: invite)
+    }
+
+    private func handledIncomingRequestCount(for contactID: UUID) -> Int {
+        handledIncomingRequestCounts[contactID] ?? 0
+    }
+
+    func incomingInviteIsHandled(_ invite: TurboInviteResponse, for contactID: UUID) -> Bool {
+        if handledIncomingInviteSourceKeys[contactID]?.contains(Self.inviteSourceKey(for: invite)) == true {
+            return true
+        }
+        return invite.requestCount <= handledIncomingRequestCount(for: contactID)
+    }
+
+    private func visibleIncomingInvites(
+        from incoming: [UUID: TurboInviteResponse]
+    ) -> [UUID: TurboInviteResponse] {
+        incoming.filter { contactID, invite in
+            !incomingInviteIsHandled(invite, for: contactID)
+        }
+    }
+
+    func visibleIncomingInvite(for contactID: UUID) -> TurboInviteResponse? {
+        guard let invite = incomingInvites[contactID],
+              !incomingInviteIsHandled(invite, for: contactID) else {
+            return nil
+        }
+        return invite
+    }
+
+    func visibleIncomingInvitesByContactID() -> [UUID: TurboInviteResponse] {
+        visibleIncomingInvites(from: incomingInvites)
+    }
+
+    func summaryIncomingRequestIsHandled(for contactID: UUID) -> Bool {
+        guard let requestCount = contactSummaries[contactID]?.requestRelationship.requestCount else {
+            return false
+        }
+        return requestCount <= handledIncomingRequestCount(for: contactID)
+    }
+
+    mutating func markIncomingRequestHandled(
+        contactID: UUID,
+        invite: TurboInviteResponse?,
+        requestCount: Int
+    ) {
+        let normalizedRequestCount = max(requestCount, invite?.requestCount ?? 0)
+        if normalizedRequestCount > 0 {
+            handledIncomingRequestCounts[contactID] = max(
+                handledIncomingRequestCount(for: contactID),
+                normalizedRequestCount
+            )
+        }
+
+        if let invite {
+            handledIncomingInviteSourceKeys[contactID, default: []].insert(Self.inviteSourceKey(for: invite))
+        }
+
+        if let currentInvite = incomingInvites[contactID],
+           incomingInviteIsHandled(currentInvite, for: contactID) {
+            incomingInvites[contactID] = nil
+        }
     }
 
     private func shouldApplyProjectionEpoch(incoming: String?, existing: String?) -> Bool {
@@ -110,7 +177,7 @@ struct BackendSyncState: Equatable {
         outgoing: [UUID: TurboInviteResponse],
         now: Date = .now
     ) {
-        incomingInvites = incoming
+        incomingInvites = visibleIncomingInvites(from: incoming)
         outgoingInvites = outgoing
         reconcileOutgoingInviteCooldowns(now: now)
     }
@@ -121,7 +188,7 @@ struct BackendSyncState: Equatable {
         now: Date = .now
     ) {
         if let incoming {
-            incomingInvites = incoming
+            incomingInvites = visibleIncomingInvites(from: incoming)
         }
         if let outgoing {
             outgoingInvites = outgoing
@@ -145,6 +212,8 @@ struct BackendSyncState: Equatable {
     mutating func clearInvites() {
         incomingInvites = [:]
         outgoingInvites = [:]
+        handledIncomingInviteSourceKeys = [:]
+        handledIncomingRequestCounts = [:]
         requestCooldownDeadlines = [:]
         requestCooldownSourceKeys = [:]
     }
@@ -157,6 +226,8 @@ struct BackendSyncState: Equatable {
         channelReadiness = [:]
         incomingInvites = [:]
         outgoingInvites = [:]
+        handledIncomingInviteSourceKeys = [:]
+        handledIncomingRequestCounts = [:]
         requestCooldownDeadlines = [:]
         requestCooldownSourceKeys = [:]
     }
@@ -177,7 +248,10 @@ struct BackendSyncState: Equatable {
 
     var requestContactIDs: Set<UUID> {
         let summaryIncoming = contactSummaries.compactMap { contactID, summary in
-            summary.requestRelationship.hasIncomingRequest ? contactID : nil
+            summary.requestRelationship.hasIncomingRequest
+                && !summaryIncomingRequestIsHandled(for: contactID)
+                ? contactID
+                : nil
         }
         let summaryOutgoing = contactSummaries.compactMap { contactID, summary in
             summary.requestRelationship.hasOutgoingRequest ? contactID : nil

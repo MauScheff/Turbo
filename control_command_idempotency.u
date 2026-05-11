@@ -1,0 +1,915 @@
+type turbo.domain.ControlCommandKind
+  = ConnectRequest
+  | JoinChannel
+  | LeaveChannel
+
+turbo.domain.ControlCommandKind.toText : ControlCommandKind -> Text
+turbo.domain.ControlCommandKind.toText = cases
+  ConnectRequest -> "connect-request"
+  JoinChannel    -> "join-channel"
+  LeaveChannel   -> "leave-channel"
+
+turbo.domain.ControlCommandKind.fromText : Text -> Optional ControlCommandKind
+turbo.domain.ControlCommandKind.fromText = cases
+  "connect-request" -> Some ConnectRequest
+  "join-channel"    -> Some JoinChannel
+  "leave-channel"   -> Some LeaveChannel
+  _                 -> None
+
+test> turbo.domain.ControlCommandKind.tests.fromText = verify do
+  ensureEqual (Some ConnectRequest) (ControlCommandKind.fromText "connect-request")
+  ensureEqual (Some JoinChannel) (ControlCommandKind.fromText "join-channel")
+  ensureEqual (Some LeaveChannel) (ControlCommandKind.fromText "leave-channel")
+  ensureEqual None (ControlCommandKind.fromText "unknown")
+
+type turbo.domain.ControlCommandStatus
+  = ControlCommandSucceeded
+
+turbo.domain.ControlCommandStatus.toText : ControlCommandStatus -> Text
+turbo.domain.ControlCommandStatus.toText = cases
+  ControlCommandSucceeded -> "succeeded"
+
+type turbo.domain.ControlCommandRecord
+  = ControlCommandRecord
+      UserId
+      DeviceId
+      Text
+      ControlCommandKind
+      Text
+      ControlCommandStatus
+      Instant
+      (Optional Instant)
+
+turbo.domain.ControlCommandRecord.matches :
+  ControlCommandKind -> Text -> ControlCommandRecord -> Boolean
+turbo.domain.ControlCommandRecord.matches expectedKind expectedTargetKey = cases
+  ControlCommandRecord _ _ _ storedKind storedTargetKey _ _ _ ->
+    use Text ==
+    ControlCommandKind.toText storedKind == ControlCommandKind.toText expectedKind
+      && storedTargetKey == expectedTargetKey
+
+type turbo.store.controlCommands.ControlCommandReplayPlan
+  = RunControlCommand
+  | ReplayControlCommand
+  | RejectControlCommand Text
+
+turbo.store.controlCommands.tables.byActorOperation :
+  Database -> OrderedTable (UserId, DeviceId, Text) ControlCommandRecord
+turbo.store.controlCommands.tables.byActorOperation db =
+  OrderedTable.named db "turboControlCommandsByActorOperation_v1" Universal.ordering
+
+turbo.store.controlCommands.channelTargetKey : ChannelId -> Text
+turbo.store.controlCommands.channelTargetKey channelId =
+  use Text ++
+  "channel:" ++ ChannelId.toText channelId
+
+turbo.store.controlCommands.connectTargetKey : UserId -> ChannelId -> Text
+turbo.store.controlCommands.connectTargetKey peerUserId channelId =
+  use Text ++
+  "peer:" ++ UserId.toText peerUserId ++ ":channel:" ++ ChannelId.toText channelId
+
+turbo.store.controlCommands.replayPlan :
+  Database
+  -> UserId
+  -> DeviceId
+  -> Optional Text
+  -> ControlCommandKind
+  -> Text
+  -> '{Exception, Remote} ControlCommandReplayPlan
+turbo.store.controlCommands.replayPlan
+  db userId deviceId operationId expectedKind expectedTargetKey =
+  do
+    match operationId with
+      None                 -> RunControlCommand
+      Some operationIdText ->
+        table = turbo.store.controlCommands.tables.byActorOperation db
+        match OrderedTable.tryRead table (userId, deviceId, operationIdText) with
+          None        -> RunControlCommand
+          Some record ->
+            if ControlCommandRecord.matches expectedKind expectedTargetKey record
+            then ReplayControlCommand
+            else RejectControlCommand "operationId reused for a different control command"
+
+turbo.store.controlCommands.recordSucceeded :
+  Database
+  -> UserId
+  -> DeviceId
+  -> Optional Text
+  -> ControlCommandKind
+  -> Text
+  -> '{Exception, Storage, Remote, Random} ()
+turbo.store.controlCommands.recordSucceeded
+  db userId deviceId operationId kind targetKey =
+  do
+    match operationId with
+      None                 -> ()
+      Some operationIdText ->
+        table = turbo.store.controlCommands.tables.byActorOperation db
+        key = (userId, deviceId, operationIdText)
+        now = now!
+        existing = OrderedTable.tryRead table key
+        record = match existing with
+          Some (ControlCommandRecord _ _ _ _ _ _ createdAt _) ->
+            ControlCommandRecord
+              userId
+              deviceId
+              operationIdText
+              kind
+              targetKey
+              ControlCommandSucceeded
+              createdAt
+              (Some now)
+          None ->
+            ControlCommandRecord
+              userId
+              deviceId
+              operationIdText
+              kind
+              targetKey
+              ControlCommandSucceeded
+              now
+              None
+        _ = OrderedTable.write table key record
+        ()
+
+test> turbo.domain.ControlCommandRecord.tests.matches = verify do
+  now = turbo.schemaDrift.fixture.instant
+  record =
+    ControlCommandRecord
+      (UserId.fromText "user-a")
+      (DeviceId.fromText "device-a")
+      "op-1"
+      JoinChannel
+      "channel:channel-a"
+      ControlCommandSucceeded
+      now
+      None
+  ensure (ControlCommandRecord.matches JoinChannel "channel:channel-a" record)
+  ensure (not (ControlCommandRecord.matches LeaveChannel "channel:channel-a" record))
+  ensure (not (ControlCommandRecord.matches JoinChannel "channel:channel-b" record))
+
+type turbo.store.invites.internal.PendingInviteReusePlan
+  = ReusePendingInvite
+  | RefreshPendingInvite
+
+turbo.store.invites.internal.pendingInviteReusePlan :
+  Optional Text -> PendingInviteReusePlan
+turbo.store.invites.internal.pendingInviteReusePlan = cases
+  Some _ -> ReusePendingInvite
+  None   -> RefreshPendingInvite
+
+test> turbo.store.invites.internal.pendingInviteReusePlan.tests.examples = verify do
+  ensureEqual
+    ReusePendingInvite
+    (turbo.store.invites.internal.pendingInviteReusePlan (Some "connect-op-1"))
+  ensureEqual
+    RefreshPendingInvite
+    (turbo.store.invites.internal.pendingInviteReusePlan None)
+
+type turbo.service.controlCommands.ControlCommandRouteResult
+  = ControlCommandRouteOk Json
+  | ControlCommandRouteBadRequest Text
+  | ControlCommandRouteNotFound Text
+
+turbo.service.controlCommands.errorJson : Text -> Json
+turbo.service.controlCommands.errorJson message =
+  object.empty |> addText "error" message
+
+turbo.service.controlCommands.respondHttp :
+  ControlCommandRouteResult -> '{Route} ()
+turbo.service.controlCommands.respondHttp = cases
+  ControlCommandRouteOk body        -> do ok.json body
+  ControlCommandRouteBadRequest err -> do badRequest.json (turbo.service.controlCommands.errorJson err)
+  ControlCommandRouteNotFound err   -> do notFound.json (turbo.service.controlCommands.errorJson err)
+
+turbo.service.controlCommands.websocketResponseJson :
+  Text -> ControlCommandKind -> ControlCommandRouteResult -> Json
+turbo.service.controlCommands.websocketResponseJson requestId kind result =
+  base =
+    object.empty
+      |> addText "type" "control-command-response"
+      |> addText "requestId" requestId
+      |> addText "commandKind" (ControlCommandKind.toText kind)
+  match result with
+    ControlCommandRouteOk body ->
+      base
+        |> addText "status" "ok"
+        |> Json.object.add "body" body
+    ControlCommandRouteBadRequest err ->
+      base
+        |> addText "status" "error"
+        |> addText "error" err
+    ControlCommandRouteNotFound err ->
+      base
+        |> addText "status" "error"
+        |> addText "error" err
+
+turbo.store.invites.createOrReuseWithOperationId :
+  Database
+  -> UserId
+  -> UserId
+  -> ChannelId
+  -> Optional Text
+  -> '{Exception, Storage, Remote, Random} Invite
+turbo.store.invites.createOrReuseWithOperationId
+  db fromUserId toUserId channelId operationId =
+  do
+    use Nat +
+    use OrderedTable write
+    use OrderedTable.write tx
+    use invites.tables byId
+    existing = pendingFromTo db fromUserId toUserId channelId ()
+    match existing with
+      Some (Invite inviteId existingFromUserId existingToUserId existingChannelId status requestCount createdAt updatedAt) ->
+        match turbo.store.invites.internal.pendingInviteReusePlan operationId with
+          ReusePendingInvite -> Invite inviteId existingFromUserId existingToUserId existingChannelId status requestCount createdAt updatedAt
+          RefreshPendingInvite ->
+            table = byId db
+            byToCreatedAt = tables.byToCreatedAt db
+            byFromCreatedAt = tables.byFromCreatedAt db
+            updatedAt = now!
+            updated = Invite inviteId existingFromUserId existingToUserId existingChannelId status (requestCount + 1) createdAt (Some updatedAt)
+            _ = write table inviteId updated
+            _ = write byToCreatedAt (existingToUserId, createdAt, inviteId) updated
+            _ = write byFromCreatedAt (existingFromUserId, createdAt, inviteId) updated
+            updated
+      None ->
+        table = byId db
+        byToCreatedAt = tables.byToCreatedAt db
+        byFromCreatedAt = tables.byFromCreatedAt db
+        now = now!
+        transact (OrderedTable.database table) do
+          inviteId = InviteId.fromText (Random.bytes 20 |> Bytes.base32Hex)
+          invite = Invite inviteId fromUserId toUserId channelId Pending 1 now None
+          _ = tx table inviteId invite
+          _ = tx byToCreatedAt (toUserId, now, inviteId) invite
+          _ = tx byFromCreatedAt (fromUserId, now, inviteId) invite
+          invite
+
+turbo.service.invites.internal.createControlCommand :
+  Database
+  -> User
+  -> Map Text Text
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.invites.internal.createControlCommand db currentUser fields = do
+  use Map get
+  use Text ==
+  use UserId toText
+  currentUserId =
+    (User userId _ _ _ _) = currentUser
+    userId
+  currentUserHandle =
+    (User _ handleText _ _ _) = currentUser
+    handleText
+  operationId = get "operationId" fields
+  senderDeviceId = match get "deviceId" fields with
+    Some senderDeviceIdText -> DeviceId.fromText senderDeviceIdText
+    None                    -> DeviceId.fromText "invite-request"
+  resolvedOther = match get "otherUserId" fields with
+    Some otherUserIdText -> Some (UserId.fromText otherUserIdText)
+    None                 ->
+      match get "otherHandle" fields with
+        None             -> None
+        Some otherHandle ->
+          match getByHandle db otherHandle () with
+            None                            -> None
+            Some (User otherUserId _ _ _ _) -> Some otherUserId
+  match resolvedOther with
+    None             -> ControlCommandRouteBadRequest "missing otherUserId or otherHandle"
+    Some otherUserId ->
+      if toText otherUserId == toText currentUserId then ControlCommandRouteBadRequest "cannot invite self"
+      else
+        channel = getOrCreateDirect db currentUserId otherUserId ()
+        channelId =
+          (DirectChannel channelId _ _ _) = channel
+          channelId
+        targetKey = turbo.store.controlCommands.connectTargetKey otherUserId channelId
+        plan =
+          turbo.store.controlCommands.replayPlan
+            db
+            currentUserId
+            senderDeviceId
+            operationId
+            ConnectRequest
+            targetKey
+            ()
+        match plan with
+          RejectControlCommand err -> ControlCommandRouteBadRequest err
+          _                        ->
+            isReplay = match plan with
+              ReplayControlCommand -> true
+              _                    -> false
+            invite = createOrReuseWithOperationId db currentUserId otherUserId channelId operationId ()
+            inviteId =
+              (Invite inviteId _ _ _ _ _ _ _) = invite
+              inviteId
+            requestCount =
+              (Invite _ _ _ _ _ requestCount _ _) = invite
+              requestCount
+            _ = match isReplay with
+              true  -> ()
+              false ->
+                badgeCount = pendingIncomingInviteBadgeCount (listIncomingPending db otherUserId ())
+                alertableDevices = listAlertableForUser db otherUserId ()
+                _ =
+                  List.foreach
+                    (cases
+                      Device targetDeviceId _ _ _ (Some alertPushToken) _ _ ->
+                        alertApnsEnvironment = getAlert db otherUserId targetDeviceId ()
+                        sendInviteAlertPush db channelId inviteId requestCount badgeCount currentUserHandle currentUserId senderDeviceId otherUserId targetDeviceId alertApnsEnvironment alertPushToken ()
+                      _                                                     -> ()) alertableDevices
+                turbo.store.controlCommands.recordSucceeded db currentUserId senderDeviceId operationId ConnectRequest targetKey ()
+            availability = users.availability db otherUserId ()
+            inviteJson = internal.inviteJson db currentUserId invite ()
+            ControlCommandRouteOk
+              (inviteJson
+                |> addText "targetAvailability" (availabilityText availability)
+                |> addOptionalText "operationId" operationId
+                |> (addBoolean "shouldAutoJoinPeer" match availability with
+                  Available -> true
+                  _         -> false))
+
+turbo.service.invites.create : Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.invites.create db = do
+  use Parser /
+  use object empty
+  noCapture POST (s "v1" / s "invites")
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      fields = decodeJson (Decoder.object Decoder.text)
+      turbo.service.controlCommands.respondHttp (turbo.service.invites.internal.createControlCommand db currentUser fields ()) ()
+
+turbo.service.channels.internal.joinControlCommand :
+  Database
+  -> User
+  -> Text
+  -> Map Text Text
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.channels.internal.joinControlCommand db currentUser channelIdText fields = do
+  use Text ==
+  use memberships add
+  use object empty
+  currentUserId =
+    (User userId _ _ _ _) = currentUser
+    userId
+  currentHandle =
+    (User _ handleText _ _ _) = currentUser
+    handleText
+  operationId = Map.get "operationId" fields
+  channelId = ChannelId.fromText channelIdText
+  joinedJson membership presence =
+    membershipUserId =
+      (ChannelMembership _ userId _) = membership
+      userId
+    presenceDeviceId =
+      (DevicePresence deviceId _ _ _ _) = presence
+      deviceId
+    empty
+      |> addText "channelId" channelIdText
+      |> addText "userId" (UserId.toText membershipUserId)
+      |> addText "deviceId" (DeviceId.toText presenceDeviceId)
+      |> addText "status" "joined"
+      |> addOptionalText "operationId" operationId
+  replayJoinedJson deviceId =
+    empty
+      |> addText "channelId" channelIdText
+      |> addText "userId" (UserId.toText currentUserId)
+      |> addText "deviceId" (DeviceId.toText deviceId)
+      |> addText "status" "joined"
+      |> addOptionalText "operationId" operationId
+  channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+  match channelOpt with
+    None         -> ControlCommandRouteNotFound "channel not found"
+    Some channel ->
+      use UserId toText
+      otherUserId =
+        (DirectChannel _ lowUserId highUserId _) = channel
+        if toText lowUserId == toText currentUserId then highUserId else lowUserId
+      match Map.get "deviceId" fields with
+        None              -> ControlCommandRouteBadRequest "missing deviceId"
+        Some deviceIdText ->
+          devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+          deviceId = DeviceId.fromText deviceIdText
+          targetKey = turbo.store.controlCommands.channelTargetKey channelId
+          replayPlan =
+            turbo.store.controlCommands.replayPlan
+              db
+              currentUserId
+              deviceId
+              operationId
+              JoinChannel
+              targetKey
+              ()
+          match replayPlan with
+            RejectControlCommand err -> ControlCommandRouteBadRequest err
+            ReplayControlCommand     -> ControlCommandRouteOk (replayJoinedJson deviceId)
+            RunControlCommand        ->
+              existingActiveChannelId = match presence.get db deviceId () with
+                Some (DevicePresence _ _ _ currentChannelId _) -> currentChannelId
+                None                                           -> None
+              joinPresencePlan = joinPresencePlanFromConnection (sessions.isConnected db deviceId ()) existingActiveChannelId
+              match joinPresencePlan with
+                JoinPresencePlanRejectMissingConnectedSession staleChannelIdOpt ->
+                  _ = appendJoinWithoutConnectedSessionInvariant db currentUserId (Some currentHandle) channelId deviceId staleChannelIdOpt ()
+                  _ = match staleChannelIdOpt with
+                    Some _ ->
+                      _ = clearActiveChannel db deviceId currentUserId ()
+                      ()
+                    None   -> ()
+                  ControlCommandRouteBadRequest "device session not connected"
+                JoinPresencePlanActivate                                        ->
+                  _ = add db channelId currentUserId ()
+                  _ = add db channelId otherUserId ()
+                  presence = presence.upsert db deviceId currentUserId DevicePresenceStatus.Online (Some channelId) ()
+                  _ = match getForUserInChannel db otherUserId channelId () with
+                    Some _ -> markConnectedForChannel db currentUserId otherUserId channelId ()
+                    None   -> None
+                  membership = add db channelId currentUserId ()
+                  _ = turbo.store.controlCommands.recordSucceeded db currentUserId deviceId operationId JoinChannel targetKey ()
+                  _ = internal.send "backend.channel.joined" "backend" "notice" currentUserId (Some currentHandle) (Some deviceId) (Some channelId) (Some otherUserId) None None None None (Some "join") None (Some "channel joined") operationId devTraffic false ()
+                  ControlCommandRouteOk (joinedJson membership presence)
+
+turbo.service.channels.join : Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.channels.join db = do
+  use Parser /
+  use object empty
+  channelIdText = route POST (s "v1" / s "channels" / Parser.text / s "join")
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      fields = decodeJson (Decoder.object Decoder.text)
+      turbo.service.controlCommands.respondHttp (turbo.service.channels.internal.joinControlCommand db currentUser channelIdText fields ()) ()
+
+turbo.service.channels.internal.leaveControlCommand :
+  Database
+  -> User
+  -> Text
+  -> Map Text Text
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.channels.internal.leaveControlCommand db currentUser channelIdText fields = do
+  use memberships remove
+  use object empty
+  currentUserId =
+    (User userId _ _ _ _) = currentUser
+    userId
+  currentHandle =
+    (User _ handleText _ _ _) = currentUser
+    handleText
+  operationId = Map.get "operationId" fields
+  channelId = ChannelId.fromText channelIdText
+  match Map.get "deviceId" fields with
+    None              -> ControlCommandRouteBadRequest "missing deviceId"
+    Some deviceIdText ->
+      devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+      deviceId = DeviceId.fromText deviceIdText
+      targetKey = turbo.store.controlCommands.channelTargetKey channelId
+      replayPlan =
+        turbo.store.controlCommands.replayPlan
+          db
+          currentUserId
+          deviceId
+          operationId
+          LeaveChannel
+          targetKey
+          ()
+      leftJson =
+        empty
+          |> addText "channelId" channelIdText
+          |> addText "deviceId" deviceIdText
+          |> addText "status" "left"
+          |> addOptionalText "operationId" operationId
+      match replayPlan with
+        RejectControlCommand err -> ControlCommandRouteBadRequest err
+        ReplayControlCommand     -> ControlCommandRouteOk leftJson
+        RunControlCommand        ->
+          leftAt = Instant.toText now!
+          _ = runtime.endTransmit db channelId currentUserId deviceId ()
+          _ = clearActiveChannel db deviceId currentUserId ()
+          _ = remove db channelId currentUserId ()
+          peerUserIdOpt = match OrderedTable.tryRead (channels.tables.byId db) channelId with
+            Some (DirectChannel _ lowUserId highUserId _) ->
+              peerUserId = if userIdEqual lowUserId currentUserId then highUserId else lowUserId
+              _ = remove db channelId peerUserId ()
+              match getRawForUserInChannel db peerUserId channelId () with
+                Some (DevicePresence peerDeviceId _ _ _ _) ->
+                  _ = clearActiveChannel db peerDeviceId peerUserId ()
+                  Some peerUserId
+                None                                       -> Some peerUserId
+            None                                          -> None
+          _ = match peerUserIdOpt with
+            Some peerUserId -> sendLeavePushIfPossible db channelId currentHandle currentUserId deviceId peerUserId leftAt ()
+            None            -> ()
+          _ = turbo.store.controlCommands.recordSucceeded db currentUserId deviceId operationId LeaveChannel targetKey ()
+          _ = internal.send "backend.channel.left" "backend" "notice" currentUserId (Some currentHandle) (Some deviceId) (Some channelId) peerUserIdOpt None None None None (Some "leave") None (Some "channel left") operationId devTraffic false ()
+          ControlCommandRouteOk leftJson
+
+turbo.service.channels.leave : Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.channels.leave db = do
+  use Parser /
+  use object empty
+  channelIdText = route POST (s "v1" / s "channels" / Parser.text / s "leave")
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      fields = decodeJson (Decoder.object Decoder.text)
+      turbo.service.controlCommands.respondHttp (turbo.service.channels.internal.leaveControlCommand db currentUser channelIdText fields ()) ()
+
+type turbo.service.ws.internal.ControlCommandRequest
+  = ControlCommandRequest Text ControlCommandKind (Map Text Text)
+
+type turbo.service.ws.internal.ControlCommandFrameParseResult
+  = NotControlCommandFrame
+  | InvalidControlCommandFrame Text
+  | ParsedControlCommandFrame ControlCommandRequest
+
+turbo.service.ws.internal.controlCommandFrameFromText :
+  Text -> ControlCommandFrameParseResult
+turbo.service.ws.internal.controlCommandFrameFromText text =
+  fieldsResult = catch do runAllowTrailing (Decoder.object Decoder.text) text
+  match fieldsResult with
+    Left _       -> NotControlCommandFrame
+    Right fields ->
+      use Text ==
+      match Map.get "type" fields with
+        Some "control-command" ->
+          match Map.get "requestId" fields with
+            None           -> InvalidControlCommandFrame "missing requestId"
+            Some requestId ->
+              match Map.get "commandKind" fields with
+                None          -> InvalidControlCommandFrame "missing commandKind"
+                Some kindText ->
+                  match ControlCommandKind.fromText kindText with
+                    None      -> InvalidControlCommandFrame "unknown commandKind"
+                    Some kind -> ParsedControlCommandFrame (ControlCommandRequest requestId kind fields)
+        _                      -> NotControlCommandFrame
+
+test> turbo.service.ws.internal.controlCommandFrameFromText.tests.examples = verify do
+  parsed =
+    turbo.service.ws.internal.controlCommandFrameFromText
+      "{\"type\":\"control-command\",\"requestId\":\"req-1\",\"commandKind\":\"join-channel\",\"deviceId\":\"device-a\",\"channelId\":\"channel-a\"}"
+  match parsed with
+    ParsedControlCommandFrame (ControlCommandRequest requestId kind fields) ->
+      _ = ensureEqual "req-1" requestId
+      _ = ensureEqual JoinChannel kind
+      ensureEqual (Some "channel-a") (Map.get "channelId" fields)
+    _ -> ensure false
+  ensureEqual
+    NotControlCommandFrame
+    (turbo.service.ws.internal.controlCommandFrameFromText "{\"type\":\"offer\"}")
+  ensureEqual
+    (InvalidControlCommandFrame "missing requestId")
+    (turbo.service.ws.internal.controlCommandFrameFromText "{\"type\":\"control-command\",\"commandKind\":\"join-channel\"}")
+
+turbo.service.ws.internal.executeControlCommand :
+  Database
+  -> User
+  -> ControlCommandRequest
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.ws.internal.executeControlCommand db currentUser =
+  cases ControlCommandRequest _ kind fields ->
+    do
+      match kind with
+        ConnectRequest -> turbo.service.invites.internal.createControlCommand db currentUser fields ()
+        JoinChannel    ->
+          match Map.get "channelId" fields with
+            None               -> ControlCommandRouteBadRequest "missing channelId"
+            Some channelIdText -> turbo.service.channels.internal.joinControlCommand db currentUser channelIdText fields ()
+        LeaveChannel   ->
+          match Map.get "channelId" fields with
+            None               -> ControlCommandRouteBadRequest "missing channelId"
+            Some channelIdText -> turbo.service.channels.internal.leaveControlCommand db currentUser channelIdText fields ()
+
+turbo.service.ws.internal.sendControlCommandResponse :
+  Database
+  -> User
+  -> WebSocket
+  -> ControlCommandRequest
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.sendControlCommandResponse db currentUser currentSocket request = do
+  use WebSockets send
+  (ControlCommandRequest requestId kind _) = request
+  result = turbo.service.ws.internal.executeControlCommand db currentUser request ()
+  body = turbo.service.controlCommands.websocketResponseJson requestId kind result
+  send currentSocket (TextMessage (Json.toText body))
+
+turbo.service.ws.internal.sendInvalidControlCommandResponse :
+  WebSocket -> Text -> '{Exception, WebSockets} ()
+turbo.service.ws.internal.sendInvalidControlCommandResponse currentSocket message = do
+  WebSockets.send
+    currentSocket
+    (TextMessage
+      (Json.toText
+        (object.empty
+          |> addText "type" "control-command-response"
+          |> addText "status" "error"
+          |> addText "error" message)))
+
+turbo.service.ws.internal.forwardEnvelope :
+  Database
+  -> UserId
+  -> DeviceId
+  -> WebSocket
+  -> SignalEnvelope
+  -> '{Exception, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.forwardEnvelope db currentUserId currentDeviceId currentSocket envelope = do
+  use Json toText
+  use Text ==
+  use WebSockets send
+  use object empty
+  resolved = resolveEnvelopeTargetWithRetry db currentUserId currentDeviceId envelope 6 ()
+  match resolved with
+    Left err               -> send currentSocket (TextMessage (toText (empty |> addText "error" err)))
+    Right resolvedEnvelope ->
+      (SignalEnvelope kind channelId _ _ _ targetDeviceId payload) = resolvedEnvelope
+      receiverStatusOpt = match kind with
+        ReceiverReady    -> Some AudioReadinessReady
+        ReceiverNotReady -> if payload == "app-background-media-closed" then Some AudioReadinessWakeCapable else Some AudioReadinessWaiting
+        _                -> None
+      _ = match receiverStatusOpt with
+        Some receiverStatus ->
+          match sessions.get db currentDeviceId () with
+            Some session ->
+              _ = receiverAudioReadiness.upsert db channelId currentUserId currentDeviceId (sessionId session) receiverStatus ()
+              ()
+            None         -> ()
+        _                   -> ()
+      match lookupTargetInboxWithRetry db targetDeviceId 6 () with
+        None       -> send currentSocket (TextMessage (toText (empty |> addText "error" "target device has no routable inbox")))
+        Some inbox -> SignalInbox.enqueue inbox resolvedEnvelope ()
+
+turbo.service.ws.internal.handleSignalMessage :
+  Database
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> WebSocket
+  -> Text
+  -> '{Exception, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.handleSignalMessage db currentUserId currentDeviceId currentSessionId currentSocket text = do
+  use Json toText
+  use WebSockets send
+  use object empty
+  parsed = catch do
+    envelope = SignalEnvelope.fromText text
+    signalSessionId = sessionIdFromText text
+    (envelope, signalSessionId)
+  match parsed with
+    Left _                            -> send currentSocket (TextMessage (toText (empty |> addText "error" "invalid signaling payload")))
+    Right (envelope, signalSessionId) ->
+      if signalSessionAccepted currentSessionId signalSessionId
+      then turbo.service.ws.internal.forwardEnvelope db currentUserId currentDeviceId currentSocket envelope ()
+      else send currentSocket (TextMessage (toText (empty |> addText "error" "stale signaling session")))
+
+turbo.service.ws.internal.handleMessage :
+  Database
+  -> User
+  -> DeviceId
+  -> Text
+  -> WebSocket
+  -> websockets.Message
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.handleMessage db currentUser currentDeviceId currentSessionId currentSocket = cases
+  TextMessage text ->
+    do
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      match turbo.service.ws.internal.controlCommandFrameFromText text with
+        ParsedControlCommandFrame request -> turbo.service.ws.internal.sendControlCommandResponse db currentUser currentSocket request ()
+        InvalidControlCommandFrame err    -> turbo.service.ws.internal.sendInvalidControlCommandResponse currentSocket err ()
+        NotControlCommandFrame            -> turbo.service.ws.internal.handleSignalMessage db currentUserId currentDeviceId currentSessionId currentSocket text ()
+  _                -> do WebSockets.send currentSocket (TextMessage (Json.toText (object.empty |> addText "error" "binary websocket messages are not supported")))
+
+turbo.service.ws.internal.handleMessageSafely :
+  Database
+  -> User
+  -> DeviceId
+  -> Text
+  -> WebSocket
+  -> websockets.Message
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.handleMessageSafely db currentUser currentDeviceId currentSessionId currentSocket message =
+  do
+    match catch do turbo.service.ws.internal.handleMessage db currentUser currentDeviceId currentSessionId currentSocket message () with
+      Left _  -> WebSockets.send currentSocket (TextMessage (Json.toText (object.empty |> addText "error" "websocket message handling failed")))
+      Right _ -> ()
+
+turbo.service.ws : Database -> '{Route, Config, Exception, Http, OpenWebSocket, Storage, Remote, WebSockets, Random, Log} ()
+turbo.service.ws db = do
+  use Parser & /
+  use Remote cancel
+  use object empty
+  deviceIdOpt = route GET (s "v1" / s "ws" & (do ParseQuery.text "deviceId"))
+  match deviceIdOpt with
+    None              -> badRequest.json (empty |> addText "error" "missing deviceId")
+    Some deviceIdText ->
+      match requireUser db () with
+        Left err          -> unauthorized.json (empty |> addText "error" err)
+        Right currentUser ->
+          currentUserId =
+            (User userId _ _ _ _) = currentUser
+            userId
+          ws = openWebSocket
+          deviceId = DeviceId.fromText deviceIdText
+          _ = clearStaleActiveChannelOnSessionConnect db currentUserId deviceId ()
+          session = sessions.connect db currentUserId deviceId ()
+          sessionId = internal.sessionId session
+          inbox = internal.inbox session
+          _ = sockets.connect db currentUserId deviceId ws ()
+          outboundTask = forkAt pool() do toRemote do sendQueuedEnvelopesForSession db deviceId sessionId inbox ws ()
+          freshnessTask = forkAt pool() do toRemote do keepSessionFreshWhileSocketOpen db deviceId currentUserId sessionId ()
+          _ = WebSockets.send ws (TextMessage (Json.toText (empty |> addText "status" "connected" |> addText "deviceId" deviceIdText |> addText "sessionId" sessionId)))
+          _ = catch do
+            forever do
+              _ = sessions.touch db deviceId sessionId ()
+              message = WebSockets.receive ws
+              turbo.service.ws.internal.handleMessageSafely db currentUser deviceId sessionId ws message ()
+          _ = cancel freshnessTask
+          _ = cancel outboundTask
+          _ = disconnectSocketForCurrentSession db deviceId sessionId ()
+          sessions.disconnect db deviceId sessionId ()
+
+turbo.service.dev.internal.deleteControlCommandRow :
+  Database -> ((UserId, DeviceId, Text), a) ->{Remote} ()
+turbo.service.dev.internal.deleteControlCommandRow db = cases
+  (key, _) ->
+    _ = OrderedTable.delete (turbo.store.controlCommands.tables.byActorOperation db) key
+    ()
+
+type turbo.service.dev.internal.ResetSummary
+  = ResetSummary Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat Nat
+
+turbo.service.dev.internal.resetSummaryJson : Text -> ResetSummary -> Json
+turbo.service.dev.internal.resetSummaryJson status =
+  cases ResetSummary runtimeCount presenceCount tokenCount inviteIdCount inviteFromCount inviteToCount membershipCount sessionCount socketCount channelCount userPairCount wakeJobRowCount wakeEventRowCount invariantEventRowCount controlCommandCount ->
+    object.empty
+      |> addText "status" status
+      |> addNat "clearedTransmitStates" runtimeCount
+      |> addNat "clearedPresenceEntries" presenceCount
+      |> addNat "clearedTokenEntries" tokenCount
+      |> addNat "clearedInviteByIdEntries" inviteIdCount
+      |> addNat "clearedInviteByFromEntries" inviteFromCount
+      |> addNat "clearedInviteByToEntries" inviteToCount
+      |> addNat "clearedMemberships" membershipCount
+      |> addNat "clearedSessions" sessionCount
+      |> addNat "clearedSockets" socketCount
+      |> addNat "clearedChannels" channelCount
+      |> addNat "clearedChannelUserPairEntries" userPairCount
+      |> addNat "clearedWakeJobs" wakeJobRowCount
+      |> addNat "clearedWakeEventRows" wakeEventRowCount
+      |> addNat "clearedInvariantEventRows" invariantEventRowCount
+      |> addNat "clearedControlCommands" controlCommandCount
+
+turbo.service.dev.internal.performReset : Database -> '{Exception, Storage, Remote} ResetSummary
+turbo.service.dev.internal.performReset db = do
+  use List foreach size
+  use OrderedTable toStream
+  use Stream toList
+  runtimeRows = toList (toStream (byChannel db))
+  _ = foreach (deleteRuntimeRow db) runtimeRows
+  presenceRows = toList (toStream (presence.tables.byDevice db))
+  _ = foreach (deletePresenceRow db) presenceRows
+  tokenRows = toList (toStream (tokens.tables.byChannelUserDevice db))
+  _ = foreach (deleteTokenRow db) tokenRows
+  ephemeralEnvironmentRows = toList (toStream (ephemeralByChannelUserDevice db))
+  _ = foreach (deleteEphemeralRow db) ephemeralEnvironmentRows
+  alertEnvironmentRows = toList (toStream (alertByUserDevice db))
+  _ = foreach (deleteAlertRow db) alertEnvironmentRows
+  inviteIdRows = toList (toStream (invites.tables.byId db))
+  _ = foreach (deleteInviteIdRow db) inviteIdRows
+  inviteFromRows = toList (toStream (byFromCreatedAt db))
+  _ = foreach (deleteInviteFromRow db) inviteFromRows
+  inviteToRows = toList (toStream (byToCreatedAt db))
+  _ = foreach (deleteInviteToRow db) inviteToRows
+  membershipRows = toList (toStream (byChannelUser db))
+  _ = foreach (deleteMembershipRow db) membershipRows
+  sessionRows = toList (toStream (sessions.tables.byDevice db))
+  _ = foreach (deleteSessionRow db) sessionRows
+  channelRows = toList (toStream (channels.tables.byId db))
+  _ = foreach (deleteChannelRow db) channelRows
+  participantRows = toList (toStream (byParticipantCreatedAt db))
+  _ = foreach (deleteChannelParticipantRow db) participantRows
+  userPairRows = toList (toStream (byUserPair db))
+  _ = foreach (deleteChannelUserPairRow db) userPairRows
+  savedContactOwnerRows = toList (toStream (byOwnerUser db))
+  _ = foreach (deleteSavedContactOwnerRow db) savedContactOwnerRows
+  controlCommandRows = toList (toStream (turbo.store.controlCommands.tables.byActorOperation db))
+  _ = foreach (deleteControlCommandRow db) controlCommandRows
+  wakeJobRowCount = clearPending db ()
+  wakeEventRowCount = devWakeEvents.clearRecent db ()
+  invariantEventRowCount = devInvariantEvents.clearRecent db ()
+  ResetSummary
+    (size runtimeRows)
+    (size presenceRows)
+    (size tokenRows)
+    (size inviteIdRows)
+    (size inviteFromRows)
+    (size inviteToRows)
+    (size membershipRows)
+    (size sessionRows)
+    0
+    (size channelRows)
+    (size userPairRows)
+    wakeJobRowCount
+    wakeEventRowCount
+    invariantEventRowCount
+    (size controlCommandRows)
+
+turbo.schemaDrift.fixtures.controlCommandRecord : ControlCommandRecord
+turbo.schemaDrift.fixtures.controlCommandRecord =
+  ControlCommandRecord
+    turbo.schemaDrift.fixture.userId
+    turbo.schemaDrift.fixture.deviceId
+    "op-schema-connect"
+    ConnectRequest
+    "peer:user-schema-blake:channel:channel-schema-direct"
+    ControlCommandSucceeded
+    turbo.schemaDrift.fixture.instant
+    (Some turbo.schemaDrift.fixture.laterInstant)
+
+turbo.schemaDrift.currentHashes : [(Text, Nat)]
+turbo.schemaDrift.currentHashes =
+  use turbo.schemaDrift.internal hash
+  [ ("User", hash user)
+  , ("Device", hash device)
+  , ("DirectChannel", hash fixtures.directChannel)
+  , ("ChannelMembership", hash channelMembership)
+  , ("Invite", hash invite)
+  , ("EphemeralToken", hash fixtures.ephemeralToken)
+  , ("DevicePresence", hash devicePresence)
+  , ("TransmitState", hash transmitState)
+  , ("ReceiverAudioReadinessRecord", hash receiverAudioReadiness)
+  , ("DirectQuicDeviceIdentity", hash directQuicIdentity)
+  , ("MediaEncryptionDeviceIdentity", hash mediaEncryptionIdentity)
+  , ("DevDiagnosticsReport", hash devDiagnosticsReport)
+  , ("DevWakeEvent", hash devWakeEvent)
+  , ("WakeJobKey", hash wakeJobKey)
+  , ("WakeJob", hash wakeJob)
+  , ("ApnsEnvironment", hash apnsEnvironment)
+  , ("ControlCommandRecord", hash controlCommandRecord)
+  ]
+
+turbo.schemaDrift.currentDeserializeChecks : [(Text, Boolean)]
+turbo.schemaDrift.currentDeserializeChecks =
+  use turbo.schemaDrift.internal serializedValueCanDeserialize
+  [ ("User", serializedValueCanDeserialize user)
+  , ("Device", serializedValueCanDeserialize device)
+  , ("DirectChannel", serializedValueCanDeserialize fixtures.directChannel)
+  , ("ChannelMembership", serializedValueCanDeserialize channelMembership)
+  , ("Invite", serializedValueCanDeserialize invite)
+  , ("EphemeralToken", serializedValueCanDeserialize fixtures.ephemeralToken)
+  , ("DevicePresence", serializedValueCanDeserialize devicePresence)
+  , ("TransmitState", serializedValueCanDeserialize transmitState)
+  , ("ReceiverAudioReadinessRecord", serializedValueCanDeserialize receiverAudioReadiness)
+  , ("DirectQuicDeviceIdentity", serializedValueCanDeserialize directQuicIdentity)
+  , ("MediaEncryptionDeviceIdentity", serializedValueCanDeserialize mediaEncryptionIdentity)
+  , ("DevDiagnosticsReport", serializedValueCanDeserialize devDiagnosticsReport)
+  , ("DevWakeEvent", serializedValueCanDeserialize devWakeEvent)
+  , ("WakeJobKey", serializedValueCanDeserialize wakeJobKey)
+  , ("WakeJob", serializedValueCanDeserialize wakeJob)
+  , ("ApnsEnvironment", serializedValueCanDeserialize apnsEnvironment)
+  , ("ControlCommandRecord", serializedValueCanDeserialize controlCommandRecord)
+  ]
+
+turbo.schemaDrift.expectedHashes : [(Text, Nat)]
+turbo.schemaDrift.expectedHashes =
+  [ ("User", 18405457429807675968)
+  , ("Device", 7731537327862444920)
+  , ("DirectChannel", 8424395335897091453)
+  , ("ChannelMembership", 10052281121105448336)
+  , ("Invite", 2875659550947466548)
+  , ("EphemeralToken", 18390580796399364664)
+  , ("DevicePresence", 17260273128971024046)
+  , ("TransmitState", 13627689098987215502)
+  , ("ReceiverAudioReadinessRecord", 18072129648974993835)
+  , ("DirectQuicDeviceIdentity", 14164950114523141883)
+  , ("MediaEncryptionDeviceIdentity", 3397794674441907854)
+  , ("DevDiagnosticsReport", 6695540840048643011)
+  , ("DevWakeEvent", 10622054063331164239)
+  , ("WakeJobKey", 3763014053017301332)
+  , ("WakeJob", 12579299559049869083)
+  , ("ApnsEnvironment", 5679781561595473831)
+  , ("ControlCommandRecord", 17950451665859013081)
+  ]
+
+turbo.schemaDrift.expectedDeserializeChecks : [(Text, Boolean)]
+turbo.schemaDrift.expectedDeserializeChecks =
+  [ ("User", true)
+  , ("Device", true)
+  , ("DirectChannel", true)
+  , ("ChannelMembership", true)
+  , ("Invite", true)
+  , ("EphemeralToken", true)
+  , ("DevicePresence", true)
+  , ("TransmitState", true)
+  , ("ReceiverAudioReadinessRecord", true)
+  , ("DirectQuicDeviceIdentity", true)
+  , ("MediaEncryptionDeviceIdentity", true)
+  , ("DevDiagnosticsReport", true)
+  , ("DevWakeEvent", true)
+  , ("WakeJobKey", true)
+  , ("WakeJob", true)
+  , ("ApnsEnvironment", true)
+  , ("ControlCommandRecord", true)
+  ]

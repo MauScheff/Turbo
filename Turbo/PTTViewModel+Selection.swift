@@ -126,6 +126,10 @@ extension PTTViewModel {
     }
 
     var incomingInviteByContactID: [UUID: TurboInviteResponse] {
+        backendSyncCoordinator.state.syncState.visibleIncomingInvitesByContactID()
+    }
+
+    var rawIncomingInviteByContactID: [UUID: TurboInviteResponse] {
         backendSyncCoordinator.state.syncState.incomingInvites
     }
 
@@ -151,6 +155,24 @@ extension PTTViewModel {
         case .none:
             return false
         }
+    }
+
+    func backendJoinIsSettling(for contactID: UUID) -> Bool {
+        if backendRuntime.isBackendJoinSettling(for: contactID) {
+            return true
+        }
+        if sessionCoordinator.pendingJoinContactID == contactID {
+            return false
+        }
+        guard case .join(let request) = backendCommandCoordinator.state.activeOperation else {
+            return false
+        }
+        return request.contactID == contactID
+    }
+
+    func shouldPreservePendingLocalJoinDuringBackendJoinSettling(for contactID: UUID) -> Bool {
+        sessionCoordinator.pendingJoinContactID == contactID
+            && backendJoinIsSettling(for: contactID)
     }
 
     func conversationContext(for contact: Contact) -> ConversationDerivationContext {
@@ -191,7 +213,10 @@ extension PTTViewModel {
         let incomingInviteCount = incomingInviteByContactID[contactID]?.requestCount
         let outgoingInviteCount = outgoingInviteByContactID[contactID]?.requestCount
         let summary = contactSummaryByContactID[contactID]
-        let summaryRelationship = summary?.requestRelationship ?? .none
+        let summaryRelationship =
+            backendSyncCoordinator.state.syncState.summaryIncomingRequestIsHandled(for: contactID)
+                ? summary?.requestRelationship.removingIncomingRequest ?? .none
+                : summary?.requestRelationship ?? .none
 
         let hasIncomingRequest = incomingInviteCount != nil || summaryRelationship.hasIncomingRequest
         let hasOutgoingRequest = outgoingInviteCount != nil || summaryRelationship.hasOutgoingRequest
@@ -213,6 +238,10 @@ extension PTTViewModel {
 
     func selectedPeerBaseState(for contactID: UUID, relationship: PairRelationshipState) -> ConversationState {
         if let state = selectedChannelState(for: contactID)?.conversationStatus {
+            if state == .incomingRequest,
+               backendSyncCoordinator.state.syncState.summaryIncomingRequestIsHandled(for: contactID) {
+                return relationship.fallbackConversationState
+            }
             return state
         }
         return relationship.fallbackConversationState
@@ -331,6 +360,20 @@ extension PTTViewModel {
             && !backendLeaveCommandInFlight
             && (selectedChannel == nil || backendChannelReferenceAbsent)
         guard pendingJoinIsStale || pendingLeaveIsComplete else { return }
+
+        if pendingJoinIsStale,
+           shouldPreservePendingLocalJoinDuringBackendJoinSettling(for: contactID) {
+            diagnostics.record(
+                .state,
+                message: "Deferred absent backend membership recovery while backend join is settling",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "backendMembership": selectedChannel.map { String(describing: $0.membership) } ?? "none",
+                    "backendStatus": selectedChannel?.status?.rawValue ?? "none",
+                ]
+            )
+            return
+        }
 
         sessionCoordinator.clearPendingJoin(for: contactID)
         sessionCoordinator.clearLeaveAction(for: contactID)
@@ -752,9 +795,17 @@ extension PTTViewModel {
 
     func selectedChannelSnapshot(for contactID: UUID) -> ChannelReadinessSnapshot? {
         selectedChannelState(for: contactID).map { channelState in
-            ChannelReadinessSnapshot(
+            let snapshot = ChannelReadinessSnapshot(
                 channelState: channelState,
                 readiness: channelReadinessByContactID[contactID]
+            )
+            guard backendSyncCoordinator.state.syncState.summaryIncomingRequestIsHandled(for: contactID),
+                  snapshot.requestRelationship.hasIncomingRequest else {
+                return snapshot
+            }
+            return snapshot.replacingRequestRelationship(
+                snapshot.requestRelationship.removingIncomingRequest,
+                status: snapshot.status == .incomingRequest ? nil : snapshot.status
             )
         }
     }

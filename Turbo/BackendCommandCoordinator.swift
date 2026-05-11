@@ -16,6 +16,7 @@ struct BackendJoinRequest: Equatable {
     let handle: String
     let intent: BackendJoinIntent
     let operationID: String?
+    let joinOperationID: String?
     let relationship: PairRelationshipState
     let existingRemoteUserID: String?
     let existingBackendChannelID: String?
@@ -29,6 +30,7 @@ struct BackendJoinRequest: Equatable {
         handle: String,
         intent: BackendJoinIntent,
         operationID: String? = nil,
+        joinOperationID: String? = nil,
         relationship: PairRelationshipState,
         existingRemoteUserID: String?,
         existingBackendChannelID: String?,
@@ -41,6 +43,7 @@ struct BackendJoinRequest: Equatable {
         self.handle = handle
         self.intent = intent
         self.operationID = operationID
+        self.joinOperationID = joinOperationID
         self.relationship = relationship
         self.existingRemoteUserID = existingRemoteUserID
         self.existingBackendChannelID = existingBackendChannelID
@@ -49,11 +52,46 @@ struct BackendJoinRequest: Equatable {
         self.requestCooldownRemaining = requestCooldownRemaining
         self.usesLocalHTTPBackend = usesLocalHTTPBackend
     }
+
+    static func == (lhs: BackendJoinRequest, rhs: BackendJoinRequest) -> Bool {
+        lhs.contactID == rhs.contactID
+            && lhs.handle == rhs.handle
+            && lhs.intent == rhs.intent
+            && lhs.relationship == rhs.relationship
+            && lhs.existingRemoteUserID == rhs.existingRemoteUserID
+            && lhs.existingBackendChannelID == rhs.existingBackendChannelID
+            && lhs.incomingInvite == rhs.incomingInvite
+            && lhs.outgoingInvite == rhs.outgoingInvite
+            && lhs.requestCooldownRemaining == rhs.requestCooldownRemaining
+            && lhs.usesLocalHTTPBackend == rhs.usesLocalHTTPBackend
+    }
 }
 
 struct BackendLeaveRequest: Equatable {
     let contactID: UUID
     let backendChannelID: String
+    let operationID: String?
+
+    init(
+        contactID: UUID,
+        backendChannelID: String,
+        operationID: String? = BackendCommandOperationID.make(prefix: "leave")
+    ) {
+        self.contactID = contactID
+        self.backendChannelID = backendChannelID
+        self.operationID = operationID
+    }
+
+    static func == (lhs: BackendLeaveRequest, rhs: BackendLeaveRequest) -> Bool {
+        lhs.contactID == rhs.contactID
+            && lhs.backendChannelID == rhs.backendChannelID
+    }
+}
+
+enum BackendCommandOperationID {
+    static func make(prefix: String) -> String {
+        "\(prefix):\(UUID().uuidString.lowercased())"
+    }
 }
 
 struct BackendCommandState: Equatable {
