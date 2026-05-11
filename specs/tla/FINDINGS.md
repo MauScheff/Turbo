@@ -357,7 +357,9 @@ Related detector:
 Scenario status:
 
 - focused local scenario covers the wake-token-only active transmit path
-- fuzz still does not generate token-revocation actions automatically
+- fuzz now generates `backgroundApp -> beginTransmit -> revokeEphemeralToken`
+  interleavings so token revocation composes with restart, websocket reconnect,
+  refresh, and transport-delay perturbations
 
 ### TLA-2026-05-11-009: active transmitter membership loss must clear transmit
 
@@ -387,3 +389,6 @@ Scenario status:
 
 - focused local scenario added as the regression proof for the sender
   membership-loss route
+- fuzz now generates `beginTransmit -> sender disconnect` interleavings so
+  active-transmit membership loss composes with restart, websocket reconnect,
+  refresh, and transport-delay perturbations

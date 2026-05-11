@@ -247,6 +247,14 @@ without copying artifacts into the repo.
 
 ## Fuzz Lane
 
+The generator biases the post-transmit phase toward the newest high-risk
+protocol edges:
+
+- active transmitter membership loss (`beginTransmit` followed by sender
+  `disconnect`)
+- wake-token addressability loss (`backgroundApp`, `beginTransmit`,
+  `revokeEphemeralToken`)
+
 Use the local websocket backend for high-volume fuzzing:
 
 1. Start the backend with `just serve-local`.
