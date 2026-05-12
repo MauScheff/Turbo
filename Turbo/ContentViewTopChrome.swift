@@ -21,7 +21,7 @@ struct TurboHeaderView: View {
     let onRequestLocalNetworkPermission: () -> Void
     let onRequestNotificationPermission: () -> Void
 
-    private let navigationButtonWidth: CGFloat = 32
+    private let navigationButtonWidth: CGFloat = 44
 
     var body: some View {
         let trailingButtonCount = showsAddContactButton ? 1 : 0
@@ -32,37 +32,33 @@ struct TurboHeaderView: View {
             ZStack {
                 if let statusMessage {
                     Text(statusMessage)
-                        .font(.callout)
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
-                        .padding(.horizontal, sideWidth + 16)
+                        .padding(.horizontal, sideWidth + 20)
                 }
 
                 HStack(spacing: 12) {
-                    Button(action: onShowProfile) {
-                        Image(systemName: "person.crop.circle")
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .accessibilityLabel("Profile")
-                    }
-                    .frame(width: navigationButtonWidth, height: navigationButtonWidth)
+                    headerIconButton(
+                        systemName: "person.crop.circle",
+                        accessibilityLabel: "Profile",
+                        action: onShowProfile
+                    )
 
                     Spacer(minLength: 0)
 
                     if showsAddContactButton {
-                        Button(action: onAddContact) {
-                            Image(systemName: "plus.circle")
-                                .font(.title3.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .accessibilityLabel("Add contact")
-                        }
-                        .frame(width: navigationButtonWidth, height: navigationButtonWidth)
+                        headerIconButton(
+                            systemName: "plus",
+                            accessibilityLabel: "Add contact",
+                            action: onAddContact
+                        )
                     }
                 }
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
+            .padding(.vertical, 4)
 
             if let transportPathState {
                 Button(action: onShowTransportPathInfo) {
@@ -128,6 +124,43 @@ struct TurboHeaderView: View {
             }
         }
     }
+
+    private func headerIconButton(
+        systemName: String,
+        accessibilityLabel: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        TurboGlassIconButton(
+            systemName: systemName,
+            accessibilityLabel: accessibilityLabel,
+            action: action
+        )
+    }
+}
+
+struct TurboGlassIconButton: View {
+    let systemName: String
+    let accessibilityLabel: String
+    let action: () -> Void
+
+    private let size: CGFloat = 44
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: size, height: size)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .background(.thinMaterial, in: Circle())
+        .overlay(
+            Circle()
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .accessibilityLabel(accessibilityLabel)
+    }
 }
 
 struct TurboTransportPathInfoModal: View {
@@ -146,8 +179,11 @@ struct TurboTransportPathInfoModal: View {
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.secondary)
                         .frame(width: 30, height: 30)
-                        .background(Color.secondary.opacity(0.12))
-                        .clipShape(Circle())
+                        .background(.thinMaterial, in: Circle())
+                        .overlay(
+                            Circle()
+                                .stroke(.white.opacity(0.18), lineWidth: 1)
+                        )
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close")
@@ -209,20 +245,23 @@ private struct TurboTransportPathBadge: View {
     let tint: Color
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 4) {
             if state.showsSecureIcon {
                 Image(systemName: "lock.fill")
-                    .font(.caption2.weight(.semibold))
+                    .font(.system(size: 10, weight: .semibold))
             }
 
             Text(state.label)
-                .font(.caption2.weight(.semibold))
+                .font(.caption2.weight(.medium))
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(tint.opacity(0.14))
-        .foregroundStyle(tint)
-        .clipShape(Capsule())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.thinMaterial, in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(tint.opacity(state == .direct ? 0.24 : 0.12), lineWidth: 1)
+        )
+        .foregroundStyle(state == .direct ? tint : .secondary)
     }
 }
 
@@ -299,33 +338,109 @@ struct TurboStartView: View {
     var body: some View {
         GeometryReader { geometry in
             let buttonWidth = TurboLayout.primaryButtonWidth(for: geometry.size.width)
-            let topInset = max(geometry.size.height * 0.18, 96)
+            let columnWidth = TurboLayout.contentWidth(for: geometry.size.width)
+            let topInset = max(geometry.safeAreaInsets.top + 24, 52)
             let bottomInset = max(geometry.safeAreaInsets.bottom + 20, 28)
 
             VStack(spacing: 0) {
                 Spacer()
                     .frame(height: topInset)
 
-                Image(wordmarkName)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(height: 42)
-                    .accessibilityLabel("BeepBeep")
+                VStack(spacing: 0) {
+                    Image(wordmarkName)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 31)
+                        .accessibilityLabel("BeepBeep")
+
+                    Spacer(minLength: 0)
+
+                    VStack(spacing: 14) {
+                        Text("Voice, when it matters.")
+                            .font(.title.weight(.semibold))
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.84)
+
+                        Text("A quiet way to reach the people you trust.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer()
+                        .frame(height: 34)
+
+                    VStack(spacing: 16) {
+                        TurboStartStepRow(
+                            symbolName: "person.crop.circle.badge.plus",
+                            title: "Choose a handle",
+                            subtitle: "How close contacts recognize you."
+                        )
+                        TurboStartStepRow(
+                            symbolName: "mic.fill",
+                            title: "Allow microphone",
+                            subtitle: "Used only while you hold to talk."
+                        )
+                        TurboStartStepRow(
+                            symbolName: "bell.badge.fill",
+                            title: "Allow requests",
+                            subtitle: "Asked only when BeepBeep needs it."
+                        )
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Button(action: onContinue) {
+                        Text("Continue")
+                            .font(.body.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 50)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .frame(width: buttonWidth)
+                }
+                .frame(width: columnWidth)
+                .frame(maxWidth: .infinity)
+                .frame(maxHeight: .infinity)
 
                 Spacer()
+                    .frame(height: bottomInset)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .overlay(alignment: .bottom) {
-                Button(action: onContinue) {
-                    Text("Get Started")
-                        .frame(maxWidth: .infinity, minHeight: 54)
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(width: buttonWidth)
-                .padding(.bottom, bottomInset)
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.horizontal, TurboLayout.horizontalPadding)
+    }
+}
+
+private struct TurboStartStepRow: View {
+    let symbolName: String
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Image(systemName: symbolName)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 34, height: 34)
+                .background(.thinMaterial, in: Circle())
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.primary)
+
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

@@ -219,9 +219,18 @@ enum PendingSessionAction: Equatable {
     }
 }
 
+struct LocalJoinAttempt: Equatable {
+    let contactID: UUID
+    let channelUUID: UUID
+    var issuedCount: Int
+    var firstIssuedAt: Date
+    var lastIssuedAt: Date
+}
+
 struct SessionCoordinatorState: Equatable {
     private(set) var pendingAction: PendingSessionAction = .none
     private(set) var pendingConnectOrigin: PendingConnectOrigin?
+    private(set) var localJoinAttempt: LocalJoinAttempt?
 
     var pendingJoinContactID: UUID? {
         pendingAction.pendingJoinContactID
@@ -230,25 +239,52 @@ struct SessionCoordinatorState: Equatable {
     mutating func queueConnect(contactID: UUID, origin: PendingConnectOrigin = .neutral) {
         pendingAction = .connect(.requestingBackend(contactID: contactID))
         pendingConnectOrigin = origin
+        localJoinAttempt = nil
     }
 
-    mutating func queueJoin(contactID: UUID) {
+    mutating func queueJoin(
+        contactID: UUID,
+        channelUUID: UUID? = nil,
+        now: Date = Date()
+    ) {
         if case .leave(.explicit(let pendingContactID)) = pendingAction,
            pendingContactID == nil || pendingContactID == contactID {
             return
         }
         pendingAction = .connect(.joiningLocal(contactID: contactID))
         pendingConnectOrigin = nil
+        guard let channelUUID else { return }
+        if var attempt = localJoinAttempt,
+           attempt.contactID == contactID,
+           attempt.channelUUID == channelUUID {
+            attempt.issuedCount += 1
+            attempt.lastIssuedAt = now
+            localJoinAttempt = attempt
+        } else {
+            localJoinAttempt = LocalJoinAttempt(
+                contactID: contactID,
+                channelUUID: channelUUID,
+                issuedCount: 1,
+                firstIssuedAt: now,
+                lastIssuedAt: now
+            )
+        }
     }
 
     mutating func markExplicitLeave(contactID: UUID?) {
         pendingAction = .leave(.explicit(contactID: contactID))
         pendingConnectOrigin = nil
+        if contactID == nil || localJoinAttempt?.contactID == contactID {
+            localJoinAttempt = nil
+        }
     }
 
     mutating func markReconciledTeardown(contactID: UUID) {
         pendingAction = .leave(.reconciledTeardown(contactID: contactID))
         pendingConnectOrigin = nil
+        if localJoinAttempt?.contactID == contactID {
+            localJoinAttempt = nil
+        }
     }
 
     mutating func clearAfterSuccessfulJoin(for contactID: UUID) {
@@ -256,12 +292,18 @@ struct SessionCoordinatorState: Equatable {
             pendingAction = .none
             pendingConnectOrigin = nil
         }
+        if localJoinAttempt?.contactID == contactID {
+            localJoinAttempt = nil
+        }
     }
 
     mutating func clearPendingJoin(for contactID: UUID) {
         if pendingJoinContactID == contactID {
             pendingAction = .none
             pendingConnectOrigin = nil
+        }
+        if localJoinAttempt?.contactID == contactID {
+            localJoinAttempt = nil
         }
     }
 
@@ -321,8 +363,13 @@ struct SessionCoordinatorState: Equatable {
         switch pendingAction {
         case .connect(.joiningLocal(let pendingContactID)) where pendingContactID != contactID:
             pendingAction = .none
+            pendingConnectOrigin = nil
+            if localJoinAttempt?.contactID == pendingContactID {
+                localJoinAttempt = nil
+            }
         case .leave(.explicit(let pendingContactID)) where pendingContactID != nil && pendingContactID != contactID:
             pendingAction = .none
+            pendingConnectOrigin = nil
         default:
             break
         }
@@ -330,6 +377,8 @@ struct SessionCoordinatorState: Equatable {
 
     mutating func reset() {
         pendingAction = .none
+        pendingConnectOrigin = nil
+        localJoinAttempt = nil
     }
 
     func autoRejoinContactID(afterLeaving _: UUID?) -> UUID? {
@@ -1955,6 +2004,30 @@ enum ConversationStateMachine {
                 isTransmitting: isTransmitting,
                 requestCooldownRemaining: requestCooldownRemaining
             )
+        }
+    }
+
+    static func shouldShowCallScreen(
+        selectedPeerState: SelectedPeerState,
+        requestedExpanded: Bool
+    ) -> Bool {
+        if selectedPeerState.detail == .waitingForPeer(reason: .disconnecting) {
+            return false
+        }
+
+        switch selectedPeerState.phase {
+        case .waitingForPeer, .localJoinFailed, .ready, .wakeReady,
+             .startingTransmit, .transmitting, .receiving,
+             .blockedByOtherSession, .systemMismatch:
+            return true
+        case .peerReady:
+            return requestedExpanded
+        case .incomingRequest:
+            return false
+        case .requested:
+            return false
+        case .idle:
+            return false
         }
     }
 

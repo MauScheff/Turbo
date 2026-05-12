@@ -317,9 +317,6 @@ extension PTTViewModel {
             return fetched.settingRemoteAudioReadiness(.waiting)
         }()
         guard let existing else { return effectiveFetched }
-        guard case .wakeCapable = existing.remoteWakeCapability else {
-            return effectiveFetched
-        }
 
         let shouldPreserveExplicitReadySignal =
             peerMembershipPresent
@@ -329,6 +326,49 @@ extension PTTViewModel {
             && effectiveFetched.remoteAudioReadiness == .wakeCapable
         if shouldPreserveExplicitReadySignal {
             return effectiveFetched.settingRemoteAudioReadiness(.ready)
+        }
+
+        let shouldPreserveRoutableReadyProjection =
+            peerMembershipPresent
+            && peerDeviceConnected
+            && existingSessionWasRoutable
+            && existing.statusView == .ready
+            && existing.selfHasActiveDevice
+            && existing.peerHasActiveDevice
+            && existing.remoteAudioReadiness == .ready
+            && !effectiveFetched.canTransmit
+            && (
+                effectiveFetched.selfHasActiveDevice
+                || effectiveFetched.peerHasActiveDevice
+            )
+            && {
+                switch effectiveFetched.statusView {
+                case .waitingForSelf, .waitingForPeer:
+                    return true
+                case .inactive, .ready, .selfTransmitting, .peerTransmitting, .unknown:
+                    return false
+                }
+            }()
+        if shouldPreserveRoutableReadyProjection {
+            diagnostics.record(
+                .backend,
+                message: "Preserved routable ready projection across transient backend readiness downgrade",
+                metadata: [
+                    "channelId": effectiveFetched.channelId,
+                    "existingStatus": existing.statusKind,
+                    "fetchedStatus": effectiveFetched.statusKind,
+                    "fetchedSelfHasActiveDevice": String(effectiveFetched.selfHasActiveDevice),
+                    "fetchedPeerHasActiveDevice": String(effectiveFetched.peerHasActiveDevice),
+                    "fetchedRemoteAudioReadiness": String(describing: effectiveFetched.remoteAudioReadiness),
+                    "existingServerTimestamp": existing.serverTimestamp ?? "none",
+                    "fetchedServerTimestamp": effectiveFetched.serverTimestamp ?? "none",
+                ]
+            )
+            return effectiveFetched.preservingRoutableReadyProjection(from: existing)
+        }
+
+        guard case .wakeCapable = existing.remoteWakeCapability else {
+            return effectiveFetched
         }
 
         let existingWakeFallbackWasAuthoritative: Bool = {
@@ -1269,7 +1309,7 @@ extension PTTViewModel {
             guard shouldMaintainBackgroundControlPlane() else { return }
             backendServices?.ensureWebSocketConnected()
         case .heartbeatPresence:
-            guard shouldPublishForegroundPresence() else { return }
+            guard shouldPublishPresenceHeartbeat() else { return }
             _ = try? await backendServices?.heartbeatPresence()
         case .refreshContactSummaries:
             await refreshContactSummaries()
@@ -2217,11 +2257,10 @@ extension PTTViewModel {
                     }
                     return next
                 }()
-                backendSyncCoordinator.send(
-                    .channelReadinessUpdated(
-                        contactID: contactID,
-                        readiness: updatedReadiness
-                    )
+                applyChannelReadiness(
+                    updatedReadiness,
+                    for: contactID,
+                    reason: "receiver-audio-readiness-signal"
                 )
             }
             diagnostics.record(
@@ -2346,6 +2385,14 @@ extension PTTViewModel {
             return
         }
 
+        recentPeerDeviceEvidenceByContactID[contactID] = RecentPeerDeviceEvidence(
+            deviceId: envelope.fromDeviceId,
+            channelId: envelope.channelId,
+            reason: "selected-peer-prewarm:\(payload.reason)",
+            observedAt: Date()
+        )
+        metadata["recordedPeerDeviceId"] = envelope.fromDeviceId
+
         if let blockReason = selectedPeerPrewarmHintBlockReason(for: contactID) {
             metadata["blockReason"] = blockReason
             diagnostics.record(
@@ -2361,10 +2408,19 @@ extension PTTViewModel {
             message: "Selected peer prewarm hint received",
             metadata: metadata
         )
-        precreateSelectedContactMediaShellIfNeeded(
-            for: contactID,
-            reason: "peer-hint-\(payload.reason)"
-        )
+        if selectedContactId == contactID {
+            Task {
+                await runSelectedContactPrewarmPipeline(
+                    for: contactID,
+                    reason: "peer-hint-\(payload.reason)"
+                )
+            }
+        } else {
+            precreateSelectedContactMediaShellIfNeeded(
+                for: contactID,
+                reason: "peer-hint-\(payload.reason)"
+            )
+        }
     }
 
     func handleIncomingDirectQuicTransmitPrepare(
@@ -2547,12 +2603,13 @@ extension PTTViewModel {
             let updates = nextSummaries.map { BackendContactSummaryUpdate(contactID: $0.key, summary: $0.value) }
             backendSyncCoordinator.send(.contactSummariesUpdated(updates))
             pruneContactsToAuthoritativeState()
+            reconcileTalkRequestSurface(allowsSelectedContact: true)
             if await resolveRestoredSystemSessionIfPossible(trigger: "contact-summaries") == nil {
                 clearUnresolvedRestoredSystemSessionIfNeeded(trigger: "contact-summaries")
             }
             reconcileContactSelectionIfNeeded(
                 reason: "contact-summaries",
-                allowSelectingFallbackContact: currentApplicationState() == .active
+                allowSelectingFallbackContact: false
             )
             updateStatusForSelectedContact()
             captureDiagnosticsState("backend-sync:contact-summaries")
@@ -2677,10 +2734,12 @@ extension PTTViewModel {
                     ]
                 )
             }
-            if effectiveChannelState.membership.hasLocalMembership,
-               localSessionEstablished,
-               effectiveChannelReadiness?.selfHasActiveDevice == false,
-               backendRuntime.signalingJoinRecoveryTask == nil {
+            if shouldRecoverMissingBackendDevicePresence(
+                contactID: contactID,
+                effectiveChannelState: effectiveChannelState,
+                effectiveChannelReadiness: effectiveChannelReadiness,
+                localSessionEstablished: localSessionEstablished
+            ) {
                 diagnostics.recordInvariantViolation(
                     invariantID: "selected.local_session_without_backend_presence",
                     scope: .convergence,
@@ -2756,8 +2815,10 @@ extension PTTViewModel {
                 effectiveChannelReadiness
                 ?? (fetchedChannelReadiness?.peerTargetDeviceId == nil ? nil : fetchedChannelReadiness)
             if let setupChannelReadiness {
-                backendSyncCoordinator.send(
-                    .channelReadinessUpdated(contactID: contactID, readiness: setupChannelReadiness)
+                applyChannelReadiness(
+                    setupChannelReadiness,
+                    for: contactID,
+                    reason: "channel-refresh"
                 )
             }
             await prepareReceiverForBackendPeerTransmitFromChannelRefreshIfNeeded(
@@ -2924,11 +2985,11 @@ extension PTTViewModel {
 
         func finishInviteSync(stateReason: String) async {
             syncTalkRequestNotificationBadge()
-            reconcileTalkRequestSurface()
+            reconcileTalkRequestSurface(allowsSelectedContact: true)
             pruneContactsToAuthoritativeState()
             reconcileContactSelectionIfNeeded(
                 reason: "invite-sync",
-                allowSelectingFallbackContact: currentApplicationState() == .active
+                allowSelectingFallbackContact: false
             )
             updateStatusForSelectedContact()
             captureDiagnosticsState(stateReason)
@@ -3007,6 +3068,19 @@ extension PTTViewModel {
             message: "Invite sync partially recovered",
             metadata: ["failedRoute": failedRoute, "error": error.localizedDescription]
         )
+    }
+
+    func shouldRecoverMissingBackendDevicePresence(
+        contactID: UUID,
+        effectiveChannelState: TurboChannelStateResponse,
+        effectiveChannelReadiness: TurboChannelReadinessResponse?,
+        localSessionEstablished: Bool
+    ) -> Bool {
+        guard effectiveChannelState.membership.hasLocalMembership else { return false }
+        guard localSessionEstablished else { return false }
+        guard effectiveChannelReadiness?.selfHasActiveDevice == false else { return false }
+        guard backendRuntime.signalingJoinRecoveryTask == nil else { return false }
+        return !backendRuntime.isBackendJoinSettling(for: contactID)
     }
 }
 

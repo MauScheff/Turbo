@@ -44,8 +44,18 @@ extension PTTViewModel {
         guard backendRuntime.isReady else { return false }
         guard (applicationState ?? currentApplicationState()) == .active else { return false }
         guard backendRuntime.isWebSocketConnected else { return false }
-        return isTransientBackendBootstrapFailure(error)
-            || shouldTreatBackendJoinDisconnectedSessionAsRecoverable(error)
+        if shouldTreatBackendJoinDisconnectedSessionAsRecoverable(error) {
+            return true
+        }
+        if isTransientBackendBootstrapFailure(error) {
+            return !selectedLocalSessionAppearsActive()
+        }
+        return false
+    }
+
+    func selectedLocalSessionAppearsActive() -> Bool {
+        guard let contactID = selectedContactId else { return false }
+        return localSessionEvidenceExists(for: contactID)
     }
 
     func recoverBackendBootstrapIfNeeded(trigger: String) async {
@@ -119,12 +129,7 @@ extension PTTViewModel {
         captureDiagnosticsState("backend:reconnect-start")
         await configureBackendIfNeeded()
         if let selectedContact = selectedContact {
-            let localSessionAppearsActive =
-                systemSessionMatches(selectedContact.id)
-                || (isJoined && activeChannelId == selectedContact.id)
-                || pttCoordinator.state.systemChannelUUID == selectedContact.channelId
-
-            if localSessionAppearsActive {
+            if selectedLocalSessionAppearsActive() {
                 diagnostics.record(
                     .backend,
                     message: "Reasserting backend join after control-plane reconnect",
@@ -184,6 +189,19 @@ extension PTTViewModel {
         guard shouldRecoverJoinDrift,
               let contact = signalingJoinRecoveryContact(),
               backendRuntime.signalingJoinRecoveryTask == nil else {
+            return
+        }
+
+        if shouldDeferBackendSignalingJoinDriftRecoveryToInFlightJoin(for: contact.id) {
+            diagnostics.record(
+                .backend,
+                message: "Deferred backend signaling drift recovery to in-flight join",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "handle": contact.handle,
+                    "notice": message,
+                ]
+            )
             return
         }
 
@@ -322,6 +340,14 @@ extension PTTViewModel {
         }
     }
 
+    func shouldDeferBackendSignalingJoinDriftRecoveryToInFlightJoin(for contactID: UUID) -> Bool {
+        guard backendRuntime.isBackendJoinSettling(for: contactID) else { return false }
+        guard case .join(let activeRequest) = backendCommandCoordinator.state.activeOperation else {
+            return false
+        }
+        return activeRequest.contactID == contactID
+    }
+
     func signalingJoinRecoveryContact() -> Contact? {
         let candidateContactID = activeChannelId ?? selectedContactId
         guard let contactID = candidateContactID,
@@ -454,6 +480,10 @@ extension PTTViewModel {
         return backendSyncCoordinator.state.syncState.channelStates[contact.id]?.membership == .absent
     }
 
+    func backendConfigurationKey(for config: TurboBackendConfig) -> String {
+        "\(config.baseURL.absoluteString)|\(config.devUserHandle)|\(config.deviceID)"
+    }
+
     func configureBackendIfNeeded() async {
         guard let backendConfig = backendConfig else {
             backendStatusMessage = "Backend not configured"
@@ -461,6 +491,53 @@ extension PTTViewModel {
             captureDiagnosticsState("backend-config:missing")
             return
         }
+        let key = backendConfigurationKey(for: backendConfig)
+        if let task = backendConfigurationTask,
+           backendConfigurationKey == key {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Coalesced backend bootstrap with in-flight configuration",
+                metadata: ["handle": backendConfig.devUserHandle]
+            )
+            await task.value
+            return
+        }
+        if let task = backendConfigurationTask {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Cancelling superseded backend bootstrap",
+                metadata: [
+                    "previousKey": backendConfigurationKey ?? "none",
+                    "nextHandle": backendConfig.devUserHandle,
+                ]
+            )
+            task.cancel()
+        }
+        let token = UUID()
+        backendConfigurationKey = key
+        backendConfigurationToken = token
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runBackendConfiguration(backendConfig, key: key)
+        }
+        backendConfigurationTask = task
+        await task.value
+        if backendConfigurationToken == token {
+            backendConfigurationTask = nil
+            backendConfigurationKey = nil
+            backendConfigurationToken = nil
+        }
+    }
+
+    private func backendConfigurationIsCurrent(key: String) -> Bool {
+        guard !Task.isCancelled else { return false }
+        guard let config = backendConfig else { return false }
+        return backendConfigurationKey(for: config) == key
+    }
+
+    private func runBackendConfiguration(_ backendConfig: TurboBackendConfig, key: String) async {
         let client = TurboBackendClient(config: backendConfig)
         client.onSignal = { [weak self] envelope in
             self?.scheduleIncomingSignalDelivery(envelope)
@@ -479,6 +556,15 @@ extension PTTViewModel {
                 try await client.authenticate(),
                 using: client
             )
+            guard backendConfigurationIsCurrent(key: key) else {
+                diagnostics.record(
+                    .backend,
+                    level: .notice,
+                    message: "Discarded superseded backend bootstrap before device registration",
+                    metadata: ["handle": backendConfig.devUserHandle]
+                )
+                return
+            }
             let directQuicIdentity = provisionDirectQuicProductionIdentityForRegistration(
                 deviceID: client.deviceID
             )
@@ -498,6 +584,15 @@ extension PTTViewModel {
                 directQuicRegisteredFingerprint = directQuicIdentity.fingerprint
             }
             _ = try await client.heartbeatPresence()
+            guard backendConfigurationIsCurrent(key: key) else {
+                diagnostics.record(
+                    .backend,
+                    level: .notice,
+                    message: "Discarded superseded backend bootstrap before applying session",
+                    metadata: ["handle": backendConfig.devUserHandle]
+                )
+                return
+            }
             applyAuthenticatedBackendSession(
                 client: client,
                 userID: session.userId,
@@ -510,10 +605,14 @@ extension PTTViewModel {
             )
             client.connectWebSocket()
             backendSyncCoordinator.send(.bootstrapCompleted(mode: runtimeConfig.mode, handle: session.handle))
-            async let contactSummaries: Void = refreshContactSummaries()
-            async let invites: Void = refreshInvites()
-            _ = await (contactSummaries, invites)
-            await openPendingTalkRequestNotificationIfNeeded()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                async let contactSummaries: Void = self.refreshContactSummaries()
+                async let invites: Void = self.refreshInvites()
+                _ = await (contactSummaries, invites)
+                await self.openPendingTalkRequestNotificationIfNeeded()
+                self.captureDiagnosticsState("backend-config:post-login-refresh-finished")
+            }
             startBackendPollingIfNeeded()
             statusMessage = selectedContact == nil ? "Ready to connect" : statusMessage
             diagnostics.record(
@@ -936,9 +1035,9 @@ extension PTTViewModel {
                     )
                 }
                 if let selectedContactId {
-                    await prewarmForegroundTalkPathIfNeeded(
+                    await runSelectedContactPrewarmPipeline(
                         for: selectedContactId,
-                        reason: "websocket-connected"
+                        reason: "websocket-connected-selected-contact"
                     )
                 }
             }

@@ -238,6 +238,7 @@ function discordAlertsWebhook(env) {
 function shouldStream(event) {
   switch (event.eventName) {
     case "backend.presence.heartbeat":
+    case "ios.diagnostics.state_capture":
       return false;
     default:
       return true;

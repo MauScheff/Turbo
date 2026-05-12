@@ -55,6 +55,90 @@ struct ContactDiagnosticsSummary: Codable, Equatable, Identifiable {
     var id: String { handle }
 }
 
+struct UIProjectionDiagnostics: Codable, Equatable {
+    let route: String
+    let callScreenVisible: Bool
+    let callScreenContactHandle: String?
+    let callScreenRequestedExpanded: Bool
+    let callScreenMinimized: Bool
+    let primaryActionKind: String?
+    let primaryActionLabel: String?
+    let primaryActionEnabled: Bool?
+    let selectedPeerPhase: String
+    let selectedPeerStatus: String
+
+    static let unknown = UIProjectionDiagnostics(
+        route: "unknown",
+        callScreenVisible: false,
+        callScreenContactHandle: nil,
+        callScreenRequestedExpanded: false,
+        callScreenMinimized: false,
+        primaryActionKind: nil,
+        primaryActionLabel: nil,
+        primaryActionEnabled: nil,
+        selectedPeerPhase: "none",
+        selectedPeerStatus: "none"
+    )
+
+    var fields: [String: String] {
+        [
+            "uiRoute": route,
+            "uiCallScreenVisible": String(callScreenVisible),
+            "uiCallScreenContact": callScreenContactHandle ?? "none",
+            "uiCallScreenRequestedExpanded": String(callScreenRequestedExpanded),
+            "uiCallScreenMinimized": String(callScreenMinimized),
+            "uiPrimaryActionKind": primaryActionKind ?? "none",
+            "uiPrimaryActionLabel": primaryActionLabel ?? "none",
+            "uiPrimaryActionEnabled": primaryActionEnabled.map(String.init(describing:)) ?? "none",
+            "uiSelectedPeerPhase": selectedPeerPhase,
+            "uiSelectedPeerStatus": selectedPeerStatus,
+        ]
+    }
+
+    var derivedInvariantCandidates: [DiagnosticsInvariantViolationCandidate] {
+        guard callScreenVisible else { return [] }
+
+        var violations: [DiagnosticsInvariantViolationCandidate] = []
+        let metadata = fields
+
+        if selectedPeerPhase == "idle" {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "ui.call_screen_visible_for_idle_peer",
+                    scope: .local,
+                    message: "call screen is visible while selectedPeerPhase=idle",
+                    metadata: metadata
+                )
+            )
+        }
+
+        if selectedPeerPhase == "incomingRequest" {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "ui.call_screen_visible_for_incoming_request",
+                    scope: .local,
+                    message: "call screen is visible for an incoming request before local accept/join evidence exists",
+                    metadata: metadata
+                )
+            )
+        }
+
+        if primaryActionKind == "holdToTalk",
+           selectedPeerPhase == "idle" || selectedPeerPhase == "requested" || selectedPeerPhase == "incomingRequest" {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "ui.call_screen_talk_action_for_non_live_peer",
+                    scope: .local,
+                    message: "call screen shows talk action for a non-live selected peer phase",
+                    metadata: metadata
+                )
+            )
+        }
+
+        return violations
+    }
+}
+
 struct LocalSessionDiagnosticsProjection: Codable, Equatable {
     let selectedContactID: String?
     let selectedHandle: String?
@@ -81,6 +165,8 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
     let remoteReceiveActivityState: String?
     let receiverAudioReadinessState: String?
     let pendingAction: String
+    let localJoinAttempt: String?
+    let localJoinAttemptIssuedCount: Int
     let reconciliationAction: String
     let hadConnectedSessionContinuity: Bool
     let controlPlaneReconnectGraceActive: Bool
@@ -111,6 +197,7 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
         let remoteWakeCapabilityKindValue = remoteWakeCapabilityKind ?? "unavailable"
         let remoteAudioReadinessValue = remoteAudioReadiness ?? "unknown"
         let systemSessionValue = systemSession
+        let localJoinAttemptValue = localJoinAttempt ?? "none"
         let backendActiveTransmitIdValue = backendActiveTransmitId ?? "none"
         let backendActiveTransmitterUserIdValue = backendActiveTransmitterUserId ?? "none"
 
@@ -349,6 +436,8 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
                         "selectedPeerPhase": phase,
                         "selectedPeerRelationship": selectedPeerRelationship,
                         "pendingAction": pendingAction,
+                        "localJoinAttempt": localJoinAttemptValue,
+                        "localJoinAttemptIssuedCount": String(localJoinAttemptIssuedCount),
                         "isJoined": String(isJoined),
                         "systemSession": systemSessionValue,
                         "backendJoinSettling": String(backendJoinSettling),
@@ -974,6 +1063,7 @@ final class DiagnosticsStore {
     private let stateCaptureLimit = 80
     private let invariantViolationLimit = 80
     private let reducerTransitionReportLimit = 160
+    private let diskQueue = DispatchQueue(label: "Turbo.DiagnosticsStore.disk", qos: .utility)
     private let logFileURL: URL?
     private static let iso8601TimestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -1055,14 +1145,16 @@ final class DiagnosticsStore {
     nonisolated func captureState(
         reason: String,
         fields: [String: String],
-        localSessionProjection: LocalSessionDiagnosticsProjection? = nil
+        localSessionProjection: LocalSessionDiagnosticsProjection? = nil,
+        uiProjection: UIProjectionDiagnostics? = nil
     ) {
         if Thread.isMainThread {
             MainActor.assumeIsolated {
                 self.captureStateOnMain(
                     reason: reason,
                     fields: fields,
-                    localSessionProjection: localSessionProjection
+                    localSessionProjection: localSessionProjection,
+                    uiProjection: uiProjection
                 )
             }
         } else {
@@ -1070,7 +1162,8 @@ final class DiagnosticsStore {
                 self?.captureStateOnMain(
                     reason: reason,
                     fields: fields,
-                    localSessionProjection: localSessionProjection
+                    localSessionProjection: localSessionProjection,
+                    uiProjection: uiProjection
                 )
             }
         }
@@ -1146,7 +1239,9 @@ final class DiagnosticsStore {
         reducerTransitionReports.removeAll()
         latestErrorEntry = nil
         guard let logFileURL else { return }
-        try? Data().write(to: logFileURL, options: .atomic)
+        diskQueue.async {
+            try? Data().write(to: logFileURL, options: .atomic)
+        }
     }
 
     private func recordReducerTransitionOnMain(_ report: ReducerTransitionReport) {
@@ -1177,12 +1272,14 @@ final class DiagnosticsStore {
     private func captureStateOnMain(
         reason: String,
         fields: [String: String],
-        localSessionProjection: LocalSessionDiagnosticsProjection?
+        localSessionProjection: LocalSessionDiagnosticsProjection?,
+        uiProjection: UIProjectionDiagnostics?
     ) {
         if stateCaptures.first?.fields == fields {
             recordInvariantViolationCandidatesOnMain(
                 reason: reason,
-                candidates: localSessionProjection?.derivedInvariantCandidates ?? []
+                candidates: (localSessionProjection?.derivedInvariantCandidates ?? [])
+                    + (uiProjection?.derivedInvariantCandidates ?? [])
             )
             return
         }
@@ -1208,7 +1305,8 @@ final class DiagnosticsStore {
 
         recordInvariantViolationCandidatesOnMain(
             reason: reason,
-            candidates: localSessionProjection?.derivedInvariantCandidates ?? []
+            candidates: (localSessionProjection?.derivedInvariantCandidates ?? [])
+                + (uiProjection?.derivedInvariantCandidates ?? [])
         )
     }
 
@@ -1346,45 +1444,26 @@ final class DiagnosticsStore {
     }
 
     private func appendToDisk(_ entry: DiagnosticsEntry) {
-        guard let logFileURL else { return }
         let timestamp = DiagnosticsStore.iso8601TimestampFormatter.string(from: entry.timestamp)
         let metadata =
             entry.metadata.isEmpty
             ? ""
             : " " + entry.metadata.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
         let line = "[\(timestamp)] [\(entry.level.rawValue)] [\(entry.subsystem.rawValue)] \(entry.message)\(metadata)\n"
-        guard let data = line.data(using: .utf8),
-              let handle = try? FileHandle(forWritingTo: logFileURL) else {
-            return
-        }
-        defer {
-            try? handle.close()
-        }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
+        appendLineToDisk(line)
     }
 
     private func appendStateCaptureToDisk(_ capture: DiagnosticsStateCapture) {
-        guard let logFileURL else { return }
         let timestamp = DiagnosticsStore.iso8601TimestampFormatter.string(from: capture.timestamp)
         let changed =
             capture.changedKeys.isEmpty
             ? "none"
             : capture.changedKeys.joined(separator: ",")
         let line = "[\(timestamp)] [state] [\(capture.reason)] changed=\(changed) \(capture.summaryLine)\n"
-        guard let data = line.data(using: .utf8),
-              let handle = try? FileHandle(forWritingTo: logFileURL) else {
-            return
-        }
-        defer {
-            try? handle.close()
-        }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
+        appendLineToDisk(line)
     }
 
     private func appendReducerTransitionToDisk(_ report: ReducerTransitionReport) {
-        guard let logFileURL else { return }
         let effects =
             report.effectsEmitted.isEmpty
             ? "none"
@@ -1394,15 +1473,24 @@ final class DiagnosticsStore {
             ? ""
             : " " + report.correlationIDs.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
         let line = "[transition] [\(report.reducerName)] [\(report.eventName)] effects=\(effects)\(correlations) from=\(report.previousStateSummary) to=\(report.nextStateSummary)\n"
-        guard let data = line.data(using: .utf8),
-              let handle = try? FileHandle(forWritingTo: logFileURL) else {
+        appendLineToDisk(line)
+    }
+
+    private func appendLineToDisk(_ line: String) {
+        guard let logFileURL,
+              let data = line.data(using: .utf8) else {
             return
         }
-        defer {
-            try? handle.close()
+        diskQueue.async {
+            guard let handle = try? FileHandle(forWritingTo: logFileURL) else {
+                return
+            }
+            defer {
+                try? handle.close()
+            }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
         }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
     }
 
     private static func changedKeys(from oldFields: [String: String], to newFields: [String: String]) -> [String] {

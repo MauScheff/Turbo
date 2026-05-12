@@ -258,10 +258,22 @@ extension PTTViewModel {
         createdInvite: TurboInviteResponse?,
         currentChannel: ChannelReadinessSnapshot?
     ) -> BackendJoinExecutionPlan {
+        if request.relationship.isIncomingRequest {
+            return .joinSession
+        }
+        if createdInvite?.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "connected" {
+            return .joinSession
+        }
+        if createdInvite?.direction == "incoming" {
+            return .joinSession
+        }
+        if request.intent == .requestConnection {
+            return .requestOnly
+        }
         if currentChannel?.membership.hasLocalMembership == true {
             return .joinSession
         }
-        if request.relationship.isIncomingRequest {
+        if request.intent == .joinAcceptedOutgoingRequest {
             return .joinSession
         }
         if request.intent == .joinReadyPeer {
@@ -269,12 +281,6 @@ extension PTTViewModel {
                   currentChannel?.requestRelationship == TurboRequestRelationship.none else {
                 return .requestOnly
             }
-            return .joinSession
-        }
-        if createdInvite?.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "connected" {
-            return .joinSession
-        }
-        if createdInvite?.direction == "incoming" {
             return .joinSession
         }
         return .requestOnly
@@ -302,8 +308,10 @@ extension PTTViewModel {
                 .channelStateUpdated(contactID: contact.id, channelState: channelState)
             )
             if let channelReadiness {
-                backendSyncCoordinator.send(
-                    .channelReadinessUpdated(contactID: contact.id, readiness: channelReadiness)
+                applyChannelReadiness(
+                    channelReadiness,
+                    for: contact.id,
+                    reason: "live-join-channel-snapshot"
                 )
             }
             return ChannelReadinessSnapshot(channelState: channelState, readiness: channelReadiness)
@@ -387,6 +395,24 @@ extension PTTViewModel {
             }
             return request
         }()
+        if let activeJoinRequest,
+           intent == .requestConnection,
+           !activeJoinRequest.relationship.isIncomingRequest,
+           !relationship.isIncomingRequest {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Coalesced repeated outgoing ask while backend request is active",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "handle": contact.handle,
+                    "relationship": String(describing: relationship),
+                    "activeRelationship": String(describing: activeJoinRequest.relationship),
+                ]
+            )
+            captureDiagnosticsState("backend-join:coalesced-outgoing-ask")
+            return
+        }
         let request = BackendJoinRequest(
             contactID: contact.id,
             handle: contact.handle,
@@ -410,7 +436,10 @@ extension PTTViewModel {
         }
     }
 
-    func reassertBackendJoin(for contact: Contact) async {
+    func reassertBackendJoin(
+        for contact: Contact,
+        intent: BackendJoinIntent = .joinReadyPeer
+    ) async {
         guard backendServices != nil else { return }
         guard !backendLeaveIsInFlight(for: contact.id) else {
             diagnostics.record(
@@ -429,9 +458,9 @@ extension PTTViewModel {
         let request = BackendJoinRequest(
             contactID: contact.id,
             handle: contact.handle,
-            intent: .joinReadyPeer,
-            operationID: backendConnectOperationID(for: contact, intent: .joinReadyPeer),
-            joinOperationID: backendChannelJoinOperationID(for: contact, intent: .joinReadyPeer),
+            intent: intent,
+            operationID: backendConnectOperationID(for: contact, intent: intent),
+            joinOperationID: backendChannelJoinOperationID(for: contact, intent: intent),
             relationship: relationshipState(for: contact.id),
             existingRemoteUserID: contact.remoteUserId,
             existingBackendChannelID: contact.backendChannelId,
@@ -961,6 +990,7 @@ extension PTTViewModel {
                     "inviteId": acceptedInvite.inviteId,
                     "targetUserId": remoteUserID,
                     "targetDeviceId": peerDeviceID.isEmpty ? "prejoin-fresh-device" : peerDeviceID,
+                    "targetDeviceSource": peerDeviceID.isEmpty ? "fresh-presence" : "readiness-or-recent-peer-device",
                 ]
             )
         } catch {
@@ -1104,7 +1134,7 @@ extension PTTViewModel {
            let invite = try await resolveOutgoingInvite(for: request, backend: backend) {
             applyInviteMetadata(invite, to: &contact)
         } else if !request.relationship.isIncomingRequest,
-                  request.intent != .joinReadyPeer,
+                  request.intent == .requestConnection,
                   request.requestCooldownRemaining == nil {
             let identityQuery = backendPeerIdentityQuery(
                 handle: request.handle,
@@ -1118,6 +1148,18 @@ extension PTTViewModel {
             createdInvite = invite
             applyInviteMetadata(invite, to: &contact)
             if invite.direction == "outgoing" {
+                recentOutgoingJoinAcceptedTokensByContactID[request.contactID] =
+                    RecentOutgoingJoinAcceptedToken(
+                        inviteId: invite.inviteId,
+                        channelId: invite.channelId,
+                        createdAt: Date()
+                    )
+                recentOutgoingRequestEvidenceByContactID[request.contactID] =
+                    RecentOutgoingRequestEvidence(
+                        channelId: invite.channelId,
+                        requestCount: max(invite.requestCount, request.relationship.requestCount ?? 0),
+                        observedAt: Date()
+                    )
                 backendSyncCoordinator.send(
                     .outgoingInviteSeeded(
                         contactID: request.contactID,
@@ -1262,6 +1304,7 @@ extension PTTViewModel {
         _ backend: BackendServices,
         request: BackendJoinRequest
     ) async throws {
+        await refreshBackendJoinSessionEvidence(backend, request: request)
         guard backend.supportsWebSocket else { return }
         guard !backend.isWebSocketConnected else { return }
 
@@ -1285,6 +1328,36 @@ extension PTTViewModel {
                 metadata: [
                     "contactId": request.contactID.uuidString,
                     "handle": request.handle,
+                ]
+            )
+        }
+    }
+
+    func refreshBackendJoinSessionEvidence(
+        _ backend: BackendServices,
+        request: BackendJoinRequest
+    ) async {
+        do {
+            _ = try await backend.heartbeatPresence()
+            diagnostics.record(
+                .backend,
+                message: "Refreshed backend session evidence before join",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "handle": request.handle,
+                    "intent": String(describing: request.intent),
+                ]
+            )
+        } catch {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Backend session evidence refresh before join failed",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "handle": request.handle,
+                    "intent": String(describing: request.intent),
+                    "error": error.localizedDescription,
                 ]
             )
         }
@@ -1450,9 +1523,9 @@ extension PTTViewModel {
                     selfJoined: true,
                     peerJoined: peerJoined,
                     peerDeviceConnected: peerDeviceConnected,
-                    hasIncomingRequest: existing.hasIncomingRequest,
-                    hasOutgoingRequest: existing.hasOutgoingRequest,
-                    requestCount: existing.requestCount,
+                    hasIncomingRequest: false,
+                    hasOutgoingRequest: false,
+                    requestCount: 0,
                     activeTransmitterUserId: existing.activeTransmitterUserId,
                     activeTransmitId: existing.activeTransmitId,
                     transmitLeaseExpiresAt: existing.transmitLeaseExpiresAt,

@@ -9,6 +9,7 @@ enum BackendCommandOperation: Equatable {
 enum BackendJoinIntent: Equatable {
     case requestConnection
     case joinReadyPeer
+    case joinAcceptedOutgoingRequest
 }
 
 struct BackendJoinRequest: Equatable {
@@ -145,6 +146,12 @@ enum BackendCommandReducer {
             if case .join(let activeRequest) = nextState.activeOperation,
                activeRequest.contactID == request.contactID {
                 if activeRequest == request || nextState.queuedJoinRequest == request {
+                    return BackendCommandTransition(state: nextState)
+                }
+                if activeRequest.intent == .requestConnection,
+                   request.intent == .requestConnection,
+                   !activeRequest.relationship.isIncomingRequest,
+                   !request.relationship.isIncomingRequest {
                     return BackendCommandTransition(state: nextState)
                 }
                 nextState.queuedJoinRequest = request

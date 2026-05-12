@@ -29,7 +29,7 @@ Optimize for:
 
 ## Turbo-specific iteration notes
 
-- Debug builds emit compact state-capture telemetry events after high-signal state transitions and coalesce automatic latest full diagnostics transcript uploads to the backend. Sustained activity should still refresh the latest backend snapshot periodically.
+- Debug builds keep state captures in the local diagnostics ring/log and coalesce automatic latest full diagnostics transcript uploads to the backend. Routine state captures are not emitted to Cloudflare telemetry by default; enable `TURBO_IOS_STATE_CAPTURE_TELEMETRY=1` only for a targeted short debugging run that needs a raw remote state timeline.
 - For long or intense physical-device sessions, use merged diagnostics first. Cloudflare telemetry gives the compact event timeline, while backend latest diagnostics gives the full transcript anchor with audio and local state detail.
 - The backend now supports exact-device diagnostics reads for simulator identities too, so `just simulator-scenario-merge` is part of the normal loop.
 - For physical-device timelines, use `python3 scripts/merged_diagnostics.py @mau @bau`; it merges Cloudflare telemetry by default when credentials are available and treats missing latest backend snapshots as source warnings.
@@ -37,7 +37,8 @@ Optimize for:
 - The simulator scenario runner is controlled by a temporary repo-local file `.scenario-runtime-config.json` that `just simulator-scenario` creates and removes through `scripts/run_simulator_scenarios.py`. Do not check this file in or depend on it manually.
 - The scenario runner now serializes scenario invocations with `.scenario-test.lock`, shares the `/tmp/turbo-simulator-test.lock` simulator lane with targeted Swift tests, and retries transient XCTest bootstrap crashes automatically. Full catalog runs also retry each catalog scenario once for hosted timing noise, while focused single-scenario runs remain strict. Use the `just` entrypoints instead of invoking `xcodebuild` manually when you want the stable loop.
 - For targeted Swift Testing runs, use `just swift-test-target <name>` instead of raw `-only-testing`. The wrapper fails if the requested test name never actually executes, which prevents false-green zero-test runs.
-- If `xcodebuild` says the simulator scenario command succeeded unusually quickly, confirm that tests actually ran. Swift Testing does not use the same selector behavior as classic XCTest, so a bad `-only-testing` filter can silently run zero tests.
+- If raw `xcodebuild -only-testing` is unavoidable for a Swift `@Test`, use `TurboTests/<suite>/<function>()` with the trailing parentheses, for example `-only-testing:TurboTests/TurboTests/audioOutputPreferenceCyclesBetweenSpeakerAndPhone()`. Without `()`, Xcode can select zero Swift Testing tests.
+- If `xcodebuild` says the simulator scenario command succeeded unusually quickly, confirm that tests actually ran. Swift Testing does not use the same selector behavior as classic XCTest, so a bad `-only-testing` filter can silently run zero tests. Prefer the proof rules in [`TESTING.md`](/Users/mau/Development/Turbo/TESTING.md).
 
 ## Merged diagnostics workflow
 
@@ -74,13 +75,13 @@ For production-like reports, the same command still applies when Cloudflare quer
 
 ### Shake reports
 
-When a development, TestFlight, or production-like user shakes the phone, the app automatically uploads full backend diagnostics and emits an alert telemetry event named `ios.problem_report.shake` when telemetry is enabled.
+When a development, TestFlight, or production-like user shakes the phone, the app asks for optional context, then uploads full backend diagnostics and emits an alert telemetry event named `ios.problem_report.shake` when telemetry is enabled. The user can send the report without typing anything.
 
 Inspect it in this order:
 
 1. Read the Discord alert or telemetry event for `incidentId`, `userHandle`, `deviceId`, `uploadedAt`, `diagnosticsLatestURL`, `channelId`, and `peerHandle`.
 2. Fetch the full transcript from the `diagnosticsLatestURL`, or use `just diagnostics-latest <device_id> https://beepbeep.to <user_handle>` if the route needs auth headers.
-3. Verify the transcript contains `Shake report requested` with the same `incidentId`.
+3. Verify the transcript contains `Shake report requested` with the same `incidentId`; if the user filled out the prompt, inspect `userReport`.
 4. Run merged diagnostics around the same time. Include `peerHandle` when the alert has one:
 
 ```bash

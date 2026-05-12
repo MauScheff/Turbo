@@ -123,6 +123,7 @@ Delivery behavior:
 - `TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK` receives non-dev telemetry events that pass the stream filter
 - `TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK` receives only non-dev alert-worthy events
 - if the new alerts webhook is unset, `TURBO_TELEMETRY_DISCORD_WEBHOOK` is used as an alerts fallback
+- `backend.presence.heartbeat` and explicitly opted-in `ios.diagnostics.state_capture` events are written to Analytics Engine, but are excluded from Discord stream delivery because they are high-volume timeline facts
 
 ## Local commands
 

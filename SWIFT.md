@@ -5,6 +5,7 @@ This file contains the app-side architecture and working rules for Swift, SwiftU
 For simulator/device/PTT debugging loops and operational debugging guidance, use:
 
 - [`SWIFT_DEBUGGING.md`](/Users/mau/Development/Turbo/SWIFT_DEBUGGING.md)
+- [`TESTING.md`](/Users/mau/Development/Turbo/TESTING.md) for targeted Swift Testing command syntax and zero-test guardrails
 - [`APP_STATE.md`](/Users/mau/Development/Turbo/APP_STATE.md) for the app-visible session states and happy-path transition examples
 
 ## Product engineering expectations
@@ -48,6 +49,7 @@ For simulator/device/PTT debugging loops and operational debugging guidance, use
   - write or update a failing test first where practical
   - make it pass with the smallest structural change
   - refactor while keeping tests green
+- For targeted Swift `@Test` runs, use `just swift-test-target <name>` by default. If raw `xcodebuild -only-testing` is unavoidable, use `TurboTests/<suite>/<function>()` with the trailing parentheses and confirm a nonzero Swift Testing test executed.
 - Prefer tests at the highest-leverage seam:
   - pure reducer / domain tests first
   - coordinator / client integration tests second

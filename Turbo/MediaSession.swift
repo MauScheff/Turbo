@@ -70,6 +70,11 @@ enum MediaSessionAudioPolicy {
 
 protocol MediaSessionDelegate: AnyObject {
     func mediaSession(_ session: MediaSession, didChange state: MediaConnectionState)
+    func mediaSession(_ session: MediaSession, didMeasureLocalAudioLevel level: Double)
+}
+
+extension MediaSessionDelegate {
+    func mediaSession(_ session: MediaSession, didMeasureLocalAudioLevel level: Double) {}
 }
 
 protocol MediaSession: AnyObject {

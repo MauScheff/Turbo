@@ -294,14 +294,8 @@ enum ControlPlaneReducer {
                 }
 
                 if publication.isSemanticallyEquivalent(to: intent.publishedState),
-                   publication.basis.suppressesEquivalentLifecyclePublish,
-                   intent.publishedState.basis == .lifecycle {
-                    break
-                }
-
-                if publication.basis == .lifecycle,
-                   intent.publishedState.basis == .webSocketReconnect,
-                   publication.isSemanticallyEquivalent(to: intent.publishedState) {
+                   !(publication.basis == .channelRefresh
+                     && intent.publishedState.basis == .webSocketReconnect) {
                     break
                 }
             }

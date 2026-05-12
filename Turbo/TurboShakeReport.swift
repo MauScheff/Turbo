@@ -10,6 +10,7 @@ struct ShakeReportResult: Equatable {
 
 struct ShakeReportPresentation: Equatable {
     enum State: Equatable {
+        case composing
         case sending
         case sent(ShakeReportResult)
         case failed(String)
@@ -22,33 +23,51 @@ struct ShakeReportPresentation: Equatable {
 struct TurboShakeReportSheet: View {
     let presentation: ShakeReportPresentation
     let onDone: () -> Void
-    let onRetry: () -> Void
+    let onSend: (_ userReport: String) -> Void
+
+    @State private var userReport: String = ""
 
     var body: some View {
-        VStack(spacing: 18) {
-            statusIcon
+        NavigationStack {
+            VStack(spacing: 18) {
+                statusIcon
 
-            VStack(spacing: 8) {
-                Text(title)
-                    .font(.headline)
-                Text(message)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(spacing: 8) {
+                    Text(title)
+                        .font(.headline)
+                    Text(message)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if case .composing = presentation.state {
+                    reportField
+                }
+
+                actionArea
             }
-
-            actionArea
+            .padding(.horizontal, TurboLayout.horizontalPadding)
+            .padding(.vertical, 24)
+            .frame(maxWidth: TurboLayout.contentMaxWidth)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onDone)
+                        .disabled(isSending)
+                }
+            }
         }
-        .padding(.horizontal, TurboLayout.horizontalPadding)
-        .padding(.vertical, 28)
-        .frame(maxWidth: TurboLayout.contentMaxWidth)
-        .presentationDetents([.height(240)])
+        .presentationDetents([presentationDetent])
     }
 
     @ViewBuilder
     private var statusIcon: some View {
         switch presentation.state {
+        case .composing:
+            Image(systemName: "exclamationmark.bubble.fill")
+                .font(.system(size: 40, weight: .semibold))
+                .foregroundStyle(.blue)
         case .sending:
             ProgressView()
                 .controlSize(.large)
@@ -65,6 +84,8 @@ struct TurboShakeReportSheet: View {
 
     private var title: String {
         switch presentation.state {
+        case .composing:
+            return "Report a problem"
         case .sending:
             return "Sending report..."
         case .sent:
@@ -76,6 +97,8 @@ struct TurboShakeReportSheet: View {
 
     private var message: String {
         switch presentation.state {
+        case .composing:
+            return "Add a few words if you want. We'll include recent diagnostics."
         case .sending:
             return "Thanks. We're collecting recent diagnostics."
         case .sent:
@@ -85,9 +108,25 @@ struct TurboShakeReportSheet: View {
         }
     }
 
+    private var reportField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("What happened?")
+                .font(.subheadline.weight(.medium))
+            TextField("What went wrong? What did you expect?", text: $userReport, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(3...5)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     @ViewBuilder
     private var actionArea: some View {
         switch presentation.state {
+        case .composing:
+            Button("Send Report") {
+                onSend(userReport)
+            }
+            .buttonStyle(.borderedProminent)
         case .sending:
             EmptyView()
         case .sent:
@@ -97,9 +136,27 @@ struct TurboShakeReportSheet: View {
             HStack(spacing: 12) {
                 Button("Done", action: onDone)
                     .buttonStyle(.bordered)
-                Button("Try Again", action: onRetry)
+                Button("Try Again") {
+                    onSend(userReport)
+                }
                     .buttonStyle(.borderedProminent)
             }
+        }
+    }
+
+    private var isSending: Bool {
+        if case .sending = presentation.state {
+            return true
+        }
+        return false
+    }
+
+    private var presentationDetent: PresentationDetent {
+        switch presentation.state {
+        case .composing:
+            return .medium
+        default:
+            return .height(240)
         }
     }
 }

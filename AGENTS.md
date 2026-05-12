@@ -5,6 +5,7 @@ This is the repo entrypoint for agent instructions.
 Detailed guidance lives in:
 
 - [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md): tooling, entrypoints, and operational infrastructure
+- [`TESTING.md`](/Users/mau/Development/Turbo/TESTING.md): repo-specific test command rules, especially Swift Testing selector gotchas
 - [`UNISON.md`](/Users/mau/Development/Turbo/UNISON.md): Unison workflow, mode rules, documentation/testing rules
 - [`UNISON_LANGUAGE.md`](/Users/mau/Development/Turbo/UNISON_LANGUAGE.md): Unison syntax, semantics, and language guide
 - [`SWIFT.md`](/Users/mau/Development/Turbo/SWIFT.md): app/client architecture and client-side working rules
@@ -42,6 +43,7 @@ Detailed guidance lives in:
   - Unison MCP/UCM for backend codebase work
   - Xcode/simulator tooling for app-side work
 - Prefer proving behavior automatically with the repo's testing and scenario infrastructure whenever possible.
+- For targeted Swift `@Test` runs, use `just swift-test-target <name>` or the exact selector form documented in [`TESTING.md`](/Users/mau/Development/Turbo/TESTING.md). Do not count raw `-only-testing` commands as proof unless they prove a nonzero Swift Testing test actually ran.
 - Only ask the user to do things that cannot be done from the repo and tooling available to the agent, such as physical-device-only verification.
 - Prefer the automated simulator scenario/test infrastructure when a task can be proven without a human on a physical device.
 - Treat observability, verification, and repeatable debug loops as part of the implementation.
@@ -151,6 +153,12 @@ Use [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md) for:
 - operational flows
 - Unison MCP/UCM vs checked-in files
 - simulator/diagnostics/APNs helper infrastructure
+
+Use [`TESTING.md`](/Users/mau/Development/Turbo/TESTING.md) for:
+
+- targeted Swift Testing command syntax
+- avoiding false-green `xcodebuild -only-testing` runs
+- proof rules for confirming a Swift `@Test` actually executed
 
 Use [`UNISON.md`](/Users/mau/Development/Turbo/UNISON.md) for:
 

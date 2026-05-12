@@ -19,6 +19,11 @@ private enum ContentRoute: Equatable {
     case live
 }
 
+private enum TurboContactActionPrototype {
+    static let isEnabled = false
+    static let showsListBottomAction = false
+}
+
 struct ContentView: View {
     @State private var viewModel: PTTViewModel
     @State private var route: ContentRoute = .launchSplash
@@ -30,6 +35,7 @@ struct ContentView: View {
     @State private var isShowingTransportPathInfo: Bool = false
     @State private var minimizedCallContactID: UUID?
     @State private var contactDetailsContactID: UUID?
+    @State private var focusedContactID: UUID?
     @State private var draftDevUserHandle: String = ""
     @State private var draftPeerHandle: String = ""
     @State private var draftExistingIdentityReference: String = ""
@@ -139,6 +145,7 @@ struct ContentView: View {
         }
         .onChange(of: viewModel.requestedExpandedCallSequence) { _, _ in
             guard let requestedContactID = viewModel.requestedExpandedCallContactID else { return }
+            focusedContactID = nil
             minimizedCallContactID = minimizedCallContactID == requestedContactID ? nil : minimizedCallContactID
         }
         .onChange(of: viewModel.currentProfileName) { _, newValue in
@@ -286,10 +293,11 @@ struct ContentView: View {
                     onDone: {
                         self.shakeReportPresentation = nil
                     },
-                    onRetry: {
+                    onSend: { userReport in
                         submitShakeReport(
                             incidentID: shakeReportPresentation.incidentID,
-                            requestedAt: Date()
+                            requestedAt: Date(),
+                            userReport: userReport
                         )
                     }
                 )
@@ -310,8 +318,7 @@ struct ContentView: View {
                     selectedPeerState: viewModel.selectedPeerState(for: contact.id),
                     primaryAction: callScreenPrimaryAction(for: contact),
                     onClose: {
-                        viewModel.requestedExpandedCallContactID = nil
-                        minimizedCallContactID = contact.id
+                        minimizeCallScreen(for: contact)
                     }
                 )
             }
@@ -329,50 +336,83 @@ struct ContentView: View {
         let transportPathBadgeState = viewModel.transportPathBadgeState
 
         return VStack(spacing: 16) {
-            TurboHeaderView(
-                statusMessage: viewModel.topChromeStatusMessage,
-                transportPathState: transportPathBadgeState,
-                transportPathTint: transportPathTint(
-                    for: transportPathBadgeState ?? viewModel.mediaTransportPathState
-                ),
-                latestErrorText: latestDiagnosticsErrorText,
-                microphonePermissionStatus: viewModel.microphonePermissionStatusText,
-                needsMicrophonePermission: false,
-                notificationPermissionStatus: viewModel.alertNotificationAuthorizationStatusText,
-                needsNotificationPermission: viewModel.needsAlertNotificationPermission,
-                localNetworkPermissionStatus: localNetworkPermissionButtonTitle,
-                showsLocalNetworkPermissionControl: viewModel.localNetworkPreflightStatus.shouldShowMainSurfaceControl,
-                showsResolvedMicrophoneStatus: false,
-                showsDebugPermissionControls: false,
-                showsAddContactButton: !viewModel.contacts.isEmpty,
-                onAddContact: {
-                    isShowingAddContactSheet = true
-                },
-                onShowProfile: {
-                    draftProfileName = viewModel.currentProfileName
-                    isShowingProfileSheet = true
-                },
-                onShowTransportPathInfo: {
-                    isShowingTransportPathInfo = true
-                },
-                onRequestMicrophonePermission: requestMicrophonePermission,
-                onRequestLocalNetworkPermission: requestLocalNetworkPermission,
-                onRequestNotificationPermission: requestNotificationPermission
-            )
-            if let permissionPrompt = missingPermissionPrompt {
-                TurboPermissionNoticeBanner(
-                    prompt: permissionPrompt,
-                    isRequesting: isRequestingPermission(permissionPrompt.kind),
-                    onEnable: { handleMainPermissionPrompt(permissionPrompt.kind) }
+            if focusedContact == nil {
+                TurboHeaderView(
+                    statusMessage: viewModel.topChromeStatusMessage,
+                    transportPathState: transportPathBadgeState,
+                    transportPathTint: transportPathTint(
+                        for: transportPathBadgeState ?? viewModel.mediaTransportPathState
+                    ),
+                    latestErrorText: latestDiagnosticsErrorText,
+                    microphonePermissionStatus: viewModel.microphonePermissionStatusText,
+                    needsMicrophonePermission: false,
+                    notificationPermissionStatus: viewModel.alertNotificationAuthorizationStatusText,
+                    needsNotificationPermission: viewModel.needsAlertNotificationPermission,
+                    localNetworkPermissionStatus: localNetworkPermissionButtonTitle,
+                    showsLocalNetworkPermissionControl: viewModel.localNetworkPreflightStatus.shouldShowMainSurfaceControl,
+                    showsResolvedMicrophoneStatus: false,
+                    showsDebugPermissionControls: false,
+                    showsAddContactButton: !viewModel.contacts.isEmpty,
+                    onAddContact: {
+                        isShowingAddContactSheet = true
+                    },
+                    onShowProfile: {
+                        draftProfileName = viewModel.currentProfileName
+                        isShowingProfileSheet = true
+                    },
+                    onShowTransportPathInfo: {
+                        isShowingTransportPathInfo = true
+                    },
+                    onRequestMicrophonePermission: requestMicrophonePermission,
+                    onRequestLocalNetworkPermission: requestLocalNetworkPermission,
+                    onRequestNotificationPermission: requestNotificationPermission
                 )
+                if let permissionPrompt = missingPermissionPrompt {
+                    TurboPermissionNoticeBanner(
+                        prompt: permissionPrompt,
+                        isRequesting: isRequestingPermission(permissionPrompt.kind),
+                        onEnable: { handleMainPermissionPrompt(permissionPrompt.kind) }
+                    )
+                }
             }
             if viewModel.contacts.isEmpty, viewModel.activeConversationContact == nil {
                 TurboEmptyContactsView(onAddContact: {
                     isShowingAddContactSheet = true
                 })
+            } else if let focusedContact {
+                TurboContactActionView(
+                    contact: focusedContact,
+                    status: focusedContactStatusPillModel(focusedContact),
+                    isJoined: viewModel.isJoined,
+                    activeChannelID: viewModel.activeChannelId,
+                    isTransmitting: viewModel.isTransmitting,
+                    isTransmitPressActive: viewModel.isTransmitPressActive,
+                    selectedPeerState: viewModel.selectedPeerState(for:),
+                    requestCooldownRemaining: viewModel.requestCooldownRemaining(for:now:),
+                    joinChannel: {
+                        ensureContactSelected(focusedContact, reason: "focused-contact-action")
+                        viewModel.joinChannel()
+                    },
+                    beginTransmit: {
+                        ensureContactSelected(focusedContact, reason: "focused-contact-action")
+                        viewModel.beginTransmit()
+                    },
+                    noteTransmitTouchReleased: viewModel.noteTransmitTouchReleased,
+                    endTransmit: { viewModel.endTransmit() },
+                    onBack: {
+                        focusedContactID = nil
+                    },
+                    onShowDetails: {
+                        showContactDetails(for: focusedContact)
+                    }
+                )
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .task(id: focusedContact.id) {
+                    guard viewModel.selectedContactId != focusedContact.id else { return }
+                    viewModel.selectContact(focusedContact, reason: "focused-contact")
+                }
             } else {
                 TurboContactListView(
-                    selectedContactID: viewModel.selectedContactId,
                     activeContact: viewModel.activeConversationContact,
                     systemSessionSubtitle: systemSessionSubtitle,
                     contactSections: viewModel.contactListSections,
@@ -381,28 +421,36 @@ struct ContentView: View {
                     activeSubtitle: { viewModel.contactSubtitle(for: $0) },
                     itemSubtitle: contactListItemSubtitle,
                     selectContact: selectContactFromList,
-                    showContactDetails: showContactDetails,
+                    longPressContact: handleContactRowLongPress,
                     endSystemSession: viewModel.endSystemSession
                 )
+                .frame(maxHeight: .infinity)
             }
-            TurboTalkControlsView(
-                selectedContactID: viewModel.selectedContactId,
-                isJoined: viewModel.isJoined,
-                activeChannelID: viewModel.activeChannelId,
-                isTransmitting: viewModel.isTransmitting,
-                isTransmitPressActive: viewModel.isTransmitPressActive,
-                selectedPeerState: viewModel.selectedPeerState(for:),
-                requestCooldownRemaining: viewModel.requestCooldownRemaining(for:now:),
-                joinChannel: viewModel.joinChannel,
-                beginTransmit: viewModel.beginTransmit,
-                noteTransmitTouchReleased: viewModel.noteTransmitTouchReleased,
-                endTransmit: { viewModel.endTransmit() }
-            )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.horizontal)
         .padding(.top)
-        .padding(.bottom, 2)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if viewModel.selectedContactId != nil,
+               TurboContactActionPrototype.showsListBottomAction || !TurboContactActionPrototype.isEnabled {
+                TurboTalkControlsView(
+                    selectedContactID: viewModel.selectedContactId,
+                    isJoined: viewModel.isJoined,
+                    activeChannelID: viewModel.activeChannelId,
+                    isTransmitting: viewModel.isTransmitting,
+                    isTransmitPressActive: viewModel.isTransmitPressActive,
+                    selectedPeerState: viewModel.selectedPeerState(for:),
+                    requestCooldownRemaining: viewModel.requestCooldownRemaining(for:now:),
+                    joinChannel: viewModel.joinChannel,
+                    beginTransmit: viewModel.beginTransmit,
+                    noteTransmitTouchReleased: viewModel.noteTransmitTouchReleased,
+                    endTransmit: { viewModel.endTransmit() }
+                )
+                .padding(.horizontal, 18)
+                .padding(.top, 10)
+                .padding(.bottom, 12)
+            }
+        }
     }
 
     private func transportPathTint(for state: MediaTransportPathState) -> Color {
@@ -430,9 +478,6 @@ struct ContentView: View {
             onContinue: {
                 if viewModel.hasCompletedIdentityOnboarding {
                     route = .live
-                    if let contact = viewModel.selectedContact {
-                        viewModel.selectContact(contact)
-                    }
                 } else {
                     draftExistingIdentityReference = ""
                     identityRestoreError = nil
@@ -502,6 +547,14 @@ struct ContentView: View {
         return viewModel.contact(for: contactDetailsContactID)
     }
 
+    private var focusedContact: Contact? {
+        guard TurboContactActionPrototype.isEnabled,
+              let focusedContactID else {
+            return nil
+        }
+        return viewModel.contact(for: focusedContactID)
+    }
+
     private var callPrototypeContact: Contact {
         viewModel.selectedContact
             ?? viewModel.activeConversationContact
@@ -565,6 +618,30 @@ struct ContentView: View {
         )
     }
 
+    private var currentUIProjectionDiagnostics: UIProjectionDiagnostics {
+        let contact = callScreenContact
+        let selectedPeerState = contact.map { viewModel.selectedPeerState(for: $0.id) }
+        let primaryAction = contact.map { callScreenPrimaryAction(for: $0) }
+        return UIProjectionDiagnostics(
+            route: String(describing: route),
+            callScreenVisible: route == .live
+                && contact != nil
+                && contact.map { minimizedCallContactID != $0.id } == true,
+            callScreenContactHandle: contact?.handle,
+            callScreenRequestedExpanded: contact.map {
+                viewModel.requestedExpandedCallContactID == $0.id
+            } ?? false,
+            callScreenMinimized: contact.map {
+                minimizedCallContactID == $0.id
+            } ?? false,
+            primaryActionKind: primaryAction.map { String(describing: $0.kind) },
+            primaryActionLabel: primaryAction?.label,
+            primaryActionEnabled: primaryAction?.isEnabled,
+            selectedPeerPhase: selectedPeerState.map { String(describing: $0.phase) } ?? "none",
+            selectedPeerStatus: selectedPeerState?.statusMessage ?? "none"
+        )
+    }
+
     @ViewBuilder
     private func callScreenView(
         contact: Contact,
@@ -581,20 +658,21 @@ struct ContentView: View {
             mediaConnectionState: viewModel.mediaConnectionState,
             mediaSessionContactID: viewModel.mediaSessionContactID,
             transportPathState: viewModel.transportPathBadgeState,
+            localAudioLevel: viewModel.localAudioLevel,
             localTelemetry: viewModel.localCallTelemetry,
             peerTelemetry: viewModel.callPeerTelemetry(for: contact.id),
             onClose: onClose,
             onLeave: {
-                onClose()
-                ensureCallContactSelected(contact)
+                leaveCallScreen(for: contact)
+                ensureContactSelected(contact, reason: "call-screen-action")
                 viewModel.disconnect()
             },
             onJoin: {
-                ensureCallContactSelected(contact)
+                ensureContactSelected(contact, reason: "call-screen-action")
                 viewModel.joinChannel()
             },
             onBeginTransmit: {
-                ensureCallContactSelected(contact)
+                ensureContactSelected(contact, reason: "call-screen-action")
                 viewModel.beginTransmit()
             },
             onTransmitTouchReleased: viewModel.noteTransmitTouchReleased,
@@ -604,22 +682,56 @@ struct ContentView: View {
 
     private func shouldShowCallScreen(for contact: Contact) -> Bool {
         let selectedPeerState = viewModel.selectedPeerState(for: contact.id)
-        if selectedPeerState.detail == .waitingForPeer(reason: .disconnecting) {
-            return false
-        }
-
-        if viewModel.requestedExpandedCallContactID == contact.id {
+        if callScreenHasEstablishedSessionClaim(for: contact),
+           selectedPeerState.detail != .waitingForPeer(reason: .disconnecting) {
             return true
+        }
+        guard ConversationStateMachine.shouldShowCallScreen(
+            selectedPeerState: selectedPeerState,
+            requestedExpanded: viewModel.requestedExpandedCallContactID == contact.id
+        ) else {
+            return false
         }
 
         switch selectedPeerState.phase {
-        case .waitingForPeer, .localJoinFailed, .ready, .wakeReady,
-             .startingTransmit, .transmitting, .receiving,
-             .blockedByOtherSession, .systemMismatch:
-            return true
-        case .idle, .requested, .incomingRequest, .peerReady:
+        case .peerReady:
+            return viewModel.requestedExpandedCallContactID == contact.id
+        case .incomingRequest:
+            return false
+        case .waitingForPeer, .ready, .wakeReady, .startingTransmit,
+             .transmitting, .receiving, .blockedByOtherSession,
+             .systemMismatch, .localJoinFailed:
+            return callScreenHasSessionClaim(for: contact, selectedPeerState: selectedPeerState)
+        case .idle, .requested:
             return false
         }
+    }
+
+    private func callScreenHasEstablishedSessionClaim(for contact: Contact) -> Bool {
+        if viewModel.isJoined, viewModel.activeChannelId == contact.id {
+            return true
+        }
+        if viewModel.systemSessionMatches(contact.id) {
+            return true
+        }
+        return false
+    }
+
+    private func callScreenHasSessionClaim(
+        for contact: Contact,
+        selectedPeerState: SelectedPeerState
+    ) -> Bool {
+        if callScreenHasEstablishedSessionClaim(for: contact) {
+            return true
+        }
+        if viewModel.pendingJoinContactId == contact.id {
+            return true
+        }
+        if viewModel.requestedExpandedCallContactID == contact.id,
+           viewModel.pendingConnectAcceptedIncomingRequestContactId == contact.id {
+            return true
+        }
+        return false
     }
 
     private func callScreenPrimaryAction(for contact: Contact) -> ConversationPrimaryAction {
@@ -633,9 +745,23 @@ struct ContentView: View {
         )
     }
 
-    private func ensureCallContactSelected(_ contact: Contact) {
+    private func ensureContactSelected(_ contact: Contact, reason: String) {
         guard viewModel.selectedContactId != contact.id else { return }
-        viewModel.selectContact(contact)
+        viewModel.selectContact(contact, reason: reason)
+    }
+
+    private func minimizeCallScreen(for contact: Contact) {
+        focusedContactID = nil
+        viewModel.requestedExpandedCallContactID = nil
+        minimizedCallContactID = contact.id
+    }
+
+    private func leaveCallScreen(for contact: Contact) {
+        focusedContactID = nil
+        viewModel.requestedExpandedCallContactID = nil
+        if minimizedCallContactID == contact.id {
+            minimizedCallContactID = nil
+        }
     }
 
     private var addContactStatusMessage: String? {
@@ -658,10 +784,34 @@ struct ContentView: View {
     }
 
     private func selectContactFromList(_ contact: Contact) {
+        if TurboContactActionPrototype.isEnabled {
+            if shouldShowCallScreen(for: contact) {
+                viewModel.selectContact(contact, reason: "contact-list-active-call")
+                minimizedCallContactID = nil
+                focusedContactID = nil
+            } else {
+                viewModel.selectContact(contact, reason: "contact-list-focused-detail")
+                focusedContactID = contact.id
+            }
+            return
+        }
+
         viewModel.selectContact(contact)
         if shouldShowCallScreen(for: contact) {
             minimizedCallContactID = nil
         }
+    }
+
+    private func handleContactRowLongPress(_ contact: Contact) {
+        if TurboContactActionPrototype.isEnabled {
+            focusedContactID = nil
+            viewModel.selectContact(contact, reason: "contact-list-long-press")
+            viewModel.joinChannel()
+            return
+        }
+
+        viewModel.selectContact(contact)
+        showContactDetails(for: contact)
     }
 
     private func saveLocalContactName() {
@@ -796,13 +946,17 @@ struct ContentView: View {
             return
         }
         lastShakeReportStartedAt = now
-        submitShakeReport(
+        shakeReportPresentation = ShakeReportPresentation(
             incidentID: "inc_\(UUID().uuidString.lowercased())",
-            requestedAt: now
+            state: .composing
         )
     }
 
-    private func submitShakeReport(incidentID: String, requestedAt: Date) {
+    private func submitShakeReport(
+        incidentID: String,
+        requestedAt: Date,
+        userReport: String
+    ) {
         shakeReportPresentation = ShakeReportPresentation(
             incidentID: incidentID,
             state: .sending
@@ -811,7 +965,8 @@ struct ContentView: View {
             do {
                 let result = try await viewModel.submitShakeReport(
                     incidentID: incidentID,
-                    requestedAt: requestedAt
+                    requestedAt: requestedAt,
+                    userReport: userReport
                 )
                 updateShakeReportPresentation(incidentID: incidentID, state: .sent(result))
             } catch {
@@ -1222,7 +1377,7 @@ struct ContentView: View {
         case .none:
             return nil
         case .active(let contactID, _):
-            return viewModel.contactName(for: contactID).map { "Active with \($0)" } ?? "Active system session"
+            return viewModel.contactName(for: contactID).map { "with \($0)" } ?? "Active in iOS"
         case .mismatched:
             return "iOS still holds a session the app cannot reconcile"
         }
@@ -1233,6 +1388,26 @@ struct ContentView: View {
             for: viewModel.contactListItem(for: contact).presentation,
             isActiveConversation: true
         )
+    }
+
+    private func focusedContactStatusPillModel(_ contact: Contact) -> ContactStatusPillModel {
+        let selectedPeerState = viewModel.selectedPeerState(for: contact.id)
+        switch selectedPeerState.phase {
+        case .ready, .wakeReady, .startingTransmit, .transmitting, .receiving:
+            return ContactStatusPillModel(text: "Connected", tint: .green)
+        case .waitingForPeer:
+            return ContactStatusPillModel(text: "Connecting", tint: .green)
+        case .requested:
+            return ContactStatusPillModel(text: "Requested", tint: .orange)
+        case .incomingRequest:
+            return ContactStatusPillModel(text: "Incoming", tint: .orange)
+        case .peerReady:
+            return ContactStatusPillModel(text: "Ready", tint: .green)
+        case .blockedByOtherSession, .systemMismatch, .localJoinFailed:
+            return ContactStatusPillModel(text: "Needs attention", tint: .orange)
+        case .idle:
+            return pillModel(for: viewModel.contactListItem(for: contact).presentation)
+        }
     }
 
     private func contactListItemStatusPillModel(_ item: ContactListItem) -> ContactStatusPillModel {

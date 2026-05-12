@@ -1484,6 +1484,54 @@ nonisolated enum TurboJoinAcceptedControlSignal {
     }
 }
 
+struct RecentOutgoingJoinAcceptedToken: Equatable {
+    let inviteId: String
+    let channelId: String
+    let createdAt: Date
+
+    func matches(
+        _ payload: TurboDirectQuicUpgradeRequestPayload,
+        now: Date = Date(),
+        ttl: TimeInterval = 30
+    ) -> Bool {
+        inviteId == payload.requestId
+            && channelId == payload.channelId
+            && now.timeIntervalSince(createdAt) <= ttl
+    }
+}
+
+struct RecentOutgoingRequestEvidence: Equatable {
+    let channelId: String
+    let requestCount: Int
+    let observedAt: Date
+
+    func matches(
+        _ payload: TurboDirectQuicUpgradeRequestPayload,
+        now: Date = Date(),
+        ttl: TimeInterval = 30
+    ) -> Bool {
+        channelId == payload.channelId
+            && now.timeIntervalSince(observedAt) <= ttl
+    }
+}
+
+struct RecentPeerDeviceEvidence: Equatable {
+    let deviceId: String
+    let channelId: String
+    let reason: String
+    let observedAt: Date
+
+    func isFresh(
+        for channelId: String?,
+        now: Date = Date(),
+        ttl: TimeInterval = 120
+    ) -> Bool {
+        !deviceId.isEmpty
+            && (channelId == nil || self.channelId == channelId)
+            && now.timeIntervalSince(observedAt) <= ttl
+    }
+}
+
 nonisolated struct TurboSelectedPeerPrewarmPayload: Codable, Equatable {
     static let expectedProtocolVersion = "selected-peer-prewarm-v1"
 
@@ -2941,6 +2989,56 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
         )
     }
 
+    func preservingReadyStatus(from existing: TurboChannelReadinessResponse) -> TurboChannelReadinessResponse {
+        TurboChannelReadinessResponse(
+            channelId: channelId,
+            peerUserId: peerUserId,
+            selfHasActiveDevice: true,
+            peerHasActiveDevice: peerHasActiveDevice,
+            activeTransmitterUserId: existing.activeTransmitterUserId,
+            activeTransmitId: existing.activeTransmitId,
+            activeTransmitExpiresAt: existing.activeTransmitExpiresAt,
+            stateEpoch: stateEpoch,
+            serverTimestamp: serverTimestamp,
+            status: existing.statusKind,
+            readinessPayload: TurboChannelReadinessPayload(
+                kind: existing.statusKind,
+                activeTransmitterUserId: existing.activeTransmitterUserId
+            ),
+            audioReadinessPayload: audioReadinessPayload.settingRemoteStatus(existing.remoteAudioReadiness),
+            wakeReadinessPayload: wakeReadinessPayload,
+            peerDirectQuicIdentity: peerDirectQuicIdentity,
+            peerMediaEncryptionIdentity: peerMediaEncryptionIdentity
+        )
+    }
+
+    func preservingRoutableReadyProjection(from existing: TurboChannelReadinessResponse) -> TurboChannelReadinessResponse {
+        TurboChannelReadinessResponse(
+            channelId: channelId,
+            peerUserId: peerUserId,
+            selfHasActiveDevice: existing.selfHasActiveDevice,
+            peerHasActiveDevice: existing.peerHasActiveDevice,
+            activeTransmitterUserId: existing.activeTransmitterUserId,
+            activeTransmitId: existing.activeTransmitId,
+            activeTransmitExpiresAt: existing.activeTransmitExpiresAt,
+            stateEpoch: stateEpoch,
+            serverTimestamp: serverTimestamp,
+            status: existing.statusKind,
+            readinessPayload: TurboChannelReadinessPayload(
+                kind: existing.statusKind,
+                activeTransmitterUserId: existing.activeTransmitterUserId
+            ),
+            audioReadinessPayload: TurboChannelAudioReadinessPayload(
+                selfReadiness: TurboAudioReadinessStatusPayload(kind: existing.localAudioReadiness.payloadKind),
+                peerReadiness: TurboAudioReadinessStatusPayload(kind: existing.remoteAudioReadiness.payloadKind),
+                peerTargetDeviceId: peerTargetDeviceId ?? existing.peerTargetDeviceId
+            ),
+            wakeReadinessPayload: wakeReadinessPayload,
+            peerDirectQuicIdentity: peerDirectQuicIdentity,
+            peerMediaEncryptionIdentity: peerMediaEncryptionIdentity
+        )
+    }
+
     func settingRemoteWakeCapability(_ status: RemoteWakeCapabilityState) -> TurboChannelReadinessResponse {
         TurboChannelReadinessResponse(
             channelId: channelId,
@@ -2959,6 +3057,21 @@ struct TurboChannelReadinessResponse: Decodable, Equatable {
             peerDirectQuicIdentity: peerDirectQuicIdentity,
             peerMediaEncryptionIdentity: peerMediaEncryptionIdentity
         )
+    }
+}
+
+private extension RemoteAudioReadinessState {
+    var payloadKind: String {
+        switch self {
+        case .unknown:
+            return "unknown"
+        case .waiting:
+            return "waiting"
+        case .wakeCapable:
+            return "wake-capable"
+        case .ready:
+            return "ready"
+        }
     }
 }
 

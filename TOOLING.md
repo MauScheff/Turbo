@@ -190,7 +190,9 @@ For distributed app/backend flows that do not require a physical device, prefer 
 
 The simulator scenario commands are backed by `scripts/run_simulator_scenarios.py`, which owns the temporary runtime config, serializes scenario runs with a repo-local lock, shares the `/tmp/turbo-simulator-test.lock` simulator lane with targeted Swift tests, and retries transient XCTest bootstrap failures. Full catalog runs also allow one catalog-level retry per scenario to absorb hosted timing noise; focused single-scenario runs stay strict. Prefer the `just` recipes over direct `xcodebuild` for the scenario loop.
 
-`just swift-test-target <name>` is the supported targeted Swift Testing loop. It runs the full non-UI bundle and fails if the requested test name never appears in the output, which prevents the false-green "0 tests executed" cases that can happen with direct `-only-testing` invocations against Swift Testing tests in this repo.
+`just swift-test-target <name>` is the supported targeted Swift Testing loop. It resolves the Swift Testing suite, invokes `xcodebuild` with the exact selector, and fails if the requested test name never appears in the output, which prevents the false-green zero-test cases that can happen with direct `-only-testing` invocations against Swift Testing tests in this repo.
+
+If you must use raw `xcodebuild -only-testing`, Swift Testing selectors need the suite type and trailing function parentheses, for example `-only-testing:TurboTests/TurboTests/audioOutputPreferenceCyclesBetweenSpeakerAndPhone()`. The same selector without `()` can build and report success while selecting zero Swift Testing tests. See [`TESTING.md`](/Users/mau/Development/Turbo/TESTING.md) for the exact selector shape and proof rules.
 
 Use the reliability gates when you need a named confidence level:
 
@@ -266,8 +268,8 @@ Debug builds publish structured diagnostics, and the backend supports exact-devi
 
 Keep the two observability lanes separate:
 
-- Cloudflare telemetry is the high-volume event stream for compact state captures, timing markers, invariant violations, route failures, and production alerts. Use it when you need the recent event timeline, especially during long physical-device sessions.
-- Unison backend diagnostics are the automatic latest full snapshot/transcript surface. Use it when you need the full local transcript, audio packet logs, playback scheduling details, or exact app state snapshot for a device. Automatic debug state captures still go to Cloudflare telemetry; the full backend transcript upload is coalesced so one burst of state changes collapses into one latest artifact, while sustained activity still publishes periodically instead of postponing the upload forever.
+- Cloudflare telemetry is the compact event stream for timing markers, invariant violations, route failures, production alerts, and shake-to-report pivots. Use it when you need the recent high-signal event timeline.
+- Unison backend diagnostics are the latest full snapshot/transcript surface. Use it when you need routine state captures, the full local transcript, audio packet logs, playback scheduling details, or exact app state snapshot for a device. Debug builds keep routine state captures local and upload them through diagnostics snapshots; raw state-capture telemetry is only for an explicit short-session opt-in.
 
 This makes the standard loop:
 
@@ -349,7 +351,7 @@ Useful `merged_diagnostics.py` flags:
 | `--include-telemetry` | Explicitly enabling Cloudflare telemetry merge. This is already the default. |
 | `--no-telemetry` | Reading only backend latest diagnostics snapshots/transcripts, useful when Cloudflare credentials are absent, slow, or irrelevant. |
 | `--telemetry-hours <hours>` | Expanding or narrowing the Cloudflare lookback window. Use a small window for fresh physical-device reports; expand when debugging a long session. |
-| `--telemetry-limit <n>` | Raising the maximum Cloudflare rows merged into the report. Increase this for intense sessions with many state captures. |
+| `--telemetry-limit <n>` | Raising the maximum Cloudflare rows merged into the report. Increase this for intense sessions with many high-signal events or an explicitly opted-in raw state-capture telemetry run. |
 | `--include-heartbeats` | Including backend presence heartbeat telemetry. Leave this off unless heartbeat cadence itself is the suspected bug. |
 | `--telemetry-dataset <name>` | Querying a non-default Analytics Engine dataset. Rare outside telemetry migration/testing. |
 | `--insecure` | Development-only workaround for local Python certificate-root problems when querying HTTPS/Cloudflare. |
@@ -370,7 +372,7 @@ Do not put every audio packet into Cloudflare telemetry by default. Packet-level
 Scenario runs are stricter than normal app debugging:
 
 - normal debug builds auto-publish the latest full diagnostics transcript opportunistically after a short coalescing window
-- debug state captures emit compact telemetry events, so high-volume timelines should be queried from Cloudflare instead of increasing backend diagnostics payload size
+- routine debug state captures stay in local/backend diagnostics; only explicitly opted-in raw state-capture telemetry should create high-volume Cloudflare timelines
 - simulator scenarios publish explicit scenario-tagged diagnostics artifacts and verify exact-device reads against those artifacts
 - scenario view models disable automatic diagnostics publishing so scenario verification does not get overwritten by later background uploads from the same simulator identity
 - merged diagnostics now also parse explicit `INVARIANT VIOLATIONS` sections, derive pair-level violations, support `--json`, include Cloudflare telemetry by default when credentials are available, tolerate missing latest backend snapshots, and can fail non-zero with `--fail-on-violations`

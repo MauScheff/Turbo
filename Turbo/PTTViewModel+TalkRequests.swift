@@ -13,9 +13,17 @@ extension PTTViewModel {
     ) {
         let resolvedApplicationState = applicationState ?? currentApplicationState()
         let candidates: [IncomingTalkRequestCandidate] = contacts.compactMap { contact in
-            guard contact.handle != currentDevUserHandle,
-                  let invite = incomingInviteByContactID[contact.id] else { return nil }
-            return IncomingTalkRequestCandidate(contact: contact, invite: invite)
+            guard contact.handle != currentDevUserHandle else { return nil }
+            if let invite = incomingInviteByContactID[contact.id] {
+                return IncomingTalkRequestCandidate(contact: contact, invite: invite)
+            }
+            let relationship = relationshipState(for: contact.id)
+            guard relationship.isIncomingRequest else { return nil }
+            return IncomingTalkRequestCandidate(
+                contact: contact,
+                requestCount: relationship.requestCount ?? 1,
+                source: "relationship"
+            )
         }
 
         talkRequestSurfaceState = TalkRequestSurfaceReducer.reduce(
@@ -50,15 +58,47 @@ extension PTTViewModel {
             dismissIncomingTalkRequestSurface()
             return
         }
-        selectContact(contact)
-        guard contact.isOnline else {
-            return
-        }
-        requestExpandedCall(for: contact)
-        requestBackendJoin(for: contact)
+        acceptIncomingTalkRequest(
+            contact,
+            reason: "foreground-banner-accept"
+        )
     }
 
     func openActiveIncomingTalkRequest() {
         acceptActiveIncomingTalkRequest()
+    }
+
+    @discardableResult
+    func acceptIncomingTalkRequest(
+        _ contact: Contact,
+        reason: String,
+        allowsJoin: Bool = true
+    ) -> Bool {
+        selectContact(contact, reason: reason)
+        let relationship = relationshipState(for: contact.id)
+        guard relationship.isIncomingRequest else {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Ignored talk request accept without incoming request",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "handle": contact.handle,
+                    "reason": reason,
+                    "relationship": String(describing: relationship),
+                ]
+            )
+            return false
+        }
+        guard contact.isOnline else {
+            return false
+        }
+        if requestedExpandedCallContactID != contact.id {
+            requestExpandedCall(for: contact)
+        }
+        guard allowsJoin else {
+            return false
+        }
+        performConnect(to: contact, intent: .requestConnection)
+        return true
     }
 }

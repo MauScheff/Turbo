@@ -25,8 +25,82 @@ extension PTTViewModel {
         for contactID: UUID,
         fallback: String? = nil
     ) -> String? {
-        channelReadinessByContactID[contactID]?.peerTargetDeviceId
-            ?? fallback
+        if let readiness = channelReadinessByContactID[contactID] {
+            if let peerTargetDeviceId = readiness.peerTargetDeviceId,
+               !peerTargetDeviceId.isEmpty {
+                return peerTargetDeviceId
+            }
+            if case .wakeCapable(let targetDeviceId) = readiness.remoteWakeCapability,
+               !targetDeviceId.isEmpty {
+                return targetDeviceId
+            }
+        }
+        if let evidence = recentPeerDeviceEvidenceByContactID[contactID] {
+            let channelID =
+                contacts.first(where: { $0.id == contactID })?.backendChannelId
+                ?? channelStateByContactID[contactID]?.channelId
+                ?? contactSummaryByContactID[contactID]?.channelId
+            if evidence.isFresh(for: channelID) {
+                return evidence.deviceId
+            }
+        }
+        return fallback
+    }
+
+    func applyChannelReadiness(
+        _ readiness: TurboChannelReadinessResponse,
+        for contactID: UUID,
+        reason: String
+    ) {
+        recordRecentPeerDeviceEvidenceIfPresent(
+            contactID: contactID,
+            readiness: readiness,
+            reason: reason
+        )
+        backendSyncCoordinator.send(
+            .channelReadinessUpdated(contactID: contactID, readiness: readiness)
+        )
+    }
+
+    func recordRecentPeerDeviceEvidenceIfPresent(
+        contactID: UUID,
+        readiness: TurboChannelReadinessResponse,
+        reason: String
+    ) {
+        let peerDeviceID: String? = {
+            if let peerTargetDeviceId = readiness.peerTargetDeviceId,
+               !peerTargetDeviceId.isEmpty {
+                return peerTargetDeviceId
+            }
+            if case .wakeCapable(let targetDeviceId) = readiness.remoteWakeCapability,
+               !targetDeviceId.isEmpty {
+                return targetDeviceId
+            }
+            return nil
+        }()
+        guard let peerDeviceID else { return }
+
+        let existing = recentPeerDeviceEvidenceByContactID[contactID]
+        recentPeerDeviceEvidenceByContactID[contactID] = RecentPeerDeviceEvidence(
+            deviceId: peerDeviceID,
+            channelId: readiness.channelId,
+            reason: reason,
+            observedAt: Date()
+        )
+
+        guard existing?.deviceId != peerDeviceID || existing?.channelId != readiness.channelId else {
+            return
+        }
+        diagnostics.record(
+            .backend,
+            message: "Recorded recent peer device evidence from channel readiness",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": readiness.channelId,
+                "peerDeviceId": peerDeviceID,
+                "reason": reason,
+            ]
+        )
     }
 
     func shouldUseDirectQuicTransport(for contactID: UUID) -> Bool {
@@ -2004,11 +2078,10 @@ extension PTTViewModel {
             requestID: payload.requestId
         )
         if let existing = channelReadinessByContactID[contactID] {
-            backendSyncCoordinator.send(
-                .channelReadinessUpdated(
-                    contactID: contactID,
-                    readiness: existing.settingRemoteAudioReadiness(.ready)
-                )
+            applyChannelReadiness(
+                existing.settingRemoteAudioReadiness(.ready),
+                for: contactID,
+                reason: "direct-quic-receiver-prewarm-ack"
             )
         }
         diagnostics.record(
@@ -2063,8 +2136,10 @@ extension PTTViewModel {
                     .wakeCapable(targetDeviceId: peerDeviceID)
                 )
             }
-            backendSyncCoordinator.send(
-                .channelReadinessUpdated(contactID: contactID, readiness: updated)
+            applyChannelReadiness(
+                updated,
+                for: contactID,
+                reason: "direct-quic-path-closing"
             )
             diagnostics.record(
                 .media,
@@ -2924,13 +2999,31 @@ extension PTTViewModel {
         }
 
         let relationship = relationshipState(for: contactID)
-        guard relationship.isOutgoingRequest || outgoingInviteByContactID[contactID] != nil else {
+        let acceptedToken = recentOutgoingJoinAcceptedTokensByContactID[contactID]
+        let acceptedViaRecentOutgoingToken = acceptedToken?.matches(payload) == true
+        let recentOutgoingRequestEvidence = recentOutgoingRequestEvidenceByContactID[contactID]
+        let acceptedViaRecentOutgoingRequestEvidence =
+            recentOutgoingRequestEvidence?.matches(payload) == true
+        guard relationship.isOutgoingRequest
+            || outgoingInviteByContactID[contactID] != nil
+            || acceptedViaRecentOutgoingToken
+            || acceptedViaRecentOutgoingRequestEvidence else {
             diagnostics.record(
                 .websocket,
                 message: "Ignored join accepted control signal without a local outgoing request",
                 metadata: metadata
             )
             return
+        }
+        if acceptedViaRecentOutgoingToken {
+            metadata["acceptedViaRecentOutgoingToken"] = "true"
+            recentOutgoingJoinAcceptedTokensByContactID.removeValue(forKey: contactID)
+        }
+        if acceptedViaRecentOutgoingRequestEvidence {
+            metadata["acceptedViaRecentOutgoingRequestEvidence"] = "true"
+            metadata["recentOutgoingRequestCount"] =
+                String(recentOutgoingRequestEvidence?.requestCount ?? 0)
+            recentOutgoingRequestEvidenceByContactID.removeValue(forKey: contactID)
         }
 
         guard selectedContactId == contactID else {
@@ -2974,7 +3067,7 @@ extension PTTViewModel {
 
         Task { @MainActor [weak self, contact] in
             guard let self else { return }
-            await self.reassertBackendJoin(for: contact)
+            await self.reassertBackendJoin(for: contact, intent: .joinAcceptedOutgoingRequest)
             await self.refreshContactSummaries()
             await self.refreshChannelState(for: contactID)
         }

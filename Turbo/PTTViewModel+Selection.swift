@@ -157,6 +157,30 @@ extension PTTViewModel {
         }
     }
 
+    func localSessionEvidenceExists(for contactID: UUID, expectedChannelUUID: UUID? = nil) -> Bool {
+        let expectedChannelUUID = expectedChannelUUID ?? channelUUID(for: contactID)
+        return systemSessionMatches(contactID)
+            || (isJoined && activeChannelId == contactID)
+            || (
+                expectedChannelUUID != nil
+                && pttCoordinator.state.systemChannelUUID == expectedChannelUUID
+            )
+    }
+
+    func unresolvedLocalJoinAttemptExists(for contactID: UUID) -> Bool {
+        guard let attempt = sessionCoordinator.localJoinAttempt,
+              attempt.contactID == contactID else {
+            return false
+        }
+        guard attempt.issuedCount < maxUnresolvedLocalJoinAttempts else {
+            return false
+        }
+        return !localSessionEvidenceExists(
+            for: contactID,
+            expectedChannelUUID: attempt.channelUUID
+        )
+    }
+
     func backendJoinIsSettling(for contactID: UUID) -> Bool {
         if backendRuntime.isBackendJoinSettling(for: contactID) {
             return true
@@ -172,7 +196,10 @@ extension PTTViewModel {
 
     func shouldPreservePendingLocalJoinDuringBackendJoinSettling(for contactID: UUID) -> Bool {
         sessionCoordinator.pendingJoinContactID == contactID
-            && backendJoinIsSettling(for: contactID)
+            && (
+                backendJoinIsSettling(for: contactID)
+                || unresolvedLocalJoinAttemptExists(for: contactID)
+            )
     }
 
     func conversationContext(for contact: Contact) -> ConversationDerivationContext {
@@ -259,6 +286,10 @@ extension PTTViewModel {
         let localTransmit = localTransmitProjection(for: contact.id)
 
         let relationship = relationshipState(for: contact.id)
+        recordRecentOutgoingRequestEvidenceIfNeeded(
+            contactID: contact.id,
+            relationship: relationship
+        )
         selectedPeerCoordinator.send(
             .syncUpdated(
                 SelectedPeerSyncSnapshot(
@@ -301,6 +332,22 @@ extension PTTViewModel {
         )
     }
 
+    func recordRecentOutgoingRequestEvidenceIfNeeded(
+        contactID: UUID,
+        relationship: PairRelationshipState,
+        now: Date = Date()
+    ) {
+        guard relationship.isOutgoingRequest else { return }
+        guard let channelID = contacts.first(where: { $0.id == contactID })?.backendChannelId,
+              !channelID.isEmpty else { return }
+        recentOutgoingRequestEvidenceByContactID[contactID] =
+            RecentOutgoingRequestEvidence(
+                channelId: channelID,
+                requestCount: relationship.requestCount ?? 0,
+                observedAt: now
+            )
+    }
+
     private func completeReconciledTeardownIfSystemSessionEnded(for contactID: UUID) {
         guard sessionCoordinator.pendingAction.pendingTeardownContactID == contactID else { return }
         guard systemSessionState == .none else { return }
@@ -335,10 +382,13 @@ extension PTTViewModel {
             return selectedChannelSnapshot(for: contactID)
         }()
         guard selectedChannel?.membership.hasLocalMembership != true else { return }
+        let pairRelationship = relationshipState(for: contactID)
         let requestRelationshipIsNone =
             selectedChannel.map { $0.requestRelationship == .none }
-            ?? (relationshipState(for: contactID) == .none)
-        guard requestRelationshipIsNone else { return }
+            ?? (pairRelationship == .none)
+        let requestRelationshipIsOutgoing =
+            selectedChannel.map { $0.requestRelationship.hasOutgoingRequest }
+            ?? pairRelationship.isOutgoingRequest
 
         let contactBackendChannelID = contacts.first(where: { $0.id == contactID })?.backendChannelId
         let summaryBackendChannelID = contactSummaryByContactID[contactID]?.channelId
@@ -359,37 +409,69 @@ extension PTTViewModel {
             return pendingContactID == contactID
         }()
         let pendingJoinIsStale = selectedChannel != nil && sessionCoordinator.pendingJoinContactID == contactID
+        let pendingJoinContradictsOutgoingRequest =
+            pendingJoinIsStale
+            && requestRelationshipIsOutgoing
+            && !localSessionTouchesContact
+            && !backendJoinIsSettling(for: contactID)
         let pendingLeaveIsComplete =
             sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
             && !backendLeaveCommandInFlight
             && (selectedChannel == nil || backendChannelReferenceAbsent)
+        guard requestRelationshipIsNone || pendingJoinContradictsOutgoingRequest else { return }
         guard pendingJoinIsStale || pendingLeaveIsComplete else { return }
 
         if pendingJoinIsStale,
+           !pendingJoinContradictsOutgoingRequest,
            shouldPreservePendingLocalJoinDuringBackendJoinSettling(for: contactID) {
-            diagnostics.record(
-                .state,
-                message: "Deferred absent backend membership recovery while backend join is settling",
-                metadata: [
-                    "contactId": contactID.uuidString,
-                    "backendMembership": selectedChannel.map { String(describing: $0.membership) } ?? "none",
-                    "backendStatus": selectedChannel?.status?.rawValue ?? "none",
-                ]
-            )
+            let preserveReason = backendJoinIsSettling(for: contactID)
+                ? "backend-join-settling"
+                : "unresolved-local-join-attempt"
+            let noticeKey = [
+                contactID.uuidString,
+                preserveReason,
+                selectedChannel.map { String(describing: $0.membership) } ?? "none",
+                selectedChannel?.status?.rawValue ?? "none",
+                String(sessionCoordinator.localJoinAttempt?.issuedCount ?? 0),
+            ].joined(separator: "|")
+            if !deferredAbsentMembershipRecoveryNoticeKeys.contains(noticeKey) {
+                deferredAbsentMembershipRecoveryNoticeKeys.insert(noticeKey)
+                diagnostics.record(
+                    .state,
+                    message: preserveReason == "backend-join-settling"
+                        ? "Deferred absent backend membership recovery while backend join is settling"
+                        : "Deferred absent backend membership recovery while local join is unresolved",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "backendMembership": selectedChannel.map { String(describing: $0.membership) } ?? "none",
+                        "backendStatus": selectedChannel?.status?.rawValue ?? "none",
+                        "preserveReason": preserveReason,
+                        "localJoinAttemptIssuedCount": String(sessionCoordinator.localJoinAttempt?.issuedCount ?? 0),
+                    ]
+                )
+            }
             return
         }
 
         sessionCoordinator.clearPendingJoin(for: contactID)
         sessionCoordinator.clearLeaveAction(for: contactID)
+        deferredAbsentMembershipRecoveryNoticeKeys = deferredAbsentMembershipRecoveryNoticeKeys.filter {
+            !$0.hasPrefix(contactID.uuidString)
+        }
         replaceDisconnectRecoveryTask(with: nil)
         diagnostics.record(
             .state,
-            message: "Recovered local session state after backend membership became absent",
+            message: pendingJoinContradictsOutgoingRequest
+                ? "Recovered stale local join during outgoing request"
+                : "Recovered local session state after backend membership became absent",
             metadata: [
                 "contactId": contactID.uuidString,
                 "pendingJoinWasStale": String(pendingJoinIsStale),
                 "pendingLeaveWasComplete": String(pendingLeaveIsComplete),
                 "backendMembership": selectedChannel.map { String(describing: $0.membership) } ?? "none",
+                "requestRelationship": selectedChannel
+                    .map { String(describing: $0.requestRelationship) }
+                    ?? String(describing: pairRelationship),
             ]
         )
         updateStatusForSelectedContact()
@@ -402,7 +484,6 @@ extension PTTViewModel {
 
     func selectedPeerProjection(for contactID: UUID) -> SelectedPeerProjection {
         if selectedContactId == contactID {
-            syncSelectedPeerSession()
             let state = selectedPeerCoordinator.state
             return SelectedPeerProjection(
                 durableSession: state.durableSessionProjection,
@@ -587,7 +668,7 @@ extension PTTViewModel {
         pruneContactsToAuthoritativeState()
         reconcileContactSelectionIfNeeded(
             reason: "contact-deleted",
-            allowSelectingFallbackContact: currentApplicationState() == .active
+            allowSelectingFallbackContact: false
         )
         updateStatusForSelectedContact()
         captureDiagnosticsState("contact-deleted")
@@ -814,7 +895,7 @@ extension PTTViewModel {
         }
     }
 
-    func selectContact(_ contact: Contact) {
+    func selectContact(_ contact: Contact, reason: String = "selected-contact") {
         trackContact(contact.id)
         markTalkRequestSurfaceOpened(
             for: contact.id,
@@ -822,28 +903,197 @@ extension PTTViewModel {
         )
         selectedContactId = contact.id
         sessionCoordinator.select(contactID: contact.id)
-        diagnostics.record(.state, message: "Selected contact", metadata: ["handle": contact.handle])
+        diagnostics.record(
+            .state,
+            message: "Selected contact",
+            metadata: [
+                "handle": contact.handle,
+                "reason": reason,
+            ]
+        )
         updateStatusForSelectedContact()
-        captureDiagnosticsState("selected-contact")
         Task {
-            precreateSelectedContactMediaShellIfNeeded(
+            await runSelectedContactPrewarmPipeline(
                 for: contact.id,
-                reason: "selected-contact"
+                reason: reason
             )
-            async let peerPrewarmHint: Void = publishSelectedPeerPrewarmHintIfPossible(
-                for: contact.id,
-                reason: "selected-contact"
-            )
-            async let directQuicPrewarm: Void = ingestSelectedContactDirectQuicPrewarm(
-                contactID: contact.id,
-                reason: "selected-contact"
-            )
-            async let foregroundTalkPrewarm: Void = prewarmForegroundTalkPathIfNeeded(
-                for: contact.id,
-                reason: "selected-contact"
-            )
-            _ = await (peerPrewarmHint, directQuicPrewarm, foregroundTalkPrewarm)
         }
+    }
+
+    func runSelectedContactPrewarmPipeline(
+        for contactID: UUID,
+        reason: String
+    ) async {
+        guard selectedContactPrewarmPipelineEnabled else {
+            diagnostics.record(
+                .media,
+                message: "Skipped selected contact prewarm pipeline",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "blockReason": "feature-disabled"
+                ]
+            )
+            return
+        }
+        guard selectedContactId == contactID else { return }
+        guard !selectedContactPrewarmInFlight.contains(contactID) else {
+            diagnostics.record(
+                .media,
+                message: "Coalesced selected contact prewarm pipeline",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                ]
+            )
+            return
+        }
+        selectedContactPrewarmInFlight.insert(contactID)
+        defer {
+            selectedContactPrewarmInFlight.remove(contactID)
+        }
+
+        let startedAt = Date()
+        diagnostics.record(
+            .media,
+            message: "Selected contact prewarm pipeline started",
+            metadata: selectedContactPrewarmMetadata(
+                for: contactID,
+                reason: reason,
+                startedAt: startedAt
+            )
+        )
+
+        await runSelectedContactPrewarmStage(
+            "media-shell",
+            contactID: contactID,
+            reason: reason
+        ) {
+            precreateSelectedContactMediaShellIfNeeded(
+                for: contactID,
+                reason: reason
+            )
+        }
+
+        let peerPrewarmHintBlockReason =
+            reason.hasPrefix("peer-hint-")
+                ? "peer-hint-loop-suppressed"
+                : selectedPeerPrewarmHintBlockReason(for: contactID)
+                    ?? selectedPeerPrewarmPublishBlockReason(for: contactID)
+        async let peerPrewarmHint: Void = runSelectedContactPrewarmStage(
+            "peer-prewarm-hint",
+            contactID: contactID,
+            reason: reason,
+            initialBlockReason: peerPrewarmHintBlockReason
+        ) {
+            guard peerPrewarmHintBlockReason == nil else { return }
+            await publishSelectedPeerPrewarmHintIfPossible(for: contactID, reason: reason)
+        }
+        async let directQuicPrewarm: Void = runSelectedContactPrewarmStage(
+            "direct-quic-prewarm",
+            contactID: contactID,
+            reason: reason,
+            initialBlockReason: selectedContactDirectQuicPrewarmBlockReason(for: contactID)
+        ) {
+            await ingestSelectedContactDirectQuicPrewarm(
+                contactID: contactID,
+                reason: reason
+            )
+        }
+        async let foregroundTalkPrewarm: Void = runSelectedContactPrewarmStage(
+            "foreground-talk-prewarm",
+            contactID: contactID,
+            reason: reason
+        ) {
+            await prewarmForegroundTalkPathIfNeeded(
+                for: contactID,
+                reason: reason
+            )
+        }
+        async let relayPrejoin: Void = runSelectedContactPrewarmStage(
+            "media-relay-prejoin",
+            contactID: contactID,
+            reason: reason
+        ) {
+            await prejoinMediaRelayForReadyChannelIfNeeded(
+                contactID: contactID,
+                channelReadiness: channelReadinessByContactID[contactID]
+            )
+        }
+        _ = await (peerPrewarmHint, directQuicPrewarm, foregroundTalkPrewarm, relayPrejoin)
+
+        diagnostics.record(
+            .media,
+            message: "Selected contact prewarm pipeline completed",
+            metadata: selectedContactPrewarmMetadata(
+                for: contactID,
+                reason: reason,
+                startedAt: startedAt
+            )
+        )
+    }
+
+    private func runSelectedContactPrewarmStage(
+        _ stage: String,
+        contactID: UUID,
+        reason: String,
+        initialBlockReason: String? = nil,
+        operation: () async -> Void
+    ) async {
+        guard selectedContactId == contactID else { return }
+        let startedAt = Date()
+        var metadata = selectedContactPrewarmMetadata(
+            for: contactID,
+            reason: reason,
+            startedAt: startedAt
+        )
+        metadata["stage"] = stage
+        if let initialBlockReason {
+            metadata["initialBlockReason"] = initialBlockReason
+        }
+        diagnostics.record(
+            .media,
+            message: "Selected contact prewarm stage started",
+            metadata: metadata
+        )
+        await operation()
+        metadata = selectedContactPrewarmMetadata(
+            for: contactID,
+            reason: reason,
+            startedAt: startedAt
+        )
+        metadata["stage"] = stage
+        if let initialBlockReason {
+            metadata["initialBlockReason"] = initialBlockReason
+        }
+        diagnostics.record(
+            .media,
+            message: "Selected contact prewarm stage completed",
+            metadata: metadata
+        )
+    }
+
+    private func selectedContactPrewarmMetadata(
+        for contactID: UUID,
+        reason: String,
+        startedAt: Date
+    ) -> [String: String] {
+        let contact = contacts.first(where: { $0.id == contactID })
+        return [
+            "contactId": contactID.uuidString,
+            "handle": contact?.handle ?? "none",
+            "reason": reason,
+            "durationMs": String(Int(Date().timeIntervalSince(startedAt) * 1000)),
+            "selectedContactCurrent": String(selectedContactId == contactID),
+            "applicationState": String(describing: currentApplicationState()),
+            "backendChannelId": contact?.backendChannelId ?? "none",
+            "remoteUserIdPresent": String(contact?.remoteUserId != nil),
+            "webSocketConnected": String(backendServices?.isWebSocketConnected == true),
+            "localMediaWarmupState": String(describing: localMediaWarmupState(for: contactID)),
+            "directQuicPrewarmBlockReason": selectedContactDirectQuicPrewarmBlockReason(for: contactID) ?? "none",
+            "mediaSessionContactId": mediaSessionContactID?.uuidString ?? "none",
+            "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
+        ]
     }
 
     func reconcileContactSelectionIfNeeded(
@@ -948,7 +1198,6 @@ extension PTTViewModel {
             )
         }
         reconcileLiveConversationActivity()
-        captureDiagnosticsState("selected-status-refresh")
     }
 
     func reconcileLiveConversationActivity() {
@@ -991,6 +1240,28 @@ extension PTTViewModel {
             await MainActor.run {
                 guard let self else { return }
                 guard self.selectedConnectionAttemptTimeoutKey == key else { return }
+                if let contact = self.contacts.first(where: { $0.id == contactID }),
+                   let attempt = self.sessionCoordinator.localJoinAttempt,
+                   attempt.contactID == contactID,
+                   attempt.channelUUID == contact.channelId,
+                   !self.localSessionEvidenceExists(for: contactID, expectedChannelUUID: contact.channelId) {
+                    self.diagnostics.record(
+                        .pushToTalk,
+                        level: .notice,
+                        message: "Retrying stale local PTT join after connection timeout",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "channelUUID": contact.channelId.uuidString,
+                            "issuedCount": String(attempt.issuedCount),
+                            "selectedPeerPhase": String(describing: self.selectedPeerCoordinator.state.selectedPeerState.phase),
+                        ]
+                    )
+                    self.selectedConnectionAttemptTimeoutKey = nil
+                    self.selectedConnectionAttemptTimeoutTask = nil
+                    self.joinPTTChannel(for: contact)
+                    self.reconcileSelectedConnectionAttemptTimeout()
+                    return
+                }
                 self.selectedPeerCoordinator.send(.connectionAttemptTimedOut(contactID: contactID))
                 self.statusMessage = self.selectedPeerCoordinator.state.selectedPeerState.statusMessage
                 self.diagnostics.record(
@@ -1019,7 +1290,8 @@ extension PTTViewModel {
         contactID: UUID? = nil
     ) -> Bool {
         if let contactID,
-           sessionCoordinator.pendingAction.pendingConnectContactID == contactID {
+           case .connect(.requestingBackend(let pendingContactID)) = sessionCoordinator.pendingAction,
+           pendingContactID == contactID {
             return false
         }
 

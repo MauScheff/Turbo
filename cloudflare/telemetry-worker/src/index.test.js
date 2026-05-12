@@ -94,11 +94,16 @@ test("shouldAlert triggers on explicit alerts and critical severity", () => {
   assert.equal(__test.shouldAlert(quietEvent), false);
 });
 
-test("shouldStream excludes noisy heartbeat events from Discord stream", () => {
+test("shouldStream excludes high-volume diagnostics events from Discord stream", () => {
   const heartbeat = __test.normalizeEvent({
     eventName: "backend.presence.heartbeat",
     source: "backend",
     severity: "notice",
+  });
+  const stateCapture = __test.normalizeEvent({
+    eventName: "ios.diagnostics.state_capture",
+    source: "ios",
+    severity: "debug",
   });
   const joined = __test.normalizeEvent({
     eventName: "backend.channel.joined",
@@ -107,6 +112,7 @@ test("shouldStream excludes noisy heartbeat events from Discord stream", () => {
   });
 
   assert.equal(__test.shouldStream(heartbeat), false);
+  assert.equal(__test.shouldStream(stateCapture), false);
   assert.equal(__test.shouldStream(joined), true);
 });
 
@@ -130,10 +136,17 @@ test("devDeliveryKind routes dev alerts and dev stream events without duplicatio
     severity: "notice",
     devTraffic: true,
   });
+  const devStateCapture = __test.normalizeEvent({
+    eventName: "ios.diagnostics.state_capture",
+    source: "ios",
+    severity: "debug",
+    devTraffic: true,
+  });
 
   assert.equal(__test.devDeliveryKind(devAlert), "dev-alert");
   assert.equal(__test.devDeliveryKind(devStream), "dev-stream");
   assert.equal(__test.devDeliveryKind(devHeartbeat), null);
+  assert.equal(__test.devDeliveryKind(devStateCapture), null);
   assert.equal(__test.formatDeliveryKind("dev-alert"), "DEV ALERT");
 });
 
@@ -201,6 +214,23 @@ test("deliverDiscord skips heartbeat stream noise and only alerts alert-worthy e
 
     urls.length = 0;
 
+    const stateCaptureResult = await __test.deliverDiscord(
+      __test.normalizeEvent({
+        eventName: "ios.diagnostics.state_capture",
+        source: "ios",
+        severity: "debug",
+      }),
+      {
+        TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK: "https://discord.example/alerts",
+        TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK: "https://discord.example/stream",
+      },
+    );
+
+    assert.deepEqual(stateCaptureResult, { alerted: false, devDelivered: false, streamed: false });
+    assert.deepEqual(urls, []);
+
+    urls.length = 0;
+
     const quietResult = await __test.deliverDiscord(
       __test.normalizeEvent({
         eventName: "ios.transmit.begin_requested",
@@ -255,6 +285,25 @@ test("deliverDiscord skips heartbeat stream noise and only alerts alert-worthy e
 
     assert.deepEqual(devQuietResult, { alerted: false, devDelivered: true, streamed: false });
     assert.deepEqual(urls, ["https://discord.example/dev"]);
+
+    urls.length = 0;
+
+    const devStateCaptureResult = await __test.deliverDiscord(
+      __test.normalizeEvent({
+        eventName: "ios.diagnostics.state_capture",
+        source: "ios",
+        severity: "debug",
+        devTraffic: true,
+      }),
+      {
+        TURBO_TELEMETRY_DISCORD_ALERTS_WEBHOOK: "https://discord.example/alerts",
+        TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK: "https://discord.example/dev",
+        TURBO_TELEMETRY_DISCORD_STREAM_WEBHOOK: "https://discord.example/stream",
+      },
+    );
+
+    assert.deepEqual(devStateCaptureResult, { alerted: false, devDelivered: false, streamed: false });
+    assert.deepEqual(urls, []);
 
     urls.length = 0;
 

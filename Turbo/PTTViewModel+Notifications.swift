@@ -2,6 +2,38 @@ import Foundation
 import UIKit
 import UserNotifications
 
+enum AlertNotificationPermissionAction: Equatable {
+    case observeOnly
+    case requestAuthorization
+    case registerForRemoteNotifications
+}
+
+enum AlertNotificationPermissionPolicy {
+    static func startupAction(for status: UNAuthorizationStatus) -> AlertNotificationPermissionAction {
+        switch status {
+        case .authorized, .ephemeral, .provisional:
+            return .registerForRemoteNotifications
+        case .notDetermined, .denied:
+            return .observeOnly
+        @unknown default:
+            return .observeOnly
+        }
+    }
+
+    static func explicitRequestAction(for status: UNAuthorizationStatus) -> AlertNotificationPermissionAction {
+        switch status {
+        case .notDetermined:
+            return .requestAuthorization
+        case .authorized, .ephemeral, .provisional:
+            return .registerForRemoteNotifications
+        case .denied:
+            return .observeOnly
+        @unknown default:
+            return .observeOnly
+        }
+    }
+}
+
 extension PTTViewModel {
     var pendingIncomingTalkRequestBadgeCount: Int {
         incomingInviteByContactID.count
@@ -25,6 +57,10 @@ extension PTTViewModel {
     }
 
     var needsAlertNotificationPermission: Bool {
+        guard hasLoadedNotificationAuthorizationStatus else {
+            return false
+        }
+
         switch notificationAuthorizationStatus {
         case .authorized, .provisional, .ephemeral:
             return false
@@ -39,9 +75,57 @@ extension PTTViewModel {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         notificationAuthorizationStatus = settings.authorizationStatus
+        hasLoadedNotificationAuthorizationStatus = true
 
-        switch settings.authorizationStatus {
-        case .notDetermined:
+        switch AlertNotificationPermissionPolicy.startupAction(for: settings.authorizationStatus) {
+        case .registerForRemoteNotifications:
+            UIApplication.shared.registerForRemoteNotifications()
+
+        case .observeOnly:
+            switch settings.authorizationStatus {
+            case .notDetermined:
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Alert notification authorization not requested yet",
+                    metadata: ["requestPolicy": "deferred-until-user-action"]
+                )
+
+            case .denied:
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Alert notifications denied",
+                    metadata: [:]
+                )
+
+            case .authorized, .ephemeral, .provisional:
+                break
+
+            @unknown default:
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Alert notification authorization unknown",
+                    metadata: ["status": "\(settings.authorizationStatus.rawValue)"]
+                )
+            }
+
+        case .requestAuthorization:
+            diagnostics.record(
+                .pushToTalk,
+                level: .error,
+                message: "Startup notification policy attempted to request authorization",
+                metadata: ["status": "\(settings.authorizationStatus.rawValue)"]
+            )
+        }
+    }
+
+    func requestAlertNotificationPermissionPreflight() async {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        notificationAuthorizationStatus = settings.authorizationStatus
+        hasLoadedNotificationAuthorizationStatus = true
+
+        switch AlertNotificationPermissionPolicy.explicitRequestAction(for: settings.authorizationStatus) {
+        case .requestAuthorization:
             do {
                 let granted = try await center.requestAuthorization(options: [.alert, .badge, .sound])
                 let refreshedSettings = await center.notificationSettings()
@@ -63,27 +147,30 @@ extension PTTViewModel {
                 )
             }
 
-        case .authorized, .ephemeral, .provisional:
+        case .registerForRemoteNotifications:
             UIApplication.shared.registerForRemoteNotifications()
 
-        case .denied:
-            diagnostics.record(
-                .pushToTalk,
-                message: "Alert notifications denied",
-                metadata: [:]
-            )
+        case .observeOnly:
+            switch settings.authorizationStatus {
+            case .denied:
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Alert notifications denied",
+                    metadata: [:]
+                )
 
-        @unknown default:
-            diagnostics.record(
-                .pushToTalk,
-                message: "Alert notification authorization unknown",
-                metadata: ["status": "\(settings.authorizationStatus.rawValue)"]
-            )
+            case .notDetermined, .authorized, .ephemeral, .provisional:
+                break
+
+            @unknown default:
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Alert notification authorization unknown",
+                    metadata: ["status": "\(settings.authorizationStatus.rawValue)"]
+                )
+            }
         }
-    }
 
-    func requestAlertNotificationPermissionPreflight() async {
-        await configureAlertNotificationsIfNeeded()
         captureDiagnosticsState("alert-notification-permission")
     }
 
@@ -130,6 +217,10 @@ extension PTTViewModel {
             applicationState: .active,
             allowsSelectedContact: true,
             allowsAlreadySurfacedInvite: true
+        )
+        await prewarmForegroundTalkRequestNotificationContactIfIdle(
+            userInfo: userInfo,
+            reason: "foreground-notification"
         )
     }
 
@@ -251,7 +342,19 @@ extension PTTViewModel {
             handle: handle,
             reason: "\(reason)-immediate"
         )
+        let joinedFromCachedIncomingRequest = shouldAccept
+            && backendServices != nil
+            && immediateContact.map {
+                acceptIncomingTalkRequest(
+                    $0,
+                    reason: "\(reason)-cached-accept",
+                    allowsJoin: true
+                )
+            } == true
         await refreshRequestStateAfterTalkRequestNotification(userInfo: userInfo, reason: reason)
+        if joinedFromCachedIncomingRequest {
+            return
+        }
         let shouldJoin = openTalkRequestFromNotification(
             handle: handle,
             reason: reason,
@@ -444,25 +547,18 @@ extension PTTViewModel {
             return false
         }
 
-        if cachedContact == nil {
-            openCachedTalkRequestContact(contact, reason: reason)
-        } else if contact.isOnline, requestedExpandedCallContactID != contact.id {
-            requestExpandedCall(for: contact)
-        }
-
-        guard allowsJoin,
-              contact.isOnline,
-              relationshipState(for: contact.id).isIncomingRequest else {
-            return false
-        }
-
         diagnostics.record(
             .pushToTalk,
-            message: "Auto-joining from talk request notification",
+            message: allowsJoin
+                ? "Accepting talk request from notification"
+                : "Opening talk request from notification",
             metadata: ["handle": contact.handle, "reason": reason]
         )
-        requestBackendJoin(for: contact)
-        return true
+        return acceptIncomingTalkRequest(
+            contact,
+            reason: reason,
+            allowsJoin: allowsJoin
+        )
     }
 
     @discardableResult
@@ -483,10 +579,25 @@ extension PTTViewModel {
             message: "Selected contact from talk request notification",
             metadata: ["handle": contact.handle, "reason": reason]
         )
-        selectContact(contact)
-        if contact.isOnline {
-            requestExpandedCall(for: contact)
+        selectContact(contact, reason: reason)
+        let relationship = relationshipState(for: contact.id)
+        guard relationship.isIncomingRequest else {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Ignored cached talk request notification expansion without incoming request",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "handle": contact.handle,
+                    "reason": reason,
+                    "relationship": String(describing: relationship),
+                ]
+            )
+            return
         }
+        guard contact.isOnline else {
+            return
+        }
+        requestExpandedCall(for: contact)
     }
 
     func requestExpandedCall(for contact: Contact) {
@@ -502,5 +613,119 @@ extension PTTViewModel {
             "channelId": (userInfo["channelId"] as? String) ?? "none",
             "deepLink": (userInfo["deepLink"] as? String) ?? "none",
         ]
+    }
+
+    private func prewarmForegroundTalkRequestNotificationContactIfIdle(
+        userInfo: [AnyHashable: Any],
+        reason: String
+    ) async {
+        guard let handle = talkRequestNotificationHandle(from: userInfo),
+              let contact = contactMatchingNormalizedHandle(handle) else {
+            return
+        }
+        guard relationshipState(for: contact.id).isIncomingRequest else { return }
+        guard foregroundTalkRequestNotificationPrewarmBlockReason(for: contact.id) == nil else {
+            diagnostics.record(
+                .media,
+                message: "Foreground talk request notification prewarm skipped",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "handle": contact.handle,
+                    "reason": reason,
+                    "blockReason": foregroundTalkRequestNotificationPrewarmBlockReason(for: contact.id) ?? "unknown",
+                ]
+            )
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Foreground talk request notification prewarm started",
+            metadata: [
+                "contactId": contact.id.uuidString,
+                "handle": contact.handle,
+                "reason": reason,
+            ]
+        )
+
+        precreateSelectedContactMediaShellIfNeeded(
+            for: contact.id,
+            reason: reason
+        )
+        await publishSelectedPeerPrewarmHintIfPossible(
+            for: contact.id,
+            reason: reason
+        )
+        await prewarmForegroundTalkRequestDirectQuicIfPossible(
+            for: contact.id,
+            reason: reason
+        )
+
+        diagnostics.record(
+            .media,
+            message: "Foreground talk request notification prewarm completed",
+            metadata: [
+                "contactId": contact.id.uuidString,
+                "handle": contact.handle,
+                "reason": reason,
+            ]
+        )
+    }
+
+    private func foregroundTalkRequestNotificationPrewarmBlockReason(for contactID: UUID) -> String? {
+        if isJoined || activeChannelId != nil {
+            return "active-channel"
+        }
+        if mediaSessionContactID != nil || isPTTAudioSessionActive {
+            return "active-media-session"
+        }
+        if isTransmitting || transmitCoordinator.state.isPressingTalk {
+            return "active-transmit"
+        }
+        guard contacts.contains(where: { $0.id == contactID }) else {
+            return "contact-missing"
+        }
+        return nil
+    }
+
+    private func prewarmForegroundTalkRequestDirectQuicIfPossible(
+        for contactID: UUID,
+        reason: String
+    ) async {
+        let prewarmReason = "foreground-notification-direct-quic-prewarm-\(reason)"
+        if let blockReason = directQuicSelectionPrewarmBlockReason(
+            for: contactID,
+            requireSelectedContact: false
+        ) {
+            if blockReason == "relay-only-forced" {
+                return
+            }
+            diagnostics.record(
+                .media,
+                message: "Foreground talk request Direct QUIC prewarm skipped",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "blockReason": blockReason,
+                ]
+            )
+            if blockReason == "not-listener-offerer" {
+                await requestRemoteDirectQuicOfferIfPossible(
+                    for: contactID,
+                    reason: prewarmReason
+                )
+            }
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Foreground talk request Direct QUIC prewarm requested",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "reason": reason,
+            ]
+        )
+        await maybeStartDirectQuicProbe(for: contactID)
     }
 }

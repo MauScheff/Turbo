@@ -464,8 +464,25 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     func ensureWebSocketConnected() {
         guard supportsWebSocket else { return }
         guard !isWebSocketSuspended else { return }
-        if webSocketConnectionState == .connected || webSocketConnectionState == .connecting {
+        if webSocketConnectionState == .connected {
             return
+        }
+        if webSocketConnectionState == .connecting {
+            if webSocketTask == nil || webSocketTask?.state == .completed {
+                connectTimeoutTask?.cancel()
+                connectTimeoutTask = nil
+                receiveTask?.cancel()
+                receiveTask = nil
+                webSocketPingTask?.cancel()
+                webSocketPingTask = nil
+                webSocketTask = nil
+                currentWebSocketSessionID = nil
+                failPendingControlCommands(TurboBackendError.webSocketUnavailable)
+                setWebSocketConnectionState(.idle)
+                onServerNotice?("WebSocket connecting task ended before open; reconnecting")
+            } else {
+                return
+            }
         }
         connectWebSocket()
     }
@@ -477,6 +494,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             if webSocketConnectionState == .connected {
                 return
             }
+            ensureWebSocketConnected()
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         throw TurboBackendError.webSocketUnavailable

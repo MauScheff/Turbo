@@ -76,7 +76,7 @@ The wrapper is intentionally thin. It runs [scripts/merged_diagnostics.py](/User
 
 There are two observability lanes. Intake should use both whenever possible.
 
-Telemetry is the compact event stream. It is for high-signal events, timings, route failures, invariant violations, production alerts, and shake-to-report markers. TestFlight and production-like reports depend heavily on this lane.
+Telemetry is the compact event stream. It is for high-signal events, timings, route failures, invariant violations, production alerts, and shake-to-report markers. TestFlight and production-like reports depend heavily on this lane. Routine iOS diagnostics state captures stay local and are uploaded with the diagnostics transcript when needed, such as shake-to-report; raw state-capture telemetry is an explicit short-session debug opt-in.
 
 Backend latest diagnostics is the full transcript and local-state anchor. It carries detailed app state, diagnostics transcript, and audio/session evidence that should not be emitted as high-volume telemetry. Current debug builds should auto-publish this after high-signal state transitions. Shake-to-report should also upload it.
 

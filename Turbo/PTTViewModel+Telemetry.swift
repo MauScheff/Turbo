@@ -4,7 +4,8 @@ import UIKit
 extension PTTViewModel {
     func submitShakeReport(
         incidentID: String,
-        requestedAt: Date = .now
+        requestedAt: Date = .now,
+        userReport: String = ""
     ) async throws -> ShakeReportResult {
         let selected = selectedContact
         let channelID = selected?.backendChannelId
@@ -12,7 +13,8 @@ extension PTTViewModel {
             incidentID: incidentID,
             requestedAt: requestedAt,
             selected: selected,
-            channelID: channelID
+            channelID: channelID,
+            userReport: userReport
         )
 
         diagnostics.record(
@@ -243,10 +245,11 @@ extension PTTViewModel {
         incidentID: String,
         requestedAt: Date,
         selected: Contact?,
-        channelID: String?
+        channelID: String?,
+        userReport: String
     ) -> [String: String] {
         let traceWindowStart = requestedAt.addingTimeInterval(-300)
-        return [
+        var metadata = [
             "incidentId": incidentID,
             "requestedAt": iso8601String(requestedAt),
             "traceWindowStart": iso8601String(traceWindowStart),
@@ -261,6 +264,17 @@ extension PTTViewModel {
             "backendMode": backendRuntime.mode,
             "telemetryEnabled": String(backendServices?.telemetryEnabled ?? false),
         ]
+        let trimmedUserReport = trimmedReportText(userReport)
+        if !trimmedUserReport.isEmpty {
+            metadata["userReport"] = trimmedUserReport
+        }
+        return metadata
+    }
+
+    private func trimmedReportText(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 1000 else { return trimmed }
+        return String(trimmed.prefix(1000))
     }
 
     private func shakeReportTelemetryMessage(diagnosticsLatestURL: String?) -> String {

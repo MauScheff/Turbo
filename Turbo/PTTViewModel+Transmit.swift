@@ -778,7 +778,7 @@ extension PTTViewModel {
         let startupContext = MediaSessionStartupContext(
             contactID: contactID,
             activationMode: .appManaged,
-            startupMode: .interactive
+            startupMode: .playbackOnly
         )
         let media = mediaServices
 
@@ -791,13 +791,13 @@ extension PTTViewModel {
 
         diagnostics.record(
             .media,
-            message: "Prewarming interactive audio for joined session",
+            message: "Prewarming foreground media for joined session",
             metadata: ["contactId": contactID.uuidString]
         )
         await ensureMediaSession(
             for: contactID,
             activationMode: .appManaged,
-            startupMode: .interactive
+            startupMode: .playbackOnly
         )
         updateStatusForSelectedContact()
     }
@@ -5570,6 +5570,7 @@ extension PTTViewModel {
         diagnostics.record(.media, message: "Media state changed", metadata: ["state": String(describing: state)])
         switch state {
         case .failed(let message):
+            localAudioLevel = 0
             backendStatusMessage = "Media failed: \(message)"
         case .connected:
             if let contactID = media.contactID(),
@@ -5577,7 +5578,7 @@ extension PTTViewModel {
                 pttWakeRuntime.clear(for: contactID)
             }
         case .closed, .idle, .preparing:
-            break
+            localAudioLevel = 0
         }
         updateStatusForSelectedContact()
         if let contactID = media.contactID() {
@@ -5588,6 +5589,16 @@ extension PTTViewModel {
                 )
             }
         }
+    }
+
+    func mediaSession(_ session: MediaSession, didMeasureLocalAudioLevel level: Double) {
+        let media = mediaServices
+        guard session === media.session() else { return }
+        let clampedLevel = max(0, min(1, level))
+        let smoothing = clampedLevel > localAudioLevel ? 0.58 : 0.24
+        let smoothedLevel = localAudioLevel + (clampedLevel - localAudioLevel) * smoothing
+        guard abs(smoothedLevel - localAudioLevel) >= 0.01 || clampedLevel == 0 else { return }
+        localAudioLevel = smoothedLevel
     }
 
     private func viewModelWakeStateNeedsClearingAfterRecovery(contactID: UUID) -> Bool {
@@ -5625,8 +5636,19 @@ extension PTTViewModel {
         for contactID: UUID,
         reason: String
     ) async {
-        guard let backend = backendServices, backend.supportsWebSocket else { return }
-        guard let currentUserID = backend.currentUserID else { return }
+        guard selectedPeerPrewarmPublishBlockReason(for: contactID) == nil else {
+            diagnostics.record(
+                .websocket,
+                message: "Selected peer prewarm hint skipped",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "blockReason": selectedPeerPrewarmPublishBlockReason(for: contactID) ?? "unknown",
+                ]
+            )
+            return
+        }
+        guard let backend = backendServices, let currentUserID = backend.currentUserID else { return }
         guard let contact = contacts.first(where: { $0.id == contactID }),
               let channelID = contact.backendChannelId,
               let remoteUserID = contact.remoteUserId else {
@@ -5686,6 +5708,18 @@ extension PTTViewModel {
                 ]
             )
         }
+    }
+
+    func selectedPeerPrewarmPublishBlockReason(for contactID: UUID) -> String? {
+        guard let backend = backendServices else { return "backend-unavailable" }
+        guard backend.supportsWebSocket else { return "websocket-unsupported" }
+        guard backend.currentUserID != nil else { return "missing-current-user" }
+        guard let contact = contacts.first(where: { $0.id == contactID }) else {
+            return "missing-contact"
+        }
+        guard contact.backendChannelId != nil else { return "missing-channel-id" }
+        guard contact.remoteUserId != nil else { return "missing-remote-user-id" }
+        return nil
     }
 
     func selectedPeerPrewarmHintBlockReason(

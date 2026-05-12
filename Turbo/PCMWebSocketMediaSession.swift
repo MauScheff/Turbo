@@ -517,6 +517,8 @@ final class PCMWebSocketMediaSession: MediaSession {
     private var enqueuedPayloadReportBudget = 3
     private var activeAudioSessionOwnership: MediaSessionActivationMode?
     private let captureStopGraceNanoseconds: UInt64 = 120_000_000
+    private var lastLocalAudioLevelReportNanoseconds: UInt64 = 0
+    private let localAudioLevelReportIntervalNanoseconds: UInt64 = 66_000_000
 
     init(
         sendAudioChunk: (@Sendable (String) async throws -> Void)?,
@@ -1030,6 +1032,7 @@ final class PCMWebSocketMediaSession: MediaSession {
 
     private func handleCapturedBuffer(_ buffer: AVAudioPCMBuffer) {
         let nowNanoseconds = DispatchTime.now().uptimeNanoseconds
+        reportLocalAudioLevelIfNeeded(buffer, nowNanoseconds: nowNanoseconds)
         guard shouldSendCapturedBuffer(nowNanoseconds: nowNanoseconds), state == .connected else { return }
         reportCapturedBufferIfNeeded(buffer)
         guard let convertedBuffer = convertCapturedBuffer(buffer) else { return }
@@ -1040,6 +1043,38 @@ final class PCMWebSocketMediaSession: MediaSession {
         Task {
             await audioChunkSender.enqueue(payload)
         }
+    }
+
+    private func reportLocalAudioLevelIfNeeded(
+        _ buffer: AVAudioPCMBuffer,
+        nowNanoseconds: UInt64
+    ) {
+        guard nowNanoseconds - lastLocalAudioLevelReportNanoseconds >= localAudioLevelReportIntervalNanoseconds else {
+            return
+        }
+        guard let levelMetrics = PCMLevelMetrics.forBuffer(buffer) else { return }
+        lastLocalAudioLevelReportNanoseconds = nowNanoseconds
+        let level = Self.normalizedLocalSpeechLevel(from: levelMetrics)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.mediaSession(self, didMeasureLocalAudioLevel: level)
+        }
+    }
+
+    private static func normalizedLocalSpeechLevel(from metrics: PCMLevelMetrics) -> Double {
+        guard !metrics.isSilent else { return 0 }
+        let rmsFloor = 0.006
+        let rmsCeiling = 0.085
+        let peakFloor = 0.035
+        let peakCeiling = 0.42
+        let rmsEnergy = normalized(metrics.rms, floor: rmsFloor, ceiling: rmsCeiling)
+        let peakEnergy = normalized(metrics.peak, floor: peakFloor, ceiling: peakCeiling)
+        return min(1, max(rmsEnergy, peakEnergy * 0.42))
+    }
+
+    private static func normalized(_ value: Double, floor: Double, ceiling: Double) -> Double {
+        guard ceiling > floor else { return 0 }
+        return max(0, min(1, (value - floor) / (ceiling - floor)))
     }
 
     private func reportCapturedBufferIfNeeded(_ buffer: AVAudioPCMBuffer) {

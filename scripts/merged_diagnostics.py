@@ -42,6 +42,7 @@ TEXT_CONTEXT_COLON_RE = re.compile(
     r"): (?P<value>\"[^\"]*\"|[^\s,\)]+)"
 )
 GROUP_DIMENSION_ORDER = ("scenarioRun", "session", "channel", "contact", "attempt")
+KEY_VALUE_RE = re.compile(r"(?P<key>[A-Za-z][A-Za-z0-9_]*)=(?P<value>\"[^\"]*\"|[^\s]+)")
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,32 @@ class DiagnosticGroup:
                 self.last_seen = timestamp
         if line and len(self.samples) < 3:
             self.samples.append(line if len(line) <= 220 else line[:220] + "...<truncated>")
+
+
+@dataclass
+class ConnectionTimingAttempt:
+    channel_id: str
+    request_id: str
+    subjects: set[str] = field(default_factory=set)
+    published_join_accepted_at: datetime | None = None
+    received_join_accepted_at: datetime | None = None
+    first_media_prewarm_at: datetime | None = None
+    last_media_ready_at: datetime | None = None
+    first_ptt_joined_at: datetime | None = None
+    last_ptt_joined_at: datetime | None = None
+    backend_ready_projection_at: datetime | None = None
+
+
+@dataclass
+class DuplicateReadinessPublish:
+    subject: str
+    contact_id: str
+    channel_id: str
+    state: str
+    count: int
+    first_seen: datetime
+    last_seen: datetime
+    reasons: set[str] = field(default_factory=set)
 
 
 def snapshot_bool(snapshot: dict[str, str], key: str) -> bool | None:
@@ -1311,6 +1338,38 @@ def diagnostic_group_payload(group: DiagnosticGroup) -> dict[str, object]:
     }
 
 
+def connection_timing_payload(attempt: ConnectionTimingAttempt) -> dict[str, object]:
+    def iso(value: datetime | None) -> str | None:
+        return value.isoformat() if value else None
+
+    return {
+        "channelId": attempt.channel_id,
+        "requestId": attempt.request_id,
+        "subjects": sorted(attempt.subjects),
+        "publishedJoinAcceptedAt": iso(attempt.published_join_accepted_at),
+        "receivedJoinAcceptedAt": iso(attempt.received_join_accepted_at),
+        "firstMediaPrewarmAt": iso(attempt.first_media_prewarm_at),
+        "lastMediaReadyAt": iso(attempt.last_media_ready_at),
+        "firstPTTJoinedAt": iso(attempt.first_ptt_joined_at),
+        "lastPTTJoinedAt": iso(attempt.last_ptt_joined_at),
+        "backendReadyProjectionAt": iso(attempt.backend_ready_projection_at),
+    }
+
+
+def duplicate_readiness_payload(duplicate: DuplicateReadinessPublish) -> dict[str, object]:
+    return {
+        "subject": duplicate.subject,
+        "contactId": duplicate.contact_id,
+        "channelId": duplicate.channel_id,
+        "state": duplicate.state,
+        "count": duplicate.count,
+        "firstSeen": duplicate.first_seen.isoformat(),
+        "lastSeen": duplicate.last_seen.isoformat(),
+        "spanMs": int((duplicate.last_seen - duplicate.first_seen).total_seconds() * 1000),
+        "reasons": sorted(duplicate.reasons),
+    }
+
+
 def render_diagnostic_groups(groups: list[DiagnosticGroup], *, limit_per_dimension: int = 12) -> list[str]:
     if not groups:
         return ["- none"]
@@ -1352,6 +1411,197 @@ def render_invariant_events(violations: Iterable[InvariantViolation]) -> list[tu
             )
         )
     return events
+
+
+def parse_key_values(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for match in KEY_VALUE_RE.finditer(text):
+        value = match.group("value")
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            value = value[1:-1]
+        values[match.group("key")] = value
+    return values
+
+
+def connection_timing_attempts(
+    timeline: Iterable[tuple[datetime, str]],
+) -> list[ConnectionTimingAttempt]:
+    attempts: dict[tuple[str, str], ConnectionTimingAttempt] = {}
+    latest_by_channel: dict[str, ConnectionTimingAttempt] = {}
+
+    def attempt_for(channel_id: str, request_id: str) -> ConnectionTimingAttempt:
+        key = (channel_id, request_id)
+        attempt = attempts.get(key)
+        if attempt is None:
+            attempt = ConnectionTimingAttempt(channel_id=channel_id, request_id=request_id)
+            attempts[key] = attempt
+        latest_by_channel[channel_id] = attempt
+        return attempt
+
+    for timestamp, line in timeline:
+        values = parse_key_values(line)
+        subject = subject_from_timeline_line(line)
+        channel_id = values.get("channelId") or values.get("channelID") or values.get("channel_id")
+
+        if "Published join accepted control signal" in line:
+            request_id = values.get("inviteId") or values.get("requestId")
+            if channel_id and request_id:
+                attempt = attempt_for(channel_id, request_id)
+                attempt.subjects.add(subject)
+                attempt.published_join_accepted_at = attempt.published_join_accepted_at or timestamp
+            continue
+
+        if "Join accepted control signal received" in line:
+            request_id = values.get("requestId") or values.get("inviteId")
+            if channel_id and request_id:
+                attempt = attempt_for(channel_id, request_id)
+                attempt.subjects.add(subject)
+                attempt.received_join_accepted_at = attempt.received_join_accepted_at or timestamp
+            continue
+
+        if not channel_id:
+            continue
+        attempt = latest_by_channel.get(channel_id)
+        if attempt is None:
+            continue
+        attempt.subjects.add(subject)
+
+        if "Prewarming interactive audio for joined session" in line:
+            if attempt.first_media_prewarm_at is None or timestamp < attempt.first_media_prewarm_at:
+                attempt.first_media_prewarm_at = timestamp
+        elif "Media session start await completed" in line:
+            if attempt.last_media_ready_at is None or timestamp > attempt.last_media_ready_at:
+                attempt.last_media_ready_at = timestamp
+        elif "Joined channel" in line:
+            if attempt.first_ptt_joined_at is None or timestamp < attempt.first_ptt_joined_at:
+                attempt.first_ptt_joined_at = timestamp
+            if attempt.last_ptt_joined_at is None or timestamp > attempt.last_ptt_joined_at:
+                attempt.last_ptt_joined_at = timestamp
+        elif "Applied accepted backend join projection" in line and "status=ready" in line:
+            attempt.backend_ready_projection_at = attempt.backend_ready_projection_at or timestamp
+
+    return sorted(
+        attempts.values(),
+        key=lambda attempt: attempt.published_join_accepted_at
+        or attempt.received_join_accepted_at
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+
+def render_connection_timing_attempts(
+    attempts: Iterable[ConnectionTimingAttempt],
+    *,
+    limit: int = 5,
+) -> list[str]:
+    rendered: list[str] = []
+    for attempt in list(attempts)[:limit]:
+        anchors = [
+            attempt.published_join_accepted_at,
+            attempt.received_join_accepted_at,
+            attempt.first_media_prewarm_at,
+            attempt.last_media_ready_at,
+            attempt.first_ptt_joined_at,
+            attempt.last_ptt_joined_at,
+            attempt.backend_ready_projection_at,
+        ]
+        if not any(anchors):
+            continue
+        start = next(anchor for anchor in anchors if anchor is not None)
+
+        def ms_since(value: datetime | None) -> str:
+            if value is None:
+                return "missing"
+            return f"+{int((value - start).total_seconds() * 1000)}ms"
+
+        subjects = ",".join(sorted(attempt.subjects)) or "unknown"
+        rendered.append(
+            f"- channel={attempt.channel_id} request={attempt.request_id} subjects={subjects} "
+            f"published={ms_since(attempt.published_join_accepted_at)} "
+            f"received={ms_since(attempt.received_join_accepted_at)} "
+            f"firstMediaPrewarm={ms_since(attempt.first_media_prewarm_at)} "
+            f"lastMediaReady={ms_since(attempt.last_media_ready_at)} "
+            f"firstPTTJoined={ms_since(attempt.first_ptt_joined_at)} "
+            f"lastPTTJoined={ms_since(attempt.last_ptt_joined_at)} "
+            f"backendReadyProjection={ms_since(attempt.backend_ready_projection_at)}"
+        )
+    return rendered or ["- none"]
+
+
+def duplicate_readiness_publishes(
+    timeline: Iterable[tuple[datetime, str]],
+    *,
+    window_ms: int = 1000,
+) -> list[DuplicateReadinessPublish]:
+    buckets: dict[tuple[str, str, str, str], list[tuple[datetime, str]]] = {}
+    for timestamp, line in timeline:
+        if "Published receiver audio readiness" not in line:
+            continue
+        values = parse_key_values(line)
+        subject = subject_from_timeline_line(line)
+        contact_id = values.get("contactId") or values.get("contactID") or "unknown"
+        channel_id = values.get("channelId") or values.get("channelID") or "unknown"
+        state = values.get("state") or "unknown"
+        reason = values.get("reason") or "unknown"
+        buckets.setdefault((subject, contact_id, channel_id, state), []).append((timestamp, reason))
+
+    duplicates: list[DuplicateReadinessPublish] = []
+    for (subject, contact_id, channel_id, state), events in buckets.items():
+        events.sort(key=lambda item: item[0])
+        cluster: list[tuple[datetime, str]] = []
+        for event in events:
+            if not cluster:
+                cluster = [event]
+                continue
+            if int((event[0] - cluster[-1][0]).total_seconds() * 1000) <= window_ms:
+                cluster.append(event)
+            else:
+                if len(cluster) > 1:
+                    duplicates.append(
+                        DuplicateReadinessPublish(
+                            subject=subject,
+                            contact_id=contact_id,
+                            channel_id=channel_id,
+                            state=state,
+                            count=len(cluster),
+                            first_seen=cluster[0][0],
+                            last_seen=cluster[-1][0],
+                            reasons={reason for _, reason in cluster},
+                        )
+                    )
+                cluster = [event]
+        if len(cluster) > 1:
+            duplicates.append(
+                DuplicateReadinessPublish(
+                    subject=subject,
+                    contact_id=contact_id,
+                    channel_id=channel_id,
+                    state=state,
+                    count=len(cluster),
+                    first_seen=cluster[0][0],
+                    last_seen=cluster[-1][0],
+                    reasons={reason for _, reason in cluster},
+                )
+            )
+
+    return sorted(duplicates, key=lambda duplicate: duplicate.last_seen, reverse=True)
+
+
+def render_duplicate_readiness_publishes(
+    duplicates: Iterable[DuplicateReadinessPublish],
+    *,
+    limit: int = 8,
+) -> list[str]:
+    lines: list[str] = []
+    for duplicate in list(duplicates)[:limit]:
+        span_ms = int((duplicate.last_seen - duplicate.first_seen).total_seconds() * 1000)
+        reasons = ",".join(sorted(duplicate.reasons))
+        lines.append(
+            f"- subject={duplicate.subject} contactId={duplicate.contact_id} "
+            f"channelId={duplicate.channel_id} state={duplicate.state} "
+            f"count={duplicate.count} spanMs={span_ms} reasons={reasons}"
+        )
+    return lines or ["- none"]
 
 
 def build_violation(
@@ -1398,6 +1648,57 @@ def analyze_report(report: Report) -> list[InvariantViolation]:
     remote_wake_capability_kind = snapshot.get("remoteWakeCapabilityKind", "unavailable")
     phase_detail = snapshot.get("selectedPeerPhaseDetail", "none")
     pending_action = snapshot.get("pendingAction", "none")
+    ui_call_screen_visible = snapshot_bool(snapshot, "uiCallScreenVisible")
+    ui_primary_action_kind = snapshot.get("uiPrimaryActionKind", "none")
+    ui_selected_peer_phase = snapshot.get("uiSelectedPeerPhase", phase)
+
+    if ui_call_screen_visible and ui_selected_peer_phase == "idle":
+        violations.append(
+            build_violation(
+                subject=report.handle,
+                invariant_id="ui.call_screen_visible_for_idle_peer",
+                scope="local",
+                message=(
+                    "call screen is visible while selected peer is idle "
+                    f"uiCallScreenContact={snapshot.get('uiCallScreenContact', 'none')} "
+                    f"uiPrimaryActionKind={ui_primary_action_kind}"
+                ),
+                metadata={
+                    "uiCallScreenVisible": str(ui_call_screen_visible),
+                    "uiCallScreenContact": snapshot.get("uiCallScreenContact", "none"),
+                    "uiCallScreenRequestedExpanded": snapshot.get("uiCallScreenRequestedExpanded", "none"),
+                    "uiCallScreenMinimized": snapshot.get("uiCallScreenMinimized", "none"),
+                    "uiSelectedPeerPhase": ui_selected_peer_phase,
+                    "selectedPeerPhase": phase,
+                },
+            )
+        )
+
+    if (
+        ui_call_screen_visible
+        and ui_primary_action_kind == "holdToTalk"
+        and ui_selected_peer_phase in {"idle", "requested", "incomingRequest"}
+    ):
+        violations.append(
+            build_violation(
+                subject=report.handle,
+                invariant_id="ui.call_screen_talk_action_for_non_live_peer",
+                scope="local",
+                message=(
+                    "call screen exposes Hold To Talk for non-live selected peer phase "
+                    f"uiSelectedPeerPhase={ui_selected_peer_phase}"
+                ),
+                metadata={
+                    "uiCallScreenVisible": str(ui_call_screen_visible),
+                    "uiCallScreenContact": snapshot.get("uiCallScreenContact", "none"),
+                    "uiPrimaryActionKind": ui_primary_action_kind,
+                    "uiPrimaryActionLabel": snapshot.get("uiPrimaryActionLabel", "none"),
+                    "uiPrimaryActionEnabled": snapshot.get("uiPrimaryActionEnabled", "none"),
+                    "uiSelectedPeerPhase": ui_selected_peer_phase,
+                    "selectedPeerPhase": phase,
+                },
+            )
+        )
 
     if (
         phase == "waitingForPeer"
@@ -1724,11 +2025,20 @@ def dedupe_violations(violations: Iterable[InvariantViolation]) -> list[Invarian
     return deduped
 
 
-def analyze_reports(reports: list[Report]) -> list[InvariantViolation]:
+def violation_identity(violation: InvariantViolation) -> tuple[str, str, str]:
+    return (violation.subject, violation.invariant_id, violation.scope)
+
+
+def analyze_reports(
+    reports: list[Report],
+    *,
+    include_recorded_violations: bool = True,
+) -> list[InvariantViolation]:
     violations: list[InvariantViolation] = []
     for report in reports:
-        violations.extend(report.invariant_violations)
-        violations.extend(report.backend_invariant_violations)
+        if include_recorded_violations:
+            violations.extend(report.invariant_violations)
+            violations.extend(report.backend_invariant_violations)
         violations.extend(analyze_report(report))
 
     if len(reports) == 2:
@@ -1747,6 +2057,60 @@ def analyze_reports(reports: list[Report]) -> list[InvariantViolation]:
             and snapshot_bool(right.snapshot, "backendPeerJoined")
             and snapshot_bool(right.snapshot, "backendPeerDeviceConnected")
         )
+
+        def request_relationship(snapshot: dict[str, str]) -> str:
+            relationship = snapshot.get("selectedPeerRelationship", "none")
+            if relationship != "none":
+                return relationship
+            return snapshot.get("backendRequestRelationship", "none")
+
+        def has_outgoing_request(snapshot: dict[str, str]) -> bool:
+            relationship = request_relationship(snapshot)
+            return relationship.startswith("outgoingRequest(") or relationship.startswith("outgoing(")
+
+        def has_incoming_request(snapshot: dict[str, str]) -> bool:
+            relationship = request_relationship(snapshot)
+            return relationship.startswith("incomingRequest(") or relationship.startswith("incoming(")
+
+        def report_observed_at(report: Report) -> datetime | None:
+            return parse_timestamp(report.uploaded_at) or parse_backend_instant(
+                report.snapshot.get("backendServerTimestamp", "none")
+            )
+
+        def append_pending_request_receiver_gap(requester: Report, receiver: Report) -> None:
+            requester_observed_at = report_observed_at(requester)
+            receiver_observed_at = report_observed_at(receiver)
+            age_delta_ms = None
+            if requester_observed_at is not None and receiver_observed_at is not None:
+                age_delta_ms = int((requester_observed_at - receiver_observed_at).total_seconds() * 1000)
+                if age_delta_ms < 0:
+                    age_delta_ms = 0
+            if age_delta_ms is not None and age_delta_ms < 5000:
+                return
+            violations.append(
+                build_violation(
+                    subject="pair",
+                    invariant_id="pair.pending_request_receiver_not_observed",
+                    scope="pair",
+                    message=(
+                        "one device observes a pending outgoing request while the peer's latest diagnostics "
+                        "does not observe the matching incoming request "
+                        f"requester={requester.handle}:{requester.snapshot.get('selectedPeerPhase', 'none')} "
+                        f"receiver={receiver.handle}:{receiver.snapshot.get('selectedPeerPhase', 'none')} "
+                        f"requesterObservedAt={requester.uploaded_at} receiverObservedAt={receiver.uploaded_at} "
+                        f"ageDeltaMs={age_delta_ms if age_delta_ms is not None else 'unknown'}"
+                    ),
+                    metadata={
+                        "requester": requester.handle,
+                        "receiver": receiver.handle,
+                        "requesterRelationship": request_relationship(requester.snapshot),
+                        "receiverRelationship": request_relationship(receiver.snapshot),
+                        "requesterObservedAt": requester.uploaded_at,
+                        "receiverObservedAt": receiver.uploaded_at,
+                        "ageDeltaMs": str(age_delta_ms if age_delta_ms is not None else "unknown"),
+                    },
+                )
+            )
 
         if snapshot_has_stale_peer_ready_membership(
             left.snapshot, left_phase
@@ -1774,9 +2138,15 @@ def analyze_reports(reports: list[Report]) -> list[InvariantViolation]:
                         message=(
                             "backend is ready on both devices, but at least one UI is still not in a live session state "
                             f"left={left.handle}:{left_phase} right={right.handle}:{right_phase}"
-                        ),
-                    )
+                    ),
                 )
+            )
+
+        if has_outgoing_request(left.snapshot) and not has_incoming_request(right.snapshot):
+            append_pending_request_receiver_gap(left, right)
+
+        if has_outgoing_request(right.snapshot) and not has_incoming_request(left.snapshot):
+            append_pending_request_receiver_gap(right, left)
 
         def snapshot_lacks_session_context(snapshot: dict[str, str]) -> bool:
             return (
@@ -1980,15 +2350,27 @@ def main() -> int:
 
     telemetry_reports = telemetry_snapshot_reports(telemetry_events, reports)
     correlation_reports = reports + telemetry_reports
+    current_violations = dedupe_violations(
+        analyze_reports(reports, include_recorded_violations=False)
+    )
+    current_violation_keys = {violation_identity(violation) for violation in current_violations}
+
     violations = analyze_reports(correlation_reports)
     violations.extend(telemetry_invariant_violations(telemetry_events))
     violations = dedupe_violations(violations)
+    historical_violations = [
+        violation
+        for violation in violations
+        if violation_identity(violation) not in current_violation_keys
+    ]
 
     timeline = merged_events(
         reports,
         telemetry_events,
         full_metadata=args.full_metadata,
     )
+    connection_timings = connection_timing_attempts(timeline)
+    readiness_duplicates = duplicate_readiness_publishes(timeline)
     diagnostic_groups = build_diagnostic_groups(
         reports,
         violations,
@@ -2002,8 +2384,16 @@ def main() -> int:
             "telemetrySnapshotReports": [report_payload(report) for report in telemetry_reports],
             "sourceWarnings": [warning_payload(warning) for warning in source_warnings],
             "violations": [violation_payload(violation) for violation in violations],
+            "currentViolations": [violation_payload(violation) for violation in current_violations],
+            "historicalViolations": [violation_payload(violation) for violation in historical_violations],
             "telemetryEventCount": len(telemetry_events),
             "telemetryEvents": [telemetry_payload(event) for event in telemetry_events],
+            "connectionTimings": [
+                connection_timing_payload(attempt) for attempt in connection_timings
+            ],
+            "duplicateReadinessPublishes": [
+                duplicate_readiness_payload(duplicate) for duplicate in readiness_duplicates
+            ],
             "diagnosticGroups": [diagnostic_group_payload(group) for group in diagnostic_groups],
             "timeline": [
                 {
@@ -2037,12 +2427,27 @@ def main() -> int:
             print("\nDIAGNOSTICS SOURCES")
             print(f"- telemetry: merged {len(telemetry_events)} Cloudflare events")
 
-        print("\nINVARIANT VIOLATIONS")
-        if violations:
-            for violation in violations:
+        print("\nCURRENT INVARIANT VIOLATIONS")
+        if current_violations:
+            for violation in current_violations:
                 print(f"- {render_violation(violation)}")
         else:
             print("- none")
+
+        print("\nHISTORICAL INVARIANT VIOLATIONS")
+        if historical_violations:
+            for violation in historical_violations:
+                print(f"- {render_violation(violation)}")
+        else:
+            print("- none")
+
+        print("\nCONNECTION TIMING SUMMARY")
+        for line in render_connection_timing_attempts(connection_timings):
+            print(line)
+
+        print("\nDUPLICATE READINESS PUBLISHES")
+        for line in render_duplicate_readiness_publishes(readiness_duplicates):
+            print(line)
 
         print("\nDIAGNOSTIC GROUPS")
         for line in render_diagnostic_groups(diagnostic_groups):

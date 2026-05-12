@@ -26,6 +26,19 @@ struct IncomingTalkRequestCandidate: Equatable {
             recencyKey: invite.updatedAt ?? invite.createdAt
         )
     }
+
+    init(contact: Contact, requestCount: Int, source: String) {
+        let normalizedRequestCount = max(requestCount, 1)
+        surface = IncomingTalkRequestSurface(
+            contactID: contact.id,
+            inviteID: "\(source):\(contact.id.uuidString):\(normalizedRequestCount)",
+            contactName: contact.name,
+            contactHandle: contact.handle,
+            contactIsOnline: contact.isOnline,
+            requestCount: normalizedRequestCount,
+            recencyKey: "\(source):\(normalizedRequestCount):\(contact.id.uuidString)"
+        )
+    }
 }
 
 struct TalkRequestSurfaceState: Equatable {

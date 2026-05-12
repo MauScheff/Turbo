@@ -81,6 +81,7 @@ extension PTTViewModel {
             )
             return
         }
+        let targetDeviceID = receiverAudioReadinessTargetDeviceID(for: intent.contactID)
 
         if !intent.isReady,
            !intent.reason.isBackgroundMediaClosure,
@@ -107,7 +108,7 @@ extension PTTViewModel {
                     fromUserId: intent.currentUserID,
                     fromDeviceId: intent.deviceID,
                     toUserId: intent.remoteUserID,
-                    toDeviceId: intent.deviceID,
+                    toDeviceId: targetDeviceID,
                     payload: ReceiverAudioReadinessSignalPayload(
                         reason: intent.reason,
                         telemetry: intent.telemetry
@@ -122,6 +123,7 @@ extension PTTViewModel {
                     "handle": intent.contactHandle,
                     "state": intent.isReady ? "ready" : "not-ready",
                     "reason": intent.reason.wireValue,
+                    "targetDeviceId": targetDeviceID.isEmpty ? "server-selected" : targetDeviceID,
                 ]
             )
             controlPlaneCoordinator.send(.receiverAudioReadinessPublished(intent))
@@ -145,6 +147,10 @@ extension PTTViewModel {
                 ]
             )
         }
+    }
+
+    private func receiverAudioReadinessTargetDeviceID(for contactID: UUID) -> String {
+        directQuicPeerDeviceID(for: contactID) ?? ""
     }
 
     func performPostWakeControlPlaneRepair(for contactID: UUID) async {

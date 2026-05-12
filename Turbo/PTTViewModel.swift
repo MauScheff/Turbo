@@ -154,7 +154,11 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var pttWakeRuntime = PTTWakeRuntimeState()
     var receiveExecutionRuntime = ReceiveExecutionRuntimeState()
     var mediaRuntime = MediaRuntimeState()
+    var backendConfigurationTask: Task<Void, Never>?
+    var backendConfigurationKey: String?
+    var backendConfigurationToken: UUID?
     var isPTTAudioSessionActive: Bool = false
+    var localAudioLevel: Double = 0
     var backendBootstrapRetryDelayNanoseconds: UInt64 = 2_000_000_000
     var disconnectRecoveryDelayNanoseconds: UInt64 = 5_000_000_000
     var remoteAudioInitialChunkTimeoutNanoseconds: UInt64 = 5_000_000_000
@@ -175,23 +179,33 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var localOnlySystemLeaveSuppressions: [UUID: LocalOnlySystemLeaveSuppression] = [:]
     var systemTransmitBeginRecoveryAttemptsByChannelUUID: [UUID: Int] = [:]
     var foregroundDirectTransmitDelegationsByContactID: [UUID: ForegroundDirectTransmitDelegation] = [:]
+    var recentOutgoingJoinAcceptedTokensByContactID: [UUID: RecentOutgoingJoinAcceptedToken] = [:]
+    var recentOutgoingRequestEvidenceByContactID: [UUID: RecentOutgoingRequestEvidence] = [:]
+    var recentPeerDeviceEvidenceByContactID: [UUID: RecentPeerDeviceEvidence] = [:]
+    var selectedContactPrewarmInFlight: Set<UUID> = []
+    var selectedContactPrewarmPipelineEnabled: Bool = true
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
     private var diagnosticsAutoPublishPendingTrigger: String?
     private let diagnosticsAutoPublishDelayNanoseconds: UInt64 = 8_000_000_000
     var disconnectRecoveryTask: Task<Void, Never>?
-    var automaticDiagnosticsPublishEnabled: Bool = true
+    var automaticDiagnosticsPublishEnabled: Bool = false
+    var stateCaptureTelemetryEnabled: Bool = false
     var conversationShortcutPolicy: ConversationShortcutPolicy = .load()
     var microphonePermission: AVAudioApplication.recordPermission = AVAudioApplication.shared.recordPermission
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
+    var hasLoadedNotificationAuthorizationStatus: Bool = false
     var localNetworkPreflightStatus: LocalNetworkPreflightStatus = .loadStored()
     var audioOutputPreference: AudioOutputPreference = .loadStored()
     var pendingTalkRequestNotificationHandle: String?
     var pendingTalkRequestNotificationShouldJoin: Bool = false
     var requestedExpandedCallContactID: UUID?
     var requestedExpandedCallSequence: Int = 0
+    var uiProjectionDiagnostics: UIProjectionDiagnostics = .unknown
     var selectedConnectionAttemptTimeoutTask: Task<Void, Never>?
     var selectedConnectionAttemptTimeoutKey: String?
-    var selectedConnectionAttemptTimeoutNanoseconds: UInt64 = 15_000_000_000
+    var selectedConnectionAttemptTimeoutNanoseconds: UInt64 = 5_000_000_000
+    var maxUnresolvedLocalJoinAttempts: Int = 2
+    var deferredAbsentMembershipRecoveryNoticeKeys: Set<String> = []
     var liveCallControlPlaneReconnectGraceStartedAt: Date?
     var liveCallControlPlaneReconnectGraceSeconds: TimeInterval = 10
     var directQuicProvisioningStatus: String = "not-started"
@@ -245,6 +259,20 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var localCallTelemetry: CallPeerTelemetry?
     var callPeerTelemetryByContactID: [UUID: CallPeerTelemetry] = [:]
 
+#if DEBUG
+    private static var automaticDiagnosticsPublishDefaultEnabled: Bool {
+        ProcessInfo.processInfo.environment["TURBO_IOS_AUTOMATIC_DIAGNOSTICS_PUBLISH"] == "1"
+    }
+
+    private static var reducerTransitionDiagnosticsEnabled: Bool {
+        ProcessInfo.processInfo.environment["TURBO_IOS_REDUCER_TRANSITION_DIAGNOSTICS"] == "1"
+    }
+
+    private static var selectedContactPrewarmPipelineDefaultEnabled: Bool {
+        ProcessInfo.processInfo.environment["TURBO_IOS_SELECTED_CONTACT_PREWARM"] != "0"
+    }
+#endif
+
     var localReceiverAudioReadinessPublications: [UUID: ReceiverAudioReadinessPublication] {
         get { controlPlaneCoordinator.state.localReceiverAudioReadinessPublications }
         set { controlPlaneCoordinator.replaceLocalReceiverAudioReadinessPublications(newValue) }
@@ -268,23 +296,34 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         self.pttSystemPolicyDefaults = pttSystemPolicyDefaults
         audioOutputPreference = .speaker
         UserDefaults.standard.set(AudioOutputPreference.speaker.rawValue, forKey: AudioOutputPreference.storageKey)
-        automaticDiagnosticsPublishEnabled = !Self.isRunningAutomatedTests
+#if DEBUG
+        automaticDiagnosticsPublishEnabled =
+            Self.automaticDiagnosticsPublishDefaultEnabled && !Self.isRunningAutomatedTests
+        stateCaptureTelemetryEnabled =
+            ProcessInfo.processInfo.environment["TURBO_IOS_STATE_CAPTURE_TELEMETRY"] == "1"
+        selectedContactPrewarmPipelineEnabled =
+            Self.selectedContactPrewarmPipelineDefaultEnabled && !Self.isRunningAutomatedTests
+#endif
         super.init()
         diagnostics.onHighSignalEvent = { [weak self] event in
             self?.handleHighSignalDiagnosticsEvent(event)
         }
-        let recordReducerTransition: @MainActor (ReducerTransitionReport) -> Void = { [weak self] report in
-            self?.diagnostics.recordReducerTransition(report)
+#if DEBUG
+        if Self.reducerTransitionDiagnosticsEnabled {
+            let recordReducerTransition: @MainActor (ReducerTransitionReport) -> Void = { [weak self] report in
+                self?.diagnostics.recordReducerTransition(report)
+            }
+            selectedPeerCoordinator.transitionReporter = recordReducerTransition
+            backendSyncCoordinator.transitionReporter = recordReducerTransition
+            controlPlaneCoordinator.transitionReporter = recordReducerTransition
+            receiveExecutionCoordinator.transitionReporter = recordReducerTransition
+            backendCommandCoordinator.transitionReporter = recordReducerTransition
+            pttCoordinator.transitionReporter = recordReducerTransition
+            transmitCoordinator.transitionReporter = recordReducerTransition
+            transmitTaskCoordinator.transitionReporter = recordReducerTransition
+            controlEventIngestor.transitionReporter = recordReducerTransition
         }
-        selectedPeerCoordinator.transitionReporter = recordReducerTransition
-        backendSyncCoordinator.transitionReporter = recordReducerTransition
-        controlPlaneCoordinator.transitionReporter = recordReducerTransition
-        receiveExecutionCoordinator.transitionReporter = recordReducerTransition
-        backendCommandCoordinator.transitionReporter = recordReducerTransition
-        pttCoordinator.transitionReporter = recordReducerTransition
-        transmitCoordinator.transitionReporter = recordReducerTransition
-        transmitTaskCoordinator.transitionReporter = recordReducerTransition
-        controlEventIngestor.transitionReporter = recordReducerTransition
+#endif
         selectedPeerCoordinator.effectHandler = { [weak self] effect in
             await self?.runSelectedPeerEffect(effect)
         }
@@ -356,6 +395,12 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func shouldPublishForegroundPresence(applicationState: UIApplication.State? = nil) -> Bool {
         (applicationState ?? currentApplicationState()) == .active
+    }
+
+    func shouldPublishPresenceHeartbeat(applicationState: UIApplication.State? = nil) -> Bool {
+        let state = applicationState ?? currentApplicationState()
+        return shouldPublishForegroundPresence(applicationState: state)
+            || shouldMaintainBackgroundControlPlane(applicationState: state)
     }
 
     private func beginProtectedBackgroundActivity(named name: String) -> @MainActor () -> Void {
@@ -460,6 +505,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         sessionCoordinator.pendingJoinContactID
     }
 
+    var pendingConnectAcceptedIncomingRequestContactId: UUID? {
+        sessionCoordinator.pendingConnectAcceptedIncomingRequestContactID
+    }
+
     var transmitProjection: TransmitProjection {
         TransmitProjection(
             controlPlane: transmitCoordinator.state,
@@ -484,6 +533,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
            transmitCoordinator.state.phase == .idle,
            !hasPendingBeginOrActiveTransmit {
             transmitRuntime.reconcileIdleState()
+            localAudioLevel = 0
         }
         transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
         updateStatusForSelectedContact()
@@ -1079,6 +1129,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         }
         let transmitSnapshot = transmitDomainSnapshot
         let systemState = pttCoordinator.state
+        let localJoinAttempt = sessionCoordinator.localJoinAttempt
 
         return LocalSessionDiagnosticsProjection(
             selectedContactID: selectedContactID?.uuidString,
@@ -1107,6 +1158,10 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             remoteReceiveActivityState: selectedRemoteReceiveActivity.map { String(describing: $0) },
             receiverAudioReadinessState: selectedReceiverAudioReadiness.map { String(describing: $0) },
             pendingAction: selectedSession.pendingAction,
+            localJoinAttempt: localJoinAttempt.map {
+                "contactID:\($0.contactID.uuidString),channelUUID:\($0.channelUUID.uuidString)"
+            },
+            localJoinAttemptIssuedCount: localJoinAttempt?.issuedCount ?? 0,
             reconciliationAction: selectedSession.reconciliationAction,
             hadConnectedSessionContinuity: selectedSession.hadConnectedSessionContinuity,
             controlPlaneReconnectGraceActive: selectedContactID.map {
@@ -1182,7 +1237,28 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         let projection = stateMachineProjection
         let selectedSession = projection.selectedSession
         let directQuic = selectedDirectQuicDiagnosticsSummary
-        return [
+        let pendingIncomingPushDescription: String
+        let pendingIncomingPushActivated: String
+        if let push = pttWakeRuntime.pendingIncomingPush {
+            let pushContactHandle = contacts.first(where: { $0.id == push.contactID })?.handle
+                ?? push.contactID.uuidString
+            pendingIncomingPushDescription = "\(push.payload.event.rawValue):\(pushContactHandle)"
+            pendingIncomingPushActivated = String(push.playbackMode == .systemActivated)
+        } else {
+            pendingIncomingPushDescription = "none"
+            pendingIncomingPushActivated = "false"
+        }
+        let localJoinAttemptDescription: String
+        let localJoinAttemptIssuedCount: String
+        if let attempt = sessionCoordinator.localJoinAttempt {
+            localJoinAttemptDescription =
+                "contactID:\(attempt.contactID.uuidString),channelUUID:\(attempt.channelUUID.uuidString)"
+            localJoinAttemptIssuedCount = String(attempt.issuedCount)
+        } else {
+            localJoinAttemptDescription = "none"
+            localJoinAttemptIssuedCount = "0"
+        }
+        var fields: [String: String] = [
             "identity": currentDevUserHandle,
             "selectedContact": selectedContact?.handle ?? "none",
             "selectedPeerPhase": selectedSession.selectedPhase,
@@ -1191,6 +1267,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "selectedPeerStatus": selectedSession.statusMessage,
             "selectedPeerCanTransmit": String(selectedSession.canTransmitNow),
             "pendingAction": selectedSession.pendingAction,
+            "localJoinAttempt": localJoinAttemptDescription,
+            "localJoinAttemptIssuedCount": localJoinAttemptIssuedCount,
             "selectedPeerReconciliationAction": selectedSession.reconciliationAction,
             "selectedPeerAutoJoinEnabled": String(
                 conversationShortcutPolicy.requesterAutoJoinOnPeerAcceptance
@@ -1218,12 +1296,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "pttTokenRegistrationKind": pttSystemPolicyCoordinator.state.tokenRegistrationKind,
             "pttUploadedBackendChannelId": pttSystemPolicyCoordinator.state.uploadedBackendChannelID ?? "none",
             "pttTokenUploadError": pttSystemPolicyCoordinator.state.lastTokenUploadError ?? "none",
-            "pendingIncomingPush": pttWakeRuntime.pendingIncomingPush.map { push in
-                "\(push.payload.event.rawValue):\(contacts.first(where: { $0.id == push.contactID })?.handle ?? push.contactID.uuidString)"
-            } ?? "none",
-            "pendingIncomingPushActivated": pttWakeRuntime.pendingIncomingPush.map {
-                String($0.playbackMode == .systemActivated)
-            } ?? "false",
+            "pendingIncomingPush": pendingIncomingPushDescription,
+            "pendingIncomingPushActivated": pendingIncomingPushActivated,
             "incomingWakeActivationState": selectedSession.incomingWakeActivationState ?? "none",
             "incomingWakeBufferedChunkCount": selectedSession.incomingWakeBufferedChunkCount.map(String.init(describing:)) ?? "0",
             "localJoinFailure": pttCoordinator.state.lastJoinFailure.map(String.init(describing:)) ?? "none",
@@ -1286,6 +1360,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "status": statusMessage,
             "backendStatus": backendStatusMessage
         ]
+        fields.merge(uiProjectionDiagnostics.fields) { _, new in new }
+        return fields
     }
 
     var diagnosticsSnapshot: String {
@@ -1366,15 +1442,22 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         diagnostics.captureState(
             reason: reason,
             fields: diagnosticsStateFields,
-            localSessionProjection: stateMachineProjection.localSession
+            localSessionProjection: stateMachineProjection.localSession,
+            uiProjection: uiProjectionDiagnostics
         )
         publishDiagnosticsStateTelemetry(reason: reason)
         scheduleAutomaticDiagnosticsPublish(trigger: reason)
     }
 
+    func updateUIProjectionDiagnostics(_ projection: UIProjectionDiagnostics, reason: String) {
+        guard uiProjectionDiagnostics != projection else { return }
+        uiProjectionDiagnostics = projection
+        captureDiagnosticsState(reason)
+    }
+
     private func publishDiagnosticsStateTelemetry(reason: String) {
 #if DEBUG
-        guard automaticDiagnosticsPublishEnabled else { return }
+        guard stateCaptureTelemetryEnabled else { return }
         sendTelemetryEvent(
             eventName: "ios.diagnostics.state_capture",
             severity: .debug,
@@ -1439,10 +1522,21 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                 self.diagnosticsAutoPublishPendingTrigger = nil
 
                 do {
+                    let startedAt = Date()
+#if DEBUG
+                    print("diagnostics auto publish started", "trigger=\(publishTrigger)")
+#endif
                     let response = try await self.publishDiagnosticsIfPossible(
                         trigger: "automatic:\(publishTrigger)",
                         recordSuccess: false
                     )
+#if DEBUG
+                    print(
+                        "diagnostics auto publish succeeded",
+                        "trigger=\(publishTrigger)",
+                        "duration=\(Date().timeIntervalSince(startedAt))"
+                    )
+#endif
                     self.sendTelemetryEvent(
                         eventName: "ios.diagnostics.auto_publish_succeeded",
                         severity: .debug,
@@ -1456,6 +1550,13 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
                 } catch is CancellationError {
                     return
                 } catch {
+#if DEBUG
+                    print(
+                        "diagnostics auto publish failed",
+                        "trigger=\(publishTrigger)",
+                        "error=\(error.localizedDescription)"
+                    )
+#endif
                     self.diagnostics.record(
                         .app,
                         level: .notice,

@@ -247,11 +247,11 @@ The practical split is:
 - backend latest diagnostics answers: "what did this exact app instance know and log in detail?"
 - merged diagnostics answers: "how do both devices' and backend facts line up?"
 
-Do not move full debug transcripts, audio packet logs, or complete local state dumps into Cloudflare telemetry. Those belong in backend latest diagnostics. Telemetry events should stay compact, queryable, and alert-friendly.
+Do not move full debug transcripts, audio packet logs, routine state captures, or complete local state dumps into Cloudflare telemetry. Those belong in local diagnostics and backend latest diagnostics, especially when shake-to-report uploads the transcript. Telemetry events should stay compact, queryable, and alert-friendly.
 
 ## Shake Reports
 
-Development, TestFlight, and production-like builds support shake-to-report. When a user shakes the phone, the app creates a local `incidentId`, records a `Shake report requested` marker in diagnostics, captures the current state projection, uploads the full latest diagnostics transcript to the backend, then emits `ios.problem_report.shake` with `alert=true` when telemetry is enabled.
+Development, TestFlight, and production-like builds support shake-to-report. When a user shakes the phone, the app creates a local `incidentId`, asks for optional context, records a `Shake report requested` marker in diagnostics, captures the current state projection, uploads the full latest diagnostics transcript to the backend, then emits `ios.problem_report.shake` with `alert=true` when telemetry is enabled.
 
 The user-facing UI stays generic. Operators should use these fields to inspect the report:
 
@@ -260,6 +260,7 @@ The user-facing UI stays generic. Operators should use these fields to inspect t
 - `uploadedAt`: identifies the report time.
 - `diagnosticsLatestURL`: points at the backend latest-diagnostics route for the reporting device.
 - `channelId` and `peerHandle`: present when the user had selected or active conversation context.
+- `userReport`: optional user-written context, present only when filled out.
 
 From a Discord alert, first open or copy the `diagnosticsLatestURL` from the message. If auth headers are needed, fetch the same report with:
 
@@ -308,7 +309,7 @@ Delivery behavior:
 - `devTraffic=true` events go only to the dev webhook when `TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK` is configured
 - the dev webhook receives both dev telemetry and dev alerts in one channel, labeled separately as `DEV STREAM` or `DEV ALERT`
 - the stream webhook receives a curated operator feed for non-dev traffic
-- `backend.presence.heartbeat` is intentionally excluded from the stream webhook to avoid Discord flood
+- `backend.presence.heartbeat` and explicitly opted-in `ios.diagnostics.state_capture` are intentionally excluded from Discord stream delivery to avoid flooding operator channels
 - the alerts webhook receives only non-dev alert-worthy events
 - the legacy `TURBO_TELEMETRY_DISCORD_WEBHOOK` name is still accepted as an alerts fallback during migration
 

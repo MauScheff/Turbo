@@ -786,10 +786,9 @@ enum SelectedPeerReducer {
         switch state.selectedPeerState.detail {
         case .peerReady, .waitingForPeer(reason: .peerReadyToConnect):
             return true
-        case .idle:
-            return state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight
-                || state.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest
         case .requested, .incomingRequest, .waitingForPeer, .wakeReady, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+            return false
+        case .idle:
             return false
         }
     }

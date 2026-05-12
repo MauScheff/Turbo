@@ -88,6 +88,12 @@ enum BackendSyncReducer {
             switch state {
             case .idle:
                 nextState.syncState.invalidateRemoteReceiverReadinessAfterWebSocketIdle()
+                if nextState.syncState.hasEstablishedConnection {
+                    effects.append(contentsOf: [
+                        .ensureWebSocketConnected,
+                        .refreshForegroundControlPlane(selectedContactID: selectedContactID),
+                    ])
+                }
             case .connecting:
                 break
             case .connected:

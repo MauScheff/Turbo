@@ -534,6 +534,9 @@ extension PTTViewModel {
         sessionCoordinator.markExplicitLeave(contactID: disconnectContactID)
         if let disconnectContactID {
             backendRuntime.clearBackendJoinSettling(for: disconnectContactID)
+            recentOutgoingJoinAcceptedTokensByContactID.removeValue(forKey: disconnectContactID)
+            recentOutgoingRequestEvidenceByContactID.removeValue(forKey: disconnectContactID)
+            recentPeerDeviceEvidenceByContactID.removeValue(forKey: disconnectContactID)
         }
         scheduleDisconnectRecovery(
             contactID: disconnectContactID,
@@ -834,6 +837,9 @@ extension PTTViewModel {
             guard selectedContactId == contactID else { return }
             sessionCoordinator.markReconciledTeardown(contactID: contactID)
             backendRuntime.clearBackendJoinSettling(for: contactID)
+            recentOutgoingJoinAcceptedTokensByContactID.removeValue(forKey: contactID)
+            recentOutgoingRequestEvidenceByContactID.removeValue(forKey: contactID)
+            recentPeerDeviceEvidenceByContactID.removeValue(forKey: contactID)
             diagnostics.record(
                 .state,
                 message: "Tearing down invalid local session after system mismatch",
@@ -847,6 +853,9 @@ extension PTTViewModel {
                   let backendChannelId = contact.backendChannelId else { return }
             sessionCoordinator.markReconciledTeardown(contactID: contactID)
             backendRuntime.clearBackendJoinSettling(for: contactID)
+            recentOutgoingJoinAcceptedTokensByContactID.removeValue(forKey: contactID)
+            recentOutgoingRequestEvidenceByContactID.removeValue(forKey: contactID)
+            recentPeerDeviceEvidenceByContactID.removeValue(forKey: contactID)
             diagnostics.record(
                 .state,
                 message: "Clearing stale backend membership without local session evidence",
@@ -941,11 +950,13 @@ extension PTTViewModel {
             return
         }
 
+        let localSessionAlreadyActive = localSessionEvidenceExists(
+            for: contact.id,
+            expectedChannelUUID: contact.channelId
+        )
         let stalePendingJoinWithoutLocalSessionEvidence =
-            sessionCoordinator.pendingJoinContactID == contact.id
-            && !systemSessionMatches(contact.id)
-            && !(isJoined && activeChannelId == contact.id)
-            && pttCoordinator.state.systemChannelUUID == nil
+            sessionCoordinator.localJoinAttempt?.contactID == contact.id
+            && !localSessionAlreadyActive
 
         if sessionCoordinator.pendingJoinContactID == contact.id,
            !stalePendingJoinWithoutLocalSessionEvidence {
@@ -968,10 +979,6 @@ extension PTTViewModel {
             captureDiagnosticsState("ptt-join:retry-stale-pending")
         }
 
-        let localSessionAlreadyActive =
-            systemSessionMatches(contact.id)
-            || (isJoined && activeChannelId == contact.id)
-            || pttCoordinator.state.systemChannelUUID == contact.channelId
         if localSessionAlreadyActive {
             sessionCoordinator.clearPendingJoin(for: contact.id)
             statusMessage = "Connecting..."
@@ -979,7 +986,7 @@ extension PTTViewModel {
             return
         }
 
-        sessionCoordinator.queueJoin(contactID: contact.id)
+        sessionCoordinator.queueJoin(contactID: contact.id, channelUUID: contact.channelId)
         do {
             try pttSystemClient.joinChannel(channelUUID: contact.channelId, name: "Chat with \(contact.name)")
             statusMessage = "Connecting..."

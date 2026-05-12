@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -14,7 +15,7 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the full Turbo non-UI test bundle and fail if the requested Swift test names do not execute."
+        description="Run targeted Turbo Swift Testing tests and fail if the requested test names do not execute."
     )
     parser.add_argument(
         "--name",
@@ -25,8 +26,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--project", default="Turbo.xcodeproj")
     parser.add_argument("--scheme", default="BeepBeep")
+    parser.add_argument("--test-target", default="TurboTests")
+    parser.add_argument("--test-source-dir", default="TurboTests")
     parser.add_argument("--destination", default="platform=iOS Simulator,name=iPhone 17")
-    parser.add_argument("--derived-data", default="/tmp/turbo-dd-targeted-swift-tests")
+    parser.add_argument(
+        "--derived-data",
+        default="",
+        help="Optional DerivedData path. By default Xcode's normal incremental DerivedData is reused.",
+    )
     parser.add_argument("--lock-file", default="/tmp/turbo-simulator-test.lock")
     return parser.parse_args()
 
@@ -124,20 +131,110 @@ def recover_simulator(udid: str) -> None:
     ensure_simulator_ready(udid)
 
 
-def build_xcodebuild_command(args: argparse.Namespace, destination: str) -> list[str]:
-    return [
+def discover_swift_testing_selectors(
+    source_dir: Path,
+    target: str,
+    names: list[str],
+) -> tuple[list[str], list[str]]:
+    requested = [name.removesuffix("()") for name in names]
+    exact_selectors: list[str] = []
+    lookup_names: list[str] = []
+    unresolved: list[str] = []
+
+    for name in requested:
+        if "/" in name:
+            selector = name if name.startswith(f"{target}/") else f"{target}/{name}"
+            exact_selectors.append(selector if selector.endswith(")") else f"{selector}()")
+            lookup_names.append(selector.rsplit("/", 1)[-1].removesuffix("()"))
+        else:
+            unresolved.append(name)
+
+    if not unresolved:
+        return exact_selectors, lookup_names
+
+    tests_by_name: dict[str, list[tuple[str, Path]]] = {}
+    type_pattern = re.compile(
+        r"^(?:@\w+(?:\([^)]*\))?\s*)*"
+        r"(?:public|internal|private|fileprivate)?\s*"
+        r"(?:struct|final\s+class|class|actor)\s+(\w+)"
+    )
+    test_pattern = re.compile(r"@Test(?:\([^)]*\))?\s+func\s+(\w+)")
+
+    for source_path in sorted(source_dir.glob("*.swift")):
+        current_suite: str | None = None
+        for line in source_path.read_text(encoding="utf-8").splitlines():
+            # Swift Testing suites are top-level types. Local helper types inside
+            # test functions are indented and must not replace the active suite.
+            if line[:1] and not line[:1].isspace():
+                type_match = type_pattern.search(line)
+                if type_match:
+                    current_suite = type_match.group(1)
+
+            test_match = test_pattern.search(line)
+            if test_match and current_suite:
+                tests_by_name.setdefault(test_match.group(1), []).append(
+                    (current_suite, source_path)
+                )
+
+    selectors = list(exact_selectors)
+    lookup_names.extend(unresolved)
+    missing: list[str] = []
+    ambiguous: list[str] = []
+    for name in unresolved:
+        matches = tests_by_name.get(name, [])
+        if not matches:
+            missing.append(name)
+            continue
+        if len(matches) > 1:
+            ambiguous.append(
+                f"{name} ({', '.join(f'{suite} in {path}' for suite, path in matches)})"
+            )
+            continue
+        suite, _ = matches[0]
+        selectors.append(f"{target}/{suite}/{name}()")
+
+    if missing or ambiguous:
+        if missing:
+            print(
+                "Could not find Swift Testing functions: " + ", ".join(missing),
+                file=sys.stderr,
+            )
+        if ambiguous:
+            print(
+                "Ambiguous Swift Testing function names; pass an exact selector: "
+                + "; ".join(ambiguous),
+                file=sys.stderr,
+            )
+        raise SystemExit(1)
+
+    return selectors, lookup_names
+
+
+def build_xcodebuild_command(
+    args: argparse.Namespace,
+    destination: str,
+    selectors: list[str],
+) -> list[str]:
+    command = [
         "xcodebuild",
         "-project", args.project,
         "-scheme", args.scheme,
         "-destination", destination,
-        "-skip-testing:TurboUITests",
-        "-parallel-testing-enabled", "NO",
-        "-maximum-concurrent-test-simulator-destinations", "1",
-        "-maximum-parallel-testing-workers", "1",
-        "-derivedDataPath", args.derived_data,
-        "test",
-        "CODE_SIGNING_ALLOWED=NO",
     ]
+    if args.derived_data:
+        command.extend(["-derivedDataPath", args.derived_data])
+    command.extend(
+        [
+            *[f"-only-testing:{selector}" for selector in selectors],
+            "-skip-testing:TurboUITests",
+            "-parallel-testing-enabled", "NO",
+            "-maximum-concurrent-test-simulator-destinations", "1",
+            "-maximum-parallel-testing-workers", "1",
+            "test",
+            "CODE_SIGNING_ALLOWED=NO",
+        ]
+    )
+    return command
 
 
 def run_xcodebuild(command: list[str], seen: dict[str, bool]) -> tuple[int, bool]:
@@ -208,6 +305,11 @@ def main() -> int:
     args = parse_args()
     repo_root = Path.cwd()
     lock_path = repo_root / args.lock_file
+    selectors, lookup_names = discover_swift_testing_selectors(
+        repo_root / args.test_source_dir,
+        args.test_target,
+        args.names,
+    )
 
     with acquire_lock(lock_path):
         destination, simulator_udid = resolve_simulator_destination(args.destination)
@@ -218,8 +320,8 @@ def main() -> int:
             )
             ensure_simulator_ready(simulator_udid)
 
-        command = build_xcodebuild_command(args, destination)
-        seen = {name: False for name in args.names}
+        command = build_xcodebuild_command(args, destination, selectors)
+        seen = {name: False for name in lookup_names}
         exit_code, saw_launch_preflight_failure = run_xcodebuild(command, seen)
 
         if exit_code != 0 and saw_launch_preflight_failure and simulator_udid:

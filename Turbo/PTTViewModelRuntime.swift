@@ -1373,7 +1373,6 @@ struct ReceiverAudioReadinessPublication: Equatable {
     func isSemanticallyEquivalent(to other: ReceiverAudioReadinessPublication) -> Bool {
         isReady == other.isReady
             && peerWasRoutable == other.peerWasRoutable
-            && telemetry == other.telemetry
     }
 }
 
