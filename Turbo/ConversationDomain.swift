@@ -1041,6 +1041,7 @@ struct ConversationDerivationContext: Equatable {
     let contactID: UUID
     let selectedContactID: UUID?
     let baseState: ConversationState
+    let relationship: PairRelationshipState
     let contactName: String
     let contactIsOnline: Bool
     let contactPresence: ContactPresencePresentation
@@ -1059,6 +1060,7 @@ struct ConversationDerivationContext: Equatable {
     let directMediaPathActive: Bool
     let firstTalkStartupProfile: FirstTalkStartupProfile
     let incomingWakeActivationState: IncomingWakeActivationState?
+    let backendJoinSettling: Bool
     let backendSignalingJoinRecoveryActive: Bool
     let controlPlaneReconnectGraceActive: Bool
     let hadConnectedSessionContinuity: Bool
@@ -1068,6 +1070,7 @@ struct ConversationDerivationContext: Equatable {
         contactID: UUID,
         selectedContactID: UUID?,
         baseState: ConversationState,
+        relationship: PairRelationshipState = .none,
         contactName: String,
         contactIsOnline: Bool,
         contactPresence: ContactPresencePresentation? = nil,
@@ -1092,6 +1095,7 @@ struct ConversationDerivationContext: Equatable {
         directMediaPathActive: Bool = false,
         firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm,
         incomingWakeActivationState: IncomingWakeActivationState? = nil,
+        backendJoinSettling: Bool = false,
         backendSignalingJoinRecoveryActive: Bool = false,
         controlPlaneReconnectGraceActive: Bool = false,
         hadConnectedSessionContinuity: Bool = false,
@@ -1100,6 +1104,7 @@ struct ConversationDerivationContext: Equatable {
         self.contactID = contactID
         self.selectedContactID = selectedContactID
         self.baseState = baseState
+        self.relationship = relationship
         self.contactName = contactName
         self.contactIsOnline = contactIsOnline
         self.contactPresence = contactPresence ?? (contactIsOnline ? .connected : .offline)
@@ -1126,6 +1131,7 @@ struct ConversationDerivationContext: Equatable {
         self.directMediaPathActive = directMediaPathActive
         self.firstTalkStartupProfile = firstTalkStartupProfile
         self.incomingWakeActivationState = incomingWakeActivationState
+        self.backendJoinSettling = backendJoinSettling
         self.backendSignalingJoinRecoveryActive = backendSignalingJoinRecoveryActive
         self.controlPlaneReconnectGraceActive = controlPlaneReconnectGraceActive
         self.hadConnectedSessionContinuity = hadConnectedSessionContinuity
@@ -1182,6 +1188,7 @@ struct ConversationDerivationContext: Equatable {
     }
 
     var backendShowsConnectablePeerRecovery: Bool {
+        guard !backendMembershipIsStaleWithoutLocalSessionEvidence else { return false }
         guard let channel else { return false }
         if channel.membership.hasPeerMembership {
             return true
@@ -1200,17 +1207,20 @@ struct ConversationDerivationContext: Equatable {
     }
 
     var backendExplicitlyInactiveWithoutMembership: Bool {
+        guard !backendJoinSettling else { return false }
         guard let channel else { return false }
         guard channel.membership == .absent else { return false }
         return channel.readinessStatus == .inactive
     }
 
     var channelHasRequestRelationship: Bool {
+        guard relationship == .none else { return true }
         guard let relationship = channel?.requestRelationship else { return false }
         return relationship != .none
     }
 
     var pendingJoinHasTerminalBackendMembershipLoss: Bool {
+        guard !backendJoinSettling else { return false }
         guard pendingAction.pendingJoinContactID == contactID else { return false }
         guard localSessionReadiness != .none else { return false }
         guard let channel else { return false }
@@ -1316,6 +1326,7 @@ struct ConversationDerivationContext: Equatable {
         guard pendingAction == .none else { return false }
         guard !explicitLeaveRequested else { return false }
         guard channel?.requestRelationship == TurboRequestRelationship.none else { return false }
+        guard remoteAudioReadinessState != .waiting else { return false }
         guard case .both(let peerDeviceConnected, _, let readinessStatus) = backendChannelReadiness else {
             return false
         }
@@ -1482,6 +1493,14 @@ enum ConversationStateMachine {
         let connectedControlPlane = context.connectedControlPlaneProjection
         let fallbackState: () -> SelectedPeerState = {
             let localSessionActive = durableSession.localSessionPresent
+
+            if context.backendMembershipIsStaleWithoutLocalSessionEvidence {
+                return makeState(
+                    .idle(isOnline: context.contactIsOnline),
+                    context.idleAvailabilityStatusMessage,
+                    false
+                )
+            }
 
             if !localSessionActive, context.pendingConnectAcceptedIncomingRequest {
                 return makeState(
@@ -1999,6 +2018,7 @@ enum ConversationStateMachine {
         case .absent:
             if localSessionActive,
                context.channel != nil,
+               !context.backendJoinSettling,
                !context.systemMismatchChannelMatchesContact,
                !context.unattributedJoinedSystemMismatch,
                !context.channelHasRequestRelationship,
@@ -2238,6 +2258,10 @@ private extension ConversationDerivationContext {
         let authoritativeRecoveryReady =
             authoritativeBackendReady
             || backendReadyAuthoritativelySatisfiesWakeCapability
+
+        if peerReadyHintOptimisticallySatisfiesConnectedUI {
+            return .ready
+        }
 
         if backendSignalingJoinRecoveryActive,
            !shouldPreserveConnectedReadinessDuringControlPlaneTransition,
@@ -2498,6 +2522,28 @@ private extension ConversationDerivationContext {
         }
 
         return true
+    }
+
+    var peerReadyHintOptimisticallySatisfiesConnectedUI: Bool {
+        guard localSessionReadiness == .aligned else { return false }
+        guard localMediaWarmupState == .ready || directMediaPathActive else { return false }
+        guard directMediaPathActive || localRelayTransportReady else { return false }
+        guard remoteAudioReadinessState == .ready,
+              case .wakeCapable = remoteWakeCapabilityState else {
+            return false
+        }
+        guard case .both(let peerDeviceConnected, let canTransmit, let readinessStatus) = backendChannelReadiness,
+              canTransmit,
+              peerDeviceConnected || directMediaPathActive else {
+            return false
+        }
+
+        switch readinessStatus {
+        case .waitingForSelf, .waitingForPeer, .ready:
+            return true
+        case .inactive, .selfTransmitting, .peerTransmitting, .unknown, .none:
+            return false
+        }
     }
 
     var startingTransmitStage: StartingTransmitStage? {

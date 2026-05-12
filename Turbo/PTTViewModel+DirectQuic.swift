@@ -30,6 +30,7 @@ extension PTTViewModel {
     }
 
     func shouldUseDirectQuicTransport(for contactID: UUID) -> Bool {
+        guard !isDirectPathRelayOnlyForced else { return false }
         guard !TurboMediaRelayDebugOverride.isForced() else { return false }
         guard mediaRuntime.directQuicProbeController != nil else { return false }
         return mediaRuntime.directQuicUpgrade.attempt(for: contactID)?.isDirectActive == true
@@ -631,6 +632,120 @@ extension PTTViewModel {
 
     func shouldRequestAutomaticDirectQuicProbe(for contactID: UUID) -> Bool {
         automaticDirectQuicProbeBlockReason(for: contactID) == nil
+    }
+
+    func selectedContactDirectQuicPrewarmBlockReason(for contactID: UUID) -> String? {
+        directQuicSelectionPrewarmBlockReason(
+            for: contactID,
+            requireSelectedContact: true
+        )
+    }
+
+    func shouldRequestSelectedContactDirectQuicPrewarm(for contactID: UUID) -> Bool {
+        selectedContactDirectQuicPrewarmBlockReason(for: contactID) == nil
+    }
+
+    func directQuicSelectionPrewarmBlockReason(
+        for contactID: UUID,
+        requireSelectedContact: Bool
+    ) -> String? {
+        if isDirectPathRelayOnlyForced {
+            return "relay-only-forced"
+        }
+        if TurboMediaRelayDebugOverride.isForced() {
+            return "media-relay-forced"
+        }
+        if isDirectQuicAutoUpgradeDisabledForDebug {
+            return "auto-upgrade-disabled"
+        }
+        if backendRuntime.signalingJoinRecoveryTask != nil {
+            return "signaling-join-recovery-active"
+        }
+        if sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
+            return "leave-in-flight"
+        }
+        if !backendAdvertisesDirectQuicUpgrade {
+            return "backend-capability-disabled"
+        }
+        if currentApplicationState() != .active,
+           !hasActiveBackgroundPTTFlowOwningDirectQuic(for: contactID) {
+            return "background-idle"
+        }
+        guard let backend = backendServices else {
+            return "backend-unavailable"
+        }
+        if requireSelectedContact, selectedContactId != contactID {
+            return "not-selected-contact"
+        }
+        guard let contact = contacts.first(where: { $0.id == contactID }) else {
+            return "contact-missing"
+        }
+        guard contact.backendChannelId != nil,
+              contact.remoteUserId != nil else {
+            return "channel-metadata-missing"
+        }
+        if mediaRuntime.directQuicUpgrade.attempt(for: contactID) != nil {
+            return "attempt-active"
+        }
+        if mediaRuntime.directQuicUpgrade.attemptByContactID.contains(where: { activeContactID, _ in
+            activeContactID != contactID
+        }) {
+            return "other-attempt-active"
+        }
+        guard mediaRuntime.directQuicUpgrade.retryBackoffState(for: contactID) == nil else {
+            return "retry-backoff"
+        }
+        guard let peerDeviceID = directQuicPeerDeviceID(for: contactID) else {
+            return "peer-device-missing"
+        }
+        guard directQuicAttemptRole(
+            localDeviceID: backend.deviceID,
+            peerDeviceID: peerDeviceID
+        ) == .listenerOfferer else {
+            return "not-listener-offerer"
+        }
+        guard backendPeerDirectQuicFingerprint(for: contactID) != nil else {
+            return "peer-identity-missing"
+        }
+        return nil
+    }
+
+    func maybeStartSelectedContactDirectQuicPrewarm(
+        for contactID: UUID,
+        reason: String
+    ) async {
+        let prewarmReason = "selection-direct-quic-prewarm-\(reason)"
+        if let blockReason = selectedContactDirectQuicPrewarmBlockReason(for: contactID) {
+            if blockReason == "relay-only-forced" {
+                return
+            }
+            diagnostics.record(
+                .media,
+                message: "Selection Direct QUIC prewarm skipped",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                    "blockReason": blockReason,
+                ]
+            )
+            if blockReason == "not-listener-offerer" {
+                await requestRemoteDirectQuicOfferIfPossible(
+                    for: contactID,
+                    reason: prewarmReason
+                )
+            }
+            return
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Selection Direct QUIC prewarm requested",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "reason": reason,
+            ]
+        )
+        await maybeStartDirectQuicProbe(for: contactID)
     }
 
     func directQuicFirstTalkWarmupBlockReason(for contactID: UUID) -> String? {
@@ -1414,7 +1529,7 @@ extension PTTViewModel {
                 onReceiverPrewarmRequest: { [weak self] payload in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        await self.handleIncomingDirectQuicReceiverPrewarmRequest(
+                        await self.ingestDirectQuicReceiverPrewarmRequest(
                             payload,
                             contactID: contactID,
                             attemptID: attemptID
@@ -1424,7 +1539,7 @@ extension PTTViewModel {
                 onReceiverPrewarmAck: { [weak self] payload in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        self.handleDirectQuicReceiverPrewarmAck(
+                        await self.ingestDirectQuicReceiverPrewarmAck(
                             payload,
                             contactID: contactID,
                             attemptID: attemptID
@@ -1434,17 +1549,16 @@ extension PTTViewModel {
                 onPathClosing: { [weak self] payload in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        await self.handleIncomingDirectQuicPathClosing(
+                        await self.ingestDirectQuicPathClosing(
                             payload,
-                            contactID: contactID,
-                            attemptID: attemptID
+                            contactID: contactID
                         )
                     }
                 },
                 onWarmPong: { [weak self] pingID in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        self.handleDirectQuicWarmPong(
+                        await self.ingestDirectQuicWarmPong(
                             pingID,
                             contactID: contactID,
                             attemptID: attemptID
@@ -1538,7 +1652,18 @@ extension PTTViewModel {
 
         if shouldUseDirectQuicTransport(for: contactID),
            await sendDirectQuicReceiverPrewarmRequest(for: contactID, reason: reason) {
+            Task { @MainActor [weak self] in
+                _ = await self?.sendMediaRelayReceiverPrewarmRequestIfPossible(
+                    for: contactID,
+                    reason: reason,
+                    requestID: self?.mediaRuntime.receiverPrewarmRequestID(for: contactID)
+                )
+            }
             await sendDirectQuicWarmPingIfPossible(for: contactID, reason: reason)
+            return
+        }
+
+        if await sendMediaRelayReceiverPrewarmRequestIfPossible(for: contactID, reason: reason) {
             return
         }
 
@@ -1657,13 +1782,153 @@ extension PTTViewModel {
         if sent, sendWarmPing {
             await sendDirectQuicWarmPingIfPossible(for: contactID, reason: transmitPrepareReason)
         }
+        if sent {
+            Task { @MainActor [weak self] in
+                _ = await self?.sendMediaRelayReceiverPrewarmRequestIfPossible(
+                    for: contactID,
+                    reason: transmitPrepareReason,
+                    requestID: requestID
+                )
+            }
+        } else {
+            _ = await sendMediaRelayReceiverPrewarmRequestIfPossible(
+                for: contactID,
+                reason: transmitPrepareReason,
+                requestID: requestID,
+                recordOutboundRequestID: true
+            )
+        }
         return sent
+    }
+
+    @discardableResult
+    func sendMediaRelayReceiverPrewarmRequestIfPossible(
+        for contactID: UUID,
+        reason: String,
+        requestID: String? = nil,
+        recordOutboundRequestID: Bool = false
+    ) async -> Bool {
+        guard !isDirectPathRelayOnlyForced else { return false }
+        guard let backend = backendServices,
+              let contact = contacts.first(where: { $0.id == contactID }),
+              let channelID = contact.backendChannelId,
+              let peerDeviceID = directQuicPeerDeviceID(for: contactID) else {
+            return false
+        }
+        let requestID = requestID ?? mediaRuntime.receiverPrewarmRequestID(for: contactID)
+        if recordOutboundRequestID {
+            mediaRuntime.replaceReceiverPrewarmRequestID(
+                for: contactID,
+                requestID: requestID
+            )
+        }
+        let payload = DirectQuicReceiverPrewarmPayload(
+            requestId: requestID,
+            channelId: channelID,
+            fromDeviceId: backend.deviceID,
+            reason: reason,
+            directQuicAttemptId: directQuicAttempt(for: contactID)?.attemptId
+        )
+        guard let relayClient = await mediaRelayClientIfEnabled(
+            contactID: contactID,
+            channelID: channelID,
+            peerDeviceID: peerDeviceID,
+            missingConfigMessage: "Media relay prewarm skipped because relay config is missing",
+            connectingMessage: "Connecting media relay for prewarm",
+            selectedMessage: "Media relay prewarm path selected",
+            failureMessage: "Media relay prewarm connection failed",
+            fromUserIDForIncoming: { contact.remoteUserId ?? "" }
+        ) else {
+            return false
+        }
+        do {
+            try await relayClient.sendReceiverPrewarmRequest(payload)
+            diagnostics.record(
+                .media,
+                message: "Media relay receiver prewarm request sent",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "peerDeviceId": peerDeviceID,
+                    "requestId": requestID,
+                    "reason": reason,
+                ]
+            )
+            return true
+        } catch {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Media relay receiver prewarm request failed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "peerDeviceId": peerDeviceID,
+                    "requestId": requestID,
+                    "error": error.localizedDescription,
+                ]
+            )
+            return false
+        }
+    }
+
+    @discardableResult
+    func sendMediaRelayReceiverPrewarmAckIfPossible(
+        _ payload: DirectQuicReceiverPrewarmPayload,
+        contactID: UUID
+    ) async -> Bool {
+        guard !isDirectPathRelayOnlyForced else { return false }
+        guard let peerDeviceID = directQuicPeerDeviceID(for: contactID, fallback: payload.fromDeviceId),
+              let contact = contacts.first(where: { $0.id == contactID }) else {
+            return false
+        }
+        guard let relayClient = await mediaRelayClientIfEnabled(
+            contactID: contactID,
+            channelID: payload.channelId,
+            peerDeviceID: peerDeviceID,
+            missingConfigMessage: "Media relay prewarm ack skipped because relay config is missing",
+            connectingMessage: "Connecting media relay for prewarm ack",
+            selectedMessage: "Media relay prewarm ack path selected",
+            failureMessage: "Media relay prewarm ack connection failed",
+            fromUserIDForIncoming: { contact.remoteUserId ?? "" }
+        ) else {
+            return false
+        }
+        do {
+            try await relayClient.sendReceiverPrewarmAck(payload)
+            diagnostics.record(
+                .media,
+                message: "Media relay receiver prewarm ack sent",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": payload.channelId,
+                    "peerDeviceId": peerDeviceID,
+                    "requestId": payload.requestId,
+                ]
+            )
+            return true
+        } catch {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Media relay receiver prewarm ack failed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": payload.channelId,
+                    "peerDeviceId": peerDeviceID,
+                    "requestId": payload.requestId,
+                    "error": error.localizedDescription,
+                ]
+            )
+            return false
+        }
     }
 
     func handleIncomingDirectQuicReceiverPrewarmRequest(
         _ payload: DirectQuicReceiverPrewarmPayload,
         contactID: UUID,
-        attemptID: String
+        attemptID: String,
+        source: ControlEventSource = .directQuicDataChannel
     ) async {
         let isFirstDelivery = mediaRuntime.markReceiverPrewarmRequestHandled(payload.requestId)
         diagnostics.record(
@@ -1694,39 +1959,45 @@ extension PTTViewModel {
             )
         }
 
-        guard let controller = mediaRuntime.directQuicProbeController else { return }
-        do {
-            try await controller.sendReceiverPrewarmAck(payload)
-            diagnostics.record(
-                .media,
-                message: "Direct QUIC receiver prewarm ack sent",
-                metadata: [
-                    "contactId": contactID.uuidString,
-                    "channelId": payload.channelId,
-                    "attemptId": attemptID,
-                    "requestId": payload.requestId,
-                ]
-            )
-        } catch {
-            diagnostics.record(
-                .media,
-                level: .error,
-                message: "Direct QUIC receiver prewarm ack failed",
-                metadata: [
-                    "contactId": contactID.uuidString,
-                    "channelId": payload.channelId,
-                    "attemptId": attemptID,
-                    "requestId": payload.requestId,
-                    "error": error.localizedDescription,
-                ]
-            )
+        switch source {
+        case .mediaRelay:
+            _ = await sendMediaRelayReceiverPrewarmAckIfPossible(payload, contactID: contactID)
+        default:
+            guard let controller = mediaRuntime.directQuicProbeController else { return }
+            do {
+                try await controller.sendReceiverPrewarmAck(payload)
+                diagnostics.record(
+                    .media,
+                    message: "Direct QUIC receiver prewarm ack sent",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": payload.channelId,
+                        "attemptId": attemptID,
+                        "requestId": payload.requestId,
+                    ]
+                )
+            } catch {
+                diagnostics.record(
+                    .media,
+                    level: .error,
+                    message: "Direct QUIC receiver prewarm ack failed",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": payload.channelId,
+                        "attemptId": attemptID,
+                        "requestId": payload.requestId,
+                        "error": error.localizedDescription,
+                    ]
+                )
+            }
         }
     }
 
     func handleDirectQuicReceiverPrewarmAck(
         _ payload: DirectQuicReceiverPrewarmPayload,
         contactID: UUID,
-        attemptID: String
+        attemptID: String,
+        source: ControlEventSource = .directQuicDataChannel
     ) {
         mediaRuntime.markReceiverPrewarmAckReceived(
             contactID: contactID,
@@ -1748,6 +2019,7 @@ extension PTTViewModel {
                 "channelId": payload.channelId,
                 "attemptId": attemptID,
                 "requestId": payload.requestId,
+                "source": source.rawValue,
             ]
         )
         updateStatusForSelectedContact()
@@ -2501,6 +2773,16 @@ extension PTTViewModel {
                 "debugBypass": String(payload.debugBypass == true),
             ]
 
+            if TurboJoinAcceptedControlSignal.matches(payload) {
+                handleIncomingJoinAcceptedControlSignal(
+                    envelope,
+                    payload: payload,
+                    contactID: contactID,
+                    metadata: metadata
+                )
+                return
+            }
+
             guard envelope.toDeviceId == backend.deviceID,
                   payload.toDeviceId == backend.deviceID,
                   payload.fromDeviceId == envelope.fromDeviceId,
@@ -2540,11 +2822,21 @@ extension PTTViewModel {
                 return
             }
 
-            if let blockReason = automaticDirectQuicProbeBlockReason(for: contactID) {
+            let allowsSelectionPrewarmRequest = payload.reason.hasPrefix("selection-direct-quic-prewarm-")
+            let blockReason = allowsSelectionPrewarmRequest
+                ? directQuicSelectionPrewarmBlockReason(
+                    for: contactID,
+                    requireSelectedContact: false
+                )
+                : automaticDirectQuicProbeBlockReason(for: contactID)
+            if let blockReason {
                 metadata["blockReason"] = blockReason
+                let message = allowsSelectionPrewarmRequest
+                    ? "Ignored Direct QUIC upgrade request because selection prewarm is blocked"
+                    : "Ignored Direct QUIC upgrade request because automatic probe is blocked"
                 diagnostics.record(
                     .websocket,
-                    message: "Ignored Direct QUIC upgrade request because automatic probe is blocked",
+                    message: message,
                     metadata: metadata
                 )
                 return
@@ -2574,6 +2866,117 @@ extension PTTViewModel {
                     "error": error.localizedDescription,
                 ]
             )
+        }
+    }
+
+    func handleIncomingJoinAcceptedControlSignal(
+        _ envelope: TurboSignalEnvelope,
+        payload: TurboDirectQuicUpgradeRequestPayload,
+        contactID: UUID,
+        metadata: [String: String]
+    ) {
+        guard let backend = backendServices else { return }
+        var metadata = metadata
+
+        guard envelope.toDeviceId == backend.deviceID,
+              payload.fromDeviceId == envelope.fromDeviceId,
+              payload.channelId == envelope.channelId else {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Rejected join accepted control signal because envelope and payload disagree",
+                metadata: metadata
+            )
+            return
+        }
+
+        guard let contact = contacts.first(where: { $0.id == contactID }) else {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Rejected join accepted control signal because contact is missing",
+                metadata: metadata
+            )
+            return
+        }
+
+        if let remoteUserId = contact.remoteUserId,
+           remoteUserId != envelope.fromUserId {
+            metadata["expectedRemoteUserId"] = remoteUserId
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Rejected join accepted control signal from unexpected peer user",
+                metadata: metadata
+            )
+            return
+        }
+
+        if let outgoingInvite = outgoingInviteByContactID[contactID],
+           outgoingInvite.inviteId != payload.requestId {
+            metadata["currentInviteId"] = outgoingInvite.inviteId
+            diagnostics.record(
+                .websocket,
+                message: "Ignored stale join accepted control signal",
+                metadata: metadata
+            )
+            return
+        }
+
+        let relationship = relationshipState(for: contactID)
+        guard relationship.isOutgoingRequest || outgoingInviteByContactID[contactID] != nil else {
+            diagnostics.record(
+                .websocket,
+                message: "Ignored join accepted control signal without a local outgoing request",
+                metadata: metadata
+            )
+            return
+        }
+
+        guard selectedContactId == contactID else {
+            diagnostics.record(
+                .websocket,
+                message: "Ignored join accepted control signal for non-selected contact",
+                metadata: metadata
+            )
+            return
+        }
+
+        guard !backendLeaveIsInFlight(for: contactID) else {
+            metadata["pendingAction"] = String(describing: sessionCoordinator.pendingAction)
+            metadata["activeBackendOperation"] = String(describing: backendCommandCoordinator.state.activeOperation)
+            diagnostics.record(
+                .websocket,
+                level: .notice,
+                message: "Ignored join accepted control signal while leave is active",
+                metadata: metadata
+            )
+            return
+        }
+
+        diagnostics.record(
+            .websocket,
+            message: "Join accepted control signal received",
+            metadata: metadata
+        )
+
+        backendRuntime.markBackendJoinSettling(for: contactID)
+        let localSessionAlreadyActive =
+            systemSessionMatches(contactID)
+            || (isJoined && activeChannelId == contactID)
+            || sessionCoordinator.pendingJoinContactID == contactID
+        if !localSessionAlreadyActive {
+            joinPTTChannel(for: contact)
+        } else {
+            updateStatusForSelectedContact()
+            captureDiagnosticsState("backend-signal:join-accepted-dedup")
+        }
+
+        Task { @MainActor [weak self, contact] in
+            guard let self else { return }
+            await self.reassertBackendJoin(for: contact)
+            await self.refreshContactSummaries()
+            await self.refreshChannelState(for: contactID)
         }
     }
 

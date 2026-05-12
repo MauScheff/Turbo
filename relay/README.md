@@ -1,11 +1,11 @@
 # Turbo Media Relay
 
-Small canary relay for Turbo audio frames.
+Small canary relay for Turbo audio and peer hint frames.
 
 The relay is intentionally dumb:
 
 - Unison remains the control plane.
-- The relay only validates a shared canary token, joins two device IDs into a session, and forwards encrypted audio payloads.
+- The relay only validates a shared canary token, joins two device IDs into a session, and forwards encrypted audio payloads plus non-authoritative peer hint frames.
 - QUIC is tried first by the iOS client, then TCP/TLS, then the app falls back to the existing Unison/WebSocket relay.
 
 ## Runtime Config

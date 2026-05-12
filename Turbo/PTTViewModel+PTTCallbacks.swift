@@ -542,7 +542,6 @@ extension PTTViewModel {
             if let contactID,
                sessionCoordinator.pendingJoinContactID == contactID {
                 sessionCoordinator.clearAfterSuccessfulJoin(for: contactID)
-                backendRuntime.clearBackendJoinSettling(for: contactID)
                 updateStatusForSelectedContact()
                 diagnostics.record(
                     .pushToTalk,
@@ -581,7 +580,6 @@ extension PTTViewModel {
                     if let contactID {
                         if self.sessionCoordinator.pendingJoinContactID == contactID {
                             self.sessionCoordinator.clearAfterSuccessfulJoin(for: contactID)
-                            self.backendRuntime.clearBackendJoinSettling(for: contactID)
                             self.updateStatusForSelectedContact()
                             self.diagnostics.record(
                                 .pushToTalk,
@@ -593,7 +591,7 @@ extension PTTViewModel {
                                 ]
                             )
                         }
-                        Task { [weak self] in
+                        Task(priority: .userInitiated) { [weak self] in
                             await self?.prewarmLocalMediaIfNeeded(for: contactID)
                         }
                     }

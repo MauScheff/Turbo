@@ -646,6 +646,34 @@ nonisolated enum TurboMediaRelayTransport: String, Codable, Equatable, Sendable 
     case tcpTls = "tcp-tls"
 }
 
+nonisolated enum TurboMediaRelayControlKind: String, Codable, Equatable, Sendable {
+    case receiverPrewarmRequest = "receiver-prewarm-request"
+    case receiverPrewarmAck = "receiver-prewarm-ack"
+}
+
+nonisolated struct TurboMediaRelayControlFrame: Codable, Equatable, Sendable {
+    let kind: TurboMediaRelayControlKind
+    let payload: String
+
+    static func receiverPrewarmRequest(
+        _ payload: DirectQuicReceiverPrewarmPayload
+    ) throws -> TurboMediaRelayControlFrame {
+        TurboMediaRelayControlFrame(
+            kind: .receiverPrewarmRequest,
+            payload: try DirectQuicReceiverPrewarmPayloadCodec.encode(payload)
+        )
+    }
+
+    static func receiverPrewarmAck(
+        _ payload: DirectQuicReceiverPrewarmPayload
+    ) throws -> TurboMediaRelayControlFrame {
+        TurboMediaRelayControlFrame(
+            kind: .receiverPrewarmAck,
+            payload: try DirectQuicReceiverPrewarmPayloadCodec.encode(payload)
+        )
+    }
+}
+
 nonisolated enum TurboMediaRelayFrame: Codable, Equatable {
     case join(
         sessionId: String,
@@ -665,6 +693,12 @@ nonisolated enum TurboMediaRelayFrame: Codable, Equatable {
         sentAtMs: Int64,
         payload: String
     )
+    case control(
+        sessionId: String,
+        senderDeviceId: String,
+        kind: TurboMediaRelayControlKind,
+        payload: String
+    )
     case peerUnavailable(sessionId: String, deviceId: String)
     case error(message: String)
 
@@ -680,12 +714,14 @@ nonisolated enum TurboMediaRelayFrame: Codable, Equatable {
         case token
         case transport
         case message
+        case kind
     }
 
     private enum FrameType: String, Codable {
         case join
         case joinAck = "join-ack"
         case audio
+        case control
         case peerUnavailable = "peer-unavailable"
         case error
     }
@@ -710,6 +746,12 @@ nonisolated enum TurboMediaRelayFrame: Codable, Equatable {
             try container.encode(senderDeviceId, forKey: .senderDeviceId)
             try container.encode(sequenceNumber, forKey: .sequenceNumber)
             try container.encode(sentAtMs, forKey: .sentAtMs)
+            try container.encode(payload, forKey: .payload)
+        case .control(let sessionId, let senderDeviceId, let kind, let payload):
+            try container.encode(FrameType.control, forKey: .type)
+            try container.encode(sessionId, forKey: .sessionId)
+            try container.encode(senderDeviceId, forKey: .senderDeviceId)
+            try container.encode(kind, forKey: .kind)
             try container.encode(payload, forKey: .payload)
         case .peerUnavailable(let sessionId, let deviceId):
             try container.encode(FrameType.peerUnavailable, forKey: .type)
@@ -743,6 +785,13 @@ nonisolated enum TurboMediaRelayFrame: Codable, Equatable {
                 senderDeviceId: try container.decode(String.self, forKey: .senderDeviceId),
                 sequenceNumber: try container.decode(UInt64.self, forKey: .sequenceNumber),
                 sentAtMs: try container.decode(Int64.self, forKey: .sentAtMs),
+                payload: try container.decode(String.self, forKey: .payload)
+            )
+        case .control:
+            self = .control(
+                sessionId: try container.decode(String.self, forKey: .sessionId),
+                senderDeviceId: try container.decode(String.self, forKey: .senderDeviceId),
+                kind: try container.decode(TurboMediaRelayControlKind.self, forKey: .kind),
                 payload: try container.decode(String.self, forKey: .payload)
             )
         case .peerUnavailable:
@@ -783,6 +832,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
     private let localDeviceId: String
     private let peerDeviceId: String
     private let onIncomingAudioPayload: @Sendable (String) async -> Void
+    private let onIncomingControlFrame: (@Sendable (TurboMediaRelayControlFrame) async -> Void)?
     private let onDisconnected: (@Sendable () async -> Void)?
     private let reportEvent: (@Sendable (String, [String: String]) async -> Void)?
     private let queue = DispatchQueue(label: "turbo.media-relay-client")
@@ -799,6 +849,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         localDeviceId: String,
         peerDeviceId: String,
         onIncomingAudioPayload: @escaping @Sendable (String) async -> Void,
+        onIncomingControlFrame: (@Sendable (TurboMediaRelayControlFrame) async -> Void)? = nil,
         onDisconnected: (@Sendable () async -> Void)? = nil,
         reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil
     ) {
@@ -807,6 +858,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         self.localDeviceId = localDeviceId
         self.peerDeviceId = peerDeviceId
         self.onIncomingAudioPayload = onIncomingAudioPayload
+        self.onIncomingControlFrame = onIncomingControlFrame
         self.onDisconnected = onDisconnected
         self.reportEvent = reportEvent
     }
@@ -846,6 +898,33 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
             throw DirectQuicProbeError.connectionFailed("media relay peer is unavailable")
         }
         try await send(frame, on: connection)
+    }
+
+    func sendReceiverPrewarmRequest(_ payload: DirectQuicReceiverPrewarmPayload) async throws {
+        try await sendControlFrame(.receiverPrewarmRequest(payload))
+    }
+
+    func sendReceiverPrewarmAck(_ payload: DirectQuicReceiverPrewarmPayload) async throws {
+        try await sendControlFrame(.receiverPrewarmAck(payload))
+    }
+
+    private func sendControlFrame(_ frame: TurboMediaRelayControlFrame) async throws {
+        let connection = lock.withLock { self.connection }
+        guard let connection else {
+            throw DirectQuicProbeError.connectionFailed("media relay is not connected")
+        }
+        if lock.withLock({ peerUnavailable }) {
+            throw DirectQuicProbeError.connectionFailed("media relay peer is unavailable")
+        }
+        try await send(
+            .control(
+                sessionId: sessionId,
+                senderDeviceId: localDeviceId,
+                kind: frame.kind,
+                payload: frame.payload
+            ),
+            on: connection
+        )
     }
 
     func close() {
@@ -1046,6 +1125,27 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
                         if case .audio(_, _, _, _, let payload) = frame {
                             Task {
                                 await self.onIncomingAudioPayload(payload)
+                            }
+                        } else if case .control(_, let senderDeviceId, let kind, let payload) = frame {
+                            guard senderDeviceId == self.peerDeviceId else {
+                                Task {
+                                    await self.report(
+                                        "Ignored media relay control frame from unexpected peer",
+                                        metadata: self.baseMetadata().merging(
+                                            [
+                                                "senderDeviceId": senderDeviceId,
+                                                "kind": kind.rawValue,
+                                            ],
+                                            uniquingKeysWith: { _, new in new }
+                                        )
+                                    )
+                                }
+                                continue
+                            }
+                            Task {
+                                await self.onIncomingControlFrame?(
+                                    TurboMediaRelayControlFrame(kind: kind, payload: payload)
+                                )
                             }
                         } else if case .peerUnavailable = frame {
                             self.lock.withLock {

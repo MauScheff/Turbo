@@ -407,7 +407,11 @@ extension PTTViewModel {
                 if let contact = contacts.first(where: { $0.id == contactID }),
                    let backendChannelId = contact.backendChannelId {
                     let request = BackendLeaveRequest(contactID: contact.id, backendChannelID: backendChannelId)
-                    await backendCommandCoordinator.handle(.leaveRequested(request))
+                    await ingestBackendCommandEvent(
+                        .leaveRequested(request),
+                        contactID: contact.id,
+                        channelID: backendChannelId
+                    )
                 }
                 pttCoordinator.reset()
                 syncPTTState()
@@ -479,7 +483,11 @@ extension PTTViewModel {
            let backendChannelId = contact.backendChannelId {
             Task {
                 let request = BackendLeaveRequest(contactID: contactID, backendChannelID: backendChannelId)
-                await backendCommandCoordinator.handle(.leaveRequested(request))
+                await ingestBackendCommandEvent(
+                    .leaveRequested(request),
+                    contactID: contactID,
+                    channelID: backendChannelId
+                )
             }
         }
 
@@ -550,7 +558,11 @@ extension PTTViewModel {
                 if let contact = selectedContact,
                    let backendChannelId = contact.backendChannelId {
                     let request = BackendLeaveRequest(contactID: contact.id, backendChannelID: backendChannelId)
-                    await backendCommandCoordinator.handle(.leaveRequested(request))
+                    await ingestBackendCommandEvent(
+                        .leaveRequested(request),
+                        contactID: contact.id,
+                        channelID: backendChannelId
+                    )
                 }
                 pttCoordinator.reset()
                 syncPTTState()
@@ -574,7 +586,11 @@ extension PTTViewModel {
                 ]
             )
             Task {
-                await backendCommandCoordinator.handle(.leaveRequested(immediateBackendLeaveRequest))
+                await ingestBackendCommandEvent(
+                    .leaveRequested(immediateBackendLeaveRequest),
+                    contactID: immediateBackendLeaveRequest.contactID,
+                    channelID: immediateBackendLeaveRequest.backendChannelID
+                )
             }
         }
 
@@ -646,7 +662,11 @@ extension PTTViewModel {
 
             if let backendChannelID {
                 let request = BackendLeaveRequest(contactID: contactID, backendChannelID: backendChannelID)
-                await self.backendCommandCoordinator.handle(.leaveRequested(request))
+                await self.ingestBackendCommandEvent(
+                    .leaveRequested(request),
+                    contactID: contactID,
+                    channelID: backendChannelID
+                )
             } else {
                 await self.refreshChannelState(for: contactID)
                 await self.refreshContactSummaries()
@@ -655,20 +675,57 @@ extension PTTViewModel {
     }
 
     func performConnect(to contact: Contact, intent: BackendJoinIntent) {
+        let relationship = relationshipState(for: contact.id)
         let connectOrigin: PendingConnectOrigin =
-            relationshipState(for: contact.id).isIncomingRequest ? .acceptingIncomingRequest : .neutral
+            relationship.isIncomingRequest ? .acceptingIncomingRequest : .neutral
+        let readyPeerJoinIsAuthoritative =
+            intent == .joinReadyPeer && canQueueReadyPeerLocalConnect(for: contact.id)
+        let shouldQueueLocalConnect =
+            backendServices == nil
+            || relationship.isIncomingRequest
+            || readyPeerJoinIsAuthoritative
+
+        if backendServices != nil,
+           intent == .joinReadyPeer,
+           !readyPeerJoinIsAuthoritative {
+            diagnostics.record(
+                .state,
+                message: "Downgrading stale ready-peer connect to request-only",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "relationship": String(describing: relationship),
+                    "backendMembership": selectedChannelSnapshot(for: contact.id)
+                        .map { String(describing: $0.membership) } ?? "none",
+                    "backendRequestRelationship": selectedChannelSnapshot(for: contact.id)
+                        .map { String(describing: $0.requestRelationship) } ?? "none",
+                ]
+            )
+            captureDiagnosticsState("session-connect:stale-ready-peer-downgraded")
+            requestBackendJoin(for: contact, intent: .requestConnection)
+            return
+        }
 
         if usesLocalHTTPBackend {
             if isJoined, activeChannelId == contact.id {
                 return
             }
-            sessionCoordinator.queueConnect(contactID: contact.id, origin: connectOrigin)
-            captureDiagnosticsState("session-connect:queued-local")
+            if shouldQueueLocalConnect {
+                sessionCoordinator.queueConnect(contactID: contact.id, origin: connectOrigin)
+                captureDiagnosticsState("session-connect:queued-local")
+            } else {
+                captureDiagnosticsState("session-connect:request-only-local")
+            }
             requestBackendJoin(for: contact, intent: intent)
             return
         }
 
         if isJoined, activeChannelId == contact.id {
+            return
+        }
+
+        guard shouldQueueLocalConnect else {
+            captureDiagnosticsState("session-connect:request-only")
+            requestBackendJoin(for: contact, intent: intent)
             return
         }
 
@@ -685,6 +742,48 @@ extension PTTViewModel {
         } else {
             requestBackendJoin(for: contact, intent: intent)
         }
+    }
+
+    func canQueueReadyPeerLocalConnect(for contactID: UUID) -> Bool {
+        guard backendServices != nil else { return true }
+        guard let channelSnapshot = selectedChannelSnapshot(for: contactID) else { return false }
+        guard channelSnapshot.membership.hasPeerMembership else { return false }
+        return channelSnapshot.requestRelationship == .none
+    }
+
+    func refreshStaleOutgoingRequestBeforeConnectIfNeeded(contactID: UUID) async {
+        let relationship = relationshipState(for: contactID)
+        guard relationship.isOutgoingRequest, !relationship.isIncomingRequest else { return }
+        guard backendServices != nil else { return }
+
+        diagnostics.record(
+            .backend,
+            level: .notice,
+            message: "Refreshing outgoing request before reconnect attempt",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "relationship": String(describing: relationship),
+            ]
+        )
+
+        async let summaries: Void = refreshContactSummaries()
+        async let invites: Void = refreshInvites()
+        _ = await (summaries, invites)
+
+        let refreshedRelationship = relationshipState(for: contactID)
+        guard refreshedRelationship != relationship else { return }
+
+        diagnostics.record(
+            .backend,
+            level: .notice,
+            message: "Outgoing request projection changed before reconnect attempt",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "previousRelationship": String(describing: relationship),
+                "refreshedRelationship": String(describing: refreshedRelationship),
+                "willJoin": refreshedRelationship.isIncomingRequest ? "true" : "false",
+            ]
+        )
     }
 
     func requestJoinSelectedPeer() async {
@@ -712,7 +811,9 @@ extension PTTViewModel {
         case .requestConnection(let contactID):
             guard let contact = contacts.first(where: { $0.id == contactID }) else { return }
             captureDiagnosticsState("selected-peer-effect:request-connection")
-            performConnect(to: contact, intent: .requestConnection)
+            await refreshStaleOutgoingRequestBeforeConnectIfNeeded(contactID: contactID)
+            let refreshedContact = contacts.first(where: { $0.id == contactID }) ?? contact
+            performConnect(to: refreshedContact, intent: .requestConnection)
         case .joinReadyPeer(let contactID):
             guard let contact = contacts.first(where: { $0.id == contactID }) else { return }
             captureDiagnosticsState("selected-peer-effect:join-ready-peer")
@@ -756,7 +857,11 @@ extension PTTViewModel {
             )
             captureDiagnosticsState("selected-peer-effect:clear-stale-backend-membership")
             let request = BackendLeaveRequest(contactID: contactID, backendChannelID: backendChannelId)
-            await backendCommandCoordinator.handle(.leaveRequested(request))
+            await ingestBackendCommandEvent(
+                .leaveRequested(request),
+                contactID: contactID,
+                channelID: backendChannelId
+            )
             sessionCoordinator.clearLeaveAction(for: contactID)
             updateStatusForSelectedContact()
         }
@@ -787,7 +892,11 @@ extension PTTViewModel {
                let contact = contacts.first(where: { $0.id == contactID }),
                let backendChannelId = contact.backendChannelId {
                 let request = BackendLeaveRequest(contactID: contactID, backendChannelID: backendChannelId)
-                await backendCommandCoordinator.handle(.leaveRequested(request))
+                await ingestBackendCommandEvent(
+                    .leaveRequested(request),
+                    contactID: contactID,
+                    channelID: backendChannelId
+                )
             } else if let contactID {
                 await refreshChannelState(for: contactID)
                 await refreshContactSummaries()

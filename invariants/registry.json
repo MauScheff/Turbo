@@ -179,7 +179,7 @@
       "detectors": ["turbo.service.presence.internal.clearStaleActiveChannelOnSessionConnect", "contracts/backend_invariant_events_manifest.json"],
       "regressions": ["scenarios/restart_ready_session_recovery_with_offline_repair.json"],
       "repairPolicy": "backend repair",
-      "repairAction": "turbo.service.presence.internal.clearStaleActiveChannelOnSessionConnect clears the stale active channel and cascades stale membership cleanup.",
+      "repairAction": "turbo.service.presence.internal.clearStaleActiveChannelOnSessionConnect clears only the stale active-channel pointer; durable membership is preserved so reconnect recovery can rejoin idempotently.",
       "alertPolicy": "diagnostics",
       "status": "active"
     },
@@ -333,6 +333,20 @@
       "regressions": ["scripts/route_probe.py"],
       "repairPolicy": "none",
       "alertPolicy": "ignore",
+      "status": "active"
+    },
+    {
+      "id": "selected.local_session_without_backend_presence",
+      "scope": "convergence",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/PTTViewModel+BackendSync.swift",
+      "predicate": "The local/system session is active and backend membership still includes the user, but backend readiness reports selfHasActiveDevice=false.",
+      "evidenceFields": ["contactId", "channelId", "backendStatus", "backendReadiness"],
+      "detectors": ["Turbo/PTTViewModel+BackendSync.swift"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "The app reconnects the WebSocket if needed, reasserts backend join, refreshes channel/contact projections, and republishes receiver readiness.",
+      "alertPolicy": "diagnostics",
       "status": "active"
     },
     {
@@ -591,6 +605,20 @@
       "regressions": ["TurboTests/TurboTests.swift"],
       "repairPolicy": "app repair",
       "repairAction": "SelectedPeerEffect.clearStaleBackendMembership sends an idempotent backend leave and clears stale local leave state.",
+      "alertPolicy": "strict diagnostics",
+      "status": "active"
+    },
+    {
+      "id": "selected.stale_backend_membership_without_local_session",
+      "scope": "backend",
+      "owner": "mixed",
+      "authoritativeSeam": "Turbo/ConversationDomain.swift",
+      "predicate": "Backend retained inactive durable channel membership while the selected app has no local, system, pending, or request evidence for that membership.",
+      "evidenceFields": ["selectedPeerPhase", "selectedPeerRelationship", "pendingAction", "isJoined", "systemSession", "backendReadiness", "backendSelfJoined", "backendPeerJoined", "backendPeerDeviceConnected"],
+      "detectors": ["Turbo/AppDiagnostics.swift", "scripts/merged_diagnostics.py"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "ConversationStateMachine projects idle while SelectedPeerEffect.clearStaleBackendMembership sends an idempotent backend leave.",
       "alertPolicy": "strict diagnostics",
       "status": "active"
     },

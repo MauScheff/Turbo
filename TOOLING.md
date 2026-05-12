@@ -317,6 +317,8 @@ Use `--insecure` only when local Python certificate roots block Cloudflare queri
 python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 --insecure @mau @bau
 ```
 
+This is the right workaround for the recurring local failure where the diagnostics fetch reaches Cloudflare telemetry but Python cannot verify the local certificate chain. Treat it as scoped to that debugging read: rerun the diagnostics command with `--insecure`, note that TLS verification was relaxed for the local fetch, and keep the rest of the investigation unchanged. Prefer the `just` diagnostics wrappers when they fit because the common debug recipes already expose/default the `insecure` argument for this local-development case.
+
 Use `--json` when you need to script over the result:
 
 ```bash

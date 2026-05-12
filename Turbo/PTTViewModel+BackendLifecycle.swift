@@ -162,7 +162,26 @@ extension PTTViewModel {
         backendStatusMessage = message
         diagnostics.record(.websocket, message: "Backend server notice", metadata: ["message": message])
 
-        guard shouldRecoverBackendSignalingJoinDrift(from: message),
+        if shouldRecoverReceiverAudioReadinessDeliveryRejection(from: message),
+           let contact = signalingJoinRecoveryContact() {
+            controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contact.id))
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.refreshChannelState(for: contact.id)
+                await self.syncLocalReceiverAudioReadinessSignal(
+                    for: contact.id,
+                    reason: .backendSignalingRecovery
+                )
+            }
+        }
+
+        let shouldRecoverJoinDrift = shouldRecoverBackendSignalingJoinDrift(from: message)
+        if shouldRecoverJoinDrift,
+           let contact = signalingJoinRecoveryContact() {
+            controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contact.id))
+        }
+
+        guard shouldRecoverJoinDrift,
               let contact = signalingJoinRecoveryContact(),
               backendRuntime.signalingJoinRecoveryTask == nil else {
             return
@@ -185,7 +204,6 @@ extension PTTViewModel {
                     self.backendRuntime.signalingJoinRecoveryTask = nil
                     self.updateStatusForSelectedContact()
                 }
-                self.controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
                 if self.backendSyncCoordinator.state.syncState.channelStates[contactID] == nil,
                    self.shouldReassertBackendJoinAfterSignalingDrift(for: contactID) {
                     self.diagnostics.record(
@@ -269,13 +287,23 @@ extension PTTViewModel {
     func shouldRecoverBackendSignalingJoinDrift(from message: String) -> Bool {
         guard backendRuntime.isReady else { return false }
         guard currentApplicationState() == .active else { return false }
+        let stripped = normalizedBackendServerNotice(message)
+        return stripped == "sender device is not joined to this channel"
+    }
+
+    func shouldRecoverReceiverAudioReadinessDeliveryRejection(from message: String) -> Bool {
+        guard backendRuntime.isReady else { return false }
+        guard currentApplicationState() == .active else { return false }
+        return normalizedBackendServerNotice(message) == "target user has no connected receiving device in this channel"
+    }
+
+    func normalizedBackendServerNotice(_ message: String) -> String {
         let normalized = message
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        let stripped = normalized.hasPrefix("signaling ")
+        return normalized.hasPrefix("signaling ")
             ? String(normalized.dropFirst("signaling ".count))
             : normalized
-        return stripped == "sender device is not joined to this channel"
     }
 
     func shouldReassertBackendJoinAfterSignalingDrift(for contactID: UUID) -> Bool {

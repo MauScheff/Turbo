@@ -9,14 +9,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use quinn::{Endpoint, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
     time,
 };
 use tokio_rustls::TlsAcceptor;
@@ -78,6 +78,12 @@ enum RelayFrame {
         sender_device_id: String,
         sequence_number: u64,
         sent_at_ms: i64,
+        payload: String,
+    },
+    Control {
+        session_id: String,
+        sender_device_id: String,
+        kind: String,
         payload: String,
     },
     PeerUnavailable {
@@ -147,8 +153,8 @@ impl Config {
         let key_pem = env::var("TURBO_RELAY_KEY_PEM")
             .map(PathBuf::from)
             .context("TURBO_RELAY_KEY_PEM is required")?;
-        let shared_token = env::var("TURBO_RELAY_SHARED_TOKEN")
-            .context("TURBO_RELAY_SHARED_TOKEN is required")?;
+        let shared_token =
+            env::var("TURBO_RELAY_SHARED_TOKEN").context("TURBO_RELAY_SHARED_TOKEN is required")?;
         let session_ttl_seconds = env::var("TURBO_RELAY_SESSION_TTL_SECONDS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -182,7 +188,8 @@ async fn serve_quic(config: Config, state: RelayState) -> Result<()> {
                         let state = state.clone();
                         let config = config.clone();
                         tokio::spawn(async move {
-                            if let Err(error) = handle_quic_stream(send, recv, config, state).await {
+                            if let Err(error) = handle_quic_stream(send, recv, config, state).await
+                            {
                                 warn!(error = %error, "QUIC stream closed");
                             }
                         });
@@ -366,19 +373,27 @@ async fn handle_join(
 
 async fn handle_inbound_frame(line: &str, state: &RelayState, joined: &JoinedPeer) -> Result<()> {
     let frame: RelayFrame = serde_json::from_str(line).context("frame was not JSON")?;
-    let RelayFrame::Audio {
-        session_id,
-        sender_device_id,
-        sequence_number: _,
-        sent_at_ms: _,
-        payload: _,
-    } = &frame
-    else {
-        return Ok(());
+    let (session_id, sender_device_id, frame_kind) = match &frame {
+        RelayFrame::Audio {
+            session_id,
+            sender_device_id,
+            sequence_number: _,
+            sent_at_ms: _,
+            payload: _,
+        } => (session_id, sender_device_id, "audio"),
+        RelayFrame::Control {
+            session_id,
+            sender_device_id,
+            kind: _,
+            payload: _,
+        } => (session_id, sender_device_id, "control"),
+        _ => return Ok(()),
     };
 
     if session_id != &joined.session_id || sender_device_id != &joined.device_id {
-        return Err(anyhow!("audio frame identity did not match joined peer"));
+        return Err(anyhow!(
+            "{frame_kind} frame identity did not match joined peer"
+        ));
     }
 
     let encoded = serde_json::to_string(&frame)?;
@@ -406,6 +421,7 @@ async fn handle_inbound_frame(line: &str, state: &RelayState, joined: &JoinedPee
                 warn!(
                     session_id = %joined.session_id,
                     device_id = %joined.device_id,
+                    frame_kind,
                     "dropped relay frame because peer queue was full or closed"
                 );
             }
@@ -420,6 +436,7 @@ async fn handle_inbound_frame(line: &str, state: &RelayState, joined: &JoinedPee
                 session_id = %joined.session_id,
                 device_id = %joined.device_id,
                 peer_device_id = %joined.peer_device_id,
+                frame_kind,
                 "dropped relay frame because peer is unavailable"
             );
         }
@@ -492,7 +509,8 @@ fn tls_server_config(config: &Config) -> Result<rustls::ServerConfig> {
 }
 
 fn load_certs(path: &PathBuf) -> Result<Vec<CertificateDer<'static>>> {
-    let file = File::open(path).with_context(|| format!("failed to open cert PEM at {}", path.display()))?;
+    let file = File::open(path)
+        .with_context(|| format!("failed to open cert PEM at {}", path.display()))?;
     let mut reader = BufReader::new(file);
     rustls_pemfile::certs(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -500,7 +518,8 @@ fn load_certs(path: &PathBuf) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn load_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>> {
-    let file = File::open(path).with_context(|| format!("failed to open key PEM at {}", path.display()))?;
+    let file = File::open(path)
+        .with_context(|| format!("failed to open key PEM at {}", path.display()))?;
     let mut reader = BufReader::new(file);
     rustls_pemfile::private_key(&mut reader)
         .context("failed to parse key PEM")?

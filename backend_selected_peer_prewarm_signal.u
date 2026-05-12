@@ -1,0 +1,3829 @@
+type turbo.domain.SignalKind
+  = Offer
+  | Answer
+  | IceCandidate
+  | Hangup
+  | TransmitStart
+  | TransmitStop
+  | AudioChunk
+  | ReceiverReady
+  | ReceiverNotReady
+  | DirectQuicUpgradeRequest
+  | SelectedPeerPrewarm
+
+type turbo.domain.SignalEnvelope
+  = SignalEnvelope
+      turbo.domain.SignalKind ChannelId UserId DeviceId UserId DeviceId Text
+
+turbo.domain.SignalKind.fromText : Text -> Optional turbo.domain.SignalKind
+turbo.domain.SignalKind.fromText = cases
+  "offer" -> Some turbo.domain.SignalKind.Offer
+  "answer" -> Some turbo.domain.SignalKind.Answer
+  "ice-candidate" -> Some turbo.domain.SignalKind.IceCandidate
+  "hangup" -> Some turbo.domain.SignalKind.Hangup
+  "transmit-start" -> Some turbo.domain.SignalKind.TransmitStart
+  "transmit-stop" -> Some turbo.domain.SignalKind.TransmitStop
+  "audio-chunk" -> Some turbo.domain.SignalKind.AudioChunk
+  "receiver-ready" -> Some turbo.domain.SignalKind.ReceiverReady
+  "receiver-not-ready" -> Some turbo.domain.SignalKind.ReceiverNotReady
+  "direct-quic-upgrade-request" ->
+    Some turbo.domain.SignalKind.DirectQuicUpgradeRequest
+  "selected-peer-prewarm" -> Some turbo.domain.SignalKind.SelectedPeerPrewarm
+  _ -> None
+
+turbo.domain.SignalKind.toText : turbo.domain.SignalKind -> Text
+turbo.domain.SignalKind.toText = cases
+  turbo.domain.SignalKind.Offer -> "offer"
+  turbo.domain.SignalKind.Answer -> "answer"
+  turbo.domain.SignalKind.IceCandidate -> "ice-candidate"
+  turbo.domain.SignalKind.Hangup -> "hangup"
+  turbo.domain.SignalKind.TransmitStart -> "transmit-start"
+  turbo.domain.SignalKind.TransmitStop -> "transmit-stop"
+  turbo.domain.SignalKind.AudioChunk -> "audio-chunk"
+  turbo.domain.SignalKind.ReceiverReady -> "receiver-ready"
+  turbo.domain.SignalKind.ReceiverNotReady -> "receiver-not-ready"
+  turbo.domain.SignalKind.DirectQuicUpgradeRequest ->
+    "direct-quic-upgrade-request"
+  turbo.domain.SignalKind.SelectedPeerPrewarm -> "selected-peer-prewarm"
+
+turbo.domain.SignalEnvelope.fromText :
+  Text ->{Exception} turbo.domain.SignalEnvelope
+turbo.domain.SignalEnvelope.fromText text =
+  use Text ++
+  use object at!
+  runAllowTrailing
+    (do
+      kindText = at! "type" Decoder.text
+      kind = match turbo.domain.SignalKind.fromText kindText with
+        Some kind -> kind
+        None      -> Decoder.fail ("unknown signal type: " ++ kindText)
+      channelIdText = at! "channelId" Decoder.text
+      fromUserIdText = at! "fromUserId" Decoder.text
+      fromDeviceIdText = at! "fromDeviceId" Decoder.text
+      toUserIdText = at! "toUserId" Decoder.text
+      toDeviceIdText = at! "toDeviceId" Decoder.text
+      payload = at! "payload" Decoder.text
+      turbo.domain.SignalEnvelope.SignalEnvelope
+        kind
+        (ChannelId.fromText channelIdText)
+        (UserId.fromText fromUserIdText)
+        (DeviceId.fromText fromDeviceIdText)
+        (UserId.fromText toUserIdText)
+        (DeviceId.fromText toDeviceIdText)
+        payload)
+    text
+
+turbo.domain.SignalEnvelope.toJson : turbo.domain.SignalEnvelope -> Json
+turbo.domain.SignalEnvelope.toJson = cases
+  turbo.domain.SignalEnvelope.SignalEnvelope
+    kind channelId fromUserId fromDeviceId toUserId toDeviceId payload ->
+    object.empty
+      |> addText "type" (turbo.domain.SignalKind.toText kind)
+      |> addText "channelId" (ChannelId.toText channelId)
+      |> addText "fromUserId" (UserId.toText fromUserId)
+      |> addText "fromDeviceId" (DeviceId.toText fromDeviceId)
+      |> addText "toUserId" (UserId.toText toUserId)
+      |> addText "toDeviceId" (DeviceId.toText toDeviceId)
+      |> addText "payload" payload
+
+turbo.domain.SignalKind.fromText.tests.examples : [Result]
+turbo.domain.SignalKind.fromText.tests.examples = 
+  test.verify do
+    labeled "parses known tag" do
+      ensureEqual
+        (turbo.domain.SignalKind.fromText "answer")
+        (Some turbo.domain.SignalKind.Answer)
+    labeled "parses audio chunk tag" do
+      ensureEqual
+        (turbo.domain.SignalKind.fromText "audio-chunk")
+        (Some turbo.domain.SignalKind.AudioChunk)
+    labeled "parses receiver ready tag" do
+      ensureEqual
+        (turbo.domain.SignalKind.fromText "receiver-ready")
+        (Some turbo.domain.SignalKind.ReceiverReady)
+    labeled "parses receiver not ready tag" do
+      ensureEqual
+        (turbo.domain.SignalKind.fromText "receiver-not-ready")
+        (Some turbo.domain.SignalKind.ReceiverNotReady)
+    labeled "parses direct quic upgrade request tag" do
+      ensureEqual
+        (turbo.domain.SignalKind.fromText "direct-quic-upgrade-request")
+        (Some turbo.domain.SignalKind.DirectQuicUpgradeRequest)
+    labeled "parses selected peer prewarm tag" do
+      ensureEqual
+        (turbo.domain.SignalKind.fromText "selected-peer-prewarm")
+        (Some turbo.domain.SignalKind.SelectedPeerPrewarm)
+    labeled "rejects unknown tag" do
+      ensureEqual (turbo.domain.SignalKind.fromText "bogus") None
+
+turbo.domain.SignalKind.toText.tests.examples : [Result]
+turbo.domain.SignalKind.toText.tests.examples = 
+  test.verify do
+    labeled "encodes offer" do
+      ensureEqual
+        (turbo.domain.SignalKind.toText turbo.domain.SignalKind.Offer) "offer"
+    labeled "encodes transmit stop" do
+      ensureEqual
+        (turbo.domain.SignalKind.toText turbo.domain.SignalKind.TransmitStop)
+        "transmit-stop"
+    labeled "encodes audio chunk" do
+      ensureEqual
+        (turbo.domain.SignalKind.toText turbo.domain.SignalKind.AudioChunk)
+        "audio-chunk"
+    labeled "encodes receiver ready" do
+      ensureEqual
+        (turbo.domain.SignalKind.toText turbo.domain.SignalKind.ReceiverReady)
+        "receiver-ready"
+    labeled "encodes receiver not ready" do
+      ensureEqual
+        (turbo.domain.SignalKind.toText
+          turbo.domain.SignalKind.ReceiverNotReady)
+        "receiver-not-ready"
+    labeled "encodes direct quic upgrade request" do
+      ensureEqual
+        (turbo.domain.SignalKind.toText
+          turbo.domain.SignalKind.DirectQuicUpgradeRequest)
+        "direct-quic-upgrade-request"
+    labeled "encodes selected peer prewarm" do
+      ensureEqual
+        (turbo.domain.SignalKind.toText
+          turbo.domain.SignalKind.SelectedPeerPrewarm)
+        "selected-peer-prewarm"
+
+turbo.domain.SignalEnvelope.fromText.tests.examples : [Result]
+turbo.domain.SignalEnvelope.fromText.tests.examples = 
+  test.verify do
+    envelope =
+      turbo.domain.SignalEnvelope.SignalEnvelope
+        turbo.domain.SignalKind.SelectedPeerPrewarm
+        (ChannelId.fromText "channel-1")
+        (UserId.fromText "alice")
+        (DeviceId.fromText "alice-phone")
+        (UserId.fromText "bob")
+        (DeviceId.fromText "bob-phone")
+        "selected-contact"
+    labeled "roundtrips selected peer prewarm envelope" do
+      ensureEqual
+        (catch do
+          turbo.domain.SignalEnvelope.fromText
+            (Json.toText (turbo.domain.SignalEnvelope.toJson envelope)))
+        (Right envelope)
+
+turbo.domain.SignalEnvelope.fromText.tests.props : [Result]
+turbo.domain.SignalEnvelope.fromText.tests.props = 
+  test.verify do
+    use Text ++
+    Each.repeat 50
+    n = natIn 0 9
+    kind = match n with
+      0 -> turbo.domain.SignalKind.Offer
+      1 -> turbo.domain.SignalKind.Answer
+      2 -> turbo.domain.SignalKind.IceCandidate
+      3 -> turbo.domain.SignalKind.Hangup
+      4 -> turbo.domain.SignalKind.TransmitStart
+      5 -> turbo.domain.SignalKind.TransmitStop
+      6 -> turbo.domain.SignalKind.AudioChunk
+      7 -> turbo.domain.SignalKind.ReceiverReady
+      8 -> turbo.domain.SignalKind.DirectQuicUpgradeRequest
+      _ -> turbo.domain.SignalKind.SelectedPeerPrewarm
+    suffix = Nat.toText (natIn 0 1000000)
+    envelope =
+      turbo.domain.SignalEnvelope.SignalEnvelope
+        kind
+        (ChannelId.fromText ("channel-" ++ suffix))
+        (UserId.fromText ("from-" ++ suffix))
+        (DeviceId.fromText ("from-device-" ++ suffix))
+        (UserId.fromText ("to-" ++ suffix))
+        (DeviceId.fromText ("to-device-" ++ suffix))
+        ("payload-" ++ suffix)
+    labeled "json roundtrip preserves the envelope" do
+      ensureEqual
+        (catch do
+          turbo.domain.SignalEnvelope.fromText
+            (Json.toText (turbo.domain.SignalEnvelope.toJson envelope)))
+        (Right envelope)
+
+turbo.service.ws.internal.signalUsesActiveTransmitTarget :
+  turbo.domain.SignalKind -> Boolean
+turbo.service.ws.internal.signalUsesActiveTransmitTarget = cases
+  turbo.domain.SignalKind.AudioChunk    -> true
+  turbo.domain.SignalKind.TransmitStart -> true
+  turbo.domain.SignalKind.TransmitStop  -> true
+  _                                     -> false
+
+turbo.service.ws.internal.signalUsesActiveTransmitTarget.tests.examples :
+  [Result]
+turbo.service.ws.internal.signalUsesActiveTransmitTarget.tests.examples = 
+  test.verify do
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalUsesActiveTransmitTarget
+        turbo.domain.SignalKind.AudioChunk)
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalUsesActiveTransmitTarget
+        turbo.domain.SignalKind.TransmitStart)
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalUsesActiveTransmitTarget
+        turbo.domain.SignalKind.TransmitStop)
+    ensureEqual
+      false
+      (turbo.service.ws.internal.signalUsesActiveTransmitTarget
+        turbo.domain.SignalKind.ReceiverReady)
+    ensureEqual
+      false
+      (turbo.service.ws.internal.signalUsesActiveTransmitTarget
+        turbo.domain.SignalKind.DirectQuicUpgradeRequest)
+    ensureEqual
+      false
+      (turbo.service.ws.internal.signalUsesActiveTransmitTarget
+        turbo.domain.SignalKind.SelectedPeerPrewarm)
+
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget :
+  turbo.domain.SignalKind -> Boolean
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget = cases
+  turbo.domain.SignalKind.DirectQuicUpgradeRequest -> true
+  turbo.domain.SignalKind.SelectedPeerPrewarm      -> true
+  turbo.domain.SignalKind.Offer                    -> true
+  turbo.domain.SignalKind.Answer                   -> true
+  turbo.domain.SignalKind.IceCandidate             -> true
+  _                                                -> false
+
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget.tests.examples :
+  [Result]
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget.tests.examples = 
+  test.verify do
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget
+        turbo.domain.SignalKind.DirectQuicUpgradeRequest)
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget
+        turbo.domain.SignalKind.SelectedPeerPrewarm)
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget
+        turbo.domain.SignalKind.Offer)
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget
+        turbo.domain.SignalKind.Answer)
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget
+        turbo.domain.SignalKind.IceCandidate)
+    ensureEqual
+      false
+      (turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget
+        turbo.domain.SignalKind.Hangup)
+    ensureEqual
+      false
+      (turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget
+        turbo.domain.SignalKind.AudioChunk)
+    ensureEqual
+      false
+      (turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget
+        turbo.domain.SignalKind.TransmitStart)
+    ensureEqual
+      false
+      (turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget
+        turbo.domain.SignalKind.ReceiverReady)
+
+turbo.deploy : '{IO, Exception} URI
+turbo.deploy = 
+  Cloud.main do
+    env = Environment.named "turbo-production-v6"
+    database = Database.named "turbo-control-plane-v5"
+    _ = seedCurrentOsEnv env ()
+    Database.assign database env
+    serviceHash = Route.deployWebSocket env (web database)
+    serviceName = ServiceName.named "turbo-v6"
+    _ = catch do ServiceName.unassign serviceName
+    uri = ServiceName.assign serviceName serviceHash
+    _ = catch do deleteDomainMapping (HostName "beepbeep.to")
+    _ =
+      createDomainMapping
+        (HostName "beepbeep.to") (ServiceName.name serviceName)
+    uri
+
+turbo.syncDeployConfig : '{IO, Exception} ()
+turbo.syncDeployConfig = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  seedCurrentOsEnv env ()
+
+turbo.setApnsBundleId : Text -> '{IO, Exception} ()
+turbo.setApnsBundleId bundleId = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_BUNDLE_ID" bundleId
+
+turbo.setApnsKeyId : Text -> '{IO, Exception} ()
+turbo.setApnsKeyId keyId = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_KEY_ID" keyId
+
+turbo.setApnsPrivateKey : Text -> '{IO, Exception} ()
+turbo.setApnsPrivateKey pemText = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_PRIVATE_KEY" pemText
+
+turbo.setApnsTeamId : Text -> '{IO, Exception} ()
+turbo.setApnsTeamId teamId = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_TEAM_ID" teamId
+
+turbo.setApnsUseSandbox : Text -> '{IO, Exception} ()
+turbo.setApnsUseSandbox useSandbox = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_USE_SANDBOX" useSandbox
+
+turbo.setApnsWorkerBaseUrl : Text -> '{IO, Exception} ()
+turbo.setApnsWorkerBaseUrl baseUrl = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_WORKER_BASE_URL" baseUrl
+
+turbo.setApnsWorkerSecret : Text -> '{IO, Exception} ()
+turbo.setApnsWorkerSecret secret = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_WORKER_SECRET" secret
+
+turbo.setTelemetryWorkerBaseUrl : Text -> '{IO, Exception} ()
+turbo.setTelemetryWorkerBaseUrl baseUrl = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_TELEMETRY_WORKER_BASE_URL" baseUrl
+
+turbo.setTelemetryWorkerSecret : Text -> '{IO, Exception} ()
+turbo.setTelemetryWorkerSecret secret = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_TELEMETRY_WORKER_SECRET" secret
+
+turbo.setWakeWorkerSecret : Text -> '{IO, Exception} ()
+turbo.setWakeWorkerSecret secret = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_WAKE_WORKER_SECRET" secret
+
+-- The definitions below no longer typecheck with the changes above.
+-- Please fix the errors and try `update` again.
+
+type turbo.domain.DeviceSession
+  = DeviceSession Text DeviceId UserId SignalInbox Instant Instant
+
+type turbo.domain.SignalInbox
+  = SignalInbox (Remote.Ref ([SignalEnvelope], Optional (Remote.Promise ())))
+
+turbo.domain.SignalEnvelope.fromText.doc : Doc
+turbo.domain.SignalEnvelope.fromText.doc =
+  {{
+  `` SignalEnvelope.fromText text `` parses a websocket signaling envelope from
+  the JSON string `text`.
+  
+  The payload is kept as opaque text in v1 so the backend can authenticate and
+  route signaling frames without understanding SDP or ICE internals.
+  
+  **Also see:** {SignalEnvelope.toJson}
+  }}
+
+turbo.domain.SignalEnvelope.toJson.doc : Doc
+turbo.domain.SignalEnvelope.toJson.doc =
+  {{
+  `` SignalEnvelope.toJson envelope `` renders `envelope` as the flat JSON
+  object sent over Turbo's websocket signaling channel.
+  
+  **Also see:** {SignalEnvelope.fromText}
+  }}
+
+turbo.domain.SignalInbox.delete : SignalInbox -> '{Remote} ()
+turbo.domain.SignalInbox.delete inbox = do Ref.delete (internal.ref inbox)
+
+turbo.domain.SignalInbox.dequeue : SignalInbox -> '{Remote} SignalEnvelope
+turbo.domain.SignalInbox.dequeue inbox = do
+  use Promise delete
+  use Ref cas
+  use Remote.Promise read
+  use SignalInbox dequeue
+  ref = internal.ref inbox
+  (ticket, (items, waiter)) = Ref.readForCas ref
+  match items with
+    envelope +: rest ->
+      success = cas ref ticket (rest, None)
+      if success then envelope else dequeue inbox ()
+    []               ->
+      match waiter with
+        Some promise ->
+          _ = read promise
+          _ = delete promise
+          dequeue inbox ()
+        None         ->
+          promise = detached!
+          success = cas ref ticket ([], Some promise)
+          if success then
+            _ = read promise
+            _ = delete promise
+            dequeue inbox ()
+          else dequeue inbox ()
+
+turbo.domain.SignalInbox.enqueue :
+  SignalInbox -> SignalEnvelope -> '{Remote} ()
+turbo.domain.SignalInbox.enqueue inbox envelope = do
+  use List :+
+  use Ref cas
+  use SignalInbox enqueue
+  ref = internal.ref inbox
+  (ticket, (items, waiter)) = Ref.readForCas ref
+  match waiter with
+    None         ->
+      success = cas ref ticket (items :+ envelope, None)
+      if success then () else enqueue inbox envelope ()
+    Some promise ->
+      success = cas ref ticket (items :+ envelope, None)
+      if success then
+        _ = Remote.Promise.write promise ()
+        ()
+      else enqueue inbox envelope ()
+
+turbo.domain.SignalInbox.internal.ref :
+  SignalInbox -> Remote.Ref ([SignalEnvelope], Optional (Remote.Promise ()))
+turbo.domain.SignalInbox.internal.ref = cases SignalInbox ref -> ref
+
+turbo.domain.SignalInbox.new : '{Remote} SignalInbox
+turbo.domain.SignalInbox.new = do
+  ref = detached ([], None)
+  SignalInbox ref
+
+turbo.domain.SignalKind.fromText.doc : Doc
+turbo.domain.SignalKind.fromText.doc =
+  use SignalKind fromText
+  {{
+  `` fromText text `` parses a websocket signaling tag from `text`. For
+  example:
+  
+  ```
+  fromText "offer"
+  ```
+  
+  Unknown tags return `None`:
+  
+  ```
+  fromText "unknown"
+  ```
+  
+  **Also see:** {SignalKind.toText}
+  }}
+
+test> turbo.domain.SignalKind.fromText.tests.props = 
+  test.verify do
+    Each.repeat 100
+    n = natIn 0 6
+    kind = match n with
+      0 -> Offer
+      1 -> Answer
+      2 -> IceCandidate
+      3 -> Hangup
+      4 -> TransmitStart
+      5 -> TransmitStop
+      _ -> AudioChunk
+    labeled "fromText inverts toText" do
+      ensureEqual (SignalKind.fromText (SignalKind.toText kind)) (Some kind)
+
+turbo.domain.SignalKind.toText.doc : Doc
+turbo.domain.SignalKind.toText.doc =
+  use SignalKind toText
+  {{
+  `` toText kind `` returns the wire-format tag for `kind`. For example:
+  
+  ```
+  toText Offer
+  ```
+  
+  **Also see:** {SignalKind.fromText}
+  }}
+
+turbo.domain.WakeJob.doc : Doc
+turbo.domain.WakeJob.doc =
+  {{
+  {type WakeJob} stores one pending production wake send for the external APNs
+  worker.
+  
+  The deployed Unison service still cannot open the APNs HTTPS connection
+  directly, so {{ docLink (docEmbedTermLink do channels.beginTransmit) }}
+  enqueues one of these jobs and the worker drains them.
+  }}
+
+turbo.serveHttpLocal : '{IO, Exception} ()
+turbo.serveHttpLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8081)
+    Random.run do
+      Threads.run do
+        _ = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localHttpService = httpWithConfig "local-http" false database
+            hash = deployHttp env (Route.run localHttpService)
+            serviceName = ServiceName.named "turbo"
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8081/h/" ++ hashText ++ "/")
+            ()
+        printLine
+          "Local HTTP computation starting on port 8081. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        ()
+
+turbo.serveLocal :
+  '{IO, Exception} ServiceHash
+    HttpRequest (Either HttpResponse (WebSocket ->{Remote, WebSockets} ()))
+turbo.serveLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8090)
+    Random.run do
+      Threads.run do
+        hash = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localWebService = web database
+            hash = Route.deployWebSocket env localWebService
+            serviceName = ServiceName.named "turbo"
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8090/h/" ++ hashText ++ "/")
+            hash
+        printLine
+          "Local Cloud computation starting on port 8090. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        hash
+
+turbo.service.api :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.api db = apiWithConfig "cloud" true db
+
+turbo.service.apiWithConfig :
+  Text
+  -> Boolean
+  -> Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.apiWithConfig mode supportsWebSocket db =
+  use Route or
+  or
+    health
+    (or
+      (service.config mode supportsWebSocket)
+      (or
+        (iceServers db)
+        (or
+          (uploadEvent db)
+          (or
+            (internal.routes db)
+            (or
+              (dev db)
+              (or
+                (service.presence.heartbeat db)
+                (or
+                  (background db)
+                  (or
+                    (offline db)
+                    (or
+                      (auth db) (or (users db) (or (invites db) (channels db))))))))))))
+
+turbo.service.channels.beginTransmit :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.channels.beginTransmit db =
+  do
+    use Parser /
+    use Text ++
+    use object empty
+    channelIdText =
+      route POST (s "v1" / s "channels" / Parser.text / s "begin-transmit")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        currentHandle =
+          (User _ handleText _ _ _) = currentUser
+          handleText
+        currentDisplayName =
+          (User _ _ displayName _ _) = currentUser
+          displayName
+        fields = decodeJson (Decoder.object Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match Map.get "deviceId" fields with
+            Some deviceIdText ->
+              resolvedTarget =
+                resolveTransmitTarget db channelId currentUserId ()
+              match resolvedTarget with
+                Left err -> badRequest.json (empty |> addText "error" err)
+                Right (targetUserId, targetDeviceId) ->
+                  result =
+                    runtime.beginTransmit
+                      db
+                      channelId
+                      currentUserId
+                      (DeviceId.fromText deviceIdText)
+                      targetUserId
+                      targetDeviceId
+                      ()
+                  match result with
+                    Left err -> badRequest.json (empty |> addText "error" err)
+                    Right state ->
+                      devTraffic =
+                        isWhitelistedDevHandle (Some currentHandle) ()
+                      (startedAt, expiresAt, senderDeviceId, transmitIdText) =
+                        (TransmitState _ _ fromDeviceId _ _ startedAt expiresAt)
+                          =
+                          state
+                        ( Instant.toText startedAt
+                        , Instant.toText expiresAt
+                        , fromDeviceId
+                        , transmitId state
+                        )
+                      _ = 
+                        forkAt pool() do
+                          toRemote do
+                            _ =
+                              sendTransmitPrepareIfTargetConnected
+                                db
+                                channelId
+                                currentUserId
+                                senderDeviceId
+                                targetUserId
+                                targetDeviceId
+                                ()
+                            ()
+                      _ =
+                        sendWakePushUnlessTargetAudioReady
+                          db
+                          channelId
+                          currentHandle
+                          currentDisplayName
+                          currentUserId
+                          senderDeviceId
+                          targetUserId
+                          targetDeviceId
+                          startedAt
+                          ()
+                      _ = 
+                        forkAt pool() do
+                          toRemote do
+                            _ =
+                              internal.send
+                                "backend.transmit.begin_granted"
+                                "backend"
+                                "notice"
+                                currentUserId
+                                (Some currentHandle)
+                                (Some senderDeviceId)
+                                (Some channelId)
+                                (Some targetUserId)
+                                (Some targetDeviceId)
+                                None
+                                None
+                                None
+                                (Some "begin-transmit")
+                                None
+                                (Some "backend transmit lease granted")
+                                (Some
+                                  ("transmitId="
+                                    ++ transmitIdText
+                                    ++ " startedAt="
+                                    ++ startedAt
+                                    ++ " expiresAt="
+                                    ++ expiresAt))
+                                devTraffic
+                                false
+                                ()
+                            ()
+                      ok.json
+                        (empty
+                          |> addText "channelId" channelIdText
+                          |> addText "status" "transmitting"
+                          |> addText "transmitId" transmitIdText
+                          |> addText "startedAt" startedAt
+                          |> addText "expiresAt" expiresAt
+                          |> addText
+                               "targetUserId" (UserId.toText targetUserId)
+                          |> addText
+                               "targetDeviceId"
+                               (DeviceId.toText targetDeviceId))
+            None ->
+              badRequest.json (empty |> addText "error" "missing deviceId")
+
+turbo.service.channels.beginTransmit.doc : Doc
+turbo.service.channels.beginTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.beginTransmit db }} starts transmit state
+  for a direct channel if it is currently idle.
+  
+  The request body only needs the sender `deviceId`.
+  
+  The backend resolves the other channel member and selects that user's
+  currently active receiving device.
+  }}
+
+turbo.service.channels.endTransmit.doc : Doc
+turbo.service.channels.endTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.endTransmit db }} ends transmit state for
+  the caller's device.
+  
+  This operation is idempotent: if the caller no longer owns an active transmit
+  lease, the backend still returns `idle`.
+  
+  **Also see:** {channels.beginTransmit}, {runtime.endTransmit}
+  }}
+
+turbo.service.channels.internal.joinControlCommand :
+  Database
+  -> User
+  -> Text
+  -> Map Text Text
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.channels.internal.joinControlCommand
+  db currentUser channelIdText fields =
+  joinControlCommandWithConnectedDevice
+    db currentUser None channelIdText fields
+
+turbo.service.channels.internal.joinControlCommandWithConnectedDevice :
+  Database
+  -> User
+  -> Optional DeviceId
+  -> Text
+  -> Map Text Text
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.channels.internal.joinControlCommandWithConnectedDevice
+  db currentUser websocketDeviceIdOpt channelIdText fields =
+  do
+    use Text ==
+    use memberships add
+    use object empty
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    currentHandle =
+      (User _ handleText _ _ _) = currentUser
+      handleText
+    operationId = Map.get "operationId" fields
+    channelId = ChannelId.fromText channelIdText
+    joinedJson membership presence =
+      membershipUserId =
+        (ChannelMembership _ userId _) = membership
+        userId
+      presenceDeviceId =
+        (DevicePresence deviceId _ _ _ _) = presence
+        deviceId
+      empty
+        |> addText "channelId" channelIdText
+        |> addText "userId" (UserId.toText membershipUserId)
+        |> addText "deviceId" (DeviceId.toText presenceDeviceId)
+        |> addText "status" "joined"
+        |> addOptionalText "operationId" operationId
+    replayJoinedJson deviceId =
+      empty
+        |> addText "channelId" channelIdText
+        |> addText "userId" (UserId.toText currentUserId)
+        |> addText "deviceId" (DeviceId.toText deviceId)
+        |> addText "status" "joined"
+        |> addOptionalText "operationId" operationId
+    channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+    match channelOpt with
+      None -> ControlCommandRouteNotFound "channel not found"
+      Some channel ->
+        use UserId toText
+        otherUserId =
+          (DirectChannel _ lowUserId highUserId _) = channel
+          if toText lowUserId == toText currentUserId then highUserId
+          else lowUserId
+        match Map.get "deviceId" fields with
+          None -> ControlCommandRouteBadRequest "missing deviceId"
+          Some deviceIdText ->
+            devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+            deviceId = DeviceId.fromText deviceIdText
+            targetKey = channelTargetKey channelId
+            replayPlan =
+              controlCommands.replayPlan
+                db currentUserId deviceId operationId JoinChannel targetKey ()
+            match replayPlan with
+              RejectControlCommand err -> ControlCommandRouteBadRequest err
+              ReplayControlCommand ->
+                ControlCommandRouteOk (replayJoinedJson deviceId)
+              RunControlCommand ->
+                existingActiveChannelId =
+                  match presence.get db deviceId () with
+                    Some (DevicePresence _ _ _ currentChannelId _) ->
+                      currentChannelId
+                    None -> None
+                storedSessionOrSocketConnected =
+                  Boolean.or
+                    (sessions.isConnected db deviceId ())
+                    (sockets.isConnected db deviceId ())
+                sessionConnected =
+                  joinControlCommandSessionConnected
+                    websocketDeviceIdOpt
+                    deviceId
+                    storedSessionOrSocketConnected
+                joinPresencePlan =
+                  joinPresencePlanFromConnection
+                    sessionConnected existingActiveChannelId
+                match joinPresencePlan with
+                  JoinPresencePlanRejectMissingConnectedSession
+                    staleChannelIdOpt ->
+                    _ =
+                      appendJoinWithoutConnectedSessionInvariant
+                        db
+                        currentUserId
+                        (Some currentHandle)
+                        channelId
+                        deviceId
+                        staleChannelIdOpt
+                        ()
+                    _ = match staleChannelIdOpt with
+                      Some _ ->
+                        _ = clearActiveChannel db deviceId currentUserId ()
+                        ()
+                      None   -> ()
+                    ControlCommandRouteBadRequest
+                      "device session not connected"
+                  JoinPresencePlanActivate ->
+                    _ = add db channelId currentUserId ()
+                    _ = add db channelId otherUserId ()
+                    presence =
+                      presence.upsert
+                        db
+                        deviceId
+                        currentUserId
+                        DevicePresenceStatus.Online
+                        (Some channelId)
+                        ()
+                    _ =
+                      match getForUserInChannel db otherUserId channelId () with
+                        Some _ ->
+                          markConnectedForChannel
+                            db currentUserId otherUserId channelId ()
+                        None -> None
+                    membership = add db channelId currentUserId ()
+                    _ =
+                      recordSucceeded
+                        db
+                        currentUserId
+                        deviceId
+                        operationId
+                        JoinChannel
+                        targetKey
+                        ()
+                    _ =
+                      internal.send
+                        "backend.channel.joined"
+                        "backend"
+                        "notice"
+                        currentUserId
+                        (Some currentHandle)
+                        (Some deviceId)
+                        (Some channelId)
+                        (Some otherUserId)
+                        None
+                        None
+                        None
+                        None
+                        (Some "join")
+                        None
+                        (Some "channel joined")
+                        operationId
+                        devTraffic
+                        false
+                        ()
+                    ControlCommandRouteOk (joinedJson membership presence)
+
+turbo.service.channels.internal.peerSetupTargetDeviceId :
+  Database
+  -> UserId
+  -> ChannelId
+  -> '{Exception, Remote, Random} Optional DeviceId
+turbo.service.channels.internal.peerSetupTargetDeviceId db peerUserId channelId =
+  do
+    inChannel = getConnectedForUserInChannel db peerUserId channelId ()
+    match inChannel with
+      Some (DevicePresence deviceId _ _ _ _) -> Some deviceId
+      None                                   ->
+        match getForUser db peerUserId () with
+          Some (DevicePresence deviceId _ _ _ _) -> Some deviceId
+          None                                   -> None
+
+turbo.service.channels.internal.sendTransmitPrepareIfTargetConnected :
+  Database
+  -> ChannelId
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> '{Exception, Remote} ()
+turbo.service.channels.internal.sendTransmitPrepareIfTargetConnected
+  db channelId senderUserId senderDeviceId targetUserId targetDeviceId =
+  do
+    match sessions.get db targetDeviceId () with
+      None -> ()
+      Some session ->
+        envelope =
+          SignalEnvelope
+            TransmitStart
+            channelId
+            senderUserId
+            senderDeviceId
+            targetUserId
+            targetDeviceId
+            "ptt-prepare"
+        SignalInbox.enqueue (inbox session) envelope ()
+
+turbo.service.channels.internal.sendWakePushUnlessTargetAudioReady :
+  Database
+  -> ChannelId
+  -> Text
+  -> Text
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> '{Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.channels.internal.sendWakePushUnlessTargetAudioReady
+  db
+  channelId
+  senderHandle
+  senderDisplayName
+  senderUserId
+  senderDeviceId
+  targetUserId
+  targetDeviceId
+  startedAt =
+  do
+    use devWakeEvents appendRecent
+    targetAudioReady =
+      isReadyForCurrentSession db channelId targetUserId targetDeviceId ()
+    targetSocketConnected = sockets.isConnected db targetDeviceId ()
+    devTraffic = isWhitelistedDevHandle (Some senderHandle) ()
+    if Boolean.and targetSocketConnected targetAudioReady then
+      _ =
+        appendRecent
+          db
+          senderUserId
+          channelId
+          senderDeviceId
+          senderHandle
+          targetUserId
+          targetDeviceId
+          startedAt
+          "skipped-target-ready"
+          "0"
+          None
+          ()
+      _ = 
+        forkAt pool() do
+          toRemote do
+            _ =
+              internal.send
+                "backend.wake.skipped_target_ready"
+                "backend"
+                "notice"
+                senderUserId
+                (Some senderHandle)
+                (Some senderDeviceId)
+                (Some channelId)
+                (Some targetUserId)
+                (Some targetDeviceId)
+                None
+                None
+                None
+                (Some "wake")
+                (Some "target-ready")
+                (Some
+                  "wake send skipped because the selected target already had receiver audio ready and an open WebSocket")
+                None
+                devTraffic
+                false
+                ()
+            ()
+      ()
+    else
+      _ =
+        appendRecent
+          db
+          senderUserId
+          channelId
+          senderDeviceId
+          senderHandle
+          targetUserId
+          targetDeviceId
+          startedAt
+          "scheduled"
+          "0"
+          None
+          ()
+      _ = 
+        forkAt pool() do
+          toRemote do
+            _ =
+              sendWakePushIfPossible
+                db
+                channelId
+                senderHandle
+                senderDisplayName
+                senderUserId
+                senderDeviceId
+                targetUserId
+                targetDeviceId
+                startedAt
+                ()
+            ()
+      ()
+
+turbo.service.channels.join :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.channels.join db =
+  do
+    use Parser /
+    channelIdText = route POST (s "v1" / s "channels" / Parser.text / s "join")
+    match requireUser db () with
+      Left err -> unauthorized.json (object.empty |> addText "error" err)
+      Right currentUser ->
+        fields = decodeJson (Decoder.object Decoder.text)
+        respondHttp
+          (joinControlCommand db currentUser channelIdText fields ()) ()
+
+turbo.service.channels.join.doc : Doc
+turbo.service.channels.join.doc =
+  {{
+  {{ docExample 1 do db -> channels.join db }} marks the caller's device as
+  joined to a direct channel, but only when the backend still has a live
+  connected session for that device. If the device's control-plane session is
+  stale, the route rejects the join and clears any carried active-channel
+  presence instead of projecting a poisoned live session.
+  }}
+
+turbo.service.channels.leave.doc : Doc
+turbo.service.channels.leave.doc =
+  {{
+  {{ docExample 1 do db -> leave db }} clears the caller's active
+  device-channel binding for `channelId`.
+  
+  This is the control-plane leave operation used when a device exits a
+  conversation. It also sends a best-effort PushToTalk `leave-channel` push to
+  the peer's latest channel token so a background peer can tear down its
+  local/system session without waiting for presence polling.
+  
+  **Also see:** {clearActiveChannel}, {{
+  docLink (docEmbedTermLink do channels.join) }}
+  }}
+
+turbo.service.channels.pttPushTarget.doc : Doc
+turbo.service.channels.pttPushTarget.doc =
+  {{
+  {{ docExample 1 do db -> pttPushTarget db }} returns the current receiver
+  push target for the caller's active transmit.
+  
+  This is the canonical background-wake payload shape for a live transmit
+  owner. It is useful for APNs integration and simulator push tooling.
+  
+  **Also see:** {channels.beginTransmit}, {{
+  docLink (docEmbedTermLink do latestForUserInChannel) }}
+  }}
+
+turbo.service.channels.readiness :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.readiness db =
+  do
+    use Boolean not
+    use Optional map
+    use Parser / text
+    use Text ==
+    use object add empty
+    (channelIdText, deviceIdText) =
+      route
+        GET (s "v1" / s "channels" / text / s "readiness" / text => Tuple.pair)
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        channelId = ChannelId.fromText channelIdText
+        currentDeviceId = DeviceId.fromText deviceIdText
+        canReadChannel = userCanReadDirectChannel db channelId currentUserId ()
+        if not canReadChannel then
+          unauthorized.json
+            (empty |> addText "error" "not a channel participant")
+        else
+          channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+          match channelOpt with
+            None ->
+              notFound.json (empty |> addText "error" "channel not found")
+            Some channel ->
+              peerUserId =
+                (DirectChannel _ lowUserId highUserId _) = channel
+                if UserId.toText lowUserId == UserId.toText currentUserId then
+                  highUserId
+                else lowUserId
+              selfPresence = presence.get db currentDeviceId ()
+              rawSelfHasActiveDevice =
+                match selfPresence with
+                  Some presence ->
+                    matchesDeviceChannelPresence
+                      currentUserId currentDeviceId channelId presence
+                  None -> false
+              selfHasActiveDevice =
+                selfJoinedChannel db currentUserId channelId selfPresence ()
+              _ =
+                if Boolean.and rawSelfHasActiveDevice (not selfHasActiveDevice) then
+                  appendStaleSelfPresenceProjectedLiveInvariant
+                    db currentUserId channelId currentDeviceId "readiness" ()
+                else ()
+              rawPeerPresence =
+                getRawForUserInChannel db peerUserId channelId ()
+              peerPresence = getForUserInChannel db peerUserId channelId ()
+              _ =
+                match (rawPeerPresence, peerPresence) with
+                  (Some (DevicePresence peerDeviceId _ _ _ _), None) ->
+                    appendStalePeerPresenceProjectedLiveInvariant
+                      db
+                      currentUserId
+                      channelId
+                      currentDeviceId
+                      peerDeviceId
+                      "readiness"
+                      ()
+                  _ -> ()
+              peerHasActiveDevice = isSome peerPresence
+              peerTargetDeviceId =
+                peerSetupTargetDeviceId db peerUserId channelId ()
+              peerDirectQuicIdentity =
+                match peerTargetDeviceId with
+                  Some targetDeviceId ->
+                    match directQuicIdentity.get db targetDeviceId () with
+                      Some identity ->
+                        if directQuicDeviceIdentityIsActive identity then
+                          Some identity
+                        else None
+                      None -> None
+                  None -> None
+              peerMediaEncryptionIdentity =
+                match peerTargetDeviceId with
+                  Some targetDeviceId ->
+                    match mediaEncryptionIdentity.get db targetDeviceId () with
+                      Some identity ->
+                        if mediaEncryptionDeviceIdentityIsActive identity then
+                          Some identity
+                        else None
+                      None -> None
+                  None -> None
+              selfAudioStatus =
+                if selfHasActiveDevice then
+                  match statusForCurrentSession
+                    db channelId currentUserId currentDeviceId () with
+                    AudioReadinessUnknown -> AudioReadinessWaiting
+                    status                -> status
+                else AudioReadinessUnknown
+              peerBaseAudioStatus =
+                match peerTargetDeviceId with
+                  Some targetDeviceId ->
+                    match statusForCurrentSession
+                      db channelId peerUserId targetDeviceId () with
+                      AudioReadinessUnknown -> AudioReadinessWaiting
+                      status                -> status
+                  None -> AudioReadinessUnknown
+              selfWakeTargetDeviceId =
+                map
+                  (cases EphemeralToken _ _ tokenDeviceId _ _ -> tokenDeviceId)
+                  (tokens.get db channelId currentUserId currentDeviceId ())
+              peerWakeTargetDeviceId =
+                map
+                  (cases EphemeralToken _ _ tokenDeviceId _ _ -> tokenDeviceId)
+                  (latestForUserInChannel db channelId peerUserId ())
+              peerAudioStatus =
+                match ( peerBaseAudioStatus
+                , wakeCapabilityStatusFromOptionalDeviceId
+                    peerWakeTargetDeviceId
+                ) with
+                  (AudioReadinessWaiting, WakeCapable _) ->
+                    AudioReadinessWakeCapable
+                  _ -> peerBaseAudioStatus
+              audioReadiness =
+                ChannelAudioReadiness
+                  selfAudioStatus peerAudioStatus peerTargetDeviceId
+              wakeReadiness =
+                ChannelWakeReadiness
+                  (wakeCapabilityStatusFromOptionalDeviceId
+                    selfWakeTargetDeviceId)
+                  (wakeCapabilityStatusFromOptionalDeviceId
+                    peerWakeTargetDeviceId)
+              activeTransmit = currentTransmit db channelId ()
+              activeTransmitterUserId =
+                map
+                  (cases TransmitState _ activeUserId _ _ _ _ _ -> activeUserId)
+                  activeTransmit
+              activeTransmitExpiresAt =
+                map
+                  (cases
+                    TransmitState _ _ _ _ _ _ expiresAt ->
+                      Instant.toText expiresAt)
+                  activeTransmit
+              activeTransmitId = map transmitId activeTransmit
+              readiness =
+                channelReadinessStatusFromDevices
+                  currentUserId
+                  selfHasActiveDevice
+                  peerHasActiveDevice
+                  activeTransmitterUserId
+              projectionEpoch = Instant.toText now!
+              base =
+                empty
+                  |> addText "channelId" channelIdText
+                  |> addText "stateEpoch" projectionEpoch
+                  |> addText "serverTimestamp" projectionEpoch
+                  |> addText "peerUserId" (UserId.toText peerUserId)
+                  |> addBoolean "selfHasActiveDevice" selfHasActiveDevice
+                  |> addBoolean "peerHasActiveDevice" peerHasActiveDevice
+                  |> add "readiness" (channelReadinessStatusJson readiness)
+                  |> add
+                       "audioReadiness"
+                       (channelAudioReadinessJson audioReadiness)
+                  |> add
+                       "wakeReadiness" (channelWakeReadinessJson wakeReadiness)
+                  |> addOptionalText
+                       "activeTransmitterUserId"
+                       (map UserId.toText activeTransmitterUserId)
+                  |> addOptionalText "activeTransmitId" activeTransmitId
+                  |> addOptionalText
+                       "activeTransmitExpiresAt" activeTransmitExpiresAt
+                  |> addText
+                       "status" (channelReadinessStatusKindText readiness)
+              withDirect =
+                match peerDirectQuicIdentity with
+                  Some identity ->
+                    base
+                      |> add
+                        "peerDirectQuicIdentity"
+                        (directQuicDeviceIdentityJson identity)
+                  None -> base
+              payload =
+                match peerMediaEncryptionIdentity with
+                  Some identity ->
+                    withDirect
+                      |> add
+                        "peerMediaEncryptionIdentity"
+                        (mediaEncryptionDeviceIdentityJson identity)
+                  None -> withDirect
+              ok.json payload
+
+turbo.service.channels.readiness.doc : Doc
+turbo.service.channels.readiness.doc =
+  {{
+  {{ docExample 1 do db -> readiness db }} reports the caller and peer
+  readiness state for a direct channel.
+  
+  This is a control-plane readiness check used by the client to distinguish
+  local join state from true peer availability. When the connected peer device
+  has an active Direct QUIC identity, readiness projects only that peer's
+  fingerprint in `peerDirectQuicIdentity`; clients must compare it with the TLS
+  certificate fingerprint observed on the direct QUIC path.
+  
+  It matches `GET /v1/channels/<channelId>/readiness/<deviceId>`.
+  }}
+
+turbo.service.channels.renewTransmit.doc : Doc
+turbo.service.channels.renewTransmit.doc =
+  {{
+  {{ docExample 1 do db -> channels.renewTransmit db }} extends the caller's
+  active transmit lease for a direct channel.
+  
+  The request body only needs the sender `deviceId`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do channels.beginTransmit) }}, {{
+  docLink (docEmbedTermLink do channels.endTransmit) }}
+  }}
+
+turbo.service.channels.revokeEphemeralToken :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.revokeEphemeralToken db =
+  do
+    use Parser /
+    use object empty
+    channelIdText =
+      route
+        POST
+        (s "v1"
+          / s "channels"
+          / Parser.text
+          / s "ephemeral-token"
+          / s "revoke")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        fields = decodeJson (Decoder.object Decoder.text)
+        channelId = ChannelId.fromText channelIdText
+        isMember = memberships.exists db channelId currentUserId ()
+        if Boolean.not isMember then
+          unauthorized.json (empty |> addText "error" "not a channel member")
+        else
+          match Map.get "deviceId" fields with
+            None ->
+              badRequest.json (empty |> addText "error" "missing deviceId")
+            Some deviceIdText ->
+              deviceId = DeviceId.fromText deviceIdText
+              _ = tokens.delete db channelId currentUserId deviceId ()
+              _ =
+                deleteEphemeralRow
+                  db ((channelId, currentUserId, deviceId), ())
+              ready =
+                isReadyForCurrentSession db channelId currentUserId deviceId ()
+              cleared =
+                if ready then None
+                else clearIfTargetDevice db channelId currentUserId deviceId ()
+              status = match cleared with
+                Some _ -> "revoked-active-transmit-cleared"
+                None   -> "revoked"
+              ok.json
+                (empty
+                  |> addText "channelId" channelIdText
+                  |> addText "deviceId" deviceIdText
+                  |> addText "status" status)
+
+turbo.service.channels.state :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.state db =
+  do
+    use Boolean and not or
+    use Optional map
+    use Parser / text
+    use memberships exists
+    use object add empty
+    (channelIdText, deviceIdText) =
+      route GET (s "v1" / s "channels" / text / s "state" / text => Tuple.pair)
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        channelId = ChannelId.fromText channelIdText
+        deviceId = DeviceId.fromText deviceIdText
+        match OrderedTable.tryRead (channels.tables.byId db) channelId with
+          None -> notFound.json (empty |> addText "error" "channel not found")
+          Some (DirectChannel _ lowUserId highUserId _) ->
+            peerUserId =
+              if userIdEqual lowUserId currentUserId then highUserId
+              else lowUserId
+            peerHandle = match users.getById db peerUserId () with
+              Some (User _ handleText _ _ _) -> handleText
+              None                           -> UserId.toText peerUserId
+            selfPresence = presence.get db deviceId ()
+            selfOnline = match selfPresence with
+              Some presence -> presenceMatches currentUserId presence
+              None          -> false
+            rawSelfJoined =
+              match selfPresence with
+                Some presence ->
+                  matchesDeviceChannelPresence
+                    currentUserId deviceId channelId presence
+                None -> false
+            normalizedSelfJoined =
+              selfJoinedChannel db currentUserId channelId selfPresence ()
+            _ =
+              if and rawSelfJoined (not normalizedSelfJoined) then
+                appendStaleSelfPresenceProjectedLiveInvariant
+                  db currentUserId channelId deviceId "state" ()
+              else ()
+            peerPresence = getForUser db peerUserId ()
+            peerOnline = isSome peerPresence
+            rawPeerPresence = getRawForUserInChannel db peerUserId channelId ()
+            peerJoinedPresence = getForUserInChannel db peerUserId channelId ()
+            _ =
+              match (rawPeerPresence, peerJoinedPresence) with
+                (Some (DevicePresence peerDeviceId _ _ _ _), None) ->
+                  appendStalePeerPresenceProjectedLiveInvariant
+                    db currentUserId channelId deviceId peerDeviceId "state" ()
+                _ -> ()
+            peerConnectedPresence =
+              getConnectedForUserInChannel db peerUserId channelId ()
+            rawPeerDeviceConnected = isSome peerConnectedPresence
+            incomingInvite =
+              incomingInviteForChannel db currentUserId peerUserId channelId ()
+            outgoingInvite =
+              outgoingInviteForChannel db currentUserId peerUserId channelId ()
+            hasIncomingRequest = isSome incomingInvite
+            hasOutgoingRequest = isSome outgoingInvite
+            hasPendingRequest = or hasIncomingRequest hasOutgoingRequest
+            durableSelfJoined = exists db channelId currentUserId ()
+            durablePeerJoined = exists db channelId peerUserId ()
+            membership =
+              stateMembershipFromDurableMembership
+                hasPendingRequest
+                durableSelfJoined
+                durablePeerJoined
+                rawPeerDeviceConnected
+            _ =
+              match membership with
+                NoMembership ->
+                  if
+                    and
+                      (not hasPendingRequest)
+                      (or durableSelfJoined durablePeerJoined) then
+                    appendNoMembershipProjectionWhileDurableMembershipExistsInvariant
+                      db
+                      currentUserId
+                      channelId
+                      deviceId
+                      durableSelfJoined
+                      durablePeerJoined
+                      ()
+                  else ()
+                _ -> ()
+            selfJoined = channelMembershipHasLocalMembership membership
+            peerJoined = channelMembershipHasPeerMembership membership
+            peerDeviceConnected =
+              channelMembershipPeerDeviceConnected membership
+            requestCount = pendingCount incomingInvite outgoingInvite
+            requestRelationship =
+              requestRelationshipFromFlags
+                hasIncomingRequest hasOutgoingRequest requestCount
+            activeTransmit = currentTransmit db channelId ()
+            activeTransmitterUserId = map transmitUserId activeTransmit
+            activeTransmitExpiresAt = map transmitExpiresAtText activeTransmit
+            activeTransmitId = map transmitId activeTransmit
+            conversationStatus =
+              channelStateStatusFromView
+                currentUserId
+                membership
+                requestRelationship
+                peerOnline
+                activeTransmitterUserId
+            _ =
+              if
+                channelStateStatusConnectsWithoutMembershipOrRequest
+                  membership requestRelationship conversationStatus then
+                appendConnectingWithoutMembershipOrRequestInvariant
+                  db currentUserId channelId ()
+              else ()
+            projectionEpoch = Instant.toText now!
+            ok.json
+              (empty
+                |> addText "channelId" channelIdText
+                |> addText "stateEpoch" projectionEpoch
+                |> addText "serverTimestamp" projectionEpoch
+                |> addText "selfUserId" (UserId.toText currentUserId)
+                |> addText "peerUserId" (UserId.toText peerUserId)
+                |> addText "peerHandle" peerHandle
+                |> addBoolean "selfOnline" selfOnline
+                |> addBoolean "peerOnline" peerOnline
+                |> addBoolean "selfJoined" selfJoined
+                |> addBoolean "peerJoined" peerJoined
+                |> addBoolean "peerDeviceConnected" peerDeviceConnected
+                |> addBoolean "hasIncomingRequest" hasIncomingRequest
+                |> addBoolean "hasOutgoingRequest" hasOutgoingRequest
+                |> addNat "requestCount" requestCount
+                |> add "membership" (channelMembershipJson membership)
+                |> add
+                     "requestRelationship"
+                     (requestRelationshipJson requestRelationship)
+                |> add
+                     "conversationStatus"
+                     (channelStateStatusJson conversationStatus)
+                |> addOptionalText
+                     "activeTransmitterUserId"
+                     (map UserId.toText activeTransmitterUserId)
+                |> addOptionalText "activeTransmitId" activeTransmitId
+                |> addOptionalText
+                     "transmitLeaseExpiresAt" activeTransmitExpiresAt
+                |> addText
+                     "status" (channelStateStatusKindText conversationStatus)
+                |> addBoolean
+                     "canTransmit"
+                     (canTransmit
+                       currentUserId
+                       selfOnline
+                       peerOnline
+                       membership
+                       activeTransmitterUserId))
+
+turbo.service.channels.state.doc : Doc
+turbo.service.channels.state.doc =
+  {{
+  {{ docExample 1 do db -> channels.state db }} returns the authoritative
+  active-session snapshot for a direct channel and device.
+  
+  The snapshot is derived from canonical facts only: device presence, pending
+  invites, memberships, and the current transmit lease. Clients should render
+  the selected conversation directly from this route instead of merging
+  multiple backend reads.
+  
+  It matches `GET /v1/channels/<channelId>/state/<deviceId>`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do summary) }}, {currentTransmit}
+  }}
+
+turbo.service.contacts.internal.selfJoinedChannel :
+  Database
+  -> UserId
+  -> ChannelId
+  -> Optional DevicePresence
+  -> '{Exception, Remote, Random} Boolean
+turbo.service.contacts.internal.selfJoinedChannel
+  db currentUserId channelId selfPresence =
+  do
+    now = now!
+    match selfPresence with
+      Some presence@(DevicePresence deviceId _ _ _ _) ->
+        if
+          matchesDeviceChannelPresence
+            currentUserId deviceId channelId presence then
+          if presence.internal.isFresh now presence then
+            hasConnectedSessionEvidence db deviceId ()
+          else false
+        else false
+      None -> false
+
+turbo.service.contacts.internal.summaryJson :
+  Database
+  -> UserId
+  -> Optional DevicePresence
+  -> User
+  -> '{Exception, Storage, Remote, Random} Optional Json
+turbo.service.contacts.internal.summaryJson db currentUserId selfPresence user =
+  do
+    use Boolean or
+    use memberships exists
+    use object add
+    (User otherUserId handleText displayName _ _) = user
+    if userIdEqual currentUserId otherUserId then None
+    else
+      directChannelOpt = internal.directChannel db currentUserId otherUserId ()
+      peerPresence = getForUser db otherUserId ()
+      peerConnectedPresence = getConnectedForUser db otherUserId ()
+      rawPeerOnline = match peerPresence with
+        None                                         -> false
+        Some (DevicePresence _ _ presenceStatus _ _) ->
+          match presenceStatus with
+            DevicePresenceStatus.Online  -> true
+            DevicePresenceStatus.Offline -> false
+      peerOnline =
+        hasConnectedSessionEvidenceFromFlags
+          rawPeerOnline (isSome peerConnectedPresence)
+      channelFacts =
+        match directChannelOpt with
+          None -> (None, false, false, false, None, None, None)
+          Some (DirectChannel channelId _ _ _) ->
+            rawPeerDeviceConnected =
+              isSome (getConnectedForUserInChannel db otherUserId channelId ())
+            incomingInvite =
+              incomingInviteForChannel
+                db currentUserId otherUserId channelId ()
+            outgoingInvite =
+              outgoingInviteForChannel
+                db currentUserId otherUserId channelId ()
+            hasPendingRequest =
+              or (isSome incomingInvite) (isSome outgoingInvite)
+            durableSelfJoined = exists db channelId currentUserId ()
+            durablePeerJoined = exists db channelId otherUserId ()
+            membershipView =
+              stateMembershipFromDurableMembership
+                hasPendingRequest
+                durableSelfJoined
+                durablePeerJoined
+                rawPeerDeviceConnected
+            selfJoined = channelMembershipHasLocalMembership membershipView
+            peerJoined = channelMembershipHasPeerMembership membershipView
+            peerDeviceConnected =
+              channelMembershipPeerDeviceConnected membershipView
+            activeTransmit = currentTransmit db channelId ()
+            activeTransmitterUserId =
+              Optional.map transmitUserId activeTransmit
+            ( Some (ChannelId.toText channelId)
+            , selfJoined
+            , peerJoined
+            , peerDeviceConnected
+            , incomingInvite
+            , outgoingInvite
+            , activeTransmitterUserId
+            )
+      ( channelIdTextOpt,
+        selfJoined,
+        peerJoined,
+        peerDeviceConnected,
+        incomingInvite,
+        outgoingInvite,
+        activeTransmitterUserId)
+        =
+        channelFacts
+      hasIncomingRequest = isSome incomingInvite
+      hasOutgoingRequest = isSome outgoingInvite
+      requestCount = pendingCount incomingInvite outgoingInvite
+      requestRelationship =
+        requestRelationshipFromFlags
+          hasIncomingRequest hasOutgoingRequest requestCount
+      membership =
+        channelMembershipFromFlags selfJoined peerJoined peerDeviceConnected
+      summaryStatus =
+        contactSummaryStatusFromView
+          currentUserId
+          peerOnline
+          membership
+          requestRelationship
+          activeTransmitterUserId
+      _ =
+        if
+          summaryConnectableWithoutLivePeerOrRequest
+            summaryStatus
+            requestRelationship
+            peerDeviceConnected
+            activeTransmitterUserId then
+          appendSummaryConnectableWithoutLivePeerOrRequestInvariant
+            db currentUserId otherUserId channelIdTextOpt summaryStatus ()
+        else ()
+      isActiveConversation =
+        or
+          (channelMembershipHasLocalMembership membership)
+          (or
+            (channelMembershipHasPeerMembership membership)
+            (isSome activeTransmitterUserId))
+      Some
+        (userIdentityJson user
+          |> addOptionalText "channelId" channelIdTextOpt
+          |> addBoolean "isOnline" peerOnline
+          |> addBoolean "hasIncomingRequest" hasIncomingRequest
+          |> addBoolean "hasOutgoingRequest" hasOutgoingRequest
+          |> addNat "requestCount" requestCount
+          |> add "membership" (channelMembershipJson membership)
+          |> add
+               "requestRelationship"
+               (requestRelationshipJson requestRelationship)
+          |> add "summaryStatus" (contactSummaryStatusJson summaryStatus)
+          |> addBoolean "isActiveConversation" isActiveConversation
+          |> addText "badgeStatus" (contactSummaryStatusKindText summaryStatus))
+
+turbo.service.contacts.internal.summaryJsons :
+  Database
+  -> UserId
+  -> Optional DevicePresence
+  -> [User]
+  -> '{Exception, Storage, Remote, Random} [Json]
+turbo.service.contacts.internal.summaryJsons
+  db currentUserId selfPresence users =
+  do match users with
+    []           -> []
+    user +: rest ->
+      use List +:
+      current = summaryJson db currentUserId selfPresence user ()
+      remaining = summaryJsons db currentUserId selfPresence rest ()
+      match current with
+        None         -> remaining
+        Some summary -> summary +: remaining
+
+turbo.service.contacts.summary :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.contacts.summary db =
+  do
+    use Parser /
+    deviceIdText =
+      route GET (s "v1" / s "contacts" / s "summaries" / Parser.text)
+    match requireUser db () with
+      Left err -> unauthorized.json (object.empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        currentDeviceId = DeviceId.fromText deviceIdText
+        selfPresence = presence.get db currentDeviceId ()
+        candidateUserIds = internal.candidateUserIds db currentUserId ()
+        users = usersByIds db candidateUserIds ()
+        summaries = summaryJsons db currentUserId selfPresence users ()
+        ok.json (Json.array summaries)
+
+turbo.service.contacts.summary.doc : Doc
+turbo.service.contacts.summary.doc =
+  {{
+  {{ docExample 1 do db -> summary db }} returns authoritative contact
+  summaries for the caller's current device.
+  
+  The route only summarizes relationship-backed contacts: peers with a pending
+  invite or an existing direct channel. It does not enumerate the entire seeded
+  dev user directory.
+  
+  **Also see:** {incoming}, {outgoing}, {{
+  docLink (docEmbedTermLink do channels.state) }}
+  }}
+
+turbo.service.dev.internal.clearDeviceState :
+  Database -> DeviceId -> '{Exception, Storage, Remote} ()
+turbo.service.dev.internal.clearDeviceState db deviceId = do
+  _ = OrderedTable.delete (presence.tables.byDevice db) deviceId
+  match OrderedTable.tryRead (sessions.tables.byDevice db) deviceId with
+    Some session ->
+      _ = SignalInbox.delete (inbox session) ()
+      _ = OrderedTable.delete (sessions.tables.byDevice db) deviceId
+      _ = OrderedTable.delete (sockets.tables.byDevice db) deviceId
+      ()
+    None         ->
+      _ = OrderedTable.delete (sockets.tables.byDevice db) deviceId
+      ()
+
+turbo.service.dev.internal.deleteSessionRow :
+  Database -> (DeviceId, a) ->{Remote} ()
+turbo.service.dev.internal.deleteSessionRow db = cases
+  (key, _) ->
+    _ = OrderedTable.delete (sessions.tables.byDevice db) key
+    ()
+
+turbo.service.dev.internal.disconnectSession :
+  Database -> DeviceSession ->{Exception, Storage, Remote} ()
+turbo.service.dev.internal.disconnectSession db = cases
+  DeviceSession expectedSessionId deviceId _ _ _ _ ->
+    _ = sessions.disconnect db deviceId expectedSessionId ()
+    ()
+
+turbo.service.dev.internal.performReset :
+  Database -> '{Exception, Storage, Remote} ResetSummary
+turbo.service.dev.internal.performReset db =
+  do
+    use List foreach size
+    use OrderedTable toStream
+    use Stream toList
+    runtimeRows = toList (toStream (byChannel db))
+    _ = foreach (deleteRuntimeRow db) runtimeRows
+    presenceRows = toList (toStream (presence.tables.byDevice db))
+    _ = foreach (deletePresenceRow db) presenceRows
+    tokenRows = toList (toStream (tokens.tables.byChannelUserDevice db))
+    _ = foreach (deleteTokenRow db) tokenRows
+    ephemeralEnvironmentRows =
+      toList (toStream (ephemeralByChannelUserDevice db))
+    _ = foreach (deleteEphemeralRow db) ephemeralEnvironmentRows
+    alertEnvironmentRows = toList (toStream (alertByUserDevice db))
+    _ = foreach (deleteAlertRow db) alertEnvironmentRows
+    inviteIdRows = toList (toStream (invites.tables.byId db))
+    _ = foreach (deleteInviteIdRow db) inviteIdRows
+    inviteFromRows = toList (toStream (byFromCreatedAt db))
+    _ = foreach (deleteInviteFromRow db) inviteFromRows
+    inviteToRows = toList (toStream (byToCreatedAt db))
+    _ = foreach (deleteInviteToRow db) inviteToRows
+    membershipRows = toList (toStream (byChannelUser db))
+    _ = foreach (deleteMembershipRow db) membershipRows
+    sessionRows = toList (toStream (sessions.tables.byDevice db))
+    _ = foreach (deleteSessionRow db) sessionRows
+    channelRows = toList (toStream (channels.tables.byId db))
+    _ = foreach (deleteChannelRow db) channelRows
+    participantRows = toList (toStream (byParticipantCreatedAt db))
+    _ = foreach (deleteChannelParticipantRow db) participantRows
+    userPairRows = toList (toStream (byUserPair db))
+    _ = foreach (deleteChannelUserPairRow db) userPairRows
+    savedContactOwnerRows = toList (toStream (byOwnerUser db))
+    _ = foreach (deleteSavedContactOwnerRow db) savedContactOwnerRows
+    controlCommandRows = toList (toStream (byActorOperation db))
+    _ = foreach (deleteControlCommandRow db) controlCommandRows
+    wakeJobRowCount = clearPending db ()
+    wakeEventRowCount = devWakeEvents.clearRecent db ()
+    invariantEventRowCount = devInvariantEvents.clearRecent db ()
+    ResetSummary
+      (size runtimeRows)
+      (size presenceRows)
+      (size tokenRows)
+      (size inviteIdRows)
+      (size inviteFromRows)
+      (size inviteToRows)
+      (size membershipRows)
+      (size sessionRows)
+      0
+      (size channelRows)
+      (size userPairRows)
+      wakeJobRowCount
+      wakeEventRowCount
+      invariantEventRowCount
+      (size controlCommandRows)
+
+turbo.service.dev.internal.resetUserState :
+  Database -> UserId -> '{Exception, Storage, Remote, Random} ResetStateSummary
+turbo.service.dev.internal.resetUserState db currentUserId =
+  do
+    use List foreach size
+    outgoingInvites = listOutgoingPending db currentUserId ()
+    incomingInvites = listIncomingPending db currentUserId ()
+    deviceIds = userDeviceIds db currentUserId ()
+    channelIds = userChannelIds db currentUserId ()
+    _ = foreach (invite -> cancelOutgoingInvite db invite ()) outgoingInvites
+    _ = foreach (invite -> declineIncomingInvite db invite ()) incomingInvites
+    _ = foreach (deviceId -> clearDeviceState db deviceId ()) deviceIds
+    tokenRows =
+      Stream.toList
+        (OrderedTable.toStream (tokens.tables.byChannelUserDevice db))
+    _ =
+      foreach
+        (tokenRow -> clearTokenRow db currentUserId deviceIds tokenRow ())
+        tokenRows
+    _ = foreach (channelId -> clearChannelRuntime db channelId ()) channelIds
+    ResetStateSummary
+      (size outgoingInvites)
+      (size incomingInvites)
+      (size deviceIds)
+      (size channelIds)
+      (size deviceIds)
+      (size tokenRows)
+
+turbo.service.dev.resetAll :
+  Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.dev.resetAll db = do
+  use Parser /
+  noCapture POST (s "v1" / s "dev" / s "reset-all")
+  summary = performReset db ()
+  ok.json (resetSummaryJson "reset-all" summary)
+
+turbo.service.dev.resetState :
+  Database -> '{Route, Exception, Storage, Remote} ()
+turbo.service.dev.resetState db = do
+  use Parser /
+  noCapture POST (s "v1" / s "dev" / s "reset-state")
+  summary = performReset db ()
+  ok.json (resetSummaryJson "reset" summary)
+
+turbo.service.dev.runtimeInspection :
+  Database -> '{Route, Exception, Http, Storage, Remote, Random} ()
+turbo.service.dev.runtimeInspection db =
+  do
+    use Parser / text
+    use memberships exists
+    use object empty
+    (channelIdText, deviceIdText) =
+      route GET (s "v1" / s "dev" / s "runtime" / text / text => Tuple.pair)
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        channelId = ChannelId.fromText channelIdText
+        deviceId = DeviceId.fromText deviceIdText
+        match OrderedTable.tryRead (channels.tables.byId db) channelId with
+          None -> notFound.json (empty |> addText "error" "channel not found")
+          Some (DirectChannel _ lowUserId highUserId _) ->
+            peerUserId =
+              if
+                textEqual
+                  (UserId.toText lowUserId) (UserId.toText currentUserId) then
+                highUserId
+              else lowUserId
+            selfPresence = presence.get db deviceId ()
+            selfSession = sessions.get db deviceId ()
+            selfSocketVisible = sockets.isConnected db deviceId ()
+            selfMembership = exists db channelId currentUserId ()
+            peerPresence = getForUser db peerUserId ()
+            peerMembership = exists db channelId peerUserId ()
+            peerJoinedPresence = getForUserInChannel db peerUserId channelId ()
+            peerConnectedPresence =
+              getConnectedForUserInChannel db peerUserId channelId ()
+            activeTransmit = currentTransmit db channelId ()
+            selfPresenceChannelId =
+              match selfPresence with
+                Some (DevicePresence _ _ _ currentChannelId _) ->
+                  Optional.map ChannelId.toText currentChannelId
+                None -> None
+            selfSessionTimes =
+              match selfSession with
+                Some (DeviceSession sessionId _ _ _ connectedAt lastSeenAt) ->
+                  ( Some sessionId
+                  , Some (Instant.toText connectedAt)
+                  , Some (Instant.toText lastSeenAt)
+                  )
+                None -> (None, None, None)
+            (selfSessionIdText, selfConnectedAtText, selfLastSeenAtText) =
+              selfSessionTimes
+            peerConnectedDeviceId =
+              match peerConnectedPresence with
+                Some (DevicePresence connectedDeviceId _ _ _ _) ->
+                  Some (DeviceId.toText connectedDeviceId)
+                None -> None
+            activeTransmitJson =
+              match activeTransmit with
+                None -> Null
+                Some
+                  (TransmitState
+                    _
+                    fromUserId
+                    fromDeviceId
+                    toUserId
+                    toDeviceId
+                    startedAt
+                    expiresAt) ->
+                  empty
+                    |> addText "fromUserId" (UserId.toText fromUserId)
+                    |> addText "fromDeviceId" (DeviceId.toText fromDeviceId)
+                    |> addText "toUserId" (UserId.toText toUserId)
+                    |> addText "toDeviceId" (DeviceId.toText toDeviceId)
+                    |> addText "startedAt" (Instant.toText startedAt)
+                    |> addText "expiresAt" (Instant.toText expiresAt)
+            ok.json
+              (empty
+                |> addText "channelId" channelIdText
+                |> addText "currentUserId" (UserId.toText currentUserId)
+                |> addText "peerUserId" (UserId.toText peerUserId)
+                |> addText "deviceId" deviceIdText
+                |> addBoolean "selfPresenceFound" (isSome selfPresence)
+                |> addOptionalText
+                     "selfPresenceChannelId" selfPresenceChannelId
+                |> addBoolean "selfSessionConnected" (isSome selfSession)
+                |> addOptionalText "selfSessionId" selfSessionIdText
+                |> addOptionalText "selfSessionConnectedAt" selfConnectedAtText
+                |> addOptionalText "selfSessionLastSeenAt" selfLastSeenAtText
+                |> addBoolean "selfSocketVisible" selfSocketVisible
+                |> addBoolean "selfMembership" selfMembership
+                |> addBoolean "peerPresenceFound" (isSome peerPresence)
+                |> addBoolean "peerMembership" peerMembership
+                |> addBoolean
+                     "peerJoinedPresenceFound" (isSome peerJoinedPresence)
+                |> addBoolean
+                     "peerConnectedPresenceFound"
+                     (isSome peerConnectedPresence)
+                |> addOptionalText
+                     "peerConnectedDeviceId" peerConnectedDeviceId
+                |> object.add "activeTransmit" activeTransmitJson)
+
+turbo.service.dev.runtimeInspection.doc : Doc
+turbo.service.dev.runtimeInspection.doc =
+  {{
+  {{ docExample 1 do db -> runtimeInspection db }} returns a backend runtime
+  snapshot for the caller's device in a channel.
+  
+  This is a dev-only diagnostic surface used by probes and on-device tooling to
+  distinguish presence, durable websocket session truth, local socket
+  visibility, and transmit ownership.
+  
+  **Also see:** {channels.state}, {sessions.get}, {sockets.lookup}
+  }}
+
+turbo.service.http :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.http db = Route.or (api db) (share db)
+
+turbo.service.httpWithConfig :
+  Text
+  -> Boolean
+  -> Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.httpWithConfig mode supportsWebSocket db =
+  Route.or (apiWithConfig mode supportsWebSocket db) (share db)
+
+turbo.service.invites.accept.doc : Doc
+turbo.service.invites.accept.doc =
+  {{
+  {{ docExample 1 do db -> invites.accept db }} acknowledges an incoming invite
+  for the current user.
+  
+  The invite remains pending until both peers have actually joined the channel;
+  the join step is still authoritative for transitioning to connected state.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do channels.join) }},
+  {invites.getById}
+  }}
+
+turbo.service.presence.background :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.presence.background db =
+  do
+    use Parser /
+    use object empty
+    noCapture POST (s "v1" / s "presence" / s "background")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        currentHandle =
+          (User _ handleText _ _ _) = currentUser
+          handleText
+        fields = decodeJson (Decoder.object Decoder.text)
+        match Map.get "deviceId" fields with
+          None -> badRequest.json (empty |> addText "error" "missing deviceId")
+          Some deviceIdText ->
+            devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+            deviceId = DeviceId.fromText deviceIdText
+            currentChannelIdOpt =
+              match presence.get db deviceId () with
+                Some (DevicePresence _ _ _ currentChannelId _) ->
+                  currentChannelId
+                None -> None
+            _ = match currentChannelIdOpt with
+              Some channelId ->
+                _ = runtime.endTransmit db channelId currentUserId deviceId ()
+                ()
+              None           -> ()
+            _ = sockets.disconnect db deviceId ()
+            _ = disconnectCurrent db deviceId ()
+            _ =
+              presence.upsert
+                db
+                deviceId
+                currentUserId
+                DevicePresenceStatus.Offline
+                currentChannelIdOpt
+                ()
+            sessionConnected = sessions.isConnected db deviceId ()
+            socketConnected = sockets.isConnected db deviceId ()
+            _ =
+              if
+                hasConnectedSessionEvidenceFromFlags
+                  sessionConnected socketConnected then
+                appendOfflineRetainedConnectedSessionInvariant
+                  db
+                  currentUserId
+                  (Some currentHandle)
+                  deviceId
+                  sessionConnected
+                  socketConnected
+                  ()
+              else ()
+            _ =
+              internal.send
+                "backend.presence.background"
+                "backend"
+                "notice"
+                currentUserId
+                (Some currentHandle)
+                (Some deviceId)
+                currentChannelIdOpt
+                None
+                None
+                None
+                None
+                None
+                (Some "presence")
+                (Some "background")
+                (Some "presence transitioned to background")
+                None
+                devTraffic
+                false
+                ()
+            ok.json
+              (empty
+                |> addText "deviceId" deviceIdText
+                |> addText "userId" (UserId.toText currentUserId)
+                |> addText "status" "offline")
+
+turbo.service.presence.background.doc : Doc
+turbo.service.presence.background.doc =
+  {{
+  {{ docExample 1 do db -> background db }} records app-level offline presence
+  for the caller's device while preserving any active channel membership for
+  wake-capable background receive.
+  
+  Use this for app background transitions where the device should appear
+  offline in presence surfaces but remain reachable for the current channel.
+  }}
+
+turbo.service.presence.heartbeat :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.presence.heartbeat db =
+  do
+    use Parser /
+    use object empty
+    noCapture POST (s "v1" / s "presence" / s "heartbeat")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        currentHandle =
+          (User _ handleText _ _ _) = currentUser
+          handleText
+        fields = decodeJson (Decoder.object Decoder.text)
+        match Map.get "deviceId" fields with
+          None -> badRequest.json (empty |> addText "error" "missing deviceId")
+          Some deviceIdText ->
+            devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+            deviceId = DeviceId.fromText deviceIdText
+            _ = store.presence.heartbeat db deviceId currentUserId ()
+            _ = touchCurrent db deviceId ()
+            _ =
+              internal.send
+                "backend.presence.heartbeat"
+                "backend"
+                "notice"
+                currentUserId
+                (Some currentHandle)
+                (Some deviceId)
+                None
+                None
+                None
+                None
+                None
+                None
+                (Some "presence")
+                (Some "heartbeat")
+                (Some "presence heartbeat recorded")
+                None
+                devTraffic
+                false
+                ()
+            ok.json
+              (empty
+                |> addText "deviceId" deviceIdText
+                |> addText "userId" (UserId.toText currentUserId)
+                |> addText "status" "online")
+
+turbo.service.presence.heartbeat.doc : Doc
+turbo.service.presence.heartbeat.doc =
+  {{
+  {{ docExample 1 do db -> service.presence.heartbeat db }} records app-level
+  online presence for the caller's device.
+  
+  This endpoint keeps contact online/offline state separate from channel join
+  state.
+  
+  **Also see:** {store.presence.heartbeat}, {{
+  docLink (docEmbedTermLink do leave) }}
+  }}
+
+turbo.service.presence.internal.clearStaleActiveChannelOnSessionConnect :
+  Database -> UserId -> DeviceId -> '{Exception, Storage, Remote, Random} ()
+turbo.service.presence.internal.clearStaleActiveChannelOnSessionConnect
+  db currentUserId currentDeviceId =
+  do
+    sessionConnected = sessions.isConnected db currentDeviceId ()
+    socketConnected = sockets.isConnected db currentDeviceId ()
+    staleChannelIdOpt =
+      staleActiveChannelOnSessionConnect
+        currentUserId
+        currentDeviceId
+        sessionConnected
+        socketConnected
+        (presence.get db currentDeviceId ())
+        ()
+    match staleChannelIdOpt with
+      Some channelId ->
+        _ =
+          appendStaleActiveChannelOnSessionConnectInvariant
+            db currentUserId channelId currentDeviceId ()
+        _ = clearActiveChannel db currentDeviceId currentUserId ()
+        ()
+      None -> ()
+
+turbo.service.presence.offline :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.presence.offline db =
+  do
+    use Parser /
+    use Text ++
+    use internal send
+    use memberships remove
+    use object empty
+    use sockets disconnect
+    noCapture POST (s "v1" / s "presence" / s "offline")
+    match requireUser db () with
+      Left err -> unauthorized.json (empty |> addText "error" err)
+      Right currentUser ->
+        currentUserId =
+          (User userId _ _ _ _) = currentUser
+          userId
+        currentHandle =
+          (User _ handleText _ _ _) = currentUser
+          handleText
+        fields = decodeJson (Decoder.object Decoder.text)
+        match Map.get "deviceId" fields with
+          None -> badRequest.json (empty |> addText "error" "missing deviceId")
+          Some deviceIdText ->
+            devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+            deviceId = DeviceId.fromText deviceIdText
+            currentChannelIdOpt =
+              match presence.get db deviceId () with
+                Some (DevicePresence _ _ _ currentChannelId _) ->
+                  currentChannelId
+                None -> None
+            _ =
+              match currentChannelIdOpt with
+                Some channelId ->
+                  _ =
+                    runtime.endTransmit db channelId currentUserId deviceId ()
+                  _ = clearActiveChannel db deviceId currentUserId ()
+                  _ = remove db channelId currentUserId ()
+                  match OrderedTable.tryRead
+                    (channels.tables.byId db) channelId with
+                    Some (DirectChannel _ lowUserId highUserId _) ->
+                      peerUserId =
+                        if userIdEqual lowUserId currentUserId then highUserId
+                        else lowUserId
+                      _ = remove db channelId peerUserId ()
+                      match getRawForUserInChannel db peerUserId channelId () with
+                        Some (DevicePresence peerDeviceId _ _ _ _) ->
+                          _ = clearActiveChannel db peerDeviceId peerUserId ()
+                          ()
+                        None                                       -> ()
+                    None -> ()
+                None -> ()
+            _ = disconnect db deviceId ()
+            _ = disconnectCurrent db deviceId ()
+            initialSessionConnected = sessions.isConnected db deviceId ()
+            initialSocketConnected = sockets.isConnected db deviceId ()
+            initialConnected =
+              hasConnectedSessionEvidenceFromFlags
+                initialSessionConnected initialSocketConnected
+            _ =
+              if initialConnected then
+                _ = disconnect db deviceId ()
+                _ = disconnectCurrent db deviceId ()
+                ()
+              else ()
+            sessionConnected = sessions.isConnected db deviceId ()
+            socketConnected = sockets.isConnected db deviceId ()
+            repairPlan =
+              offlineConnectedSessionRepairPlan
+                initialSessionConnected
+                initialSocketConnected
+                sessionConnected
+                socketConnected
+            _ =
+              match repairPlan with
+                ConnectedSessionRepairSucceeded ->
+                  metadata =
+                    "deviceId="
+                      ++ DeviceId.toText deviceId
+                      ++ " sessionConnected="
+                      ++ (if initialSessionConnected then "true" else "false")
+                      ++ " socketConnected="
+                      ++ (if initialSocketConnected then "true" else "false")
+                  _ =
+                    send
+                      "backend.presence.offline.repair"
+                      "backend"
+                      "notice"
+                      currentUserId
+                      (Some currentHandle)
+                      (Some deviceId)
+                      currentChannelIdOpt
+                      None
+                      None
+                      None
+                      None
+                      None
+                      (Some "presence")
+                      (Some "offline")
+                      (Some
+                        "presence.offline repaired connected session residue")
+                      (Some metadata)
+                      devTraffic
+                      false
+                      ()
+                  ()
+                _ -> ()
+            _ =
+              presence.upsert
+                db deviceId currentUserId DevicePresenceStatus.Offline None ()
+            _ =
+              match repairPlan with
+                LeaveChannel ->
+                  _ = disconnect db deviceId ()
+                  _ = disconnectCurrent db deviceId ()
+                  finalSessionConnected = sessions.isConnected db deviceId ()
+                  finalSocketConnected = sockets.isConnected db deviceId ()
+                  finalRepairPlan =
+                    offlineConnectedSessionRepairPlan
+                      sessionConnected
+                      socketConnected
+                      finalSessionConnected
+                      finalSocketConnected
+                  _ =
+                    match finalRepairPlan with
+                      ConnectedSessionRepairSucceeded ->
+                        metadata =
+                          "deviceId="
+                            ++ DeviceId.toText deviceId
+                            ++ " sessionConnected="
+                            ++ (if sessionConnected then "true" else "false")
+                            ++ " socketConnected="
+                            ++ (if socketConnected then "true" else "false")
+                            ++ " repairPass=post-offline-write"
+                        _ =
+                          send
+                            "backend.presence.offline.repair"
+                            "backend"
+                            "notice"
+                            currentUserId
+                            (Some currentHandle)
+                            (Some deviceId)
+                            currentChannelIdOpt
+                            None
+                            None
+                            None
+                            None
+                            None
+                            (Some "presence")
+                            (Some "offline")
+                            (Some
+                              "presence.offline repaired connected session residue after offline write")
+                            (Some metadata)
+                            devTraffic
+                            false
+                            ()
+                        ()
+                      ConnectedSessionRepairFailed ->
+                        appendOfflineRetainedConnectedSessionInvariant
+                          db
+                          currentUserId
+                          (Some currentHandle)
+                          deviceId
+                          finalSessionConnected
+                          finalSocketConnected
+                          ()
+                      NoConnectedSessionRepairNeeded -> ()
+                  ()
+                _ -> ()
+            _ =
+              send
+                "backend.presence.offline"
+                "backend"
+                "notice"
+                currentUserId
+                (Some currentHandle)
+                (Some deviceId)
+                currentChannelIdOpt
+                None
+                None
+                None
+                None
+                None
+                (Some "presence")
+                (Some "offline")
+                (Some "presence transitioned to offline")
+                None
+                devTraffic
+                false
+                ()
+            ok.json
+              (empty
+                |> addText "deviceId" deviceIdText
+                |> addText "userId" (UserId.toText currentUserId)
+                |> addText "status" "offline")
+
+turbo.service.presence.offline.doc : Doc
+turbo.service.presence.offline.doc =
+  {{
+  {{ docExample 1 do db -> offline db }} records app-level offline presence for
+  the caller's device.
+  
+  This is the explicit disconnect or clean-shutdown counterpart to
+  {service.presence.heartbeat}. It also clears connected-session truth and
+  active channel membership for the device immediately so peers stop projecting
+  the session as live.
+  }}
+
+turbo.service.routes.channels :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.channels db =
+  use Route or
+  or
+    (channels.direct db)
+    (or
+      (channels.join db)
+      (or
+        (leave db)
+        (or
+          (channels.state db)
+          (or
+            (revokeEphemeralToken db)
+            (or
+              (channels.ephemeralToken db)
+              (or
+                (pttPushTarget db)
+                (or
+                  (channels.beginTransmit db)
+                  (or
+                    (channels.renewTransmit db)
+                    (or (channels.endTransmit db) (readiness db))))))))))
+
+turbo.service.routes.dev :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.dev db =
+  use Route or
+  or
+    (dev.deployStamp db)
+    (or
+      (seed db)
+      (or
+        (resetAll db)
+        (or
+          (resetState db)
+          (or
+            (clearDiagnosticsForDevice db)
+            (or
+              (clearDiagnostics db)
+              (or
+                (uploadDiagnostics db)
+                (or
+                  (latestDiagnostics db)
+                  (or
+                    (latestDiagnosticsForCurrentUser db)
+                    (or
+                      (runtimeInspection db)
+                      (or
+                        (uploadWakeEvent db)
+                        (or
+                          (recentWakeEvents db)
+                          (or
+                            (uploadInvariantEvent db)
+                            (recentInvariantEvents db)))))))))))))
+
+turbo.service.routes.users :
+  Database -> '{Route, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.users db =
+  use Route or
+  or
+    (profile db)
+    (or
+      (resolveIdentity db)
+      (or
+        (contacts.forget db)
+        (or
+          (contacts.remember db)
+          (or (summary db) (or (presenceByHandle db) (users.byHandle db))))))
+
+turbo.service.web :
+  Database
+  -> '{Route,
+  Config,
+  Exception,
+  Http,
+  OpenWebSocket,
+  Storage,
+  Remote,
+  WebSockets,
+  Random,
+  Log} ()
+turbo.service.web db =
+  use Route or
+  or (api db) (or (ws db) (share db))
+
+turbo.service.ws :
+  Database
+  -> '{Route,
+  Config,
+  Exception,
+  Http,
+  OpenWebSocket,
+  Storage,
+  Remote,
+  WebSockets,
+  Random,
+  Log} ()
+turbo.service.ws db =
+  do
+    use Parser & /
+    use Remote cancel
+    use object empty
+    deviceIdOpt = route GET (s "v1" / s "ws" & (do ParseQuery.text "deviceId"))
+    match deviceIdOpt with
+      None -> badRequest.json (empty |> addText "error" "missing deviceId")
+      Some deviceIdText ->
+        match requireUser db () with
+          Left err -> unauthorized.json (empty |> addText "error" err)
+          Right currentUser ->
+            currentUserId =
+              (User userId _ _ _ _) = currentUser
+              userId
+            ws = openWebSocket
+            deviceId = DeviceId.fromText deviceIdText
+            _ =
+              clearStaleActiveChannelOnSessionConnect
+                db currentUserId deviceId ()
+            session = sessions.connect db currentUserId deviceId ()
+            sessionId = internal.sessionId session
+            inbox = internal.inbox session
+            _ = sockets.connect db currentUserId deviceId ws ()
+            outboundTask = 
+              forkAt pool() do
+                toRemote do
+                  sendQueuedEnvelopesForSession
+                    db deviceId sessionId inbox ws ()
+            freshnessTask = 
+              forkAt pool() do
+                toRemote do
+                  keepSessionFreshWhileSocketOpen
+                    db deviceId currentUserId sessionId ()
+            _ =
+              WebSockets.send
+                ws
+                (TextMessage
+                  (Json.toText
+                    (empty
+                      |> addText "status" "connected"
+                      |> addText "deviceId" deviceIdText
+                      |> addText "sessionId" sessionId)))
+            _ = 
+              catch do
+                forever do
+                  _ = sessions.touch db deviceId sessionId ()
+                  message = WebSockets.receive ws
+                  handleMessageSafely
+                    db currentUser deviceId sessionId ws message ()
+            _ = cancel freshnessTask
+            _ = cancel outboundTask
+            _ = disconnectSocketForCurrentSession db deviceId sessionId ()
+            sessions.disconnect db deviceId sessionId ()
+
+turbo.service.ws.internal.appendActiveTransmitSenderPresenceDriftInvariant :
+  Database
+  -> UserId
+  -> ChannelId
+  -> DeviceId
+  -> SignalKind
+  -> '{Exception, Storage, Remote} ()
+turbo.service.ws.internal.appendActiveTransmitSenderPresenceDriftInvariant
+  db currentUserId channelId deviceId signalKind =
+  do
+    use Text ++
+    metadata =
+      "channelId="
+        ++ ChannelId.toText channelId
+        ++ " deviceId="
+        ++ DeviceId.toText deviceId
+        ++ " signalKind="
+        ++ SignalKind.toText signalKind
+    appendInvariantEvent
+      db
+      currentUserId
+      "channel.active_transmit_sender_presence_drift"
+      "backend"
+      "backend"
+      "active transmit matched the signaling sender while raw joined presence was missing"
+      (Some metadata)
+      ()
+
+turbo.service.ws.internal.disconnectSocketForCurrentSession :
+  Database -> DeviceId -> Text -> '{Exception, Storage, Remote} ()
+turbo.service.ws.internal.disconnectSocketForCurrentSession
+  db deviceId expectedSessionId =
+  do
+    currentSessionOpt = sessions.get db deviceId ()
+    currentSessionMatches = match currentSessionOpt with
+      Some session -> textEqual (sessionId session) expectedSessionId
+      None         -> false
+    if currentSessionMatches then sockets.disconnect db deviceId () else ()
+
+turbo.service.ws.internal.executeControlCommand :
+  Database
+  -> User
+  -> Optional DeviceId
+  -> ControlCommandRequest
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.ws.internal.executeControlCommand
+  db currentUser websocketDeviceIdOpt = cases
+  ControlCommandRequest _ kind fields ->
+    do
+      match kind with
+        ConnectRequest -> createControlCommand db currentUser fields ()
+        JoinChannel ->
+          match Map.get "channelId" fields with
+            None -> ControlCommandRouteBadRequest "missing channelId"
+            Some channelIdText ->
+              joinControlCommandWithConnectedDevice
+                db currentUser websocketDeviceIdOpt channelIdText fields ()
+        LeaveChannel ->
+          match Map.get "channelId" fields with
+            None -> ControlCommandRouteBadRequest "missing channelId"
+            Some channelIdText ->
+              leaveControlCommand db currentUser channelIdText fields ()
+
+turbo.service.ws.internal.forwardEnvelope :
+  Database
+  -> UserId
+  -> DeviceId
+  -> WebSocket
+  -> SignalEnvelope
+  -> '{Exception, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.forwardEnvelope
+  db currentUserId currentDeviceId currentSocket envelope =
+  do
+    use Json toText
+    use Text ==
+    use WebSockets send
+    use object empty
+    resolved =
+      resolveEnvelopeTargetWithRetry
+        db currentUserId currentDeviceId envelope 6 ()
+    match resolved with
+      Left err ->
+        send
+          currentSocket (TextMessage (toText (empty |> addText "error" err)))
+      Right resolvedEnvelope ->
+        (SignalEnvelope kind channelId _ _ _ targetDeviceId payload) =
+          resolvedEnvelope
+        receiverStatusOpt =
+          match kind with
+            ReceiverReady -> Some AudioReadinessReady
+            ReceiverNotReady ->
+              if payload == "app-background-media-closed" then
+                Some AudioReadinessWakeCapable
+              else Some AudioReadinessWaiting
+            _ -> None
+        _ =
+          match receiverStatusOpt with
+            Some receiverStatus ->
+              match sessions.get db currentDeviceId () with
+                Some session ->
+                  _ =
+                    receiverAudioReadiness.upsert
+                      db
+                      channelId
+                      currentUserId
+                      currentDeviceId
+                      (sessionId session)
+                      receiverStatus
+                      ()
+                  ()
+                None -> ()
+            _ -> ()
+        match lookupTargetInboxWithRetry db targetDeviceId 6 () with
+          None ->
+            send
+              currentSocket
+              (TextMessage
+                (toText
+                  (empty
+                    |> addText "error" "target device has no routable inbox")))
+          Some inbox -> SignalInbox.enqueue inbox resolvedEnvelope ()
+
+turbo.service.ws.internal.handleMessage :
+  Database
+  -> User
+  -> DeviceId
+  -> Text
+  -> WebSocket
+  -> websockets.Message
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.handleMessage
+  db currentUser currentDeviceId currentSessionId currentSocket = cases
+  TextMessage text ->
+    do
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      match controlCommandFrameFromText text with
+        ParsedControlCommandFrame request ->
+          sendControlCommandResponse
+            db currentUser currentDeviceId currentSocket request ()
+        InvalidControlCommandFrame err ->
+          sendInvalidControlCommandResponse currentSocket err ()
+        NotControlCommandFrame ->
+          handleSignalMessage
+            db
+            currentUserId
+            currentDeviceId
+            currentSessionId
+            currentSocket
+            text
+            ()
+  _ ->
+    do
+      WebSockets.send
+        currentSocket
+        (TextMessage
+          (Json.toText
+            (object.empty
+              |> addText "error" "binary websocket messages are not supported")))
+
+turbo.service.ws.internal.handleMessageSafely :
+  Database
+  -> User
+  -> DeviceId
+  -> Text
+  -> WebSocket
+  -> websockets.Message
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.handleMessageSafely
+  db currentUser currentDeviceId currentSessionId currentSocket message =
+  do
+    match catch do
+      handleMessage
+        db
+        currentUser
+        currentDeviceId
+        currentSessionId
+        currentSocket
+        message
+        () with
+      Left _ ->
+        WebSockets.send
+          currentSocket
+          (TextMessage
+            (Json.toText
+              (object.empty
+                |> addText "error" "websocket message handling failed")))
+      Right _ -> ()
+
+turbo.service.ws.internal.handleSignalMessage :
+  Database
+  -> UserId
+  -> DeviceId
+  -> Text
+  -> WebSocket
+  -> Text
+  -> '{Exception, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.handleSignalMessage
+  db currentUserId currentDeviceId currentSessionId currentSocket text =
+  do
+    use Json toText
+    use WebSockets send
+    use object empty
+    parsed = catch do
+      envelope = SignalEnvelope.fromText text
+      signalSessionId = sessionIdFromText text
+      (envelope, signalSessionId)
+    match parsed with
+      Left _ ->
+        send
+          currentSocket
+          (TextMessage
+            (toText (empty |> addText "error" "invalid signaling payload")))
+      Right (envelope, signalSessionId) ->
+        if signalSessionAccepted currentSessionId signalSessionId then
+          forwardEnvelope
+            db currentUserId currentDeviceId currentSocket envelope ()
+        else
+          send
+            currentSocket
+            (TextMessage
+              (toText (empty |> addText "error" "stale signaling session")))
+
+turbo.service.ws.internal.keepSessionFreshWhileSocketOpen :
+  Database
+  -> DeviceId
+  -> UserId
+  -> Text
+  ->{Exception, Storage, Remote, Random} '{Exception, Storage, Remote, Random} ()
+turbo.service.ws.internal.keepSessionFreshWhileSocketOpen
+  db deviceId userId sessionId =
+  do
+    touchedCurrentSession = isSome (sessions.touch db deviceId sessionId ())
+    socketStillRegistered = isSome (sockets.lookup db deviceId ())
+    if keepSessionFreshShouldContinue
+      touchedCurrentSession socketStillRegistered then
+      _ = store.presence.heartbeat db deviceId userId ()
+      _ = Remote.sleepMicroseconds sessionFreshnessTouchIntervalMicroseconds
+      keepSessionFreshWhileSocketOpen db deviceId userId sessionId ()
+    else ()
+
+turbo.service.ws.internal.lookupTargetInboxWithRetry :
+  Database -> DeviceId -> Nat -> '{Exception, Remote} Optional SignalInbox
+turbo.service.ws.internal.lookupTargetInboxWithRetry
+  db targetDeviceId attemptsRemaining =
+  do
+    match sessions.get db targetDeviceId () with
+      Some session -> Some (inbox session)
+      None ->
+        use Nat - <=
+        remainingAfterThisAttempt =
+          if attemptsRemaining <= 1 then 0 else attemptsRemaining - 1
+        match remainingAfterThisAttempt with
+          0 -> None
+          _ ->
+            _ = Remote.sleepMicroseconds 100000
+            lookupTargetInboxWithRetry
+              db targetDeviceId remainingAfterThisAttempt ()
+
+turbo.service.ws.internal.resolveEnvelopeTarget :
+  Database
+  -> UserId
+  -> DeviceId
+  -> SignalEnvelope
+  -> '{Exception, Storage, Remote, Random} Either Text SignalEnvelope
+turbo.service.ws.internal.resolveEnvelopeTarget
+  db currentUserId currentDeviceId = cases
+  SignalEnvelope kind channelId fromUserId fromDeviceId toUserId _ payload ->
+    do
+      use Boolean not
+      sameUser =
+        textEqual (UserId.toText currentUserId) (UserId.toText fromUserId)
+      sameDevice =
+        textEqual
+          (DeviceId.toText currentDeviceId) (DeviceId.toText fromDeviceId)
+      activeTransmit = currentTransmit db channelId ()
+      senderIsJoined =
+        isDeviceJoinedInChannel db fromUserId fromDeviceId channelId ()
+      senderCanReadChannel =
+        userCanReadDirectChannel db channelId fromUserId ()
+      signalUsesSetupTarget = signalUsesPreJoinDirectQuicSetupTarget kind
+      senderMatchesActiveTransmit =
+        activeTransmitMatchesSender fromUserId fromDeviceId activeTransmit
+      transmitOwnedSignal = signalUsesActiveTransmitTarget kind
+      senderAuthorizedByActiveTransmit =
+        transmitOwnedSignal && senderMatchesActiveTransmit
+      senderAuthorizedBySetupMembership =
+        signalUsesSetupTarget && senderCanReadChannel
+      senderIsAuthorized =
+        senderIsJoined || senderAuthorizedByActiveTransmit
+          || senderAuthorizedBySetupMembership
+      if not sameUser
+        || not sameDevice then
+        Left "signaling sender does not match authenticated socket"
+      else
+        _ =
+          if senderAuthorizedByActiveTransmit && not senderIsJoined then
+            appendActiveTransmitSenderPresenceDriftInvariant
+              db currentUserId channelId fromDeviceId kind ()
+          else ()
+        if not senderIsAuthorized then
+          Left "signaling sender device is not joined to this channel"
+        else
+          targetPlan =
+            signalTargetResolutionPlanFromActiveTransmit
+              kind fromUserId fromDeviceId toUserId activeTransmit
+          match targetPlan with
+            SignalTargetResolutionUseActiveTransmitTarget targetDeviceId ->
+              Right
+                (SignalEnvelope
+                  kind
+                  channelId
+                  fromUserId
+                  fromDeviceId
+                  toUserId
+                  targetDeviceId
+                  payload)
+            SignalTargetResolutionUseConnectedPresence ->
+              if signalUsesSetupTarget then
+                match getForUser db toUserId () with
+                  None -> Left "target user has no fresh receiving device"
+                  Some (DevicePresence targetDeviceId _ _ _ _) ->
+                    Right
+                      (SignalEnvelope
+                        kind
+                        channelId
+                        fromUserId
+                        fromDeviceId
+                        toUserId
+                        targetDeviceId
+                        payload)
+              else
+                match getConnectedForUserInChannel db toUserId channelId () with
+                  None ->
+                    Left
+                      "target user has no connected receiving device in this channel"
+                  Some (DevicePresence targetDeviceId _ _ _ _) ->
+                    Right
+                      (SignalEnvelope
+                        kind
+                        channelId
+                        fromUserId
+                        fromDeviceId
+                        toUserId
+                        targetDeviceId
+                        payload)
+
+turbo.service.ws.internal.resolveEnvelopeTarget.doc : Doc
+turbo.service.ws.internal.resolveEnvelopeTarget.doc =
+  {{
+  {{
+  docExample 4 do
+    db currentUserId currentDeviceId envelope ->
+      resolveEnvelopeTarget db currentUserId currentDeviceId envelope }}
+  resolves a routable signaling envelope only when the authenticated sender
+  device is authorized for the in-channel signal.
+  
+  The normal authorization path still requires the sender device to appear as
+  the joined in-channel presence. For active transmit signal kinds, a matching
+  backend transmit lease can also authorize the sender temporarily so
+  transmit-owned signaling does not collapse during presence/session drift.
+  
+  For active transmit signal kinds, routing preserves the backend-chosen
+  transmit target device so wake-capable delivery does not depend on a second
+  presence lookup catching up first. Other signal kinds still route through the
+  latest connected in-channel presence.
+  
+  **Also see:** {currentTransmit},
+  {{ docLink (docEmbedTermLink do isDeviceJoinedInChannel) }}, {{
+  docLink (docEmbedTermLink do getConnectedForUserInChannel) }}
+  }}
+
+turbo.service.ws.internal.resolveEnvelopeTargetWithRetry :
+  Database
+  -> UserId
+  -> DeviceId
+  -> SignalEnvelope
+  -> Nat
+  -> '{Exception, Storage, Remote, Random} Either Text SignalEnvelope
+turbo.service.ws.internal.resolveEnvelopeTargetWithRetry
+  db currentUserId currentDeviceId envelope attemptsRemaining =
+  do
+    use Nat - <= >
+    resolved =
+      resolveEnvelopeTarget db currentUserId currentDeviceId envelope ()
+    match resolved with
+      Right resolvedEnvelope -> Right resolvedEnvelope
+      Left err ->
+        remainingAfterThisAttempt =
+          if attemptsRemaining <= 1 then 0 else attemptsRemaining - 1
+        if isTransientTargetError err
+          && remainingAfterThisAttempt > 0 then
+          _ = Remote.sleepMicroseconds 100000
+          resolveEnvelopeTargetWithRetry
+            db
+            currentUserId
+            currentDeviceId
+            envelope
+            remainingAfterThisAttempt
+            ()
+        else Left err
+
+turbo.service.ws.internal.sendControlCommandResponse :
+  Database
+  -> User
+  -> DeviceId
+  -> WebSocket
+  -> ControlCommandRequest
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.sendControlCommandResponse
+  db currentUser currentDeviceId currentSocket request =
+  do
+    (ControlCommandRequest requestId kind _) = request
+    result =
+      executeControlCommand db currentUser (Some currentDeviceId) request ()
+    body = websocketResponseJson requestId kind result
+    WebSockets.send currentSocket (TextMessage (Json.toText body))
+
+turbo.service.ws.internal.sendQueuedEnvelopes :
+  SignalInbox -> WebSocket -> '{Exception, Remote, WebSockets} ()
+turbo.service.ws.internal.sendQueuedEnvelopes inbox ws =
+  do
+    forever do
+      envelope = SignalInbox.dequeue inbox ()
+      WebSockets.send
+        ws (TextMessage (Json.toText (SignalEnvelope.toJson envelope)))
+
+turbo.service.ws.internal.sendQueuedEnvelopesForSession :
+  Database
+  -> DeviceId
+  -> Text
+  -> SignalInbox
+  -> WebSocket
+  -> '{Exception, Storage, Remote, WebSockets} ()
+turbo.service.ws.internal.sendQueuedEnvelopesForSession
+  db deviceId sessionId inbox ws =
+  do
+    envelope = SignalInbox.dequeue inbox ()
+    sent = 
+      catch do
+        WebSockets.send
+          ws (TextMessage (Json.toText (SignalEnvelope.toJson envelope)))
+    match sent with
+      Right _ ->
+        sendQueuedEnvelopesForSession db deviceId sessionId inbox ws ()
+      Left _ ->
+        _ = disconnectSocketForCurrentSession db deviceId sessionId ()
+        sessions.disconnect db deviceId sessionId ()
+
+turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit :
+  SignalKind
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> Optional TransmitState
+  -> SignalTargetResolutionPlan
+turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit
+  kind fromUserId fromDeviceId toUserId activeTransmit =
+  if signalUsesActiveTransmitTarget kind then
+    match activeTransmit with
+      Some
+        (TransmitState
+          _
+          activeFromUserId
+          activeFromDeviceId
+          activeToUserId
+          activeToDeviceId
+          _
+          _) ->
+        sameSenderUser =
+          textEqual (UserId.toText activeFromUserId) (UserId.toText fromUserId)
+        sameSenderDevice =
+          textEqual
+            (DeviceId.toText activeFromDeviceId) (DeviceId.toText fromDeviceId)
+        sameTargetUser =
+          textEqual (UserId.toText activeToUserId) (UserId.toText toUserId)
+        if sameSenderUser && sameSenderDevice && sameTargetUser then
+          SignalTargetResolutionUseActiveTransmitTarget activeToDeviceId
+        else SignalTargetResolutionUseConnectedPresence
+      None -> SignalTargetResolutionUseConnectedPresence
+  else SignalTargetResolutionUseConnectedPresence
+
+test> turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit.tests.examples = 
+  test.verify do
+    channelId = ChannelId.fromText "channel-123"
+    senderUserId = UserId.fromText "sender-user"
+    senderDeviceId = DeviceId.fromText "sender-device"
+    targetUserId = UserId.fromText "target-user"
+    targetDeviceId = DeviceId.fromText "target-device"
+    otherUserId = UserId.fromText "other-user"
+    startedAt = epoch
+    expiresAt = epoch
+    activeTransmit =
+      Some
+        (TransmitState
+          channelId
+          senderUserId
+          senderDeviceId
+          targetUserId
+          targetDeviceId
+          startedAt
+          expiresAt)
+    ensureEqual
+      (SignalTargetResolutionUseActiveTransmitTarget targetDeviceId)
+      (signalTargetResolutionPlanFromActiveTransmit
+        AudioChunk senderUserId senderDeviceId targetUserId activeTransmit)
+    ensureEqual
+      SignalTargetResolutionUseConnectedPresence
+      (signalTargetResolutionPlanFromActiveTransmit
+        ReceiverReady senderUserId senderDeviceId targetUserId activeTransmit)
+    ensureEqual
+      SignalTargetResolutionUseConnectedPresence
+      (signalTargetResolutionPlanFromActiveTransmit
+        AudioChunk otherUserId senderDeviceId targetUserId activeTransmit)
+    ensureEqual
+      SignalTargetResolutionUseConnectedPresence
+      (signalTargetResolutionPlanFromActiveTransmit
+        AudioChunk senderUserId senderDeviceId otherUserId activeTransmit)
+
+turbo.setApnsPrivateKeyFromPath : Text -> '{IO, Exception} ()
+turbo.setApnsPrivateKeyFromPath pathText = do
+  pemText = readFileUtf8 (FilePath pathText)
+  setApnsPrivateKey pemText ()
+
+turbo.store.presence.getConnectedForUser :
+  Database -> UserId -> '{Exception, Remote, Random} Optional DevicePresence
+turbo.store.presence.getConnectedForUser db userId = do
+  entries = Stream.toList (OrderedTable.toStream (presence.tables.byDevice db))
+  firstConnectedPresenceForUser db userId entries ()
+
+turbo.store.presence.getConnectedForUser.doc : Doc
+turbo.store.presence.getConnectedForUser.doc =
+  {{
+  {{ docExample 2 do db userId -> getConnectedForUser db userId }} returns the
+  most recent fresh connected device presence for `userId`, if one exists.
+  
+  Unlike {getForUser}, this helper also requires connected-session evidence
+  instead of relying only on a fresh presence heartbeat.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do getForUser) }}, {{
+  docLink (docEmbedTermLink do sessions.isConnected) }}
+  }}
+
+turbo.store.presence.getConnectedForUserInChannel :
+  Database
+  -> UserId
+  -> ChannelId
+  -> '{Exception, Remote, Random} Optional DevicePresence
+turbo.store.presence.getConnectedForUserInChannel db userId channelId =
+  do
+    indexedEntries =
+      Stream.toList
+        (rangeClosed.prefix
+          (byUserChannelDevice db)
+          userChannelPrefixOrdering
+          (userId, channelId)
+          (userId, channelId))
+    entries =
+      List.map
+        (cases ((_, _, deviceId), presence) -> (deviceId, presence))
+        indexedEntries
+    bestConnectedPresence db userId channelId entries None ()
+
+turbo.store.presence.getConnectedForUserInChannel.doc : Doc
+turbo.store.presence.getConnectedForUserInChannel.doc =
+  {{
+  {{
+  docExample 3 do
+    db userId channelId -> getConnectedForUserInChannel db userId channelId }}
+  returns the most recently active connected in-channel device presence for
+  `userId`.
+  
+  When multiple stale or concurrent devices exist, the backend prefers the
+  session with the newest observed websocket activity.
+  
+  **Also see:** {sessions.touch}, {resolveTransmitTarget}
+  }}
+
+turbo.store.presence.getForUser.doc : Doc
+turbo.store.presence.getForUser.doc =
+  {{
+  {{ docExample 2 do db userId -> getForUser db userId }} returns the first
+  fresh online device presence for `userId`, if one exists.
+  
+  Freshness is derived from the presence heartbeat timestamp rather than
+  websocket session ownership.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do presence.get) }}, {{
+  docLink (docEmbedTermLink do getForUserInChannel) }}
+  }}
+
+turbo.store.presence.getForUserInChannel :
+  Database
+  -> UserId
+  -> ChannelId
+  -> '{Exception, Remote, Random} Optional DevicePresence
+turbo.store.presence.getForUserInChannel db userId channelId =
+  do
+    indexedEntries =
+      Stream.toList
+        (rangeClosed.prefix
+          (byUserChannelDevice db)
+          userChannelPrefixOrdering
+          (userId, channelId)
+          (userId, channelId))
+    entries =
+      List.map
+        (cases ((_, _, deviceId), presence) -> (deviceId, presence))
+        indexedEntries
+    firstConnectedPresence db userId channelId entries ()
+
+turbo.store.presence.getForUserInChannel.doc : Doc
+turbo.store.presence.getForUserInChannel.doc =
+  {{
+  {{
+  docExample 3 do
+    db userId channelId -> getForUserInChannel db userId channelId }} returns
+  the fresh online device presence for `userId` in `channelId`, if one exists
+  and the device still has a live connected session.
+  
+  This lookup requires both a recent heartbeat and a live websocket-backed
+  session for the device.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do presence.get) }}, {{
+  docLink (docEmbedTermLink do resolveTransmitTarget) }}
+  }}
+
+turbo.store.presence.internal.bestConnectedPresence :
+  Database
+  -> UserId
+  -> ChannelId
+  -> [(DeviceId, DevicePresence)]
+  -> Optional (DeviceSession, DevicePresence)
+  -> '{Exception, Remote, Random} Optional DevicePresence
+turbo.store.presence.internal.bestConnectedPresence
+  db userId channelId entries currentBest =
+  do
+    use Instant >=
+    now = now!
+    match entries with
+      [] -> Optional.map (cases (_, presence) -> presence) currentBest
+      (_, presence@(DevicePresence deviceId _ _ _ _)) +: rest ->
+        if Boolean.and
+          (matchesOnlinePresence userId channelId presence)
+          (presence.internal.isFresh now presence) then
+          if hasConnectedSessionEvidence db deviceId () then
+            match sessions.get db deviceId () with
+              None ->
+                bestConnectedPresence db userId channelId rest currentBest ()
+              Some candidateSession ->
+                nextBest =
+                  match currentBest with
+                    None -> Some (candidateSession, presence)
+                    Some (bestSession, bestPresence) ->
+                      if lastSeenAt candidateSession >= lastSeenAt bestSession then
+                        Some (candidateSession, presence)
+                      else Some (bestSession, bestPresence)
+                bestConnectedPresence db userId channelId rest nextBest ()
+          else bestConnectedPresence db userId channelId rest currentBest ()
+        else bestConnectedPresence db userId channelId rest currentBest ()
+
+turbo.store.presence.internal.firstConnectedPresence :
+  Database
+  -> UserId
+  -> ChannelId
+  -> [(DeviceId, DevicePresence)]
+  -> '{Exception, Remote, Random} Optional DevicePresence
+turbo.store.presence.internal.firstConnectedPresence
+  db userId channelId entries =
+  do
+    now = now!
+    match entries with
+      [] -> None
+      (_, presence@(DevicePresence deviceId _ _ _ _)) +: rest ->
+        if
+          Boolean.and
+            (matchesOnlinePresence userId channelId presence)
+            (presence.internal.isFresh now presence) then
+          if hasConnectedSessionEvidence db deviceId () then Some presence
+          else firstConnectedPresence db userId channelId rest ()
+        else firstConnectedPresence db userId channelId rest ()
+
+turbo.store.presence.internal.firstConnectedPresenceForUser :
+  Database
+  -> UserId
+  -> [(DeviceId, DevicePresence)]
+  -> '{Exception, Remote, Random} Optional DevicePresence
+turbo.store.presence.internal.firstConnectedPresenceForUser db userId entries =
+  do
+    use Text ==
+    use UserId toText
+    now = now!
+    match entries with
+      [] -> None
+      (_, presence@(DevicePresence deviceId candidateUserId status _ _)) +: rest ->
+        sameUser = toText candidateUserId == toText userId
+        isOnline = match status with
+          DevicePresenceStatus.Online  -> true
+          DevicePresenceStatus.Offline -> false
+        if sameUser && isOnline && presence.internal.isFresh now presence then
+          if sessions.isConnected db deviceId () then Some presence
+          else firstConnectedPresenceForUser db userId rest ()
+        else firstConnectedPresenceForUser db userId rest ()
+
+turbo.store.presence.internal.hasConnectedSessionEvidence :
+  Database -> DeviceId -> '{Exception, Remote, Random} Boolean
+turbo.store.presence.internal.hasConnectedSessionEvidence db deviceId = do
+  sessionConnected = sessions.isConnected db deviceId ()
+  socketOpen = isSome (sockets.lookup db deviceId ())
+  hasConnectedSessionEvidenceFromFlags sessionConnected socketOpen
+
+turbo.store.presence.isDeviceJoinedInChannel.doc : Doc
+turbo.store.presence.isDeviceJoinedInChannel.doc =
+  {{
+  {{
+  docExample 4 do
+    db userId deviceId channelId ->
+      isDeviceJoinedInChannel db userId deviceId channelId }} returns whether
+  `deviceId` is the caller's currently online joined presence for `channelId`.
+  
+  This is the websocket sender-side participation check and avoids relying on a
+  separate membership row becoming visible before routing.
+  
+  **Also see:** {presence.get}, {getConnectedForUserInChannel}
+  }}
+
+turbo.store.receiverAudioReadiness.getForCurrentSession :
+  Database
+  -> ChannelId
+  -> UserId
+  -> DeviceId
+  -> '{Exception, Remote} Optional ReceiverAudioReadinessRecord
+turbo.store.receiverAudioReadiness.getForCurrentSession
+  db channelId userId deviceId =
+  do
+    recordOpt =
+      OrderedTable.tryRead
+        (receiverAudioReadiness.tables.byChannelUserDevice db)
+        (channelId, userId, deviceId)
+    sessionOpt = sessions.get db deviceId ()
+    match (recordOpt, sessionOpt) with
+      (Some record, Some session) ->
+        if
+          textEqual
+            (receiverAudioReadinessRecordSessionId record) (sessionId session) then
+          Some record
+        else None
+      _ -> None
+
+turbo.store.receiverAudioReadiness.isReadyForCurrentSession :
+  Database -> ChannelId -> UserId -> DeviceId -> '{Exception, Remote} Boolean
+turbo.store.receiverAudioReadiness.isReadyForCurrentSession
+  db channelId userId deviceId =
+  do match getForCurrentSession db channelId userId deviceId () with
+    Some record -> receiverAudioReadinessRecordIsReady record
+    None        -> false
+
+turbo.store.receiverAudioReadiness.statusForCurrentSession :
+  Database
+  -> ChannelId
+  -> UserId
+  -> DeviceId
+  -> '{Exception, Remote} AudioReadinessStatus
+turbo.store.receiverAudioReadiness.statusForCurrentSession
+  db channelId userId deviceId =
+  do match getForCurrentSession db channelId userId deviceId () with
+    Some record -> receiverAudioReadinessRecordStatus record
+    None        -> AudioReadinessUnknown
+
+turbo.store.runtime.resolveTransmitTarget :
+  Database
+  -> ChannelId
+  -> UserId
+  -> '{Exception, Remote, Random} Either Text (UserId, DeviceId)
+turbo.store.runtime.resolveTransmitTarget db channelId senderUserId =
+  do
+    channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+    match channelOpt with
+      None -> Left "channel not found"
+      Some channel ->
+        targetUserId = internal.targetUserId channel senderUserId
+        wakeCapableTargetDeviceId =
+          match latestForUserInChannel db channelId targetUserId () with
+            Some (EphemeralToken _ _ targetDeviceId _ _) -> Some targetDeviceId
+            None                                         -> None
+        match getConnectedForUserInChannel db targetUserId channelId () with
+          Some (DevicePresence targetDeviceId _ _ _ _) ->
+            if isReadyForCurrentSession
+              db channelId targetUserId targetDeviceId () then
+              Right (targetUserId, targetDeviceId)
+            else
+              match wakeCapableTargetDeviceId with
+                Some wakeCapableTargetDeviceId ->
+                  Right (targetUserId, wakeCapableTargetDeviceId)
+                None -> Left "target receiving device audio is not ready"
+          None ->
+            match wakeCapableTargetDeviceId with
+              Some wakeCapableTargetDeviceId ->
+                Right (targetUserId, wakeCapableTargetDeviceId)
+              None ->
+                Left
+                  "no connected or wake-capable receiving device for target user"
+
+turbo.store.runtime.resolveTransmitTarget.doc : Doc
+turbo.store.runtime.resolveTransmitTarget.doc =
+  {{
+  {{
+  docExample 3 do
+    db channelId senderUserId ->
+      resolveTransmitTarget db channelId senderUserId }} resolves the receiving
+  target for a transmit attempt.
+  
+  The backend prefers a currently connected joined device for the other
+  direct-channel member. If there is no connected presence, it falls back to
+  that user's latest PushToTalk token device for the channel so wake-capable
+  transmit can still begin.
+  
+  **Also see:** {getConnectedForUserInChannel}, {latestForUserInChannel},
+  {runtime.beginTransmit}
+  }}
+
+turbo.store.sessions.connect :
+  Database
+  -> UserId
+  -> DeviceId
+  -> '{Exception, Storage, Remote, Random} DeviceSession
+turbo.store.sessions.connect db userId deviceId = do
+  now = now!
+  sessionId = Uuid.toText newv4()
+  inbox = SignalInbox.new()
+  session = DeviceSession sessionId deviceId userId inbox now now
+  OrderedTable.write (sessions.tables.byDevice db) deviceId session
+  session
+
+turbo.store.sessions.connect.doc : Doc
+turbo.store.sessions.connect.doc =
+  {{
+  {{ docExample 3 do db userId deviceId -> sessions.connect db userId deviceId
+  }} creates a fresh websocket session identity and per-device remote inbox for
+  `deviceId`.
+  
+  The returned session is the authoritative routable transport record for the
+  current connection.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do sessions.touch) }},
+  {{ docLink (docEmbedTermLink do sessions.disconnect) }}, {{
+  docLink (docEmbedTermLink do SignalInbox.enqueue) }}
+  }}
+
+turbo.store.sessions.disconnect :
+  Database -> DeviceId -> Text -> '{Exception, Storage, Remote} ()
+turbo.store.sessions.disconnect db deviceId expectedSessionId = do
+  table = sessions.tables.byDevice db
+  match OrderedTable.tryRead table deviceId with
+    Some session ->
+      if textEqual (sessionId session) expectedSessionId then
+        _ = SignalInbox.delete (inbox session) ()
+        OrderedTable.delete table deviceId
+      else ()
+    None         -> ()
+
+turbo.store.sessions.disconnect.doc : Doc
+turbo.store.sessions.disconnect.doc =
+  {{
+  {{
+  docExample 3 do
+    db deviceId expectedSessionId ->
+      sessions.disconnect db deviceId expectedSessionId }} removes the current
+  websocket session for `deviceId` only if the stored session still matches
+  `expectedSessionId`.
+  
+  If it matches, the associated remote inbox is deleted as part of cleanup.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do sessions.connect) }}, {{
+  docLink (docEmbedTermLink do SignalInbox.delete) }}
+  }}
+
+turbo.store.sessions.disconnectCurrent :
+  Database -> DeviceId -> '{Exception, Storage, Remote} ()
+turbo.store.sessions.disconnectCurrent db deviceId =
+  do match sessions.get db deviceId () with
+    Some session -> sessions.disconnect db deviceId (sessionId session) ()
+    None         -> ()
+
+turbo.store.sessions.get :
+  Database -> DeviceId -> '{Exception, Remote} Optional DeviceSession
+turbo.store.sessions.get db deviceId =
+  do OrderedTable.tryRead (sessions.tables.byDevice db) deviceId
+
+turbo.store.sessions.get.doc : Doc
+turbo.store.sessions.get.doc =
+  {{
+  {{ docExample 2 do db deviceId -> sessions.get db deviceId }} returns the
+  active websocket session record for `deviceId`, including its routable inbox.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do sessions.connect) }}, {{
+  docLink (docEmbedTermLink do sessions.isConnected) }}
+  }}
+
+turbo.store.sessions.internal.inbox : DeviceSession -> SignalInbox
+turbo.store.sessions.internal.inbox = cases
+  DeviceSession _ _ _ inbox _ _ -> inbox
+
+turbo.store.sessions.internal.isFresh : Instant -> DeviceSession -> Boolean
+turbo.store.sessions.internal.isFresh now = cases
+  DeviceSession _ _ _ _ _ observedAt -> isFreshFromLastSeen now observedAt
+
+turbo.store.sessions.internal.lastSeenAt : DeviceSession -> Instant
+turbo.store.sessions.internal.lastSeenAt = cases
+  DeviceSession _ _ _ _ _ lastSeenAt -> lastSeenAt
+
+turbo.store.sessions.internal.sessionId : DeviceSession -> Text
+turbo.store.sessions.internal.sessionId = cases
+  DeviceSession sessionId _ _ _ _ _ -> sessionId
+
+turbo.store.sessions.isConnected :
+  Database -> DeviceId -> '{Exception, Remote, Random} Boolean
+turbo.store.sessions.isConnected db deviceId = do
+  now = now!
+  match sessions.get db deviceId () with
+    Some session -> sessions.internal.isFresh now session
+    None         -> false
+
+turbo.store.sessions.isConnected.doc : Doc
+turbo.store.sessions.isConnected.doc =
+  {{
+  {{ docExample 2 do db deviceId -> sessions.isConnected db deviceId }} returns
+  whether `deviceId` currently has a durable active websocket session.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do sessions.get) }}, {{
+  docLink (docEmbedTermLink do getConnectedForUserInChannel) }}
+  }}
+
+turbo.store.sessions.tables.byDevice :
+  Database -> OrderedTable DeviceId DeviceSession
+turbo.store.sessions.tables.byDevice db =
+  OrderedTable.named db "turboDeviceSessionsByDevice_v2" Universal.ordering
+
+turbo.store.sessions.touch :
+  Database
+  -> DeviceId
+  -> Text
+  -> '{Exception, Storage, Remote, Random} Optional DeviceSession
+turbo.store.sessions.touch db deviceId expectedSessionId = do
+  table = sessions.tables.byDevice db
+  match OrderedTable.tryRead table deviceId with
+    Some (DeviceSession sessionId _ userId inbox connectedAt _) ->
+      if textEqual sessionId expectedSessionId then
+        now = now!
+        session = DeviceSession sessionId deviceId userId inbox connectedAt now
+        _ = OrderedTable.write table deviceId session
+        Some session
+      else None
+    None                                                        -> None
+
+turbo.store.sessions.touch.doc : Doc
+turbo.store.sessions.touch.doc =
+  {{
+  {{
+  docExample 3 do
+    db deviceId expectedSessionId ->
+      sessions.touch db deviceId expectedSessionId }} refreshes the activity
+  timestamp for the current websocket session if it still owns `deviceId`.
+  
+  This prevents stale reconnect cleanup from mutating a newer session.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do sessions.connect) }}, {{
+  docLink (docEmbedTermLink do sessions.get) }}
+  }}
+
+turbo.store.sessions.touchCurrent :
+  Database
+  -> DeviceId
+  -> '{Exception, Storage, Remote, Random} Optional DeviceSession
+turbo.store.sessions.touchCurrent db deviceId = do
+  table = sessions.tables.byDevice db
+  match OrderedTable.tryRead table deviceId with
+    Some (DeviceSession sessionId _ userId inbox connectedAt _) ->
+      now = now!
+      session = DeviceSession sessionId deviceId userId inbox connectedAt now
+      _ = OrderedTable.write table deviceId session
+      Some session
+    None                                                        -> None
+
+turbo.store.sockets.connect.doc : Doc
+turbo.store.sockets.connect.doc =
+  {{
+  {{
+  docExample 4 do
+    db userId deviceId ws -> sockets.connect db userId deviceId ws }} records
+  the live websocket transport handle for `deviceId`.
+  
+  This registry is transport-local. Durable session truth lives in the
+  `turbo.store.sessions.*` definitions.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do sessions.connect) }},
+  {sockets.lookup}, {{ docLink (docEmbedTermLink do sockets.disconnect) }}
+  }}
+
+turbo.store.sockets.disconnect.doc : Doc
+turbo.store.sockets.disconnect.doc =
+  {{
+  {{ docExample 2 do db deviceId -> sockets.disconnect db deviceId }} removes
+  the live websocket transport handle for `deviceId`.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do sockets.connect) }}, {{
+  docLink (docEmbedTermLink do sessions.disconnect) }}
+  }}
+
+turbo.store.sockets.isConnected.doc : Doc
+turbo.store.sockets.isConnected.doc =
+  {{
+  {{ docExample 2 do db deviceId -> sockets.isConnected db deviceId }} returns
+  whether this handler can currently look up a live websocket transport for
+  `deviceId`.
+  
+  This is a transport-level diagnostic and should not be used as the durable
+  readiness source.
+  
+  **Also see:** {{ docLink (docEmbedTermLink do sessions.isConnected) }},
+  {sockets.lookup}
+  }}
+
+turbo.syncApnsWorkerConfig : '{IO} ()
+turbo.syncApnsWorkerConfig = do match catch do syncDeployConfig() with
+  Left _  -> ()
+  Right _ -> ()
+
+turbo.syncTelemetryWorkerConfig : '{IO} ()
+turbo.syncTelemetryWorkerConfig = do match catch do syncDeployConfig() with
+  Left _  -> ()
+  Right _ -> ()
+
+
+
+---- Anything below this line is ignored by Unison.
+
+
+type turbo.domain.SignalKind
+  = Offer
+  | Answer
+  | IceCandidate
+  | Hangup
+  | TransmitStart
+  | TransmitStop
+  | AudioChunk
+  | ReceiverReady
+  | ReceiverNotReady
+  | DirectQuicUpgradeRequest
+  | SelectedPeerPrewarm
+
+type turbo.domain.SignalEnvelope
+  = SignalEnvelope SignalKind ChannelId UserId DeviceId UserId DeviceId Text
+
+turbo.domain.SignalKind.fromText : Text -> Optional SignalKind
+turbo.domain.SignalKind.fromText = cases
+  "offer"                       -> Some Offer
+  "answer"                      -> Some Answer
+  "ice-candidate"               -> Some IceCandidate
+  "hangup"                      -> Some Hangup
+  "transmit-start"              -> Some TransmitStart
+  "transmit-stop"               -> Some TransmitStop
+  "audio-chunk"                 -> Some AudioChunk
+  "receiver-ready"              -> Some ReceiverReady
+  "receiver-not-ready"          -> Some ReceiverNotReady
+  "direct-quic-upgrade-request" -> Some DirectQuicUpgradeRequest
+  "selected-peer-prewarm"       -> Some SelectedPeerPrewarm
+  _                             -> None
+
+turbo.domain.SignalKind.toText : SignalKind -> Text
+turbo.domain.SignalKind.toText = cases
+  Offer                    -> "offer"
+  Answer                   -> "answer"
+  IceCandidate             -> "ice-candidate"
+  Hangup                   -> "hangup"
+  TransmitStart            -> "transmit-start"
+  TransmitStop             -> "transmit-stop"
+  AudioChunk               -> "audio-chunk"
+  ReceiverReady            -> "receiver-ready"
+  ReceiverNotReady         -> "receiver-not-ready"
+  DirectQuicUpgradeRequest -> "direct-quic-upgrade-request"
+  SelectedPeerPrewarm      -> "selected-peer-prewarm"
+
+turbo.domain.SignalEnvelope.fromText : Text ->{Exception} SignalEnvelope
+turbo.domain.SignalEnvelope.fromText text =
+  use Text ++
+  use object at!
+  runAllowTrailing
+    (do
+      kindText = at! "type" Decoder.text
+      kind = match SignalKind.fromText kindText with
+        Some kind -> kind
+        None      -> Decoder.fail ("unknown signal type: " ++ kindText)
+      channelIdText = at! "channelId" Decoder.text
+      fromUserIdText = at! "fromUserId" Decoder.text
+      fromDeviceIdText = at! "fromDeviceId" Decoder.text
+      toUserIdText = at! "toUserId" Decoder.text
+      toDeviceIdText = at! "toDeviceId" Decoder.text
+      payload = at! "payload" Decoder.text
+      SignalEnvelope kind (ChannelId.fromText channelIdText) (UserId.fromText fromUserIdText) (DeviceId.fromText fromDeviceIdText) (UserId.fromText toUserIdText) (DeviceId.fromText toDeviceIdText) payload) text
+
+turbo.domain.SignalEnvelope.toJson : SignalEnvelope -> Json
+turbo.domain.SignalEnvelope.toJson = cases
+  SignalEnvelope kind channelId fromUserId fromDeviceId toUserId toDeviceId payload ->
+    object.empty
+      |> addText "type" (SignalKind.toText kind)
+      |> addText "channelId" (ChannelId.toText channelId)
+      |> addText "fromUserId" (UserId.toText fromUserId)
+      |> addText "fromDeviceId" (DeviceId.toText fromDeviceId)
+      |> addText "toUserId" (UserId.toText toUserId)
+      |> addText "toDeviceId" (DeviceId.toText toDeviceId)
+      |> addText "payload" payload
+
+turbo.domain.SignalKind.fromText.tests.examples : [Result]
+turbo.domain.SignalKind.fromText.tests.examples = test.verify do
+  use SignalKind fromText
+  labeled "parses known tag" do ensureEqual (fromText "answer") (Some Answer)
+  labeled "parses audio chunk tag" do ensureEqual (fromText "audio-chunk") (Some AudioChunk)
+  labeled "parses receiver ready tag" do ensureEqual (fromText "receiver-ready") (Some ReceiverReady)
+  labeled "parses receiver not ready tag" do ensureEqual (fromText "receiver-not-ready") (Some ReceiverNotReady)
+  labeled "parses direct quic upgrade request tag" do ensureEqual (fromText "direct-quic-upgrade-request") (Some DirectQuicUpgradeRequest)
+  labeled "parses selected peer prewarm tag" do ensureEqual (fromText "selected-peer-prewarm") (Some SelectedPeerPrewarm)
+  labeled "rejects unknown tag" do ensureEqual (fromText "bogus") None
+
+turbo.domain.SignalKind.toText.tests.examples : [Result]
+turbo.domain.SignalKind.toText.tests.examples = test.verify do
+  use SignalKind toText
+  labeled "encodes offer" do ensureEqual (toText Offer) "offer"
+  labeled "encodes transmit stop" do ensureEqual (toText TransmitStop) "transmit-stop"
+  labeled "encodes audio chunk" do ensureEqual (toText AudioChunk) "audio-chunk"
+  labeled "encodes receiver ready" do ensureEqual (toText ReceiverReady) "receiver-ready"
+  labeled "encodes receiver not ready" do ensureEqual (toText ReceiverNotReady) "receiver-not-ready"
+  labeled "encodes direct quic upgrade request" do ensureEqual (toText DirectQuicUpgradeRequest) "direct-quic-upgrade-request"
+  labeled "encodes selected peer prewarm" do ensureEqual (toText SelectedPeerPrewarm) "selected-peer-prewarm"
+
+turbo.domain.SignalEnvelope.fromText.tests.examples : [Result]
+turbo.domain.SignalEnvelope.fromText.tests.examples = test.verify do
+  envelope = SignalEnvelope SelectedPeerPrewarm (ChannelId.fromText "channel-1") (UserId.fromText "alice") (DeviceId.fromText "alice-phone") (UserId.fromText "bob") (DeviceId.fromText "bob-phone") "selected-contact"
+  labeled "roundtrips selected peer prewarm envelope" do ensureEqual (catch do SignalEnvelope.fromText (Json.toText (SignalEnvelope.toJson envelope))) (Right envelope)
+
+turbo.domain.SignalEnvelope.fromText.tests.props : [Result]
+turbo.domain.SignalEnvelope.fromText.tests.props = test.verify do
+  use Text ++
+  Each.repeat 50
+  n = natIn 0 9
+  kind = match n with
+    0 -> Offer
+    1 -> Answer
+    2 -> IceCandidate
+    3 -> Hangup
+    4 -> TransmitStart
+    5 -> TransmitStop
+    6 -> AudioChunk
+    7 -> ReceiverReady
+    8 -> DirectQuicUpgradeRequest
+    _ -> SelectedPeerPrewarm
+  suffix = Nat.toText (natIn 0 1000000)
+  envelope = SignalEnvelope kind (ChannelId.fromText ("channel-" ++ suffix)) (UserId.fromText ("from-" ++ suffix)) (DeviceId.fromText ("from-device-" ++ suffix)) (UserId.fromText ("to-" ++ suffix)) (DeviceId.fromText ("to-device-" ++ suffix)) ("payload-" ++ suffix)
+  labeled "json roundtrip preserves the envelope" do ensureEqual (catch do SignalEnvelope.fromText (Json.toText (SignalEnvelope.toJson envelope))) (Right envelope)
+
+turbo.service.ws.internal.signalUsesActiveTransmitTarget : SignalKind -> Boolean
+turbo.service.ws.internal.signalUsesActiveTransmitTarget = cases
+  AudioChunk    -> true
+  TransmitStart -> true
+  TransmitStop  -> true
+  _             -> false
+
+turbo.service.ws.internal.signalUsesActiveTransmitTarget.tests.examples : [Result]
+turbo.service.ws.internal.signalUsesActiveTransmitTarget.tests.examples = test.verify do
+  ensureEqual true (signalUsesActiveTransmitTarget AudioChunk)
+  ensureEqual true (signalUsesActiveTransmitTarget TransmitStart)
+  ensureEqual true (signalUsesActiveTransmitTarget TransmitStop)
+  ensureEqual false (signalUsesActiveTransmitTarget ReceiverReady)
+  ensureEqual false (signalUsesActiveTransmitTarget DirectQuicUpgradeRequest)
+  ensureEqual false (signalUsesActiveTransmitTarget SelectedPeerPrewarm)
+
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget : SignalKind -> Boolean
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget = cases
+  DirectQuicUpgradeRequest -> true
+  SelectedPeerPrewarm      -> true
+  Offer                    -> true
+  Answer                   -> true
+  IceCandidate             -> true
+  _                        -> false
+
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget.tests.examples : [Result]
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget.tests.examples = test.verify do
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget DirectQuicUpgradeRequest)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget SelectedPeerPrewarm)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget Offer)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget Answer)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget IceCandidate)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget Hangup)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget AudioChunk)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget TransmitStart)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget ReceiverReady)
+
+turbo.deploy : '{IO, Exception} URI
+turbo.deploy = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  database = Database.named "turbo-control-plane-v5"
+  _ = seedCurrentOsEnv env ()
+  Database.assign database env
+  serviceHash = Route.deployWebSocket env (web database)
+  serviceName = ServiceName.named "turbo-v6"
+  _ = catch do ServiceName.unassign serviceName
+  uri = ServiceName.assign serviceName serviceHash
+  _ = catch do deleteDomainMapping (HostName "beepbeep.to")
+  _ = createDomainMapping (HostName "beepbeep.to") (ServiceName.name serviceName)
+  uri
+
+turbo.syncDeployConfig : '{IO, Exception} ()
+turbo.syncDeployConfig = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  seedCurrentOsEnv env ()
+
+turbo.setApnsBundleId : Text -> '{IO, Exception} ()
+turbo.setApnsBundleId bundleId = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_BUNDLE_ID" bundleId
+
+turbo.setApnsKeyId : Text -> '{IO, Exception} ()
+turbo.setApnsKeyId keyId = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_KEY_ID" keyId
+
+turbo.setApnsPrivateKey : Text -> '{IO, Exception} ()
+turbo.setApnsPrivateKey pemText = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_PRIVATE_KEY" pemText
+
+turbo.setApnsTeamId : Text -> '{IO, Exception} ()
+turbo.setApnsTeamId teamId = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_TEAM_ID" teamId
+
+turbo.setApnsUseSandbox : Text -> '{IO, Exception} ()
+turbo.setApnsUseSandbox useSandbox = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_USE_SANDBOX" useSandbox
+
+turbo.setApnsWorkerBaseUrl : Text -> '{IO, Exception} ()
+turbo.setApnsWorkerBaseUrl baseUrl = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_WORKER_BASE_URL" baseUrl
+
+turbo.setApnsWorkerSecret : Text -> '{IO, Exception} ()
+turbo.setApnsWorkerSecret secret = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_APNS_WORKER_SECRET" secret
+
+turbo.setTelemetryWorkerBaseUrl : Text -> '{IO, Exception} ()
+turbo.setTelemetryWorkerBaseUrl baseUrl = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_TELEMETRY_WORKER_BASE_URL" baseUrl
+
+turbo.setTelemetryWorkerSecret : Text -> '{IO, Exception} ()
+turbo.setTelemetryWorkerSecret secret = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_TELEMETRY_WORKER_SECRET" secret
+
+turbo.setWakeWorkerSecret : Text -> '{IO, Exception} ()
+turbo.setWakeWorkerSecret secret = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  setValue env "TURBO_WAKE_WORKER_SECRET" secret

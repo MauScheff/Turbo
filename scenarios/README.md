@@ -52,6 +52,8 @@ For the repo-wide workflow and architectural intent behind these scenarios, read
   - delays the first `receiver-ready` delivery on both sides during the final join so the handshake must remain in `waitingForPeer` until backend/audio readiness really converges instead of drifting to `ready`, `wakeReady`, or optimistic hold-to-talk too early
 - `request_accept_ready_peer_transmit`
   - ready session where the recipient becomes the transmitter, then returns to `ready` and disconnects cleanly; this used to be a disabled regression and is now part of the default suite
+- `selected_contact_direct_quic_prewarm`
+  - selecting/opening a contact must not join or transmit; the client attempts selected-contact Direct QUIC prewarm immediately, retries after channel metadata refresh, and safely skips when hosted routing or simulator identity metadata is not yet sufficient
 - `duplicate_connect_request_deduplicates`
   - duplicate connect intents from the requester must still converge to a single outstanding request before the peers continue to `ready`
 - `disconnect_refresh_convergence`

@@ -748,7 +748,7 @@ def fetch_telemetry_events(
     dataset: str,
     insecure: bool,
     include_heartbeats: bool,
-) -> list[tuple[datetime, str]]:
+) -> list[TelemetryEvent]:
     account_id = query_telemetry.DEFAULT_ACCOUNT_ID
     api_token = query_telemetry.DEFAULT_API_TOKEN
     if not account_id or not api_token:
@@ -866,6 +866,111 @@ def render_telemetry_events(
             pieces.append(f"metadata={metadata_text}")
         events.append((event.timestamp, f"[{event.handle}] [telemetry] " + " ".join(pieces)))
     return events
+
+
+def telemetry_metadata(event: TelemetryEvent) -> dict[str, str]:
+    if not event.metadata_text:
+        return {}
+    try:
+        parsed = json.loads(event.metadata_text)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): str(value) for key, value in parsed.items()}
+
+
+def telemetry_invariant_violations(events: Iterable[TelemetryEvent]) -> list[InvariantViolation]:
+    violations: list[InvariantViolation] = []
+    for event in events:
+        invariant_id = event.invariant_id.strip()
+        if not invariant_id:
+            continue
+        metadata = telemetry_metadata(event)
+        scope = metadata.get("scope") or event.reason or "telemetry"
+        violations.append(
+            build_violation(
+                subject=event.handle,
+                invariant_id=invariant_id,
+                scope=scope,
+                message=event.message or event.event_name,
+                source="telemetry",
+                timestamp=event.timestamp,
+                metadata=metadata,
+            )
+        )
+    return violations
+
+
+TELEMETRY_SNAPSHOT_REQUIRED_KEYS = {
+    "selectedPeerRelationship",
+    "pendingAction",
+    "isJoined",
+    "systemSession",
+    "backendChannelStatus",
+    "backendReadiness",
+    "backendSelfJoined",
+    "backendPeerJoined",
+    "backendPeerDeviceConnected",
+}
+
+
+def snapshot_from_telemetry_event(event: TelemetryEvent) -> dict[str, str] | None:
+    metadata = telemetry_metadata(event)
+    if not TELEMETRY_SNAPSHOT_REQUIRED_KEYS.issubset(metadata.keys()):
+        return None
+
+    snapshot: dict[str, str] = {
+        "selectedPeerPhase": event.phase or metadata.get("selectedPeerPhase", "none"),
+        "selectedContact": event.peer_handle or metadata.get("selectedHandle", "none"),
+        "identity": event.handle,
+    }
+    for key, value in metadata.items():
+        if value:
+            snapshot[key] = value
+    if event.channel_id:
+        snapshot.setdefault("backendChannelID", event.channel_id)
+        snapshot.setdefault("backendChannelId", event.channel_id)
+    return snapshot
+
+
+def telemetry_snapshot_reports(
+    events: Iterable[TelemetryEvent],
+    reports: Iterable[Report],
+) -> list[Report]:
+    existing_subjects = {(report.handle, report.device_id) for report in reports}
+    latest_by_subject: dict[tuple[str, str], tuple[TelemetryEvent, dict[str, str]]] = {}
+    for event in events:
+        snapshot = snapshot_from_telemetry_event(event)
+        if snapshot is None:
+            continue
+        subject = (event.handle, event.device_id)
+        if subject in existing_subjects:
+            continue
+        previous = latest_by_subject.get(subject)
+        if previous is None or event.timestamp > previous[0].timestamp:
+            latest_by_subject[subject] = (event, snapshot)
+
+    synthetic_reports: list[Report] = []
+    for event, snapshot in latest_by_subject.values():
+        synthetic_reports.append(
+            Report(
+                handle=event.handle,
+                device_id=event.device_id,
+                app_version="telemetry",
+                scenario_name=None,
+                scenario_run_id=None,
+                uploaded_at=event.timestamp.isoformat(),
+                structured_diagnostics=None,
+                snapshot=snapshot,
+                state_timeline=[],
+                invariant_violations=[],
+                backend_invariant_violations=[],
+                diagnostics=[],
+                wake_events=[],
+            )
+        )
+    return synthetic_reports
 
 
 def sql_string(value: str) -> str:
@@ -1340,6 +1445,19 @@ def analyze_report(report: Report) -> list[InvariantViolation]:
             )
         )
 
+    if snapshot_has_stale_backend_membership_without_local_session(snapshot):
+        violations.append(
+            build_violation(
+                subject=report.handle,
+                invariant_id="selected.stale_backend_membership_without_local_session",
+                scope="backend",
+                message=(
+                    "backend retained inactive durable channel membership without local "
+                    "session evidence"
+                ),
+            )
+        )
+
     if backend_peer_joined and not backend_self_joined:
         if phase in {"idle", "requested"}:
             violations.append(
@@ -1578,6 +1696,19 @@ def snapshot_has_stale_peer_ready_membership(snapshot: dict[str, str], phase: st
         and snapshot.get("backendReadiness", "none") == "inactive"
         and snapshot_bool(snapshot, "backendSelfJoined") is True
         and snapshot_bool(snapshot, "backendPeerJoined") is True
+    )
+
+
+def snapshot_has_stale_backend_membership_without_local_session(snapshot: dict[str, str]) -> bool:
+    return (
+        snapshot.get("selectedPeerRelationship", "none") == "none"
+        and snapshot.get("pendingAction", "none") == "none"
+        and snapshot_bool(snapshot, "isJoined") is False
+        and snapshot.get("systemSession", "none") == "none"
+        and snapshot.get("backendReadiness", "none") == "inactive"
+        and snapshot_bool(snapshot, "backendSelfJoined") is True
+        and snapshot_bool(snapshot, "backendPeerJoined") is True
+        and snapshot_bool(snapshot, "backendPeerDeviceConnected") is False
     )
 
 
@@ -1834,7 +1965,6 @@ def main() -> int:
             print(str(exc), file=sys.stderr)
             return 1
 
-    violations = analyze_reports(reports)
     telemetry_events: list[TelemetryEvent] = []
     if args.include_telemetry:
         telemetry_events = fetch_telemetry_events(
@@ -1847,6 +1977,12 @@ def main() -> int:
             insecure=args.insecure,
             include_heartbeats=args.include_heartbeats,
         )
+
+    telemetry_reports = telemetry_snapshot_reports(telemetry_events, reports)
+    correlation_reports = reports + telemetry_reports
+    violations = analyze_reports(correlation_reports)
+    violations.extend(telemetry_invariant_violations(telemetry_events))
+    violations = dedupe_violations(violations)
 
     timeline = merged_events(
         reports,
@@ -1863,6 +1999,7 @@ def main() -> int:
     if args.json:
         payload = {
             "reports": [report_payload(report) for report in reports],
+            "telemetrySnapshotReports": [report_payload(report) for report in telemetry_reports],
             "sourceWarnings": [warning_payload(warning) for warning in source_warnings],
             "violations": [violation_payload(violation) for violation in violations],
             "telemetryEventCount": len(telemetry_events),
@@ -1884,6 +2021,11 @@ def main() -> int:
                 print(render_snapshot(report))
         else:
             print("- none")
+
+        if telemetry_reports:
+            print("\nTELEMETRY SNAPSHOT FACTS")
+            for report in telemetry_reports:
+                print(render_snapshot(report))
 
         if source_warnings:
             print("\nDIAGNOSTICS SOURCES")

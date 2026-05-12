@@ -57,6 +57,8 @@ Backend latest snapshots are fetched by default. `--full-metadata` only affects 
 
 Use the tester's actual handles when they are not `@mau` and `@bau`. Add `--json` when you need to count events, compare transport digests, or script over the result. Add `--insecure` only for local certificate-root problems.
 
+If the first diagnostics fetch fails while querying Cloudflare telemetry because local Python cannot verify the certificate chain, rerun the same merged diagnostics command with `--insecure`. That flag is the repo-supported development workaround for this local certificate-root issue; it only relaxes TLS verification for the local diagnostics fetch and should not change the interpretation of backend or telemetry evidence.
+
 Read the result in layers:
 
 1. Source warnings: confirm whether telemetry and backend latest snapshots were both available.

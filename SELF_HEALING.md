@@ -18,6 +18,8 @@ The system should:
 6. keep enough diagnostics to explain what happened later
 7. prove the recovery with a checked-in regression
 
+While the repair is pending, the invalid fact must be treated as repair-only evidence. It must not authorize a user action, readiness projection, transmit path, or join shortcut. In algebraic terms, invalid stale facts compose like a tombstone/absorbing repair marker: they can move the system toward convergence, but they cannot be reinterpreted as live capability.
+
 ## Recovery Classes
 
 Use these classes before editing code.
@@ -94,7 +96,8 @@ Example:
 4. Make the repair idempotent. Running it twice should be harmless.
 5. Bound the repair. Use a callback, attempt ID, or timeout so it cannot loop forever.
 6. Log the repair as a normal diagnostic event, not only as an invariant.
-7. Add a regression for both:
+7. Ensure the bad state projects to a safe user state while repair is pending.
+8. Add a regression for both:
    - the bad state repairs
    - the nearby valid in-flight state does not repair
 

@@ -265,6 +265,13 @@ extension PTTViewModel {
             return .joinSession
         }
         if request.intent == .joinReadyPeer {
+            guard currentChannel?.membership.hasPeerMembership == true,
+                  currentChannel?.requestRelationship == TurboRequestRelationship.none else {
+                return .requestOnly
+            }
+            return .joinSession
+        }
+        if createdInvite?.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "connected" {
             return .joinSession
         }
         if createdInvite?.direction == "incoming" {
@@ -330,7 +337,7 @@ extension PTTViewModel {
             return
         }
 
-        await backendCommandCoordinator.handle(.openPeerRequested(handle: normalizedReference))
+        await ingestBackendCommandEvent(.openPeerRequested(handle: normalizedReference))
     }
 
     func runBackendCommandEffect(_ effect: BackendCommandEffect) async {
@@ -350,6 +357,11 @@ extension PTTViewModel {
         isJoined = true
         updateAutomaticAudioRouteMonitoring(reason: "backend-join-complete")
         updateStatusForSelectedContact()
+    }
+
+    func startLocalJoinAfterAcceptedBackendJoin(for contact: Contact) {
+        backendRuntime.markBackendJoinSettling(for: contact.id)
+        joinPTTChannel(for: contact)
     }
 
     func requestBackendJoin(for contact: Contact, intent: BackendJoinIntent = .requestConnection) {
@@ -390,12 +402,30 @@ extension PTTViewModel {
             usesLocalHTTPBackend: usesLocalHTTPBackend
         )
         Task {
-            await backendCommandCoordinator.handle(.joinRequested(request))
+            await ingestBackendCommandEvent(
+                .joinRequested(request),
+                contactID: contact.id,
+                channelID: contact.backendChannelId
+            )
         }
     }
 
     func reassertBackendJoin(for contact: Contact) async {
         guard backendServices != nil else { return }
+        guard !backendLeaveIsInFlight(for: contact.id) else {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Skipped backend join reassertion while leave is active",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "handle": contact.handle,
+                    "pendingAction": String(describing: sessionCoordinator.pendingAction),
+                    "activeBackendOperation": String(describing: backendCommandCoordinator.state.activeOperation),
+                ]
+            )
+            return
+        }
         let request = BackendJoinRequest(
             contactID: contact.id,
             handle: contact.handle,
@@ -410,16 +440,6 @@ extension PTTViewModel {
             requestCooldownRemaining: requestCooldownRemaining(for: contact.id),
             usesLocalHTTPBackend: usesLocalHTTPBackend
         )
-        if case .leave(let contactID) = backendCommandCoordinator.state.activeOperation,
-           contactID == contact.id {
-            diagnostics.record(
-                .backend,
-                level: .notice,
-                message: "Skipped backend join reassertion while leave is active",
-                metadata: ["contactId": contact.id.uuidString, "handle": contact.handle]
-            )
-            return
-        }
         if case .join(let activeRequest) = backendCommandCoordinator.state.activeOperation,
            activeRequest.contactID == contact.id {
             diagnostics.record(
@@ -430,7 +450,129 @@ extension PTTViewModel {
             )
             backendCommandCoordinator.send(.reset)
         }
-        await backendCommandCoordinator.handle(.joinRequested(request))
+        await ingestBackendCommandEvent(
+            .joinRequested(request),
+            contactID: contact.id,
+            channelID: contact.backendChannelId
+        )
+    }
+
+    func backendLeaveIsInFlight(for contactID: UUID) -> Bool {
+        if sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
+            return true
+        }
+        if case .leave(let activeContactID) = backendCommandCoordinator.state.activeOperation,
+           activeContactID == contactID {
+            return true
+        }
+        return false
+    }
+
+    private func activeBackendJoinMatches(_ request: BackendJoinRequest) -> Bool {
+        guard case .join(let activeRequest) = backendCommandCoordinator.state.activeOperation else {
+            return false
+        }
+        return activeRequest == request
+    }
+
+    private func backendJoinSupersededReason(for request: BackendJoinRequest) -> String? {
+        if sessionCoordinator.pendingAction.isLeaveInFlight(for: request.contactID) {
+            return "session-leave-in-flight"
+        }
+        if case .leave(let contactID) = backendCommandCoordinator.state.activeOperation,
+           contactID == request.contactID {
+            return "backend-leave-active"
+        }
+        if !activeBackendJoinMatches(request) {
+            return "backend-operation-superseded"
+        }
+        return nil
+    }
+
+    @discardableResult
+    private func discardSupersededBackendJoinIfNeeded(
+        _ request: BackendJoinRequest,
+        stage: String,
+        contact: Contact? = nil,
+        backend: BackendServices? = nil
+    ) async -> Bool {
+        guard let reason = backendJoinSupersededReason(for: request) else {
+            return false
+        }
+
+        diagnostics.record(
+            .backend,
+            level: .notice,
+            message: "Discarded superseded backend join",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "handle": request.handle,
+                "stage": stage,
+                "reason": reason,
+                "pendingAction": String(describing: sessionCoordinator.pendingAction),
+                "activeBackendOperation": String(describing: backendCommandCoordinator.state.activeOperation),
+            ]
+        )
+
+        if activeBackendJoinMatches(request) {
+            backendCommandCoordinator.send(.reset)
+        }
+
+        if let contact,
+           let backend,
+           reason == "session-leave-in-flight" || reason == "backend-leave-active" {
+            await compensateBackendLeaveAfterSupersededJoin(
+                contact: contact,
+                request: request,
+                backend: backend,
+                reason: reason
+            )
+        }
+
+        return true
+    }
+
+    private func compensateBackendLeaveAfterSupersededJoin(
+        contact: Contact,
+        request: BackendJoinRequest,
+        backend: BackendServices,
+        reason: String
+    ) async {
+        guard let backendChannelId = contact.backendChannelId else { return }
+
+        do {
+            _ = try await backend.leaveChannel(
+                channelId: backendChannelId,
+                operationId: BackendCommandOperationID.make(prefix: "leave-superseded-join")
+            )
+            await refreshChannelState(for: contact.id)
+            await refreshContactSummaries()
+            await refreshInvites()
+            diagnostics.record(
+                .backend,
+                message: "Compensated backend membership after superseded join",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "handle": request.handle,
+                    "channelId": backendChannelId,
+                    "reason": reason,
+                ]
+            )
+        } catch {
+            await refreshChannelState(for: contact.id)
+            diagnostics.record(
+                .backend,
+                level: .error,
+                message: "Compensating backend leave after superseded join failed",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "handle": request.handle,
+                    "channelId": backendChannelId,
+                    "reason": reason,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
     }
 
     private func applyInviteMetadata(_ invite: TurboInviteResponse, to contact: inout Contact) {
@@ -727,6 +869,13 @@ extension PTTViewModel {
                 continue
             }
             if acceptedInvite.pendingJoin != false {
+                Task(priority: .userInitiated) { @MainActor [weak self] in
+                    await self?.publishJoinAcceptedControlSignalIfPossible(
+                        request: request,
+                        acceptedInvite: acceptedInvite,
+                        backend: backend
+                    )
+                }
                 Task { @MainActor [weak self] in
                     await self?.waitForAcceptedIncomingInviteToDisappear(
                         acceptedInvite,
@@ -751,6 +900,82 @@ extension PTTViewModel {
         }
 
         return nil
+    }
+
+    func publishJoinAcceptedControlSignalIfPossible(
+        request: BackendJoinRequest,
+        acceptedInvite: TurboInviteResponse,
+        backend: BackendServices
+    ) async {
+        guard backend.supportsWebSocket else { return }
+        guard let currentUserID = backend.currentUserID else { return }
+
+        let remoteUserID: String
+        if currentUserID == acceptedInvite.toUserId {
+            remoteUserID = acceptedInvite.fromUserId
+        } else if currentUserID == acceptedInvite.fromUserId {
+            remoteUserID = acceptedInvite.toUserId
+        } else {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Join accepted control signal skipped because invite ownership is inconsistent",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "inviteId": acceptedInvite.inviteId,
+                    "currentUserId": currentUserID,
+                    "fromUserId": acceptedInvite.fromUserId,
+                    "toUserId": acceptedInvite.toUserId,
+                ]
+            )
+            return
+        }
+
+        let peerDeviceID = directQuicPeerDeviceID(for: request.contactID) ?? ""
+        let payload = TurboDirectQuicUpgradeRequestPayload(
+            requestId: acceptedInvite.inviteId,
+            channelId: acceptedInvite.channelId,
+            fromDeviceId: backend.deviceID,
+            toDeviceId: peerDeviceID,
+            reason: TurboJoinAcceptedControlSignal.reason,
+            roleIntent: .symmetric,
+            debugBypass: false
+        )
+
+        do {
+            let envelope = try TurboSignalEnvelope.directQuicUpgradeRequest(
+                channelId: acceptedInvite.channelId,
+                fromUserId: currentUserID,
+                fromDeviceId: backend.deviceID,
+                toUserId: remoteUserID,
+                toDeviceId: peerDeviceID,
+                payload: payload
+            )
+            try await backend.sendSignal(envelope)
+            diagnostics.record(
+                .websocket,
+                message: "Published join accepted control signal",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "channelId": acceptedInvite.channelId,
+                    "inviteId": acceptedInvite.inviteId,
+                    "targetUserId": remoteUserID,
+                    "targetDeviceId": peerDeviceID.isEmpty ? "prejoin-fresh-device" : peerDeviceID,
+                ]
+            )
+        } catch {
+            diagnostics.record(
+                .websocket,
+                level: .notice,
+                message: "Join accepted control signal send failed",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "channelId": acceptedInvite.channelId,
+                    "inviteId": acceptedInvite.inviteId,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
     }
 
     private func resolveOutgoingInvite(
@@ -1292,9 +1517,21 @@ extension PTTViewModel {
             if Task.isCancelled {
                 return false
             }
+            if await discardSupersededBackendJoinIfNeeded(
+                request,
+                stage: "membership-visibility"
+            ) {
+                return false
+            }
 
             do {
                 let channelState = try await backend.channelState(channelId: channelId)
+                if await discardSupersededBackendJoinIfNeeded(
+                    request,
+                    stage: "membership-visibility-response"
+                ) {
+                    return false
+                }
                 backendSyncCoordinator.send(.channelStateUpdated(contactID: contactID, channelState: channelState))
                 if channelState.membership.hasLocalMembership {
                     if attempt > 1 {
@@ -1334,8 +1571,20 @@ extension PTTViewModel {
     }
 
     private func executeBackendJoin(_ request: BackendJoinRequest) async throws {
+        guard !(await discardSupersededBackendJoinIfNeeded(request, stage: "start")) else {
+            return
+        }
+
         let resolution = try await resolveBackendJoinContact(request)
         var contact = resolution.contact
+        guard !(await discardSupersededBackendJoinIfNeeded(
+            request,
+            stage: "resolved",
+            contact: contact,
+            backend: backendServices
+        )) else {
+            return
+        }
 
         switch resolution.executionPlan {
         case .requestOnly:
@@ -1348,6 +1597,14 @@ extension PTTViewModel {
                     request: request,
                     backend: backend
                 )
+                guard !(await discardSupersededBackendJoinIfNeeded(
+                    request,
+                    stage: "join-command-returned",
+                    contact: contact,
+                    backend: backend
+                )) else {
+                    return
+                }
                 diagnostics.record(
                     .backend,
                     message: "Backend join completed",
@@ -1362,15 +1619,24 @@ extension PTTViewModel {
             if request.usesLocalHTTPBackend {
                 completeLocalBackendJoin(for: contact)
             } else {
-                backendRuntime.markBackendJoinSettling(for: contact.id)
-                joinPTTChannel(for: contact)
-                if sessionCoordinator.pendingJoinContactID != contact.id {
-                    backendRuntime.clearBackendJoinSettling(for: contact.id)
-                }
+                startLocalJoinAfterAcceptedBackendJoin(for: contact)
             }
         }
 
-        backendCommandCoordinator.send(.operationFinished)
+        if activeBackendJoinMatches(request) {
+            backendCommandCoordinator.send(.operationFinished)
+        } else {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Skipped backend join completion for superseded operation",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "handle": request.handle,
+                    "activeBackendOperation": String(describing: backendCommandCoordinator.state.activeOperation),
+                ]
+            )
+        }
         Task { @MainActor [weak self, contactID = contact.id] in
             await self?.refreshBackendJoinVisibility(for: contactID)
         }
@@ -1414,11 +1680,16 @@ extension PTTViewModel {
                 }
             }
         } catch {
+            if await discardSupersededBackendJoinIfNeeded(request, stage: "failed") {
+                return
+            }
             let message = error.localizedDescription
             let failedActiveJoin =
                 sessionCoordinator.pendingAction.pendingConnectContactID == request.contactID
                 || sessionCoordinator.pendingAction.pendingJoinContactID == request.contactID
-            backendCommandCoordinator.send(.operationFailed(message))
+            if activeBackendJoinMatches(request) {
+                backendCommandCoordinator.send(.operationFailed(message))
+            }
             sessionCoordinator.clearPendingConnect(for: request.contactID)
             if failedActiveJoin {
                 backendSyncCoordinator.send(.channelStateCleared(contactID: request.contactID))

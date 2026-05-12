@@ -26,8 +26,12 @@ struct BackendSyncState: Equatable {
     }
 
     func incomingInviteIsHandled(_ invite: TurboInviteResponse, for contactID: UUID) -> Bool {
-        if handledIncomingInviteSourceKeys[contactID]?.contains(Self.inviteSourceKey(for: invite)) == true {
+        let sourceKey = Self.inviteSourceKey(for: invite)
+        if handledIncomingInviteSourceKeys[contactID]?.contains(sourceKey) == true {
             return true
+        }
+        if handledIncomingInviteSourceKeys[contactID]?.isEmpty == false {
+            return false
         }
         return invite.requestCount <= handledIncomingRequestCount(for: contactID)
     }
@@ -138,7 +142,8 @@ struct BackendSyncState: Equatable {
     }
 
     mutating func applyChannelReadiness(_ readiness: TurboChannelReadinessResponse, for contactID: UUID) {
-        if channelStates[contactID]?.membership == .absent {
+        if channelStates[contactID]?.membership == .absent,
+           readiness.peerTargetDeviceId == nil {
             channelReadiness[contactID] = nil
             return
         }

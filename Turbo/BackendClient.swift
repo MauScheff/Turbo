@@ -84,6 +84,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     private var receiveTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var connectTimeoutTask: Task<Void, Never>?
+    private var webSocketPingTask: Task<Void, Never>?
     private var runtimeConfig: TurboBackendRuntimeConfig?
     private var webSocketConnectionState: WebSocketConnectionState = .idle
     private var currentWebSocketSessionID: String?
@@ -91,6 +92,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     private var isWebSocketSuspended = false
     private let webSocketConnectTimeoutNanoseconds: UInt64 = 12_000_000_000
     private let webSocketControlCommandTimeoutNanoseconds: UInt64 = 3_000_000_000
+    private let webSocketPingIntervalNanoseconds: UInt64 = 20_000_000_000
     private var capturesSentSignalsForTesting = false
     private var capturedSentSignalsForTesting: [TurboSignalEnvelope] = []
     private var pendingControlCommandResponses: [String: CheckedContinuation<Data, Error>] = [:]
@@ -431,6 +433,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         reconnectTask = nil
         connectTimeoutTask?.cancel()
         connectTimeoutTask = nil
+        webSocketPingTask?.cancel()
+        webSocketPingTask = nil
         receiveTask?.cancel()
         receiveTask = nil
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
@@ -579,6 +583,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             self.receiveTask = nil
             self.webSocketTask = nil
             self.currentWebSocketSessionID = nil
+            self.webSocketPingTask?.cancel()
+            self.webSocketPingTask = nil
             self.failPendingControlCommands(TurboBackendError.webSocketUnavailable)
             self.setWebSocketConnectionState(.idle)
             let reason = "WebSocket disconnected: \(error.localizedDescription)"
@@ -605,6 +611,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             self.receiveTask = Task { [weak self] in
                 await self?.listenForMessages()
             }
+            self.startWebSocketPingLoop(for: webSocketTask)
         }
     }
 
@@ -621,6 +628,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             self.connectTimeoutTask = nil
             self.receiveTask?.cancel()
             self.receiveTask = nil
+            self.webSocketPingTask?.cancel()
+            self.webSocketPingTask = nil
             self.webSocketTask = nil
             self.currentWebSocketSessionID = nil
             self.failPendingControlCommands(TurboBackendError.webSocketUnavailable)
@@ -660,6 +669,40 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
+    private func startWebSocketPingLoop(for task: URLSessionWebSocketTask) {
+        webSocketPingTask?.cancel()
+        webSocketPingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: self?.webSocketPingIntervalNanoseconds ?? 20_000_000_000)
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                guard self.webSocketTask === task,
+                      self.webSocketConnectionState == .connected else {
+                    return
+                }
+                task.sendPing { [weak self] error in
+                    guard let error else { return }
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        guard self.webSocketTask === task else { return }
+                        let reason = "WebSocket ping failed: \(error.localizedDescription)"
+                        self.onServerNotice?(reason)
+                        self.webSocketPingTask?.cancel()
+                        self.webSocketPingTask = nil
+                        self.receiveTask?.cancel()
+                        self.receiveTask = nil
+                        self.webSocketTask = nil
+                        self.currentWebSocketSessionID = nil
+                        self.failPendingControlCommands(TurboBackendError.webSocketUnavailable)
+                        self.setWebSocketConnectionState(.idle)
+                        task.cancel(with: .goingAway, reason: nil)
+                        self.scheduleReconnect(reason: reason)
+                    }
+                }
+            }
+        }
+    }
+
     private func scheduleConnectTimeout(for task: URLSessionWebSocketTask) {
         connectTimeoutTask?.cancel()
         connectTimeoutTask = Task { @MainActor [weak self] in
@@ -670,6 +713,8 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             guard self.webSocketConnectionState == .connecting else { return }
             self.receiveTask?.cancel()
             self.receiveTask = nil
+            self.webSocketPingTask?.cancel()
+            self.webSocketPingTask = nil
             self.webSocketTask = nil
             self.currentWebSocketSessionID = nil
             self.failPendingControlCommands(TurboBackendError.webSocketUnavailable)

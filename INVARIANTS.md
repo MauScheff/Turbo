@@ -1,143 +1,103 @@
 # Invariant Rules
 
-This repo treats invariants as typed, named rules instead of ad hoc log strings.
+This repo treats reliability bugs as broken named truths, not as ad hoc log strings.
 
-This file is not the user's interface. It is the agent's encoding guide.
+Use this file when a bug report says some state "should be impossible", especially for distributed state, backend truth, app/backend contracts, selected-session projection, reconnect/retry behavior, or stale state. For recoverable invalid states, pair this with `SELF_HEALING.md`.
 
-For recoverable invalid states, pair this file with `SELF_HEALING.md`. This file explains how to name and emit the broken truth; `SELF_HEALING.md` explains how to choose and prove the bounded repair action.
+## Core Model
 
-The user should be able to describe a failure in plain language, for example:
+An invariant has one stable identity in `invariants/registry.json`, but the executable check belongs at the narrowest seam that can prove the truth.
+
+- `invariants/registry.json`: canonical index for ID, owner, detector location, evidence, repair policy, and proof status.
+- Swift reducer/projection: app-owned transition and derived-state rules.
+- Unison/backend route/service/projection: backend-owned shared truth.
+- `scripts/merged_diagnostics.py`: pair and convergence rules that require multiple device/backend perspectives.
+- TLA+ or fuzz oracle: protocol interleavings, stale facts, ordering, monotonicity, or convergence classes.
+
+Do not build a detached runtime that reads the registry and tries to enforce every rule generically. Most rules need typed local context; the state machine or backend seam that has that context is where the predicate should live.
+
+Use these terms when they help:
+
+- `precondition`: what must be true before accepting an event or command.
+- `postcondition`: what must be true after a transition, route, projection, or repair.
+- `invariant`: what must remain true for every valid state in that subsystem.
+
+Prefer typed state machines and total transitions that make illegal states unrepresentable. Use explicit runtime invariant checks for cross-boundary, distributed, stale, or recoverable states that the type system cannot rule out alone.
+
+## Intake Workflow
+
+The user should be able to describe the failure in product/debug language:
 
 - "Avery still sees Blake online after Blake disconnected."
 - "Both devices look ready in the backend, but one UI is still stuck in requested."
 - "The sender can hold to talk even though the peer is not actually ready."
 
-The agent's job is to translate that report into a typed invariant, add the detector at the authoritative seam, and make future occurrences show up automatically in diagnostics and merged logs.
+The agent converts that report into a durable rule:
 
-The goal is:
+1. Restate the report as the broken truth, not the UI symptom.
+2. Identify the owner: app, backend, pair/convergence, Apple/PTT/audio boundary, or ambiguous in-flight state.
+3. Choose or update a stable `invariantId`.
+4. Add detection at the authoritative seam.
+5. Emit expected/observed evidence with stable IDs.
+6. Choose the narrowest proof lane.
+7. Add bounded self-healing only when the state is provably invalid and safely repairable.
+8. Fix the owning subsystem.
+9. Verify with the selected proof and, when relevant, strict merged diagnostics.
 
-1. detect a violated assumption at the authoritative seam
-2. emit a stable invariant ID into diagnostics
-3. surface that same ID from merged multi-device diagnostics
-4. turn the violation into a checked-in regression
+The user should not need to ask separately for classification, registration, fuzzing, TLA+, scenarios, or proof selection.
 
-If the violation is clearly recoverable, the additional goal is to converge the app/backend back to a valid state without requiring force quit, manual reset, or manual peer intervention. Use `SELF_HEALING.md` for that repair design.
+## Production Visibility
 
-Use this file when you are adding a new invariant rule or teaching an agent how to do it.
+Invariant detection is not only a local-development feature. If the same bug can happen in TestFlight or production, the invariant must be visible or reconstructable from production-capable evidence.
 
-## Plain-Language Intake
+Evidence paths:
 
-When a user reports a bug, do not ask them to write invariant IDs or formal rule text first.
+- app diagnostics and invariant violations exported by shake-to-report
+- iOS telemetry facts and telemetry events with `invariantId`
+- Unison/backend telemetry facts and backend invariant events
+- backend latest diagnostics snapshots and transcripts
+- `just reliability-intake-shake`, `just reliability-intake`, and `just production-replay`
 
-Instead:
+Single-runtime invariants should emit the `invariantId` where they are detected. True distributed invariants usually cannot be proven by one device; each runtime should emit correlated facts, and a later correlator should evaluate the pair/convergence predicate.
 
-1. restate the report as a broken truth
-2. decide who is authoritative for that truth
-3. decide whether the rule is `local`, `backend`, `pair`, or `convergence`
-4. encode the invariant in code
-5. emit a stable invariant ID into diagnostics
-6. make sure merged diagnostics can rediscover it later
-7. add the regression scenario/test
+Required correlation fields, when available:
 
-The desired workflow is:
+- user handle and device ID
+- peer handle and peer device ID
+- channel/session/attempt/transmit IDs
+- selected phase and relationship
+- backend readiness, membership, and transmit facts
+- timestamps and capture reason
 
-- the user reports the problem in normal product/debug language
-- the agent translates it into an invariant
-- the system logs it automatically when it happens again
-- merged diagnostics discovers the same invariant ID later without requiring another human interpretation pass
+For distributed production invariants, choose one of these designs:
 
-## Current rule surfaces
+- Move the rule to the backend if the backend owns enough canonical state to prove it live.
+- Emit per-device fact events and evaluate the predicate in telemetry, reliability intake, merged diagnostics, or a backend correlation job.
+- Make shake-to-report preserve enough peer evidence for an on-demand merge.
+- Mark the rule development-only only when production detection is explicitly not required.
 
-- checked-in invariant catalog:
-  - `invariants/registry.json`
-  - `scripts/check_invariant_registry.py`
-- app-side snapshot and projection checks:
-  - `Turbo/AppDiagnostics.swift`
-- merged multi-device and convergence checks:
-  - `scripts/merged_diagnostics.py`
-- distributed regressions and proofs:
-  - `scenarios/*.json`
-  - `TurboTests/TurboTests.swift`
-  - `STATE_MACHINE_TESTING.md`
-
-Treat `invariants/registry.json` as the source of truth for active invariant
-IDs, ownership, detector locations, evidence fields, repair policy, and known
-regression gaps. This document explains how to model and emit invariant rules;
-it should not grow a separate hand-maintained active catalog.
-
-## Rule anatomy
-
-Every invariant rule should define:
-
-- `invariantId`
-  - stable, checked-in, string identifier
-  - format: `<subject>.<claim>`
-  - examples:
-    - `selected.ready_without_join`
-    - `selected.backend_ready_ui_not_live`
-    - `pair.backend_ready_ui_not_live`
-    - `channel.stale_membership_on_session_connect`
-- `scope`
-  - one of:
-    - `local`
-    - `backend`
-    - `pair`
-    - `convergence`
-- authoritative seam
-  - the narrowest place that can actually know the rule is violated
-- predicate
-  - the exact condition that means the rule failed
-- evidence
-  - the fields, IDs, and projections needed to debug it
-- regression target
-  - the lowest-leverage test that should prevent recurrence
-
-## Where a rule belongs
+## Where Rules Belong
 
 Choose the smallest seam that can prove the rule.
 
-- put the rule in Swift diagnostics when one device can already prove the contradiction from its own typed state or backend snapshot
-- put the rule in the merged diagnostics analyzer when the rule depends on multiple device views or cross-device convergence
-- put the rule in the backend when the backend is the authority for the fact, such as transmitter exclusivity or canonical readiness
+- Put app-local rules in Swift diagnostics when one device can prove the contradiction from typed state or a backend snapshot.
+- Put backend-owned rules in Unison when the backend owns the fact, such as canonical readiness, membership, request truth, wake-target selection, or transmitter exclusivity.
+- Put pair/convergence rules in merged diagnostics when no single runtime has the whole predicate.
 
-Do not put pair or convergence rules only in client-side logs. One device cannot prove those alone.
-Do not treat a distributed-state bug as fully encoded if every invariant lives only in the UI or merged analyzer while the backend owns the broken fact.
+Do not treat a distributed-state bug as fully encoded if every invariant lives only in the UI or merged analyzer while the backend owns the broken fact. Client checks may fail closed, preserve evidence, or trigger safe repair, but they do not replace a backend fix for backend-owned truth.
 
-For distributed app/backend bugs:
+## Naming And Evidence
 
-- at least one invariant should exist at the backend/domain seam when the backend is authoritative for the violated truth
-- client-side invariants should describe projection contradictions, not replace backend ownership
-- merged invariants should help rediscover cross-device fallout, not be the only place the broken truth is observable
+Rule IDs must stay stable over time. They tie together diagnostics, telemetry, merged analysis, handoffs, bug reports, and regressions.
 
-## Relationship to self-healing
+Use:
 
-An invariant is observability. A self-heal is a repair policy.
-
-Do not automatically repair every invariant. Add a repair only when the bad state is provably invalid and there is a safe owner for convergence:
-
-- backend stale, client can prove it: emit the invariant and send an idempotent backend repair such as leave/clear-membership
-- client stale, backend already converged: emit or preserve the invariant evidence and clear the stale local coordinator state
-- ambiguous or in-flight: wait for a callback, attempt ID, or timeout before repairing
-
-See `SELF_HEALING.md` for the full taxonomy, current examples, and proof checklist.
-
-## Naming rules
-
-Rule IDs must stay stable over time. They are the handle that ties together:
-
-- diagnostics
-- merged analysis
-- handoffs
-- bug reports
-- regression tests
-
-Use these conventions:
-
-- keep IDs short and factual
-- describe the broken truth, not the symptom
-- prefer `selected.*` for selected-session projection rules
-- prefer `pair.*` for merged multi-device rules
-- prefer `channel.*` or `backend.*` for backend-owned rules
+- `<subject>.<claim>`
+- short factual names
+- the broken truth, not the symptom
+- `selected.*` for selected-session projection rules
+- `pair.*` for merged multi-device rules
+- `channel.*`, `backend.*`, or domain-specific prefixes for backend-owned rules
 
 Good:
 
@@ -151,40 +111,27 @@ Bad:
 - `weird-ready-bug`
 - `fix-me`
 
-## Required evidence
+Every emitted violation should include enough context to classify ownership and replay the failure. Prefer expected/observed facts over generic prose.
 
-Every emitted invariant violation should include enough context to reproduce and classify it.
-
-At minimum include:
-
-- `selectedPeerPhase` or equivalent typed phase
-- relevant backend truth such as `backendSelfJoined`, `backendPeerJoined`, `backendPeerDeviceConnected`, `backendCanTransmit`, or readiness ADTs
-- the capture reason or operation context
-- device, channel, session, or handle identifiers when available
-
-Prefer expected/observed context in the message or metadata over generic prose.
-
-Good:
+Good evidence:
 
 - `selectedPeerPhase=ready while isJoined=false`
-- `backend says both sides are ready, but selectedPeerPhase=requested`
+- `backendSelfJoined=true backendPeerJoined=true backendPeerDeviceConnected=false`
+- `channelId=... deviceId=... attemptId=...`
 
-Bad:
+## Encoding Rules
 
-- `session looks wrong`
-- `state drift`
+### App
 
-## App-side encoding
+Use `DiagnosticsStore.recordInvariantViolation(...)` for explicit app-side violations. Snapshot invariants may also be derived automatically in `Turbo/AppDiagnostics.swift`.
 
-Use `DiagnosticsStore.recordInvariantViolation(...)` for explicit app-side violations.
+For state-machine code:
 
-Current pattern:
+- Check event preconditions before applying events that should be rejected or ignored.
+- Check transition postconditions after deriving next state when the reducer owns the fact.
+- Check projection invariants where canonical state becomes UI or diagnostics state.
 
-- `captureState(...)` evaluates a small catalog of snapshot invariants automatically
-- explicit adapter or coordinator code may also call `recordInvariantViolation(...)` directly when it detects a real contract break
-- invariant violations are exported in the `INVARIANT VIOLATIONS` transcript section and also recorded as diagnostics errors
-
-Swift example:
+Do not crash production code for recoverable distributed invariant failures. Emit the invariant, fail closed in projection if needed, and use `SELF_HEALING.md` for bounded repair. Reserve debug assertions for programmer-only impossibilities.
 
 ```swift
 diagnostics.recordInvariantViolation(
@@ -199,19 +146,9 @@ diagnostics.recordInvariantViolation(
 )
 ```
 
-Rules in `AppDiagnostics.swift` should stay cheap, deterministic, and based on already-derived typed state. Do not put expensive polling or remote fan-out there.
+### Backend
 
-## Backend-side encoding
-
-Use `turbo.service.internal.appendInvariantEvent` for explicit backend-owned invariant violations.
-
-Current pattern:
-
-- detect the violation at the backend-owned seam
-- emit a stable invariant ID plus scope, source, message, and optional metadata
-- expose the event through `/v1/dev/invariant-events/recent` so merged diagnostics can rediscover it later
-
-Backend example:
+Use `turbo.service.internal.appendInvariantEvent` for backend-owned invariant events.
 
 ```unison
 _ =
@@ -226,141 +163,49 @@ _ =
     ()
 ```
 
-Keep backend invariant emitters narrow and authoritative. Emit them where the backend can prove the contradiction from its own state, not from client guesses.
+Keep backend emitters narrow and authoritative. Emit where the backend can prove the contradiction from its own state.
 
-## Merged multi-device encoding
+### Merged Diagnostics
 
-Use `scripts/merged_diagnostics.py` for rules that depend on multiple device reports or merged convergence.
+Use `scripts/merged_diagnostics.py` for pair and convergence rules. It:
 
-Current pattern:
+- parses app and backend invariant events
+- merges iOS and backend telemetry
+- converts complete telemetry state facts into snapshot facts
+- derives pair/convergence violations
+- supports `--json` and `--fail-on-violations`
 
-- parse explicit invariant violations from the transcript
-- derive additional pair/convergence violations from merged reports
-- emit stable invariant IDs
-- support `--json` for machine-readable output
-- support `--fail-on-violations` for strict automation
+If app/backend runtime already emits an invariant for the same broken truth, keep the merged rule aligned to the same `invariantId`. Use a new `pair.*` or `convergence.*` ID only when the merged view proves a broader contradiction.
 
-Python example:
+## Proof Lanes
 
-```python
-violations.append(
-    build_violation(
-        subject="pair",
-        invariant_id="pair.backend_ready_ui_not_live",
-        scope="pair",
-        message=(
-            "backend is ready on both devices, but at least one UI is still "
-            "not in a live session state"
-        ),
-    )
-)
-```
+An invariant is not done when it only logs. Add the narrowest durable proof that would have failed before the fix.
 
-If a rule can already be emitted explicitly by the app, keep the merged rule aligned to the same `invariantId` when it is expressing the same broken truth.
+Use:
 
-## When to encode a test as an invariant
+- Swift or Unison reducer/property tests for pure transition or projection rules.
+- Backend tests or route probes for backend-owned truth.
+- TLA+ for protocol semantics, ownership, stale facts, monotonicity, convergence, or all interleavings.
+- Seeded fuzzing for duplicate/drop/reorder/retry/reconnect/restart/timing families.
+- Simulator scenarios when the concrete app/backend journey adds evidence beyond the smaller proof.
+- Physical-device checks only for Apple/PTT/audio/hardware boundaries.
 
-Do not try to turn every test into an invariant.
+Useful commands:
 
-Use an invariant when the thing being tested is a durable system truth that should never be false in any real run, and when surfacing that failure in diagnostics would help classify future incidents quickly.
-
-Good candidates for invariants:
-
-- backend-authoritative truths that should hold across app runs, retries, reconnects, or duplicate delivery
-- local projection contradictions that one device can already prove from typed state plus backend snapshot
-- pair or convergence truths that merged multi-device diagnostics can prove after the fact
-- bugs where the same broken truth should appear in logs, merged analysis, handoffs, and the regression suite under one stable ID
-
-Keep a normal test when the assertion is mostly about:
-
-- a pure function example such as `f(x) == y`
-- a parser, formatter, helper, or algorithm edge case
-- a reducer transition sample that is useful as executable specification but does not need production diagnostics
-- implementation details whose failure would not be useful to surface as an incident-level invariant
-
-Rules of thumb:
-
-1. If it is a timeless truth about valid state, make it an invariant.
-2. If it is an example, edge case, or algorithm contract, keep it as a normal test.
-3. If it is distributed, pair the invariant with a checked-in scenario, not just a unit test.
-4. If it would help you debug or classify a future production failure, it probably deserves an invariant ID.
-5. Do not replace tests with invariants. The invariant gives observability; the tests and scenarios prove the detector, the fix, and the regression.
-
-Examples:
-
-- "backend says both sides are ready, but at least one UI is still not live" should be an invariant
-- "this helper normalizes handles correctly" should stay a normal test
-- "this reducer maps event A to state B" usually stays a normal test unless that transition encodes a named system truth that should also surface in diagnostics
-
-## Test obligations
-
-An invariant is not done when it only logs.
-
-Each new invariant should usually produce:
-
-- one lower-level reducer, projection, or backend test for the rule itself
-- one checked-in simulator scenario if the bug is distributed and reproducible there
-
-Use this order:
-
-1. encode the invariant
-2. reproduce the bug with a scenario if it is distributed
-3. add the lower-level regression test
-4. fix the code
-5. rerun the strict merge path
-
-## Agent workflow
-
-When an agent sees a new distributed bug report:
-
-1. restate the bug as a violated invariant
-2. decide whether the rule is `local`, `backend`, `pair`, or `convergence`
-3. choose a stable `invariantId`
-4. add detection at the authoritative seam
-5. emit exact expected/observed evidence
-6. add or update a checked-in simulator scenario when the behavior is distributed
-7. add the lower-level regression test
-8. fix the reducer, coordinator, adapter, or backend seam
-9. verify with strict merged diagnostics
-
-In other words:
-
-- the user speaks the bug
-- the agent encodes the invariant
-- the system logs and rediscovers it
-
-## Commands
-
-Manual inspection:
-
-- `just simulator-scenario-merge`
-- `just simulator-scenario-merge-local`
-
-Strict check:
-
-- `just simulator-scenario-merge-strict`
-- `just simulator-scenario-merge-local-strict`
-
-Machine-readable output:
-
+- `just protocol-model-checks`
+- `just simulator-fuzz-local <seed> <count>`
+- `just simulator-fuzz-replay <artifact-dir>`
+- `just simulator-fuzz-shrink <artifact-dir>`
 - `python3 scripts/merged_diagnostics.py --json --fail-on-violations ...`
 
-## Current invariant IDs
+A scenario is valuable, but not mandatory for every physical-device discovery. If TLA+ plus a reducer/backend test proves the impossible state cannot be reached, and a simulator scenario would only restate the same pure rule slowly, document that decision in the registry or handoff.
 
-Current first-pass IDs in the repo:
+## Registry
 
-- `selected.ready_without_join`
-- `selected.ready_while_backend_cannot_transmit`
-- `selected.backend_ready_ui_not_live`
-- `selected.peer_joined_ui_not_connectable`
-- `selected.stale_membership_peer_ready_without_session`
-- `selected.local_join_failure_present`
-- `selected.online_contact_projected_offline`
-- `receiver.background_not_ready_without_wake_reason`
-- `ptt.foreground_system_begin_without_local_press`
-- `pair.backend_ready_ui_not_live`
-- `pair.symmetric_peer_ready_without_session`
-- `channel.stale_membership_on_session_connect`
-- `transmit.stale_startup_side_effect`
+`invariants/registry.json` is the active catalog. Do not maintain a second hand-written list of current IDs in this file.
 
-Add new IDs here when you add new rules so the catalog remains discoverable.
+When adding or changing invariant IDs, update the registry and run:
+
+```bash
+python3 scripts/check_invariant_registry.py
+```

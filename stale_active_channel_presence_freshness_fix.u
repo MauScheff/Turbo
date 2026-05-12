@@ -1,4 +1,154 @@
 turbo.service.presence.internal.clearStaleActiveChannelOnSessionConnect :
+  Database -> UserId -> DeviceId -> '{Exception, Storage, Remote, Random} ()
+turbo.service.presence.internal.clearStaleActiveChannelOnSessionConnect
+  db currentUserId currentDeviceId =
+  do
+    staleChannelIdOpt =
+      turbo.service.presence.internal.staleActiveChannelOnSessionConnect
+        currentUserId currentDeviceId (presence.get db currentDeviceId ()) ()
+    match staleChannelIdOpt with
+      Some channelId ->
+        _ =
+          appendStaleActiveChannelOnSessionConnectInvariant
+            db currentUserId channelId currentDeviceId ()
+        _ = clearActiveChannel db currentDeviceId currentUserId ()
+        ()
+      None -> ()
+
+turbo.service.presence.internal.staleActiveChannelOnSessionConnect :
+  UserId
+  -> DeviceId
+  -> Optional DevicePresence
+  -> '{Remote, Random} Optional ChannelId
+turbo.service.presence.internal.staleActiveChannelOnSessionConnect
+  currentUserId currentDeviceId presenceOpt =
+  do
+    match presenceOpt with
+      Some
+        (DevicePresence
+          presenceDeviceId
+          presenceUserId
+          presenceStatus
+          currentChannelId
+          observedAt) ->
+        now = now!
+        turbo.service.presence.internal.staleActiveChannelOnSessionConnectFromFields
+          now
+          currentUserId
+          currentDeviceId
+          presenceDeviceId
+          presenceUserId
+          presenceStatus
+          currentChannelId
+          observedAt
+      None -> None
+
+turbo.service.presence.internal.staleActiveChannelOnSessionConnectFromFields :
+  Instant
+  -> UserId
+  -> DeviceId
+  -> DeviceId
+  -> UserId
+  -> DevicePresenceStatus
+  -> Optional ChannelId
+  -> Instant
+  -> Optional ChannelId
+turbo.service.presence.internal.staleActiveChannelOnSessionConnectFromFields
+  now
+  currentUserId
+  currentDeviceId
+  presenceDeviceId
+  presenceUserId
+  presenceStatus
+  currentChannelId
+  observedAt =
+  use Instant + >=
+  sameUser =
+    textEqual (UserId.toText currentUserId) (UserId.toText presenceUserId)
+  sameDevice =
+    textEqual
+      (DeviceId.toText currentDeviceId) (DeviceId.toText presenceDeviceId)
+  isFresh = observedAt + freshnessWindow >= now
+  if Boolean.and sameUser sameDevice then
+    match presenceStatus with
+      DevicePresenceStatus.Online -> if isFresh then None else currentChannelId
+      DevicePresenceStatus.Offline -> None
+  else None
+
+turbo.service.presence.internal.staleActiveChannelOnSessionConnectFromFields.tests.examples :
+  [Result]
+turbo.service.presence.internal.staleActiveChannelOnSessionConnectFromFields.tests.examples = 
+  test.verify do
+    use DevicePresenceStatus Online
+    use Instant +
+    now = epoch + time.Duration.seconds +20
+    currentUserId = UserId.fromText "self-user"
+    otherUserId = UserId.fromText "other-user"
+    currentDeviceId = DeviceId.fromText "self-device"
+    otherDeviceId = DeviceId.fromText "other-device"
+    channelId = ChannelId.fromText "channel-123"
+    freshObservedAt = now
+    staleObservedAt = epoch
+    ensureEqual
+      None
+      (turbo.service.presence.internal.staleActiveChannelOnSessionConnectFromFields
+        now
+        currentUserId
+        currentDeviceId
+        currentDeviceId
+        currentUserId
+        Online
+        (Some channelId)
+        freshObservedAt)
+    ensureEqual
+      (Some channelId)
+      (turbo.service.presence.internal.staleActiveChannelOnSessionConnectFromFields
+        now
+        currentUserId
+        currentDeviceId
+        currentDeviceId
+        currentUserId
+        Online
+        (Some channelId)
+        staleObservedAt)
+    ensureEqual
+      None
+      (turbo.service.presence.internal.staleActiveChannelOnSessionConnectFromFields
+        now
+        currentUserId
+        currentDeviceId
+        currentDeviceId
+        currentUserId
+        DevicePresenceStatus.Offline
+        (Some channelId)
+        staleObservedAt)
+    ensureEqual
+      None
+      (turbo.service.presence.internal.staleActiveChannelOnSessionConnectFromFields
+        now
+        currentUserId
+        currentDeviceId
+        otherDeviceId
+        currentUserId
+        Online
+        (Some channelId)
+        staleObservedAt)
+    ensureEqual
+      None
+      (turbo.service.presence.internal.staleActiveChannelOnSessionConnectFromFields
+        now
+        currentUserId
+        currentDeviceId
+        currentDeviceId
+        otherUserId
+        Online
+        (Some channelId)
+        staleObservedAt)
+
+---- Anything below this line is ignored by Unison.
+
+
+turbo.service.presence.internal.clearStaleActiveChannelOnSessionConnect :
   Database
   -> UserId
   -> DeviceId

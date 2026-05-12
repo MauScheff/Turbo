@@ -1657,7 +1657,10 @@ final class PCMWebSocketMediaSession: MediaSession {
     }
 
     private func report(_ message: String, metadata: [String: String]) async {
-        await reportEvent?(message, metadata)
+        guard let reportEvent else { return }
+        Task {
+            await reportEvent(message, metadata)
+        }
     }
 
     private func audioSessionMetadata(_ session: AVAudioSession) -> [String: String] {

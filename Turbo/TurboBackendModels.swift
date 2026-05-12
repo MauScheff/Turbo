@@ -1254,12 +1254,13 @@ enum TurboSignalKind: String, Codable {
     case receiverReady = "receiver-ready"
     case receiverNotReady = "receiver-not-ready"
     case directQuicUpgradeRequest = "direct-quic-upgrade-request"
+    case selectedPeerPrewarm = "selected-peer-prewarm"
 
     var isDirectQuicControlSignal: Bool {
         switch self {
         case .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest:
             return true
-        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady:
+        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .selectedPeerPrewarm:
             return false
         }
     }
@@ -1475,6 +1476,54 @@ nonisolated struct TurboDirectQuicUpgradeRequestPayload: TurboDirectQuicSignalin
     }
 }
 
+nonisolated enum TurboJoinAcceptedControlSignal {
+    static let reason = "join-accepted"
+
+    static func matches(_ payload: TurboDirectQuicUpgradeRequestPayload) -> Bool {
+        payload.reason == reason
+    }
+}
+
+nonisolated struct TurboSelectedPeerPrewarmPayload: Codable, Equatable {
+    static let expectedProtocolVersion = "selected-peer-prewarm-v1"
+
+    let protocolVersion: String
+    let requestId: String
+    let channelId: String
+    let fromDeviceId: String
+    let toDeviceId: String
+    let reason: String
+
+    init(
+        protocolVersion: String = Self.expectedProtocolVersion,
+        requestId: String,
+        channelId: String,
+        fromDeviceId: String,
+        toDeviceId: String,
+        reason: String
+    ) {
+        self.protocolVersion = protocolVersion
+        self.requestId = requestId
+        self.channelId = channelId
+        self.fromDeviceId = fromDeviceId
+        self.toDeviceId = toDeviceId
+        self.reason = reason
+    }
+
+    var usesExpectedProtocolVersion: Bool {
+        protocolVersion == Self.expectedProtocolVersion
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion = "protocol"
+        case requestId
+        case channelId
+        case fromDeviceId
+        case toDeviceId
+        case reason
+    }
+}
+
 enum TurboDirectQuicSignalPayload: Equatable {
     case offer(TurboDirectQuicOfferPayload)
     case answer(TurboDirectQuicAnswerPayload)
@@ -1515,6 +1564,23 @@ enum TurboDirectQuicPayloadError: Error, LocalizedError, Equatable {
     }
 }
 
+enum TurboSelectedPeerPrewarmPayloadError: Error, LocalizedError, Equatable {
+    case wrongSignalKind(expected: TurboSignalKind, actual: TurboSignalKind)
+    case unsupportedProtocolVersion(String)
+    case invalidJSON(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .wrongSignalKind(let expected, let actual):
+            return "Expected \(expected.rawValue) selected peer prewarm signal but received \(actual.rawValue)"
+        case .unsupportedProtocolVersion(let version):
+            return "Unsupported selected peer prewarm protocol version \(version)"
+        case .invalidJSON(let message):
+            return "Invalid selected peer prewarm payload JSON: \(message)"
+        }
+    }
+}
+
 enum TurboPTTPushEvent: String, Codable, Equatable {
     case transmitStart = "transmit-start"
     case leaveChannel = "leave-channel"
@@ -1524,23 +1590,35 @@ struct TurboPTTPushPayload: Equatable {
     let event: TurboPTTPushEvent
     let channelId: String?
     let activeSpeaker: String?
+    let activeSpeakerDisplayName: String?
     let senderUserId: String?
     let senderDeviceId: String?
 
     var participantName: String {
-        activeSpeaker ?? "Remote"
+        activeSpeakerDisplayName ?? activeSpeaker ?? "Remote"
+    }
+
+    var notificationTitle: String {
+        switch event {
+        case .transmitStart:
+            return "\(participantName) wants to talk"
+        case .leaveChannel:
+            return participantName
+        }
     }
 
     init(
         event: TurboPTTPushEvent,
         channelId: String?,
         activeSpeaker: String?,
+        activeSpeakerDisplayName: String? = nil,
         senderUserId: String?,
         senderDeviceId: String?
     ) {
         self.event = event
         self.channelId = channelId
         self.activeSpeaker = activeSpeaker
+        self.activeSpeakerDisplayName = activeSpeakerDisplayName
         self.senderUserId = senderUserId
         self.senderDeviceId = senderDeviceId
     }
@@ -1558,13 +1636,14 @@ struct TurboPTTPushPayload: Equatable {
             event: event,
             channelId: pushPayload["channelId"] as? String,
             activeSpeaker: pushPayload["activeSpeaker"] as? String,
+            activeSpeakerDisplayName: pushPayload["activeSpeakerDisplayName"] as? String,
             senderUserId: pushPayload["senderUserId"] as? String,
             senderDeviceId: pushPayload["senderDeviceId"] as? String
         )
     }
 }
 
-nonisolated struct TurboSignalEnvelope: Codable {
+nonisolated struct TurboSignalEnvelope: Codable, Equatable {
     let type: TurboSignalKind
     let channelId: String
     let fromUserId: String
@@ -1702,6 +1781,26 @@ nonisolated struct TurboSignalEnvelope: Codable {
         )
     }
 
+    static func selectedPeerPrewarm(
+        channelId: String,
+        fromUserId: String,
+        fromDeviceId: String,
+        toUserId: String,
+        toDeviceId: String,
+        payload: TurboSelectedPeerPrewarmPayload
+    ) throws -> TurboSignalEnvelope {
+        let encodedPayload = try encodeSelectedPeerPrewarmPayload(payload)
+        return TurboSignalEnvelope(
+            type: .selectedPeerPrewarm,
+            channelId: channelId,
+            fromUserId: fromUserId,
+            fromDeviceId: fromDeviceId,
+            toUserId: toUserId,
+            toDeviceId: toDeviceId,
+            payload: encodedPayload
+        )
+    }
+
     func decodeDirectQuicSignalPayload() throws -> TurboDirectQuicSignalPayload {
         switch type {
         case .offer:
@@ -1712,7 +1811,7 @@ nonisolated struct TurboSignalEnvelope: Codable {
             return .candidate(try decodeDirectQuicPayload(TurboDirectQuicCandidatePayload.self, expectedKind: .iceCandidate))
         case .hangup:
             return .hangup(try decodeDirectQuicPayload(TurboDirectQuicHangupPayload.self, expectedKind: .hangup))
-        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .directQuicUpgradeRequest:
+        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .directQuicUpgradeRequest, .selectedPeerPrewarm:
             throw TurboDirectQuicPayloadError.notDirectQuicSignal(type)
         }
     }
@@ -1722,6 +1821,26 @@ nonisolated struct TurboSignalEnvelope: Codable {
             TurboDirectQuicUpgradeRequestPayload.self,
             expectedKind: .directQuicUpgradeRequest
         )
+    }
+
+    func decodeSelectedPeerPrewarmPayload() throws -> TurboSelectedPeerPrewarmPayload {
+        guard type == .selectedPeerPrewarm else {
+            throw TurboSelectedPeerPrewarmPayloadError.wrongSignalKind(
+                expected: .selectedPeerPrewarm,
+                actual: type
+            )
+        }
+        let data = Data(payload.utf8)
+        let decodedPayload: TurboSelectedPeerPrewarmPayload
+        do {
+            decodedPayload = try JSONDecoder().decode(TurboSelectedPeerPrewarmPayload.self, from: data)
+        } catch {
+            throw TurboSelectedPeerPrewarmPayloadError.invalidJSON(error.localizedDescription)
+        }
+        guard decodedPayload.usesExpectedProtocolVersion else {
+            throw TurboSelectedPeerPrewarmPayloadError.unsupportedProtocolVersion(decodedPayload.protocolVersion)
+        }
+        return decodedPayload
     }
 
     private static func makeDirectQuicEnvelope<Payload: TurboDirectQuicSignalingPayload>(
@@ -1751,6 +1870,16 @@ nonisolated struct TurboSignalEnvelope: Codable {
         let data = try JSONEncoder().encode(payload)
         guard let json = String(data: data, encoding: .utf8) else {
             throw TurboDirectQuicPayloadError.invalidJSON("encoded payload was not UTF-8")
+        }
+        return json
+    }
+
+    private static func encodeSelectedPeerPrewarmPayload(
+        _ payload: TurboSelectedPeerPrewarmPayload
+    ) throws -> String {
+        let data = try JSONEncoder().encode(payload)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw TurboSelectedPeerPrewarmPayloadError.invalidJSON("encoded payload was not UTF-8")
         }
         return json
     }

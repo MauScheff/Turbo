@@ -4,12 +4,13 @@ Turbo now has a production telemetry pipeline built around a Cloudflare Worker p
 
 ## Architecture
 
-There are three producers and one sink:
+There are two producers and one sink:
 
 - the iOS app emits high-signal client telemetry through the backend
 - the Unison backend emits server-side telemetry directly
-- invariant violations can be forwarded as production telemetry
 - the Cloudflare telemetry worker writes compact events to Analytics Engine and can mirror alert-worthy events to Discord
+
+Both producers may include `invariantId` when they can prove a contradiction locally. For true distributed invariants, they emit correlated facts that reliability intake or merged diagnostics can evaluate later.
 
 The backend remains the authority for production ingestion:
 
@@ -222,7 +223,7 @@ The query helper prints a compact operator view by default and supports `--json`
 
 ## Relationship To Merged Diagnostics
 
-Production telemetry is now one input to the agent debugging loop, not a replacement for debug diagnostics.
+Production telemetry is one input to the agent debugging loop, not a replacement for full diagnostics.
 
 Use direct telemetry queries when the question is operational:
 
@@ -238,13 +239,13 @@ Use merged diagnostics when the question is behavioral:
 python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 @mau @bau
 ```
 
-`merged_diagnostics.py` pulls Cloudflare telemetry by default when query credentials are present, then combines it with the latest backend diagnostics snapshots. This is the normal agent-facing command for physical-device debugging because it keeps the compact queryable event stream and the full transcript in one timeline.
+`merged_diagnostics.py` pulls Cloudflare telemetry by default when query credentials are present, then combines it with the latest backend diagnostics snapshots. It treats both iOS and backend telemetry as invariant evidence: events with `invariantId` become violations, and complete telemetry state facts can become snapshot facts for the same pair/convergence checks used by local diagnostics.
 
 The practical split is:
 
-- telemetry answers "what high-signal facts happened recently?"
-- backend latest diagnostics answers "what did this exact app instance know and log in detail?"
-- merged diagnostics answers "how do both devices' facts line up?"
+- telemetry answers: "what high-signal facts happened recently?"
+- backend latest diagnostics answers: "what did this exact app instance know and log in detail?"
+- merged diagnostics answers: "how do both devices' and backend facts line up?"
 
 Do not move full debug transcripts, audio packet logs, or complete local state dumps into Cloudflare telemetry. Those belong in backend latest diagnostics. Telemetry events should stay compact, queryable, and alert-friendly.
 

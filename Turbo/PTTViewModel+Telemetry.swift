@@ -182,7 +182,7 @@ extension PTTViewModel {
     }
 
     private func baseTelemetryMetadata() -> [String: String] {
-        [
+        var metadata = [
             "applicationState": String(describing: currentApplicationState()),
             "backendMode": backendRuntime.mode,
             "isJoined": String(isJoined),
@@ -191,6 +191,35 @@ extension PTTViewModel {
             "iosVersion": UIDevice.current.systemVersion,
             "deviceModel": UIDevice.current.model,
         ]
+        for key in [
+            "selectedPeerPhase",
+            "selectedPeerPhaseDetail",
+            "selectedPeerRelationship",
+            "pendingAction",
+            "activeChannelId",
+            "systemSession",
+            "transmitPhase",
+            "backendChannelStatus",
+            "backendReadiness",
+            "backendSelfJoined",
+            "backendPeerJoined",
+            "backendPeerDeviceConnected",
+            "backendCanTransmit",
+            "backendActiveTransmitId",
+            "backendServerTimestamp",
+            "hadConnectedSessionContinuity",
+            "remoteAudioReadiness",
+            "remoteWakeCapabilityKind",
+            "directQuicAttemptId",
+            "directQuicChannelId",
+            "directQuicLocalDeviceId",
+            "directQuicPeerDeviceId",
+        ] {
+            if let value = diagnosticsStateFields[key] {
+                metadata[key] = value
+            }
+        }
+        return metadata
     }
 
     private func shouldAlertForDiagnosticsEntry(_ entry: DiagnosticsEntry) -> Bool {

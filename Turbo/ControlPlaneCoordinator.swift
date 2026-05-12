@@ -159,7 +159,14 @@ struct ReceiverAudioReadinessIntent: Equatable {
     let telemetry: CallPeerTelemetry?
 
     var publicationBasis: ReceiverAudioReadinessPublicationBasis {
-        reason == .channelRefresh ? .channelRefresh : .lifecycle
+        switch reason {
+        case .channelRefresh:
+            return .channelRefresh
+        case .websocketConnected, .backendReconnect:
+            return .webSocketReconnect
+        default:
+            return .lifecycle
+        }
     }
 
     var publishedState: ReceiverAudioReadinessPublication {
@@ -281,9 +288,22 @@ enum ControlPlaneReducer {
                 break
             }
 
-            if case .published(let publication)? = nextState.receiverAudioReadinessStates[intent.contactID],
-               publication == intent.publishedState {
-                break
+            if case .published(let publication)? = nextState.receiverAudioReadinessStates[intent.contactID] {
+                if publication == intent.publishedState {
+                    break
+                }
+
+                if publication.isSemanticallyEquivalent(to: intent.publishedState),
+                   publication.basis.suppressesEquivalentLifecyclePublish,
+                   intent.publishedState.basis == .lifecycle {
+                    break
+                }
+
+                if publication.basis == .lifecycle,
+                   intent.publishedState.basis == .webSocketReconnect,
+                   publication.isSemanticallyEquivalent(to: intent.publishedState) {
+                    break
+                }
             }
 
             if !webSocketConnected {
@@ -292,6 +312,7 @@ enum ControlPlaneReducer {
                 break
             }
 
+            nextState.receiverAudioReadinessStates[intent.contactID] = .published(intent.publishedState)
             effects.append(.publishReceiverAudioReadiness(intent))
 
         case .receiverAudioReadinessPublished(let intent):

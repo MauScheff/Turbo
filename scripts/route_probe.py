@@ -1200,20 +1200,36 @@ async def main() -> int:
             ),
         )
         mutual_channel_id = mutual_callee_invite["channelId"]
-        mutual_accept_payload = run_check(
-            results,
-            "invite-accept:mutual-clears-both-directions",
-            lambda: request(
-                args.base_url,
-                f"/v1/invites/{mutual_callee_invite['inviteId']}/accept",
-                caller["handle"],
-                method="POST",
-                insecure=args.insecure,
-            ),
-        )
+        if mutual_callee_invite.get("status") == "connected":
+            mutual_accept_payload = mutual_callee_invite
+            results.append(
+                CheckResult(
+                    name="invite-accept:mutual-clears-both-directions",
+                    ok=True,
+                    detail="reciprocal create collapsed to connected",
+                    durationMs=0,
+                    payload=mutual_accept_payload,
+                )
+            )
+        else:
+            mutual_accept_payload = run_check(
+                results,
+                "invite-accept:mutual-clears-both-directions",
+                lambda: request(
+                    args.base_url,
+                    f"/v1/invites/{mutual_callee_invite['inviteId']}/accept",
+                    caller["handle"],
+                    method="POST",
+                    insecure=args.insecure,
+                ),
+            )
+            require(
+                mutual_accept_payload.get("accepted") is True,
+                f"mutual accept route did not mark invite accepted: {mutual_accept_payload}",
+            )
         require(
-            mutual_accept_payload.get("accepted") is True,
-            f"mutual accept route did not mark invite accepted: {mutual_accept_payload}",
+            mutual_accept_payload.get("status") == "connected",
+            f"mutual request did not converge to connected: {mutual_accept_payload}",
         )
         caller_outgoing_after_mutual_accept = run_check(
             results,

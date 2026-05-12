@@ -293,6 +293,35 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
             )
         }
 
+        if selectedPeerRelationship == "none",
+           pendingAction == "none",
+           isJoined == false,
+           systemSessionValue == "none",
+           backendReadinessValue == "inactive",
+           backendSelfJoined == true,
+           backendPeerJoined == true,
+           backendPeerDeviceConnected == false {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.stale_backend_membership_without_local_session",
+                    scope: .backend,
+                    message: "backend retained inactive durable channel membership without local session evidence",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerRelationship": selectedPeerRelationship,
+                        "pendingAction": pendingAction,
+                        "isJoined": String(isJoined),
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        "backendPeerDeviceConnected": boolMetadata(backendPeerDeviceConnected),
+                    ]
+                )
+            )
+        }
+
         let pendingLocalJoinWithoutSession =
             pendingAction.contains("joiningLocal(")
             || pendingAction.contains(".joiningLocal(")

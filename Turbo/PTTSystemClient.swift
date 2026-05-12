@@ -108,7 +108,7 @@ private final class ApplePTTSystemClientAdapter: NSObject, PTChannelManagerDeleg
         case .transmitStart:
             // TODO: Populate the participant image from a locally cached contact
             // avatar once we persist and restore that metadata on device.
-            result = .activeRemoteParticipant(PTParticipant(name: payload.participantName, image: nil))
+            result = .activeRemoteParticipant(PTParticipant(name: payload.notificationTitle, image: nil))
             resultDescription = "activeRemoteParticipant"
         case .leaveChannel:
             result = .leaveChannel
@@ -195,6 +195,7 @@ private final class ApplePTTSystemClientAdapter: NSObject, PTChannelManagerDeleg
             event: .transmitStart,
             channelId: pushPayload["channelId"] as? String,
             activeSpeaker: pushPayload["activeSpeaker"] as? String ?? "Remote",
+            activeSpeakerDisplayName: pushPayload["activeSpeakerDisplayName"] as? String,
             senderUserId: pushPayload["senderUserId"] as? String,
             senderDeviceId: pushPayload["senderDeviceId"] as? String
         )

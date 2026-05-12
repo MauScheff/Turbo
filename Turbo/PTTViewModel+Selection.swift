@@ -182,6 +182,7 @@ extension PTTViewModel {
             baseState: selectedContactId == contact.id
                 ? selectedPeerBaseState(for: contact.id, relationship: relationshipState(for: contact.id))
                 : listConversationState(for: contact.id),
+            relationship: relationshipState(for: contact.id),
             contactName: contact.name,
             contactIsOnline: selectedConversationPresenceIsOnline(for: contact.id),
             contactPresence: contactPresencePresentation(for: contact.id),
@@ -201,6 +202,7 @@ extension PTTViewModel {
             directMediaPathActive: shouldUseDirectQuicTransport(for: contact.id),
             firstTalkStartupProfile: firstTalkStartupProfile(for: contact.id, startGraceIfNeeded: false),
             incomingWakeActivationState: pttWakeRuntime.incomingWakeActivationState(for: contact.id),
+            backendJoinSettling: backendJoinIsSettling(for: contact.id),
             controlPlaneReconnectGraceActive: shouldUseLiveCallControlPlaneReconnectGrace(for: contact.id),
             hadConnectedSessionContinuity: selectedContactId == contact.id
                 ? selectedPeerCoordinator.state.hadConnectedSessionContinuity
@@ -287,6 +289,8 @@ extension PTTViewModel {
                     firstTalkStartupProfile: firstTalkStartupProfile(for: contact.id, startGraceIfNeeded: false),
                     incomingWakeActivationState:
                         pttWakeRuntime.incomingWakeActivationState(for: contact.id),
+                    backendJoinSettling:
+                        backendJoinIsSettling(for: contact.id),
                     backendSignalingJoinRecoveryActive:
                         backendRuntime.signalingJoinRecoveryTask != nil,
                     controlPlaneReconnectGraceActive:
@@ -822,10 +826,23 @@ extension PTTViewModel {
         updateStatusForSelectedContact()
         captureDiagnosticsState("selected-contact")
         Task {
-            await prewarmForegroundTalkPathIfNeeded(
+            precreateSelectedContactMediaShellIfNeeded(
                 for: contact.id,
                 reason: "selected-contact"
             )
+            async let peerPrewarmHint: Void = publishSelectedPeerPrewarmHintIfPossible(
+                for: contact.id,
+                reason: "selected-contact"
+            )
+            async let directQuicPrewarm: Void = ingestSelectedContactDirectQuicPrewarm(
+                contactID: contact.id,
+                reason: "selected-contact"
+            )
+            async let foregroundTalkPrewarm: Void = prewarmForegroundTalkPathIfNeeded(
+                for: contact.id,
+                reason: "selected-contact"
+            )
+            _ = await (peerPrewarmHint, directQuicPrewarm, foregroundTalkPrewarm)
         }
     }
 

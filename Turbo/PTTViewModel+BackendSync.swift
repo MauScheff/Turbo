@@ -321,6 +321,16 @@ extension PTTViewModel {
             return effectiveFetched
         }
 
+        let shouldPreserveExplicitReadySignal =
+            peerMembershipPresent
+            && peerDeviceConnected
+            && existingSessionWasRoutable
+            && existing.remoteAudioReadiness == .ready
+            && effectiveFetched.remoteAudioReadiness == .wakeCapable
+        if shouldPreserveExplicitReadySignal {
+            return effectiveFetched.settingRemoteAudioReadiness(.ready)
+        }
+
         let existingWakeFallbackWasAuthoritative: Bool = {
             if existingSessionWasRoutable {
                 return true
@@ -497,6 +507,7 @@ extension PTTViewModel {
              .iceCandidate,
              .hangup,
              .directQuicUpgradeRequest,
+             .selectedPeerPrewarm,
              .audioChunk,
              .receiverReady,
              .receiverNotReady:
@@ -1359,7 +1370,7 @@ extension PTTViewModel {
                         ]
                     )
                 }
-                self.handleIncomingSignal(envelope)
+                await self.ingestBackendWebSocketSignal(envelope)
             }
         }
     }
@@ -2232,12 +2243,24 @@ extension PTTViewModel {
                 updateStatusForSelectedContact()
                 captureDiagnosticsState("backend-signal:\(envelope.type.rawValue)")
             }
+            let shouldEchoReadyAfterPeerReconnect =
+                readiness == .ready
+                && readinessReason.requestsReciprocalReceiverReadinessAfterReconnect
             Task {
                 if readiness == .ready {
                     await resumeLocalInteractivePrewarmForRemoteReady(
                         contactID: contactID,
                         applicationState: applicationState
                     )
+                    if shouldEchoReadyAfterPeerReconnect {
+                        controlPlaneCoordinator.send(
+                            .receiverAudioReadinessCacheCleared(contactID: contactID)
+                        )
+                        await syncLocalReceiverAudioReadinessSignal(
+                            for: contactID,
+                            reason: .receiverPrewarmRequest
+                        )
+                    }
                     await syncLocalReceiverAudioReadinessSignal(
                         for: contactID,
                         reason: .channelRefresh
@@ -2258,9 +2281,90 @@ extension PTTViewModel {
             }
         case .directQuicUpgradeRequest:
             handleIncomingDirectQuicUpgradeRequest(envelope, contactID: contactID)
+        case .selectedPeerPrewarm:
+            handleIncomingSelectedPeerPrewarmHint(envelope, contactID: contactID)
         case .offer, .answer, .iceCandidate, .hangup:
             handleIncomingDirectQuicControlSignal(envelope, contactID: contactID)
         }
+    }
+
+    func handleIncomingSelectedPeerPrewarmHint(
+        _ envelope: TurboSignalEnvelope,
+        contactID: UUID
+    ) {
+        guard let backend = backendServices else { return }
+        let payload: TurboSelectedPeerPrewarmPayload
+        do {
+            payload = try envelope.decodeSelectedPeerPrewarmPayload()
+        } catch {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Rejected selected peer prewarm hint because payload was invalid",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": envelope.channelId,
+                    "fromDeviceId": envelope.fromDeviceId,
+                    "toDeviceId": envelope.toDeviceId,
+                    "error": error.localizedDescription,
+                ]
+            )
+            return
+        }
+        var metadata = [
+            "contactId": contactID.uuidString,
+            "channelId": envelope.channelId,
+            "requestId": payload.requestId,
+            "reason": payload.reason,
+            "fromDeviceId": envelope.fromDeviceId,
+            "toDeviceId": envelope.toDeviceId,
+        ]
+
+        guard envelope.toDeviceId == backend.deviceID,
+              payload.fromDeviceId == envelope.fromDeviceId,
+              payload.channelId == envelope.channelId,
+              payload.toDeviceId.isEmpty || payload.toDeviceId == backend.deviceID else {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Rejected selected peer prewarm hint because envelope and payload disagree",
+                metadata: metadata
+            )
+            return
+        }
+
+        if let contact = contacts.first(where: { $0.id == contactID }),
+           let remoteUserId = contact.remoteUserId,
+           remoteUserId != envelope.fromUserId {
+            metadata["expectedRemoteUserId"] = remoteUserId
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Rejected selected peer prewarm hint from unexpected peer user",
+                metadata: metadata
+            )
+            return
+        }
+
+        if let blockReason = selectedPeerPrewarmHintBlockReason(for: contactID) {
+            metadata["blockReason"] = blockReason
+            diagnostics.record(
+                .websocket,
+                message: "Ignored selected peer prewarm hint because receiver is not warmable",
+                metadata: metadata
+            )
+            return
+        }
+
+        diagnostics.record(
+            .websocket,
+            message: "Selected peer prewarm hint received",
+            metadata: metadata
+        )
+        precreateSelectedContactMediaShellIfNeeded(
+            for: contactID,
+            reason: "peer-hint-\(payload.reason)"
+        )
     }
 
     func handleIncomingDirectQuicTransmitPrepare(
@@ -2557,6 +2661,65 @@ extension PTTViewModel {
             let localSessionCleared =
                 !systemSessionMatches(contactID)
                 && !(isJoined && activeChannelId == contactID)
+            if backendRuntime.isBackendJoinSettling(for: contactID),
+               effectiveChannelState.membership.hasLocalMembership,
+               localSessionEstablished,
+               effectiveChannelReadiness?.selfHasActiveDevice == true {
+                backendRuntime.clearBackendJoinSettling(for: contactID)
+                diagnostics.record(
+                    .backend,
+                    message: "Cleared backend join settling after active device became visible",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": backendChannelId,
+                        "backendStatus": effectiveChannelState.status,
+                        "backendReadiness": effectiveChannelReadiness?.statusKind ?? "none",
+                    ]
+                )
+            }
+            if effectiveChannelState.membership.hasLocalMembership,
+               localSessionEstablished,
+               effectiveChannelReadiness?.selfHasActiveDevice == false,
+               backendRuntime.signalingJoinRecoveryTask == nil {
+                diagnostics.recordInvariantViolation(
+                    invariantID: "selected.local_session_without_backend_presence",
+                    scope: .convergence,
+                    message: "local/system session is active, but backend readiness says selfHasActiveDevice=false",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": backendChannelId,
+                        "backendStatus": effectiveChannelState.status,
+                        "backendReadiness": effectiveChannelReadiness?.statusKind ?? "none",
+                    ]
+                )
+                replaceBackendSignalingJoinRecoveryTask(
+                    with: Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        defer {
+                            self.backendRuntime.signalingJoinRecoveryTask = nil
+                            self.updateStatusForSelectedContact()
+                        }
+                        self.diagnostics.record(
+                            .backend,
+                            message: "Repairing missing backend device presence for active local session",
+                            metadata: [
+                                "contactId": contactID.uuidString,
+                                "channelId": backendChannelId,
+                                "handle": contact.handle,
+                            ]
+                        )
+                        self.backendServices?.ensureWebSocketConnected()
+                        await self.reassertBackendJoin(for: contact)
+                        await self.refreshChannelState(for: contactID)
+                        await self.refreshContactSummaries()
+                        await self.syncLocalReceiverAudioReadinessSignal(
+                            for: contactID,
+                            reason: .backendSignalingRecovery
+                        )
+                        self.captureDiagnosticsState("backend-presence:self-healed")
+                    }
+                )
+            }
             let leaveWasInFlight = sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
             let shouldPreserveSettlingBackendJoin =
                 !effectiveChannelState.membership.hasLocalMembership
@@ -2589,9 +2752,12 @@ extension PTTViewModel {
             backendSyncCoordinator.send(
                 .channelStateUpdated(contactID: contactID, channelState: effectiveChannelState)
             )
-            if let effectiveChannelReadiness {
+            let setupChannelReadiness =
+                effectiveChannelReadiness
+                ?? (fetchedChannelReadiness?.peerTargetDeviceId == nil ? nil : fetchedChannelReadiness)
+            if let setupChannelReadiness {
                 backendSyncCoordinator.send(
-                    .channelReadinessUpdated(contactID: contactID, readiness: effectiveChannelReadiness)
+                    .channelReadinessUpdated(contactID: contactID, readiness: setupChannelReadiness)
                 )
             }
             await prepareReceiverForBackendPeerTransmitFromChannelRefreshIfNeeded(
@@ -2603,10 +2769,15 @@ extension PTTViewModel {
                 contact.isOnline = effectiveChannelState.peerOnline
                 contact.remoteUserId = effectiveChannelState.peerUserId
             }
-            if backendStatusMessage.hasPrefix("signaling "),
-               let effectiveChannelReadiness,
+            if let effectiveChannelReadiness,
                !effectiveChannelReadiness.statusKind.isEmpty {
-                backendStatusMessage = "Connected"
+                let normalizedBackendNotice = normalizedBackendServerNotice(backendStatusMessage)
+                let channelReadyClearsTargetDeviceNotice =
+                    effectiveChannelReadiness.statusKind == ConversationState.ready.rawValue
+                    && normalizedBackendNotice == "target user has no connected receiving device in this channel"
+                if backendStatusMessage.hasPrefix("signaling ") || channelReadyClearsTargetDeviceNotice {
+                    backendStatusMessage = "Connected"
+                }
             }
             if selectedContactId == contactID {
                 let backendChannelSnapshot = ChannelReadinessSnapshot(
@@ -2644,6 +2815,10 @@ extension PTTViewModel {
             await syncLocalReceiverAudioReadinessSignal(for: contactID, reason: .channelRefresh)
             await reconcileSelectedSessionIfNeeded()
             if selectedContactId == contactID {
+                await maybeStartSelectedContactDirectQuicPrewarm(
+                    for: contactID,
+                    reason: "channel-refresh"
+                )
                 await prewarmForegroundTalkPathIfNeeded(
                     for: contactID,
                     reason: "channel-ready"
@@ -2832,5 +3007,32 @@ extension PTTViewModel {
             message: "Invite sync partially recovered",
             metadata: ["failedRoute": failedRoute, "error": error.localizedDescription]
         )
+    }
+}
+
+private extension ReceiverAudioReadinessReason {
+    var requestsReciprocalReceiverReadinessAfterReconnect: Bool {
+        switch self {
+        case .websocketConnected, .backendReconnect:
+            return true
+        case .appBackgroundMediaClosed,
+             .audioRouteChange,
+             .audioRoutePreference(_),
+             .backendSignalingRecovery,
+             .channelRefresh,
+             .directQuicReceiverPrewarm,
+             .directQuicTransmitPrepare,
+             .foregroundTalkPrewarm(_),
+             .incomingPushForeground,
+             .mediaState(_),
+             .networkChange,
+             .pttSync,
+             .pttWakePostActivationRefresh,
+             .receiverPrewarmRequest,
+             .remoteAudioEndedKeepalive,
+             .telemetryRefresh,
+             .legacy(_):
+            return false
+        }
     }
 }

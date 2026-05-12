@@ -181,11 +181,14 @@ When a field or physical-device failure has merged diagnostics JSON:
 
 ### Production Report To Regression
 
-The intended production loop is:
+The production loop turns field evidence into a named invariant and then a
+repeatable proof. Use `INVARIANTS.md` for ownership/proof-lane decisions and
+`PRODUCTION_TELEMETRY.md` for telemetry, shake-report, and intake evidence.
 
 1. The human describes the observed failure in product terms.
-2. The agent collects or asks for the relevant shake-to-report handles/device
-   identities, then runs merged diagnostics.
+2. The agent collects or asks for the relevant handles, device identities,
+   incident IDs, and peer context, then runs reliability intake or merged
+   diagnostics.
 3. The agent classifies ownership of the broken fact:
    - backend/shared truth
    - client projection or reducer state
@@ -200,8 +203,9 @@ The intended production loop is:
    - physical-device checklist only for the Apple or hardware boundary
 5. The agent fixes the owning subsystem, then runs the narrow proof and the
    appropriate reliability gate.
-6. Before or after release, the agent runs `just postdeploy-check` or
-   `just deploy-verified` so the live hosted surface has a fresh SLO artifact.
+6. Before or after release, the agent runs the appropriate reliability gate,
+   such as `just postdeploy-check` or `just deploy-verified`, so the live hosted
+   surface has a fresh SLO artifact.
 
 This is how a production observation becomes part of Turbo's semantics. The
 goal is not to preserve every tap literally; it is to encode the invariant that

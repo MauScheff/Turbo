@@ -43,6 +43,7 @@ struct SelectedPeerSessionState: Equatable {
     var directMediaPathActive = false
     var firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm
     var incomingWakeActivationState: IncomingWakeActivationState?
+    var backendJoinSettling = false
     var backendSignalingJoinRecoveryActive = false
     var controlPlaneReconnectGraceActive = false
     var hadConnectedSessionContinuity = false
@@ -75,6 +76,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
     let directMediaPathActive: Bool
     let firstTalkStartupProfile: FirstTalkStartupProfile
     let incomingWakeActivationState: IncomingWakeActivationState?
+    let backendJoinSettling: Bool
     let backendSignalingJoinRecoveryActive: Bool
     let controlPlaneReconnectGraceActive: Bool
     let localJoinFailure: PTTJoinFailure?
@@ -98,6 +100,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
         directMediaPathActive: Bool,
         firstTalkStartupProfile: FirstTalkStartupProfile = .relayWarm,
         incomingWakeActivationState: IncomingWakeActivationState?,
+        backendJoinSettling: Bool = false,
         backendSignalingJoinRecoveryActive: Bool = false,
         controlPlaneReconnectGraceActive: Bool = false,
         localJoinFailure: PTTJoinFailure?
@@ -120,6 +123,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
         self.directMediaPathActive = directMediaPathActive
         self.firstTalkStartupProfile = firstTalkStartupProfile
         self.incomingWakeActivationState = incomingWakeActivationState
+        self.backendJoinSettling = backendJoinSettling
         self.backendSignalingJoinRecoveryActive = backendSignalingJoinRecoveryActive
         self.controlPlaneReconnectGraceActive = controlPlaneReconnectGraceActive
         self.localJoinFailure = localJoinFailure
@@ -207,6 +211,7 @@ enum SelectedPeerReducer {
             nextState.directMediaPathActive = snapshot.directMediaPathActive
             nextState.firstTalkStartupProfile = snapshot.firstTalkStartupProfile
             nextState.incomingWakeActivationState = snapshot.incomingWakeActivationState
+            nextState.backendJoinSettling = snapshot.backendJoinSettling
             nextState.backendSignalingJoinRecoveryActive = snapshot.backendSignalingJoinRecoveryActive
             nextState.controlPlaneReconnectGraceActive = snapshot.controlPlaneReconnectGraceActive
         case .selectedContactChanged(let selection):
@@ -329,6 +334,7 @@ enum SelectedPeerReducer {
             nextState.requesterAutoJoinOnPeerAcceptanceArmed = false
             nextState.requesterAutoJoinOnPeerAcceptanceDispatchInFlight = true
             nextState.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest = false
+            nextState.interruptedConnectionAttemptContactID = nil
             if let selection = nextState.selection {
                 nextState.selectedPeerState = SelectedPeerState(
                     contactID: selection.contactID,
@@ -400,6 +406,7 @@ enum SelectedPeerReducer {
             directMediaPathActive: state.directMediaPathActive,
             firstTalkStartupProfile: state.firstTalkStartupProfile,
             incomingWakeActivationState: state.incomingWakeActivationState,
+            backendJoinSettling: state.backendJoinSettling,
             backendSignalingJoinRecoveryActive: state.backendSignalingJoinRecoveryActive,
             controlPlaneReconnectGraceActive: state.controlPlaneReconnectGraceActive,
             hadConnectedSessionContinuity: hadConnectedSessionContinuity,
@@ -580,7 +587,7 @@ enum SelectedPeerReducer {
             guard channel.membership == .absent else { return false }
             if state.requesterAutoJoinOnPeerAcceptanceArmed,
                !state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight {
-                return state.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest
+                return false
             }
         } else if state.requesterAutoJoinOnPeerAcceptanceArmed,
                   !state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight,
@@ -625,7 +632,7 @@ enum SelectedPeerReducer {
         guard let contactID = state.selection?.contactID else { return nil }
 
         if state.interruptedConnectionAttemptContactID == contactID {
-            if state.channel?.membership.hasPeerMembership == true {
+            if readyPeerJoinIsAuthoritative(state) {
                 return .joinReadyPeer(contactID: contactID)
             }
             return .requestConnection(contactID: contactID)
@@ -635,10 +642,19 @@ enum SelectedPeerReducer {
         case (.inactive, .idle), (.inactive, .requested), (.inactive, .incomingRequest):
             return .requestConnection(contactID: contactID)
         case (.inactive, .peerReady):
-            return .joinReadyPeer(contactID: contactID)
+            if readyPeerJoinIsAuthoritative(state) {
+                return .joinReadyPeer(contactID: contactID)
+            }
+            return .requestConnection(contactID: contactID)
         case (.transitioning, _), (.connected, _), (.blockedByOtherSession, _), (.systemMismatch, _), (.localJoinFailed, _), (.pendingJoin, _), (.disconnecting, _), (.inactive, _):
             return nil
         }
+    }
+
+    private static func readyPeerJoinIsAuthoritative(_ state: SelectedPeerSessionState) -> Bool {
+        guard let channel = state.channel else { return false }
+        guard channel.membership.hasPeerMembership else { return false }
+        return channel.requestRelationship == .none
     }
 
     private static func isInterruptibleConnectionAttempt(
@@ -731,12 +747,23 @@ enum SelectedPeerReducer {
 
     private static func autoJoinReadyPeerEffect(for state: SelectedPeerSessionState) -> SelectedPeerEffect? {
         guard state.requesterAutoJoinOnPeerAcceptanceEnabled else { return nil }
+        if state.interruptedConnectionAttemptContactID == state.selection?.contactID {
+            guard state.pendingAction.pendingConnectContactID == nil else { return nil }
+            guard state.pendingAction.pendingJoinContactID == nil else { return nil }
+            guard state.durableSessionProjection == .inactive else { return nil }
+            guard state.selection?.contactID == state.selectedPeerState.contactID else { return nil }
+            guard state.selectedPeerState.phase == .peerReady else { return nil }
+            guard readyPeerJoinIsAuthoritative(state) else { return nil }
+            guard let contactID = state.selection?.contactID else { return nil }
+            return .joinReadyPeer(contactID: contactID)
+        }
         guard state.requesterAutoJoinOnPeerAcceptanceArmed else { return nil }
         guard state.pendingAction.pendingConnectContactID == nil else { return nil }
         guard state.pendingAction.pendingJoinContactID == nil else { return nil }
         guard state.durableSessionProjection == .inactive else { return nil }
         guard state.selection?.contactID == state.selectedPeerState.contactID else { return nil }
         guard state.selectedPeerState.phase == .peerReady else { return nil }
+        guard readyPeerJoinIsAuthoritative(state) else { return nil }
         guard let contactID = state.selection?.contactID else { return nil }
         return .joinReadyPeer(contactID: contactID)
     }
@@ -760,7 +787,8 @@ enum SelectedPeerReducer {
         case .peerReady, .waitingForPeer(reason: .peerReadyToConnect):
             return true
         case .idle:
-            return !state.relationship.isOutgoingRequest
+            return state.requesterAutoJoinOnPeerAcceptanceDispatchInFlight
+                || state.requesterAutoJoinOnPeerAcceptanceObservedOutgoingRequest
         case .requested, .incomingRequest, .waitingForPeer, .wakeReady, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
             return false
         }

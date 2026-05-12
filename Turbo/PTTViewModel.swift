@@ -142,6 +142,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     let transmitCoordinator = TransmitCoordinator()
     let transmitTaskCoordinator = TransmitTaskCoordinator()
     let selectedPeerCoordinator = SelectedPeerCoordinator()
+    let controlEventIngestor = ControlEventIngestor()
     let liveConversationActivityController = LiveConversationActivityController()
     let selfCheckCoordinator = DevSelfCheckCoordinator()
     let pttSystemPolicyCoordinator = PTTSystemPolicyCoordinator()
@@ -283,6 +284,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         pttCoordinator.transitionReporter = recordReducerTransition
         transmitCoordinator.transitionReporter = recordReducerTransition
         transmitTaskCoordinator.transitionReporter = recordReducerTransition
+        controlEventIngestor.transitionReporter = recordReducerTransition
         selectedPeerCoordinator.effectHandler = { [weak self] effect in
             await self?.runSelectedPeerEffect(effect)
         }
@@ -312,6 +314,12 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         }
         transmitTaskCoordinator.effectHandler = { [weak self] effect in
             self?.runTransmitTaskEffect(effect)
+        }
+        controlEventIngestor.effectHandler = { [weak self] effect in
+            await self?.runControlEventIngestorEffect(effect)
+        }
+        controlEventIngestor.ignoredEventReporter = { [weak self] envelope, reason in
+            self?.recordIgnoredControlEvent(envelope, reason: reason)
         }
         pttSystemPolicyCoordinator.stateChangeHandler = { [weak self] state in
             guard let defaults = self?.pttSystemPolicyDefaults else { return }
@@ -429,11 +437,20 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         isTransmitting = pttCoordinator.state.isTransmitting
         updateAutomaticAudioRouteMonitoring(reason: "ptt-sync")
         captureDiagnosticsState("ptt-sync")
+        if let activeChannelId, isJoined {
+            Task(priority: .userInitiated) { [weak self] in
+                guard let self else { return }
+                await self.prewarmLocalMediaIfNeeded(
+                    for: activeChannelId,
+                    applicationState: self.currentApplicationState()
+                )
+            }
+        }
         let readinessContactIDs = Set(
             [previousActiveChannelID, activeChannelId, mediaSessionContactID].compactMap { $0 }
         )
         for contactID in readinessContactIDs {
-            Task {
+            Task(priority: .utility) {
                 await syncLocalReceiverAudioReadinessSignal(for: contactID, reason: .pttSync)
             }
         }

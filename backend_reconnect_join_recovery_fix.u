@@ -1,0 +1,163 @@
+turbo.service.presence.internal.clearStaleActiveChannelOnSessionConnect :
+  Database -> UserId -> DeviceId -> '{Exception, Storage, Remote, Random} ()
+turbo.service.presence.internal.clearStaleActiveChannelOnSessionConnect db currentUserId currentDeviceId =
+  do
+    sessionConnected = sessions.isConnected db currentDeviceId ()
+    socketConnected = sockets.isConnected db currentDeviceId ()
+    staleChannelIdOpt =
+      staleActiveChannelOnSessionConnect
+        currentUserId
+        currentDeviceId
+        sessionConnected
+        socketConnected
+        (presence.get db currentDeviceId ())
+        ()
+    match staleChannelIdOpt with
+      Some channelId ->
+        _ = appendStaleActiveChannelOnSessionConnectInvariant db currentUserId channelId currentDeviceId ()
+        _ = clearActiveChannel db currentDeviceId currentUserId ()
+        ()
+      None -> ()
+
+turbo.service.channels.internal.joinControlCommandWithConnectedDevice :
+  Database -> User -> Optional DeviceId -> Text -> Map Text Text -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.channels.internal.joinControlCommandWithConnectedDevice db currentUser websocketDeviceIdOpt channelIdText fields =
+  do
+    use Text ==
+    use memberships add
+    use object empty
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    currentHandle =
+      (User _ handleText _ _ _) = currentUser
+      handleText
+    operationId = Map.get "operationId" fields
+    channelId = ChannelId.fromText channelIdText
+    joinedJson membership presence =
+      membershipUserId =
+        (ChannelMembership _ userId _) = membership
+        userId
+      presenceDeviceId =
+        (DevicePresence deviceId _ _ _ _) = presence
+        deviceId
+      empty
+        |> addText "channelId" channelIdText
+        |> addText "userId" (UserId.toText membershipUserId)
+        |> addText "deviceId" (DeviceId.toText presenceDeviceId)
+        |> addText "status" "joined"
+        |> addOptionalText "operationId" operationId
+    replayJoinedJson deviceId =
+      empty
+        |> addText "channelId" channelIdText
+        |> addText "userId" (UserId.toText currentUserId)
+        |> addText "deviceId" (DeviceId.toText deviceId)
+        |> addText "status" "joined"
+        |> addOptionalText "operationId" operationId
+    channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+    match channelOpt with
+      None -> ControlCommandRouteNotFound "channel not found"
+      Some channel ->
+        use UserId toText
+        otherUserId =
+          (DirectChannel _ lowUserId highUserId _) = channel
+          if toText lowUserId == toText currentUserId then highUserId else lowUserId
+        match Map.get "deviceId" fields with
+          None -> ControlCommandRouteBadRequest "missing deviceId"
+          Some deviceIdText ->
+            devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+            deviceId = DeviceId.fromText deviceIdText
+            targetKey = channelTargetKey channelId
+            replayPlan =
+              controlCommands.replayPlan
+                db
+                currentUserId
+                deviceId
+                operationId
+                StalePresenceRepairSucceeded
+                targetKey
+                ()
+            match replayPlan with
+              RejectControlCommand err -> ControlCommandRouteBadRequest err
+              ReplayControlCommand -> ControlCommandRouteOk (replayJoinedJson deviceId)
+              RunControlCommand ->
+                existingActiveChannelId =
+                  match presence.get db deviceId () with
+                    Some (DevicePresence _ _ _ currentChannelId _) -> currentChannelId
+                    None -> None
+                storedSessionOrSocketConnected =
+                  Boolean.or
+                    (sessions.isConnected db deviceId ())
+                    (sockets.isConnected db deviceId ())
+                sessionConnected =
+                  joinControlCommandSessionConnected
+                    websocketDeviceIdOpt
+                    deviceId
+                    storedSessionOrSocketConnected
+                joinPresencePlan =
+                  joinPresencePlanFromConnection sessionConnected existingActiveChannelId
+                match joinPresencePlan with
+                  JoinPresencePlanRejectMissingConnectedSession staleChannelIdOpt ->
+                    _ =
+                      appendJoinWithoutConnectedSessionInvariant
+                        db
+                        currentUserId
+                        (Some currentHandle)
+                        channelId
+                        deviceId
+                        staleChannelIdOpt
+                        ()
+                    _ =
+                      match staleChannelIdOpt with
+                        Some _ ->
+                          _ = clearActiveChannel db deviceId currentUserId ()
+                          ()
+                        None -> ()
+                    ControlCommandRouteBadRequest "device session not connected"
+                  JoinPresencePlanActivate ->
+                    _ = add db channelId currentUserId ()
+                    _ = add db channelId otherUserId ()
+                    presence =
+                      presence.upsert
+                        db
+                        deviceId
+                        currentUserId
+                        DevicePresenceStatus.Online
+                        (Some channelId)
+                        ()
+                    _ =
+                      match getForUserInChannel db otherUserId channelId () with
+                        Some _ -> markConnectedForChannel db currentUserId otherUserId channelId ()
+                        None -> None
+                    membership = add db channelId currentUserId ()
+                    _ =
+                      recordSucceeded
+                        db
+                        currentUserId
+                        deviceId
+                        operationId
+                        StalePresenceRepairSucceeded
+                        targetKey
+                        ()
+                    _ =
+                      internal.send
+                        "backend.channel.joined"
+                        "backend"
+                        "notice"
+                        currentUserId
+                        (Some currentHandle)
+                        (Some deviceId)
+                        (Some channelId)
+                        (Some otherUserId)
+                        None
+                        None
+                        None
+                        None
+                        (Some "join")
+                        None
+                        (Some "channel joined")
+                        operationId
+                        devTraffic
+                        false
+                        ()
+                    ControlCommandRouteOk (joinedJson membership presence)

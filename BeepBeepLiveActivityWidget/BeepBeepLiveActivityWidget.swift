@@ -57,16 +57,17 @@ private struct BeepBeepLiveActivityLockScreenView: View {
     let context: ActivityViewContext<BeepBeepLiveActivityAttributes>
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             Image(systemName: iconName(for: context.state.phase))
-                .font(.title2)
-                .frame(width: 34, height: 34)
+                .font(.system(size: 21, weight: .semibold))
+                .frame(width: 44, height: 44)
                 .foregroundStyle(.white)
                 .background(Circle().fill(Color.accentColor))
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(context.attributes.contactName)
                     .font(.headline)
+                    .fontWeight(.semibold)
                     .lineLimit(1)
                 Text(statusLine)
                     .font(.subheadline)
@@ -74,22 +75,27 @@ private struct BeepBeepLiveActivityLockScreenView: View {
                     .lineLimit(1)
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 10)
 
-            if context.state.canEnd {
-                Link(destination: endURL(for: context)) {
-                    Text("End")
+            HStack(spacing: 12) {
+                if context.state.canEnd {
+                    Link(destination: endURL(for: context)) {
+                        Text("End")
+                            .font(.headline)
+                            .foregroundStyle(.red)
+                            .frame(minWidth: 44, minHeight: 36)
+                    }
+                }
+
+                Link(destination: openURL(for: context)) {
+                    Text("Open")
                         .font(.headline)
-                        .foregroundStyle(.red)
+                        .frame(minWidth: 52, minHeight: 36)
                 }
             }
-
-            Link(destination: openURL(for: context)) {
-                Text("Open")
-                    .font(.headline)
-            }
         }
-        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
         .activityBackgroundTint(Color(.systemBackground))
         .activitySystemActionForegroundColor(.accentColor)
     }

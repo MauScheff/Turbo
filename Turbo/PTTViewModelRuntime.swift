@@ -1352,6 +1352,16 @@ enum MediaSessionStartupState: Equatable {
 enum ReceiverAudioReadinessPublicationBasis: Equatable {
     case lifecycle
     case channelRefresh
+    case webSocketReconnect
+
+    var suppressesEquivalentLifecyclePublish: Bool {
+        switch self {
+        case .channelRefresh, .webSocketReconnect:
+            return true
+        case .lifecycle:
+            return false
+        }
+    }
 }
 
 struct ReceiverAudioReadinessPublication: Equatable {
@@ -1359,6 +1369,12 @@ struct ReceiverAudioReadinessPublication: Equatable {
     let peerWasRoutable: Bool
     let basis: ReceiverAudioReadinessPublicationBasis
     let telemetry: CallPeerTelemetry?
+
+    func isSemanticallyEquivalent(to other: ReceiverAudioReadinessPublication) -> Bool {
+        isReady == other.isReady
+            && peerWasRoutable == other.peerWasRoutable
+            && telemetry == other.telemetry
+    }
 }
 
 struct BackendServices {

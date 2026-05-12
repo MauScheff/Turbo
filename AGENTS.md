@@ -22,7 +22,9 @@ Detailed guidance lives in:
 - Prefer structural improvements over tactical patches that increase coupling or ambiguity.
 - For Unison syntax and semantics, treat [`UNISON_LANGUAGE.md`](/Users/mau/Development/Turbo/UNISON_LANGUAGE.md) as authoritative.
 - The structure is the answer.
-- When a bug report is really a broken invariant, translate the plain-language report into a typed invariant using [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md), add detection at the authoritative seam, and make it show up in merged diagnostics plus a regression.
+- Treat invariant-first debugging as the default for distributed state, backend truth, app/backend contracts, and selected-session projection bugs. Convert impossible behavior into a named invariant using [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md), register it, detect it at the authoritative seam, and prove the fix with the narrowest useful proof lane.
+- Treat `invariants/registry.json` as the central index for invariant identity and ownership. Put executable preconditions, postconditions, and invariant predicates next to the reducer, projection, backend seam, or merged analyzer that has the typed context to prove them.
+- Invariants that can happen in TestFlight or production must be visible or reconstructable from production-capable evidence. Single-runtime invariants emit an `invariantId`; true distributed invariants emit correlated typed facts for backend ownership, telemetry correlation, reliability intake, merged diagnostics, or production replay.
 - When a broken invariant describes a provably recoverable bad state, follow [`SELF_HEALING.md`](/Users/mau/Development/Turbo/SELF_HEALING.md): classify ownership, add a bounded idempotent repair action, emit repair diagnostics, and prove both recovery and nearby valid in-flight states.
 - When searching broadly, use [`BACKEND_STRUCTURE.md`](/Users/mau/Development/Turbo/BACKEND_STRUCTURE.md) as a quick backend index, then use the Unison MCP to explore the backend authoritatively when you need the current structure or deeper detail.
 - Investigate first and fix problems at their source—never patch backend issues in the frontend.
@@ -52,10 +54,12 @@ Prefer agent-driven development where it fits: turn behavior reports or requeste
 
 # Preferred Proof Order
 
-1. Prove behavior with automated tests and checked-in scenarios.
-2. Use local reproducible tooling and diagnostics.
-3. For mixed app/backend bugs, use diagnostics, backend route/projection inspection, and hosted or prod-like probes to prove where the contradiction originates before patching.
-4. Ask for manual or physical-device verification only when the relevant surface cannot be exercised from the repo and tooling.
+1. Prove the invariant at the smallest authoritative seam: Swift reducer/property test, Unison/backend test or probe, or TLA+ when the bug is about protocol semantics, stale facts, ownership, monotonicity, convergence, or all interleavings.
+2. Add a simulator scenario when the bug depends on a concrete app/backend journey and the scenario adds evidence beyond the smaller proof. Do not add slow scenario coverage just because the bug was first seen on a device if TLA+ plus lower-level tests already prove the impossible state cannot occur.
+3. Use fuzzing when the suspected class involves generated interleavings, duplicate/drop/reorder, reconnect, retry, restart, or timing perturbations; promote stable minimized failures into scenarios only when the scenario remains useful.
+4. Use local reproducible tooling and diagnostics to prove ownership and repair behavior.
+5. For mixed app/backend bugs, use diagnostics, backend route/projection inspection, and hosted or prod-like probes to prove where the contradiction originates before patching.
+6. Ask for manual or physical-device verification only when the relevant surface cannot be exercised from the repo and tooling, such as Apple PushToTalk UI, microphone, lock-screen wake, or real audio behavior.
 
 # Engineering Principles
 

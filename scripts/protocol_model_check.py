@@ -36,7 +36,8 @@ TURBO_COMMUNICATION_REQUIRED_TLA_INVARIANTS = (
     "ReceivingHasLocalTransmitEvidence",
     "TransmittingHasLocalTransmitEvidence",
     "DisconnectedClientIsNotLive",
-    "NotJoinedProjectionRequiresNonMembership",
+    "StaleMembershipWithoutLocalEvidenceIsNotJoining",
+    "NotJoinedProjectionHasNoLocalJoinIntent",
 )
 TURBO_SESSION_GENERATION_REQUIRED_TLA_INVARIANTS = (
     "TypeOK",

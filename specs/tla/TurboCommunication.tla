@@ -72,6 +72,7 @@ NoLocalJoinIntent == [d \in Devices |-> [c \in Channels |-> FALSE]]
 
 IsMember(d, c) == d \in members[c]
 IsJoined(d, c) == IsMember(d, c) /\ presence[d][c] = "joined"
+HasLocalJoinEvidence(d, c) == localJoinIntent[d][c] \/ IsJoined(d, c)
 IsAddressable(d, c) == IsMember(d, c) /\ (IsJoined(d, c) \/ wakeToken[d][c])
 HasAddressablePeer(d, c) ==
   \E peer \in Devices :
@@ -103,7 +104,8 @@ PhaseAfterNoTransmit(d, c) ==
   IF ~IsMember(d, c) THEN "notJoined"
   ELSE IF IsJoined(d, c) /\ receiverReady[d][c] THEN "ready"
   ELSE IF IsJoined(d, c) THEN "preparingAudio"
-  ELSE "joining"
+  ELSE IF localJoinIntent[d][c] THEN "joining"
+  ELSE "notJoined"
 
 PhaseFromBackend(d, c) ==
   IF ~IsMember(d, c) THEN "notJoined"
@@ -646,9 +648,17 @@ DisconnectedClientIsNotLive ==
     ~IsJoined(d, c) =>
       clientPhase[d][c] \notin {"transmitting", "receiving"}
 
-NotJoinedProjectionRequiresNonMembership ==
+StaleMembershipWithoutLocalEvidenceIsNotJoining ==
+  \A d \in Devices, c \in Channels :
+    (/\ IsMember(d, c)
+     /\ ~HasLocalJoinEvidence(d, c)
+     /\ ~wakeToken[d][c]
+     /\ activeTransmit[c] = NoDevice) =>
+      clientPhase[d][c] # "joining"
+
+NotJoinedProjectionHasNoLocalJoinIntent ==
   \A d \in Devices, c \in Channels :
     clientPhase[d][c] = "notJoined" =>
-      ~IsMember(d, c) \/ knownTransmit[d][c] = NoDevice
+      ~localJoinIntent[d][c]
 
 ===============================================================================

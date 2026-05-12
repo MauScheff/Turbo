@@ -596,19 +596,53 @@ extension PTTViewModel {
             break
         }
 
+        if localReceiverAudioReadinessSessionIsLive(for: contactID) {
+            return true
+        }
+
         let projection = selectedPeerProjection(for: contactID)
         guard projection.durableSession == .connected else { return false }
         guard projection.connectedExecution == nil else { return false }
         return true
     }
 
+    func localReceiverAudioReadinessSessionIsLive(for contactID: UUID) -> Bool {
+        let localSessionEstablished =
+            systemSessionMatches(contactID)
+            || (isJoined && activeChannelId == contactID)
+        guard localSessionEstablished else { return false }
+
+        guard let channel = selectedChannelSnapshot(for: contactID),
+              channel.membership.hasLocalMembership else {
+            return false
+        }
+
+        switch channel.status {
+        case .waitingForPeer, .ready, .transmitting, .receiving:
+            return true
+        case .requested, .incomingRequest, .idle, nil:
+            return false
+        }
+    }
+
     func peerIsRoutableForReceiverAudioReadiness(for contactID: UUID) -> Bool {
         guard let channel = selectedChannelSnapshot(for: contactID) else { return false }
-        if channel.membership.hasPeerMembership {
+        if channel.membership.peerDeviceConnected {
             return true
         }
 
-        if channel.membership.peerDeviceConnected {
+        if let readiness = channelReadinessByContactID[contactID],
+           readiness.peerHasActiveDevice,
+           readiness.peerTargetDeviceId != nil,
+           readiness.remoteAudioReadiness == .ready {
+            return true
+        }
+
+        if channel.membership.hasPeerMembership,
+           deviceScopedPeerWakeHintIsAvailableForReceiverAudioReadiness(
+                channel: channel,
+                readiness: channelReadinessByContactID[contactID]
+           ) {
             return true
         }
 
@@ -624,6 +658,31 @@ extension PTTViewModel {
         case .systemActivationTimedOutWaitingForForeground,
              .systemActivationInterruptedByTransmitEnd,
              .none:
+            return false
+        }
+    }
+
+    func deviceScopedPeerWakeHintIsAvailableForReceiverAudioReadiness(
+        channel: ChannelReadinessSnapshot,
+        readiness: TurboChannelReadinessResponse?
+    ) -> Bool {
+        let hasTargetDevice =
+            readiness?.peerTargetDeviceId != nil
+            || {
+                if case .wakeCapable = channel.remoteWakeCapability {
+                    return true
+                }
+                return false
+            }()
+        guard hasTargetDevice else { return false }
+
+        switch channel.remoteAudioReadiness {
+        case .ready, .wakeCapable:
+            return true
+        case .waiting, .unknown:
+            if case .wakeCapable = channel.remoteWakeCapability {
+                return true
+            }
             return false
         }
     }
@@ -704,6 +763,15 @@ extension PTTViewModel {
                     "reason": "avoid-ptt-audio-session-contention",
                 ]
             )
+            return
+        }
+        guard !isPTTAudioSessionActive else {
+            diagnostics.record(
+                .media,
+                message: "Deferred interactive audio prewarm while PTT audio session is active",
+                metadata: ["contactId": contactID.uuidString]
+            )
+            deferInteractivePrewarmUntilPTTAudioDeactivation(for: contactID)
             return
         }
 
@@ -1786,10 +1854,10 @@ extension PTTViewModel {
                     reason: "begin-transmit"
                 )
             }
-            try await requestSystemTransmitHandoffIfNeeded(for: request)
             if await reassertBackendJoinAfterWakeIfNeeded(for: request.contactID) {
                 await refreshChannelState(for: request.contactID)
             }
+            try await requestSystemTransmitHandoffIfNeeded(for: request)
             if let target = directQuicBackendLeaseBypassTarget(
                 for: request,
                 reason: "begin-transmit-lease-bypass"
@@ -4542,8 +4610,10 @@ extension PTTViewModel {
 
     func preconnectMediaRelayForAudioSendIfNeeded(target: TransmitTarget) {
         let shouldAttempt =
-            TurboMediaRelayDebugOverride.isEnabled()
+            !isDirectPathRelayOnlyForced
+            && (TurboMediaRelayDebugOverride.isEnabled()
             || TurboMediaRelayDebugOverride.isForced()
+            )
         guard shouldAttempt else { return }
         guard TurboMediaRelayDebugOverride.config()?.isConfigured == true else { return }
         diagnostics.record(
@@ -4563,6 +4633,9 @@ extension PTTViewModel {
     }
 
     func configuredOutgoingAudioTransportLabel(for contactID: UUID) -> String {
+        if isDirectPathRelayOnlyForced {
+            return "relay-websocket"
+        }
         if TurboMediaRelayDebugOverride.isForced() {
             return "media-relay-forced"
         }
@@ -4602,8 +4675,9 @@ extension PTTViewModel {
             selectedMessage: "Media relay receive prejoin selected",
             failureMessage: "Media relay receive prejoin failed",
             fromUserIDForIncoming: { [weak self] in
-                await MainActor.run {
-                    self?.contacts.first(where: { $0.id == contactID })?.remoteUserId ?? ""
+                guard let viewModel = self else { return "" }
+                return await MainActor.run {
+                    viewModel.contacts.first(where: { $0.id == contactID })?.remoteUserId ?? ""
                 }
             }
         )
@@ -4620,7 +4694,8 @@ extension PTTViewModel {
         fromUserIDForIncoming: @escaping @Sendable () async -> String
     ) async -> TurboMediaRelayClient? {
         let shouldAttempt = await MainActor.run {
-            TurboMediaRelayDebugOverride.isEnabled() || TurboMediaRelayDebugOverride.isForced()
+            !isDirectPathRelayOnlyForced
+                && (TurboMediaRelayDebugOverride.isEnabled() || TurboMediaRelayDebugOverride.isForced())
         }
         guard shouldAttempt else { return nil }
         guard let config = await MainActor.run(body: { TurboMediaRelayDebugOverride.config() }) else {
@@ -4713,6 +4788,14 @@ extension PTTViewModel {
                     incomingAudioTransport: .directQuic
                 )
             },
+            onIncomingControlFrame: { [weak self] frame in
+                await self?.handleIncomingMediaRelayControlFrame(
+                    frame,
+                    contactID: contactID,
+                    channelID: channelID,
+                    peerDeviceID: peerDeviceID
+                )
+            },
             onDisconnected: { [weak self] in
                 guard let viewModel = self else { return }
                 await MainActor.run {
@@ -4734,8 +4817,9 @@ extension PTTViewModel {
                 }
             },
             reportEvent: { [weak self] message, metadata in
+                guard let viewModel = self else { return }
                 await MainActor.run {
-                    self?.diagnostics.record(.media, message: message, metadata: metadata)
+                    viewModel.diagnostics.record(.media, message: message, metadata: metadata)
                 }
             }
         )
@@ -4793,12 +4877,79 @@ extension PTTViewModel {
         }
     }
 
+    func handleIncomingMediaRelayControlFrame(
+        _ frame: TurboMediaRelayControlFrame,
+        contactID: UUID,
+        channelID: String,
+        peerDeviceID: String
+    ) async {
+        do {
+            let payload = try DirectQuicReceiverPrewarmPayloadCodec.decode(frame.payload)
+            guard payload.channelId == channelID,
+                  payload.fromDeviceId == peerDeviceID else {
+                await MainActor.run {
+                    diagnostics.record(
+                        .media,
+                        message: "Ignored stale media relay control frame",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "expectedChannelId": channelID,
+                            "receivedChannelId": payload.channelId,
+                            "expectedPeerDeviceId": peerDeviceID,
+                            "receivedPeerDeviceId": payload.fromDeviceId,
+                            "kind": frame.kind.rawValue,
+                            "requestId": payload.requestId,
+                        ]
+                    )
+                }
+                return
+            }
+
+            await MainActor.run {
+                diagnostics.record(
+                    .media,
+                    message: "Media relay control frame received",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelID,
+                        "peerDeviceId": peerDeviceID,
+                        "kind": frame.kind.rawValue,
+                        "requestId": payload.requestId,
+                    ]
+                )
+            }
+
+            switch frame.kind {
+            case .receiverPrewarmRequest:
+                await ingestMediaRelayReceiverPrewarmRequest(payload, contactID: contactID)
+            case .receiverPrewarmAck:
+                await ingestMediaRelayReceiverPrewarmAck(payload, contactID: contactID)
+            }
+        } catch {
+            await MainActor.run {
+                diagnostics.record(
+                    .media,
+                    level: .error,
+                    message: "Media relay control frame decode failed",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelID,
+                        "peerDeviceId": peerDeviceID,
+                        "kind": frame.kind.rawValue,
+                        "error": error.localizedDescription,
+                    ]
+                )
+            }
+        }
+    }
+
     func prejoinMediaRelayForReadyChannelIfNeeded(
         contactID: UUID,
         channelReadiness: TurboChannelReadinessResponse?
     ) async {
         let shouldAttempt = await MainActor.run {
-            TurboMediaRelayDebugOverride.isEnabled() || TurboMediaRelayDebugOverride.isForced()
+            !isDirectPathRelayOnlyForced
+                && (TurboMediaRelayDebugOverride.isEnabled() || TurboMediaRelayDebugOverride.isForced())
         }
         guard shouldAttempt else { return }
         guard let channelReadiness,
@@ -5447,6 +5598,174 @@ extension PTTViewModel {
         pttWakeRuntime.pendingIncomingPush != nil
     }
 
+    func precreateSelectedContactMediaShellIfNeeded(
+        for contactID: UUID,
+        reason: String,
+        applicationState: UIApplication.State? = nil
+    ) {
+        #if targetEnvironment(simulator)
+        return
+        #else
+        let applicationState = applicationState ?? currentApplicationState()
+        guard applicationState == .active else { return }
+        guard contacts.contains(where: { $0.id == contactID }) else { return }
+        guard !isTransmitting else { return }
+        guard !isPTTAudioSessionActive else { return }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return }
+        guard mediaSessionContactID == nil || mediaSessionContactID == contactID else { return }
+
+        _ = prepareMediaSessionShellIfNeeded(
+            for: contactID,
+            reason: "selected-contact-\(reason)"
+        )
+        #endif
+    }
+
+    func publishSelectedPeerPrewarmHintIfPossible(
+        for contactID: UUID,
+        reason: String
+    ) async {
+        guard let backend = backendServices, backend.supportsWebSocket else { return }
+        guard let currentUserID = backend.currentUserID else { return }
+        guard let contact = contacts.first(where: { $0.id == contactID }),
+              let channelID = contact.backendChannelId,
+              let remoteUserID = contact.remoteUserId else {
+            diagnostics.record(
+                .websocket,
+                message: "Selected peer prewarm hint skipped because routing metadata is missing",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "reason": reason,
+                ]
+            )
+            return
+        }
+
+        // Pre-call selection hints should follow the backend's fresh presence
+        // routing instead of trusting a possibly stale cached peer device.
+        let peerDeviceID = ""
+        let payload = TurboSelectedPeerPrewarmPayload(
+            requestId: UUID().uuidString.lowercased(),
+            channelId: channelID,
+            fromDeviceId: backend.deviceID,
+            toDeviceId: peerDeviceID,
+            reason: reason
+        )
+
+        do {
+            let envelope = try TurboSignalEnvelope.selectedPeerPrewarm(
+                channelId: channelID,
+                fromUserId: currentUserID,
+                fromDeviceId: backend.deviceID,
+                toUserId: remoteUserID,
+                toDeviceId: peerDeviceID,
+                payload: payload
+            )
+            try await backend.sendSignal(envelope)
+            diagnostics.record(
+                .websocket,
+                message: "Selected peer prewarm hint sent",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "requestId": payload.requestId,
+                    "reason": reason,
+                    "targetDeviceId": peerDeviceID.isEmpty ? "prejoin-fresh-device" : peerDeviceID,
+                ]
+            )
+        } catch {
+            diagnostics.record(
+                .websocket,
+                level: .notice,
+                message: "Selected peer prewarm hint send failed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "reason": reason,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
+    }
+
+    func selectedPeerPrewarmHintBlockReason(
+        for contactID: UUID,
+        applicationState: UIApplication.State? = nil
+    ) -> String? {
+        let applicationState = applicationState ?? currentApplicationState()
+        guard applicationState == .active else { return "not-foreground" }
+        guard contacts.contains(where: { $0.id == contactID }) else { return "missing-contact" }
+        guard !isJoined, activeChannelId == nil else { return "local-session-active" }
+        guard sessionCoordinator.pendingAction == .none else { return "local-session-transition" }
+        guard !isTransmitting else { return "transmitting" }
+        guard !isPTTAudioSessionActive else { return "ptt-audio-active" }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return "incoming-wake-pending" }
+        guard mediaSessionContactID == nil || mediaSessionContactID == contactID else {
+            return "other-media-session-active"
+        }
+        return nil
+    }
+
+    @discardableResult
+    func prepareMediaSessionShellIfNeeded(
+        for contactID: UUID,
+        reason: String
+    ) -> Bool {
+        guard contacts.contains(where: { $0.id == contactID }) else { return false }
+        let media = mediaServices
+        let existingMediaContactID = media.contactID()
+        let sessionNeedsContactSwitch =
+            existingMediaContactID != nil && existingMediaContactID != contactID
+        let sessionNeedsRecreation = shouldRecreateMediaSession(connectionState: mediaConnectionState)
+
+        if sessionNeedsContactSwitch {
+            closeMediaSession()
+        }
+
+        if sessionNeedsRecreation {
+            closeMediaSession(
+                preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
+            )
+        }
+
+        guard !media.hasSession() else { return false }
+
+        let sessionCreationStartedAt = Date()
+        let supportsWebSocket = backendServices?.supportsWebSocket == true
+        let session = makeDefaultMediaSession(
+            supportsWebSocket: supportsWebSocket,
+            sendAudioChunk: media.sendAudioChunk(),
+            reportEvent: { [weak self] message, metadata in
+                guard let self else { return }
+                await MainActor.run {
+                    self.recordTransmitStartupTimingForMediaEvent(
+                        message,
+                        metadata: metadata
+                    )
+                    self.recordWakeReceiveTimingForMediaEvent(
+                        message,
+                        metadata: metadata
+                    )
+                    self.diagnostics.record(.media, message: message, metadata: metadata)
+                }
+            }
+        )
+        session.delegate = self
+        media.attach(session, contactID)
+        session.updateSendAudioChunk(media.sendAudioChunk())
+        diagnostics.record(
+            .media,
+            message: "Media session shell prepared",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "supportsWebSocket": String(supportsWebSocket),
+                "durationMs": String(Int(Date().timeIntervalSince(sessionCreationStartedAt) * 1000)),
+                "reason": reason,
+            ]
+        )
+        return true
+    }
+
     func ensureMediaSession(
         for contactID: UUID,
         activationMode: MediaSessionActivationMode? = nil,
@@ -5477,28 +5796,10 @@ extension PTTViewModel {
         }
 
         if sessionNeedsCreation || sessionNeedsContactSwitch || sessionNeedsRecreation {
-            let supportsWebSocket = backendServices?.supportsWebSocket == true
-            let session = makeDefaultMediaSession(
-                supportsWebSocket: supportsWebSocket,
-                sendAudioChunk: media.sendAudioChunk(),
-                reportEvent: { [weak self] message, metadata in
-                    guard let self else { return }
-                    await MainActor.run {
-                        self.recordTransmitStartupTimingForMediaEvent(
-                            message,
-                            metadata: metadata
-                        )
-                        self.recordWakeReceiveTimingForMediaEvent(
-                            message,
-                            metadata: metadata
-                        )
-                        self.diagnostics.record(.media, message: message, metadata: metadata)
-                    }
-                }
+            _ = prepareMediaSessionShellIfNeeded(
+                for: contactID,
+                reason: sessionNeedsCreation ? "created" : sessionNeedsContactSwitch ? "contact-switch" : "recreated"
             )
-            session.delegate = self
-            media.attach(session, contactID)
-            session.updateSendAudioChunk(media.sendAudioChunk())
         }
 
         if media.isStartupInFlight(startupContext) {
@@ -5529,9 +5830,20 @@ extension PTTViewModel {
         media.markStartupInFlight(startupContext)
 
         do {
+            let startRequestedAt = Date()
             try await media.session()?.start(
                 activationMode: resolvedActivationMode,
                 startupMode: startupMode
+            )
+            diagnostics.record(
+                .media,
+                message: "Media session start await completed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "activationMode": String(describing: resolvedActivationMode),
+                    "startupMode": String(describing: startupMode),
+                    "durationMs": String(Int(Date().timeIntervalSince(startRequestedAt) * 1000)),
+                ]
             )
             media.markStartupSucceeded()
             applyPreferredAudioOutputRouteIfPossible()

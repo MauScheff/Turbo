@@ -10,3 +10,4 @@ __pycache__/
 .envrc
 node_modules/
 .wrangler/
+relay/target/

@@ -1,0 +1,168 @@
+turbo.service.channels.internal.peerSetupTargetDeviceId :
+  Database -> UserId -> ChannelId -> '{Exception, Remote, Random} Optional DeviceId
+turbo.service.channels.internal.peerSetupTargetDeviceId db peerUserId channelId = do
+  inChannel = turbo.store.presence.getConnectedForUserInChannel db peerUserId channelId ()
+  match inChannel with
+    Some (DevicePresence deviceId _ _ _ _) -> Some deviceId
+    None ->
+      match turbo.store.presence.getForUser db peerUserId () with
+        Some (DevicePresence deviceId _ _ _ _) -> Some deviceId
+        None -> None
+
+turbo.domain.directChannelIncludesUser : UserId -> DirectChannel -> Boolean
+turbo.domain.directChannelIncludesUser userId = cases
+  DirectChannel _ lowUserId highUserId _ ->
+    userIdEqual userId lowUserId || userIdEqual userId highUserId
+
+turbo.store.channels.userCanReadDirectChannel :
+  Database -> ChannelId -> UserId -> '{Exception, Remote} Boolean
+turbo.store.channels.userCanReadDirectChannel db channelId userId = do
+  match OrderedTable.tryRead (channels.tables.byId db) channelId with
+    None -> false
+    Some channel -> directChannelIncludesUser userId channel
+
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget : SignalKind -> Boolean
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget = cases
+  DirectQuicUpgradeRequest -> true
+  Offer -> true
+  Answer -> true
+  IceCandidate -> true
+  _ -> false
+
+turbo.service.channels.readiness : Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.readiness db = do
+  use Boolean not
+  use Optional map
+  use Parser / text
+  use Text ==
+  use object add empty
+  (channelIdText, deviceIdText) = route GET (s "v1" / s "channels" / text / s "readiness" / text => Tuple.pair)
+  match requireUser db () with
+    Left err -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      channelId = ChannelId.fromText channelIdText
+      currentDeviceId = DeviceId.fromText deviceIdText
+      canReadChannel = turbo.store.channels.userCanReadDirectChannel db channelId currentUserId ()
+      if not canReadChannel then unauthorized.json (empty |> addText "error" "not a channel participant")
+      else
+        channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+        match channelOpt with
+          None -> notFound.json (empty |> addText "error" "channel not found")
+          Some channel ->
+            peerUserId =
+              (DirectChannel _ lowUserId highUserId _) = channel
+              if UserId.toText lowUserId == UserId.toText currentUserId then highUserId else lowUserId
+            selfPresence = presence.get db currentDeviceId ()
+            rawSelfHasActiveDevice = match selfPresence with
+              Some presence -> matchesDeviceChannelPresence currentUserId currentDeviceId channelId presence
+              None -> false
+            selfHasActiveDevice = selfJoinedChannel db currentUserId channelId selfPresence ()
+            _ = if targetAudioReadySuppressesWake rawSelfHasActiveDevice (not selfHasActiveDevice) then appendStaleSelfPresenceProjectedLiveInvariant db currentUserId channelId currentDeviceId "readiness" () else ()
+            rawPeerPresence = getRawForUserInChannel db peerUserId channelId ()
+            peerPresence = getForUserInChannel db peerUserId channelId ()
+            _ = match (rawPeerPresence, peerPresence) with
+              (Some (DevicePresence peerDeviceId _ _ _ _), None) -> appendStalePeerPresenceProjectedLiveInvariant db currentUserId channelId currentDeviceId peerDeviceId "readiness" ()
+              _ -> ()
+            peerHasActiveDevice = isSome peerPresence
+            peerTargetDeviceId = turbo.service.channels.internal.peerSetupTargetDeviceId db peerUserId channelId ()
+            peerDirectQuicIdentity = match peerTargetDeviceId with
+              Some targetDeviceId ->
+                match directQuicIdentity.get db targetDeviceId () with
+                  Some identity -> if directQuicDeviceIdentityIsActive identity then Some identity else None
+                  None -> None
+              None -> None
+            peerMediaEncryptionIdentity = match peerTargetDeviceId with
+              Some targetDeviceId ->
+                match mediaEncryptionIdentity.get db targetDeviceId () with
+                  Some identity -> if mediaEncryptionDeviceIdentityIsActive identity then Some identity else None
+                  None -> None
+              None -> None
+            selfAudioStatus =
+              if selfHasActiveDevice then
+                match statusForCurrentSession db channelId currentUserId currentDeviceId () with
+                  AudioReadinessUnknown -> AudioReadinessWaiting
+                  status -> status
+              else AudioReadinessUnknown
+            peerBaseAudioStatus = match peerTargetDeviceId with
+              Some targetDeviceId ->
+                match statusForCurrentSession db channelId peerUserId targetDeviceId () with
+                  AudioReadinessUnknown -> AudioReadinessWaiting
+                  status -> status
+              None -> AudioReadinessUnknown
+            selfWakeTargetDeviceId = map (cases EphemeralToken _ _ tokenDeviceId _ _ -> tokenDeviceId) (tokens.get db channelId currentUserId currentDeviceId ())
+            peerWakeTargetDeviceId = map (cases EphemeralToken _ _ tokenDeviceId _ _ -> tokenDeviceId) (latestForUserInChannel db channelId peerUserId ())
+            peerAudioStatus = match (peerBaseAudioStatus, wakeCapabilityStatusFromOptionalDeviceId peerWakeTargetDeviceId) with
+              (AudioReadinessWaiting, WakeCapable _) -> AudioReadinessWakeCapable
+              _ -> peerBaseAudioStatus
+            audioReadiness = ChannelAudioReadiness selfAudioStatus peerAudioStatus peerTargetDeviceId
+            wakeReadiness = ChannelWakeReadiness (wakeCapabilityStatusFromOptionalDeviceId selfWakeTargetDeviceId) (wakeCapabilityStatusFromOptionalDeviceId peerWakeTargetDeviceId)
+            activeTransmit = currentTransmit db channelId ()
+            activeTransmitterUserId = map (cases TransmitState _ activeUserId _ _ _ _ _ -> activeUserId) activeTransmit
+            activeTransmitExpiresAt = map (cases TransmitState _ _ _ _ _ _ expiresAt -> Instant.toText expiresAt) activeTransmit
+            activeTransmitId = map transmitId activeTransmit
+            readiness = channelReadinessStatusFromDevices currentUserId selfHasActiveDevice peerHasActiveDevice activeTransmitterUserId
+            projectionEpoch = Instant.toText now!
+            base = empty |> addText "channelId" channelIdText |> addText "stateEpoch" projectionEpoch |> addText "serverTimestamp" projectionEpoch |> addText "peerUserId" (UserId.toText peerUserId) |> addBoolean "selfHasActiveDevice" selfHasActiveDevice |> addBoolean "peerHasActiveDevice" peerHasActiveDevice |> add "readiness" (channelReadinessStatusJson readiness) |> add "audioReadiness" (channelAudioReadinessJson audioReadiness) |> add "wakeReadiness" (channelWakeReadinessJson wakeReadiness) |> addOptionalText "activeTransmitterUserId" (map UserId.toText activeTransmitterUserId) |> addOptionalText "activeTransmitId" activeTransmitId |> addOptionalText "activeTransmitExpiresAt" activeTransmitExpiresAt |> addText "status" (channelReadinessStatusKindText readiness)
+            withDirect = match peerDirectQuicIdentity with
+              Some identity -> base |> add "peerDirectQuicIdentity" (directQuicDeviceIdentityJson identity)
+              None -> base
+            payload = match peerMediaEncryptionIdentity with
+              Some identity -> withDirect |> add "peerMediaEncryptionIdentity" (mediaEncryptionDeviceIdentityJson identity)
+              None -> withDirect
+            ok.json payload
+
+turbo.service.ws.internal.resolveEnvelopeTarget :
+  Database -> UserId -> DeviceId -> SignalEnvelope -> '{Exception, Storage, Remote, Random} Either Text SignalEnvelope
+turbo.service.ws.internal.resolveEnvelopeTarget db currentUserId currentDeviceId = cases
+  SignalEnvelope kind channelId fromUserId fromDeviceId toUserId _ payload ->
+    do
+      use Boolean not
+      sameUser = textEqual (UserId.toText currentUserId) (UserId.toText fromUserId)
+      sameDevice = textEqual (DeviceId.toText currentDeviceId) (DeviceId.toText fromDeviceId)
+      activeTransmit = currentTransmit db channelId ()
+      senderIsJoined = isDeviceJoinedInChannel db fromUserId fromDeviceId channelId ()
+      senderCanReadChannel = turbo.store.channels.userCanReadDirectChannel db channelId fromUserId ()
+      signalUsesSetupTarget = signalUsesPreJoinDirectQuicSetupTarget kind
+      senderMatchesActiveTransmit = activeTransmitMatchesSender fromUserId fromDeviceId activeTransmit
+      transmitOwnedSignal = signalUsesActiveTransmitTarget kind
+      senderAuthorizedByActiveTransmit = transmitOwnedSignal && senderMatchesActiveTransmit
+      senderAuthorizedBySetupMembership = signalUsesSetupTarget && senderCanReadChannel
+      senderIsAuthorized = senderIsJoined || senderAuthorizedByActiveTransmit || senderAuthorizedBySetupMembership
+      if not sameUser || not sameDevice then Left "signaling sender does not match authenticated socket"
+      else
+        _ = if senderAuthorizedByActiveTransmit && not senderIsJoined then appendActiveTransmitSenderPresenceDriftInvariant db currentUserId channelId fromDeviceId kind () else ()
+        if not senderIsAuthorized then Left "signaling sender device is not joined to this channel"
+        else
+          targetPlan = signalTargetResolutionPlanFromActiveTransmit kind fromUserId fromDeviceId toUserId activeTransmit
+          match targetPlan with
+            SignalTargetResolutionUseActiveTransmitTarget targetDeviceId -> Right (SignalEnvelope kind channelId fromUserId fromDeviceId toUserId targetDeviceId payload)
+            SignalTargetResolutionUseConnectedPresence ->
+              if signalUsesSetupTarget then
+                match turbo.store.presence.getForUser db toUserId () with
+                  None -> Left "target user has no fresh receiving device"
+                  Some (DevicePresence targetDeviceId _ _ _ _) -> Right (SignalEnvelope kind channelId fromUserId fromDeviceId toUserId targetDeviceId payload)
+              else
+                match getConnectedForUserInChannel db toUserId channelId () with
+                  None -> Left "target user has no connected receiving device in this channel"
+                  Some (DevicePresence targetDeviceId _ _ _ _) -> Right (SignalEnvelope kind channelId fromUserId fromDeviceId toUserId targetDeviceId payload)
+
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget.tests.examples : [Result]
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget.tests.examples = test.verify do
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget DirectQuicUpgradeRequest)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget Offer)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget Answer)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget IceCandidate)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget Hangup)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget AudioChunk)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget TransmitStart)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget ReceiverReady)
+
+turbo.domain.directChannelIncludesUser.tests.examples : [Result]
+turbo.domain.directChannelIncludesUser.tests.examples = test.verify do
+  channel = DirectChannel (ChannelId.fromText "channel-1") (UserId.fromText "user-a") (UserId.fromText "user-b") turbo.schemaDrift.fixture.instant
+  ensureEqual true (directChannelIncludesUser (UserId.fromText "user-a") channel)
+  ensureEqual true (directChannelIncludesUser (UserId.fromText "user-b") channel)
+  ensureEqual false (directChannelIncludesUser (UserId.fromText "user-c") channel)

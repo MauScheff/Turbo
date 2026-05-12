@@ -239,6 +239,7 @@ def write_summary(
 
     if payload is not None:
         reports = payload_list(payload, "reports")
+        telemetry_reports = payload_list(payload, "telemetrySnapshotReports")
         warnings = payload_list(payload, "sourceWarnings")
         violations = payload_list(payload, "violations")
         telemetry_count = payload.get("telemetryEventCount", 0)
@@ -247,6 +248,7 @@ def write_summary(
         lines.extend(
             [
                 f"- backend latest snapshots: `{len(reports)}`",
+                f"- telemetry snapshot facts: `{len(telemetry_reports)}`",
                 f"- telemetry events: `{telemetry_count}`",
                 f"- source warnings: `{len(warnings)}`",
                 f"- invariant violations: `{len(violations)}`",
@@ -266,6 +268,24 @@ def write_summary(
                             f"device=`{report.get('deviceId', 'unknown')}`",
                             f"uploadedAt=`{report.get('uploadedAt', 'unknown')}`",
                             f"appVersion=`{report.get('appVersion', 'unknown')}`",
+                        ]
+                    )
+                )
+
+        if telemetry_reports:
+            lines.extend(["", "## Telemetry Snapshot Facts", ""])
+            for report in telemetry_reports:
+                snapshot = report.get("snapshot")
+                snapshot = snapshot if isinstance(snapshot, dict) else {}
+                lines.append(
+                    "- "
+                    + " ".join(
+                        [
+                            f"`{report.get('handle', 'unknown')}`",
+                            f"device=`{report.get('deviceId', 'unknown')}`",
+                            f"uploadedAt=`{report.get('uploadedAt', 'unknown')}`",
+                            f"phase=`{snapshot.get('selectedPeerPhase', 'unknown')}`",
+                            f"backendReadiness=`{snapshot.get('backendReadiness', 'unknown')}`",
                         ]
                     )
                 )
