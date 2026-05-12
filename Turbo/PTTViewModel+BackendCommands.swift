@@ -427,6 +427,15 @@ extension PTTViewModel {
             requestCooldownRemaining: requestCooldownRemaining(for: contact.id),
             usesLocalHTTPBackend: usesLocalHTTPBackend
         )
+        if intent == .requestConnection,
+           !relationship.isIncomingRequest,
+           request.requestCooldownRemaining == nil {
+            markOptimisticOutgoingRequestStarted(
+                contactID: contact.id,
+                relationship: relationship,
+                operationID: request.operationID
+            )
+        }
         Task {
             await ingestBackendCommandEvent(
                 .joinRequested(request),
@@ -1168,6 +1177,10 @@ extension PTTViewModel {
                     )
                 )
             }
+            clearOptimisticOutgoingRequest(
+                contactID: request.contactID,
+                reason: "backend-invite-resolved"
+            )
         }
 
         contacts[index] = contact
@@ -1763,6 +1776,10 @@ extension PTTViewModel {
             if activeBackendJoinMatches(request) {
                 backendCommandCoordinator.send(.operationFailed(message))
             }
+            clearOptimisticOutgoingRequest(
+                contactID: request.contactID,
+                reason: "backend-join-failed"
+            )
             sessionCoordinator.clearPendingConnect(for: request.contactID)
             if failedActiveJoin {
                 backendSyncCoordinator.send(.channelStateCleared(contactID: request.contactID))

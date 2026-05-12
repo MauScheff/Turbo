@@ -241,6 +241,7 @@ extension PTTViewModel {
     func relationshipState(for contactID: UUID) -> PairRelationshipState {
         let incomingInviteCount = incomingInviteByContactID[contactID]?.requestCount
         let outgoingInviteCount = outgoingInviteByContactID[contactID]?.requestCount
+        let optimisticOutgoingRequestCount = optimisticOutgoingRequestCount(for: contactID)
         let summary = contactSummaryByContactID[contactID]
         let summaryRelationship =
             backendSyncCoordinator.state.syncState.summaryIncomingRequestIsHandled(for: contactID)
@@ -248,11 +249,15 @@ extension PTTViewModel {
                 : summary?.requestRelationship ?? .none
 
         let hasIncomingRequest = incomingInviteCount != nil || summaryRelationship.hasIncomingRequest
-        let hasOutgoingRequest = outgoingInviteCount != nil || summaryRelationship.hasOutgoingRequest
+        let hasOutgoingRequest =
+            outgoingInviteCount != nil
+            || summaryRelationship.hasOutgoingRequest
+            || optimisticOutgoingRequestCount != nil
         let requestCount =
             [
                 incomingInviteCount,
                 outgoingInviteCount,
+                optimisticOutgoingRequestCount,
                 summaryRelationship.requestCount,
             ]
             .compactMap { $0 }
@@ -263,6 +268,59 @@ extension PTTViewModel {
             hasOutgoingRequest: hasOutgoingRequest,
             requestCount: requestCount
         )
+    }
+
+    func optimisticOutgoingRequestCount(for contactID: UUID, now: Date = Date()) -> Int? {
+        guard let evidence = optimisticOutgoingRequestEvidenceByContactID[contactID],
+              evidence.isActive(now: now) else {
+            return nil
+        }
+        return max(evidence.requestCount, 1)
+    }
+
+    func markOptimisticOutgoingRequestStarted(
+        contactID: UUID,
+        relationship: PairRelationshipState,
+        operationID: String?,
+        now: Date = Date()
+    ) {
+        guard !relationship.isIncomingRequest else { return }
+        let requestCount = max((relationship.requestCount ?? 0) + 1, 1)
+        optimisticOutgoingRequestEvidenceByContactID[contactID] =
+            OptimisticOutgoingRequestEvidence(
+                requestCount: requestCount,
+                startedAt: now,
+                cooldownDeadline: now.addingTimeInterval(30),
+                operationID: operationID
+            )
+        diagnostics.record(
+            .state,
+            message: "Projected outgoing ask optimistically",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "requestCount": "\(requestCount)",
+                "operationId": operationID ?? "none",
+            ]
+        )
+        updateStatusForSelectedContact()
+    }
+
+    func clearOptimisticOutgoingRequest(
+        contactID: UUID,
+        reason: String,
+        refreshSelection: Bool = true
+    ) {
+        guard optimisticOutgoingRequestEvidenceByContactID.removeValue(forKey: contactID) != nil else {
+            return
+        }
+        diagnostics.record(
+            .state,
+            message: "Cleared optimistic outgoing ask projection",
+            metadata: ["contactId": contactID.uuidString, "reason": reason]
+        )
+        if refreshSelection {
+            updateStatusForSelectedContact()
+        }
     }
 
     func selectedPeerBaseState(for contactID: UUID, relationship: PairRelationshipState) -> ConversationState {
@@ -678,7 +736,10 @@ extension PTTViewModel {
     }
 
     func requestCooldownRemaining(for contactID: UUID, now: Date = .now) -> Int? {
-        guard let deadline = requestCooldownDeadlineByContactID[contactID] else { return nil }
+        let deadline =
+            requestCooldownDeadlineByContactID[contactID]
+            ?? optimisticOutgoingRequestEvidenceByContactID[contactID]?.cooldownDeadline
+        guard let deadline else { return nil }
         let remaining = Int(ceil(deadline.timeIntervalSince(now)))
         guard remaining > 0 else { return nil }
         return remaining

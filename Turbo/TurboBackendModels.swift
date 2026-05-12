@@ -1515,6 +1515,17 @@ struct RecentOutgoingRequestEvidence: Equatable {
     }
 }
 
+struct OptimisticOutgoingRequestEvidence: Equatable {
+    let requestCount: Int
+    let startedAt: Date
+    let cooldownDeadline: Date
+    let operationID: String?
+
+    func isActive(now: Date = Date()) -> Bool {
+        now < cooldownDeadline
+    }
+}
+
 struct RecentPeerDeviceEvidence: Equatable {
     let deviceId: String
     let channelId: String

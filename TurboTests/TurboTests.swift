@@ -3271,6 +3271,7 @@ struct TurboTests {
             userID: "user-self",
             mode: "cloud"
         )
+        viewModel.selectedContactPrewarmPipelineEnabled = true
         viewModel.applicationStateOverride = .active
         let contact = Contact(
             id: contactID,
@@ -3303,6 +3304,51 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func detailFocusSelectionRunsSelectedContactPrewarmPipeline() async throws {
+        let contactID = UUID()
+        let client = TurboBackendClient(
+            config: TurboBackendConfig(
+                baseURL: URL(string: "http://127.0.0.1:9")!,
+                devUserHandle: "@self",
+                deviceID: "self-device"
+            )
+        )
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+        client.enableSentSignalCaptureForTesting()
+        let viewModel = PTTViewModel()
+        viewModel.applyAuthenticatedBackendSession(
+            client: client,
+            userID: "user-self",
+            mode: "cloud"
+        )
+        viewModel.selectedContactPrewarmPipelineEnabled = true
+        viewModel.applicationStateOverride = .active
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: UUID(),
+            backendChannelId: "channel-1",
+            remoteUserId: "user-peer"
+        )
+        viewModel.contacts = [contact]
+
+        viewModel.selectContact(contact, reason: "contact-list-focused-detail")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        let envelope = try #require(client.sentSignalsForTesting().first)
+        let payload = try envelope.decodeSelectedPeerPrewarmPayload()
+        #expect(envelope.type == .selectedPeerPrewarm)
+        #expect(payload.reason == "contact-list-focused-detail")
+        #expect(viewModel.selectedContactId == contactID)
+        #expect(viewModel.diagnosticsTranscript.contains("reason=contact-list-focused-detail"))
+        #expect(viewModel.diagnosticsTranscript.contains("Selected contact prewarm pipeline completed"))
+    }
+
+    @MainActor
     @Test func selectedPeerPrewarmHintRunsSelectedContactPipelineWithoutEchoingHint() async throws {
         let contactID = UUID()
         let client = TurboBackendClient(
@@ -3322,6 +3368,7 @@ struct TurboTests {
             userID: "user-self",
             mode: "cloud"
         )
+        viewModel.selectedContactPrewarmPipelineEnabled = true
         viewModel.applicationStateOverride = .active
         viewModel.contacts = [
             Contact(
@@ -29176,6 +29223,41 @@ struct TurboTests {
 
         _ = viewModel.selectedPeerState(for: contactID)
         #expect(viewModel.selectedPeerCoordinator.state == stateAfterSelection)
+    }
+
+    @MainActor
+    @Test func outgoingAskProjectsRequestedAndCooldownBeforeBackendInviteReturns() {
+        let viewModel = PTTViewModel()
+        viewModel.selectedContactPrewarmPipelineEnabled = false
+        let contactID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Blake",
+            handle: "@blake",
+            isOnline: true,
+            channelId: UUID(),
+            backendChannelId: "channel",
+            remoteUserId: "peer-user"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+        viewModel.backendCommandCoordinator.effectHandler = { _ in }
+        viewModel.contacts = [contact]
+        viewModel.selectContact(contact, reason: "test")
+
+        #expect(viewModel.relationshipState(for: contactID) == .none)
+
+        viewModel.requestBackendJoin(for: contact, intent: .requestConnection)
+
+        #expect(viewModel.relationshipState(for: contactID) == .outgoingRequest(requestCount: 1))
+        #expect(viewModel.selectedPeerCoordinator.state.selectedPeerState.phase == .requested)
+        let cooldownRemaining = viewModel.requestCooldownRemaining(for: contactID)
+        #expect(cooldownRemaining != nil)
+        #expect((29...30).contains(cooldownRemaining ?? 0))
     }
 
     @MainActor

@@ -841,7 +841,8 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
     private var receiveBuffer = Data()
     private var selectedTransport: TurboMediaRelayTransport?
     private var sequenceNumber: UInt64 = 0
-    private var peerUnavailable = false
+    private var peerUnavailableSince: Date?
+    private let peerUnavailableFreshnessWindow: TimeInterval = 1.0
 
     init(
         config: TurboMediaRelayClientConfig,
@@ -894,7 +895,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         guard let connection else {
             throw DirectQuicProbeError.connectionFailed("media relay is not connected")
         }
-        if lock.withLock({ peerUnavailable }) {
+        if isPeerUnavailableFresh() {
             throw DirectQuicProbeError.connectionFailed("media relay peer is unavailable")
         }
         try await send(frame, on: connection)
@@ -913,7 +914,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         guard let connection else {
             throw DirectQuicProbeError.connectionFailed("media relay is not connected")
         }
-        if lock.withLock({ peerUnavailable }) {
+        if isPeerUnavailableFresh() {
             throw DirectQuicProbeError.connectionFailed("media relay peer is unavailable")
         }
         try await send(
@@ -933,7 +934,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
             self.connection = nil
             self.receiveBuffer.removeAll(keepingCapacity: false)
             self.selectedTransport = nil
-            self.peerUnavailable = false
+            self.peerUnavailableSince = nil
             return connection
         }
         connection?.cancel()
@@ -966,7 +967,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
             self.connection = connection
             self.selectedTransport = ackTransport
             self.receiveBuffer.removeAll(keepingCapacity: false)
-            self.peerUnavailable = false
+            self.peerUnavailableSince = nil
         }
         receiveFrames(on: connection)
         return ackTransport
@@ -1123,6 +1124,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
                 case .success(let frames):
                     for frame in frames {
                         if case .audio(_, _, _, _, let payload) = frame {
+                            self.clearPeerUnavailable()
                             Task {
                                 await self.onIncomingAudioPayload(payload)
                             }
@@ -1142,15 +1144,14 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
                                 }
                                 continue
                             }
+                            self.clearPeerUnavailable()
                             Task {
                                 await self.onIncomingControlFrame?(
                                     TurboMediaRelayControlFrame(kind: kind, payload: payload)
                                 )
                             }
                         } else if case .peerUnavailable = frame {
-                            self.lock.withLock {
-                                self.peerUnavailable = true
-                            }
+                            self.markPeerUnavailable()
                             Task {
                                 await self.report(
                                     "Media relay peer unavailable",
@@ -1186,6 +1187,29 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         lock.withLock {
             sequenceNumber += 1
             return sequenceNumber
+        }
+    }
+
+    private func markPeerUnavailable() {
+        lock.withLock {
+            peerUnavailableSince = Date()
+        }
+    }
+
+    private func clearPeerUnavailable() {
+        lock.withLock {
+            peerUnavailableSince = nil
+        }
+    }
+
+    private func isPeerUnavailableFresh(now: Date = Date()) -> Bool {
+        lock.withLock {
+            guard let peerUnavailableSince else { return false }
+            if now.timeIntervalSince(peerUnavailableSince) <= peerUnavailableFreshnessWindow {
+                return true
+            }
+            self.peerUnavailableSince = nil
+            return false
         }
     }
 

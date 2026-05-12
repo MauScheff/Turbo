@@ -181,6 +181,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var foregroundDirectTransmitDelegationsByContactID: [UUID: ForegroundDirectTransmitDelegation] = [:]
     var recentOutgoingJoinAcceptedTokensByContactID: [UUID: RecentOutgoingJoinAcceptedToken] = [:]
     var recentOutgoingRequestEvidenceByContactID: [UUID: RecentOutgoingRequestEvidence] = [:]
+    var optimisticOutgoingRequestEvidenceByContactID: [UUID: OptimisticOutgoingRequestEvidence] = [:]
     var recentPeerDeviceEvidenceByContactID: [UUID: RecentPeerDeviceEvidence] = [:]
     var selectedContactPrewarmInFlight: Set<UUID> = []
     var selectedContactPrewarmPipelineEnabled: Bool = true

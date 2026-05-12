@@ -20,7 +20,7 @@ private enum ContentRoute: Equatable {
 }
 
 private enum TurboContactActionPrototype {
-    static let isEnabled = false
+    static let isEnabled = true
     static let showsListBottomAction = false
 }
 
@@ -777,6 +777,7 @@ struct ContentView: View {
     }
 
     private func showContactDetails(for contact: Contact) {
+        ensureContactSelected(contact, reason: "contact-details")
         contactDetailsContactID = contact.id
         draftLocalContactName = viewModel.contactLocalName(for: contact.id) ?? ""
         contactDeleteError = nil
