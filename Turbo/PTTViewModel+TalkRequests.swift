@@ -12,6 +12,7 @@ extension PTTViewModel {
         allowsAlreadySurfacedInvite: Bool = false
     ) {
         let resolvedApplicationState = applicationState ?? currentApplicationState()
+        expirePendingForegroundTalkRequestSurfaceIfNeeded()
         let candidates: [IncomingTalkRequestCandidate] = contacts.compactMap { contact in
             guard contact.handle != currentDevUserHandle else { return nil }
             if let invite = incomingInviteByContactID[contact.id] {
@@ -24,6 +25,27 @@ extension PTTViewModel {
                 requestCount: relationship.requestCount ?? 1,
                 source: "relationship"
             )
+        } + contacts.compactMap { contact in
+            guard let pendingSurface = pendingForegroundTalkRequestSurface,
+                  pendingSurface.contactID == contact.id,
+                  pendingSurface.contactHandle == contact.handle,
+                  contact.handle != currentDevUserHandle else {
+                return nil
+            }
+            guard incomingInviteByContactID[contact.id] == nil else {
+                clearPendingForegroundTalkRequestSurface(contactID: contact.id)
+                return nil
+            }
+            let relationship = relationshipState(for: contact.id)
+            guard !relationship.isIncomingRequest else {
+                clearPendingForegroundTalkRequestSurface(contactID: contact.id)
+                return nil
+            }
+            guard !talkRequestNotificationAlreadyHandled(for: contact.id) else {
+                clearPendingForegroundTalkRequestSurface(contactID: contact.id)
+                return nil
+            }
+            return IncomingTalkRequestCandidate(surface: pendingSurface)
         }
 
         talkRequestSurfaceState = TalkRequestSurfaceReducer.reduce(
@@ -39,6 +61,9 @@ extension PTTViewModel {
     }
 
     func dismissIncomingTalkRequestSurface() {
+        if let activeIncomingTalkRequest {
+            clearPendingForegroundTalkRequestSurface(contactID: activeIncomingTalkRequest.contactID)
+        }
         talkRequestSurfaceState = TalkRequestSurfaceReducer.reduce(
             state: talkRequestSurfaceState,
             event: .incomingRequestDismissed
@@ -46,6 +71,7 @@ extension PTTViewModel {
     }
 
     func markTalkRequestSurfaceOpened(for contactID: UUID, inviteID: String?) {
+        clearPendingForegroundTalkRequestSurface(contactID: contactID, inviteID: inviteID)
         talkRequestSurfaceState = TalkRequestSurfaceReducer.reduce(
             state: talkRequestSurfaceState,
             event: .contactOpened(contactID: contactID, inviteID: inviteID)
@@ -58,6 +84,16 @@ extension PTTViewModel {
             dismissIncomingTalkRequestSurface()
             return
         }
+        diagnostics.record(
+            .pushToTalk,
+            message: "Foreground talk request banner accepted",
+            metadata: [
+                "contactId": contact.id.uuidString,
+                "handle": contact.handle,
+                "inviteId": activeIncomingTalkRequest.inviteID,
+                "requestCount": "\(activeIncomingTalkRequest.requestCount)",
+            ]
+        )
         acceptIncomingTalkRequest(
             contact,
             reason: "foreground-banner-accept"
@@ -66,6 +102,68 @@ extension PTTViewModel {
 
     func openActiveIncomingTalkRequest() {
         acceptActiveIncomingTalkRequest()
+    }
+
+    func queuePendingForegroundTalkRequestSurface(
+        for contact: Contact,
+        inviteID: String,
+        requestCount: Int,
+        reason: String
+    ) {
+        let normalizedRequestCount = max(requestCount, 1)
+        pendingForegroundTalkRequestSurface = IncomingTalkRequestSurface(
+            contactID: contact.id,
+            inviteID: inviteID,
+            contactName: contact.name,
+            contactHandle: contact.handle,
+            contactIsOnline: contact.isOnline,
+            requestCount: normalizedRequestCount,
+            recencyKey: "notification:\(normalizedRequestCount):\(inviteID)"
+        )
+        pendingForegroundTalkRequestReceivedAt = Date()
+        diagnostics.record(
+            .pushToTalk,
+            message: "Queued pending foreground talk request surface from notification",
+            metadata: [
+                "contactId": contact.id.uuidString,
+                "handle": contact.handle,
+                "inviteId": inviteID,
+                "reason": reason,
+                "requestCount": "\(normalizedRequestCount)",
+            ]
+        )
+    }
+
+    func clearPendingForegroundTalkRequestSurface(contactID: UUID? = nil, inviteID: String? = nil) {
+        guard let pendingSurface = pendingForegroundTalkRequestSurface else { return }
+        if let contactID, pendingSurface.contactID != contactID {
+            return
+        }
+        if let inviteID, pendingSurface.inviteID != inviteID {
+            return
+        }
+        pendingForegroundTalkRequestSurface = nil
+        pendingForegroundTalkRequestReceivedAt = nil
+    }
+
+    func expirePendingForegroundTalkRequestSurfaceIfNeeded(now: Date = Date()) {
+        guard let receivedAt = pendingForegroundTalkRequestReceivedAt,
+              let pendingSurface = pendingForegroundTalkRequestSurface else {
+            return
+        }
+        guard now.timeIntervalSince(receivedAt) >= pendingForegroundTalkRequestLifetime else {
+            return
+        }
+        diagnostics.record(
+            .pushToTalk,
+            message: "Expired pending foreground talk request surface",
+            metadata: [
+                "contactId": pendingSurface.contactID.uuidString,
+                "handle": pendingSurface.contactHandle,
+                "inviteId": pendingSurface.inviteID,
+            ]
+        )
+        clearPendingForegroundTalkRequestSurface()
     }
 
     @discardableResult

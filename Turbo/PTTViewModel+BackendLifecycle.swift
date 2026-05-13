@@ -545,6 +545,9 @@ extension PTTViewModel {
         client.onServerNotice = { [weak self] message in
             self?.handleBackendServerNotice(message)
         }
+        client.onControlCommandTrace = { [weak self] event in
+            self?.handleBackendControlCommandTrace(event)
+        }
         client.onWebSocketStateChange = { [weak self] state in
             self?.handleWebSocketStateChange(state)
         }
@@ -1076,6 +1079,30 @@ extension PTTViewModel {
             message: "Cleared live call control-plane reconnect grace",
             metadata: ["reason": reason]
         )
+    }
+
+    func handleBackendControlCommandTrace(_ event: TurboBackendClient.ControlCommandTraceEvent) {
+        var metadata: [String: String] = [
+            "commandKind": event.commandKind,
+            "transport": event.transport.rawValue,
+            "phase": event.phase.rawValue,
+        ]
+        if let operationId = event.operationId {
+            metadata["operationId"] = operationId
+        }
+        if let channelId = event.channelId {
+            metadata["channelId"] = channelId
+        }
+        if let requestId = event.requestId {
+            metadata["requestId"] = requestId
+        }
+        if let elapsedMs = event.elapsedMs {
+            metadata["elapsedMs"] = String(elapsedMs)
+        }
+        if let detail = event.detail, !detail.isEmpty {
+            metadata["detail"] = detail
+        }
+        diagnostics.record(.backend, message: "Backend control command trace", metadata: metadata)
     }
 
     private func performSelfCheck(_ request: DevSelfCheckRequest) async {

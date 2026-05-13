@@ -185,13 +185,26 @@ extension PTTViewModel {
         if backendRuntime.isBackendJoinSettling(for: contactID) {
             return true
         }
+        if let optimisticOutgoingRequest = optimisticOutgoingRequestEvidenceByContactID[contactID],
+           optimisticOutgoingRequest.isActive(),
+           optimisticOutgoingRequest.phase == .joinTransition,
+           relationshipState(for: contactID).isOutgoingRequest,
+           !localSessionEvidenceExists(for: contactID) {
+            return true
+        }
         if sessionCoordinator.pendingJoinContactID == contactID {
             return false
         }
         guard case .join(let request) = backendCommandCoordinator.state.activeOperation else {
             return false
         }
-        return request.contactID == contactID
+        guard request.contactID == contactID else { return false }
+        switch request.intent {
+        case .joinAcceptedOutgoingRequest, .joinReadyPeer:
+            return true
+        case .requestConnection:
+            return request.relationship.isIncomingRequest
+        }
     }
 
     func shouldPreservePendingLocalJoinDuringBackendJoinSettling(for contactID: UUID) -> Bool {
@@ -291,7 +304,8 @@ extension PTTViewModel {
                 requestCount: requestCount,
                 startedAt: now,
                 cooldownDeadline: now.addingTimeInterval(30),
-                operationID: operationID
+                operationID: operationID,
+                phase: .cooldownOnly
             )
         diagnostics.record(
             .state,
@@ -300,6 +314,34 @@ extension PTTViewModel {
                 "contactId": contactID.uuidString,
                 "requestCount": "\(requestCount)",
                 "operationId": operationID ?? "none",
+            ]
+        )
+        updateStatusForSelectedContact()
+    }
+
+    func promoteOptimisticOutgoingRequestToJoinTransition(
+        contactID: UUID,
+        now: Date = Date()
+    ) {
+        guard let evidence = optimisticOutgoingRequestEvidenceByContactID[contactID],
+              evidence.isActive(now: now) else {
+            return
+        }
+        guard evidence.phase != .joinTransition else { return }
+        optimisticOutgoingRequestEvidenceByContactID[contactID] = OptimisticOutgoingRequestEvidence(
+            requestCount: evidence.requestCount,
+            startedAt: evidence.startedAt,
+            cooldownDeadline: max(evidence.cooldownDeadline, now.addingTimeInterval(30)),
+            operationID: evidence.operationID,
+            phase: .joinTransition
+        )
+        diagnostics.record(
+            .state,
+            message: "Promoted optimistic outgoing ask to join transition",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "requestCount": "\(evidence.requestCount)",
+                "operationId": evidence.operationID ?? "none",
             ]
         )
         updateStatusForSelectedContact()

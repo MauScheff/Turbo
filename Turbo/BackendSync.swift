@@ -104,6 +104,11 @@ struct BackendSyncState: Equatable {
         channelReadiness = channelReadiness.filter { contactsWithLiveChannels.contains($0.key) }
 
         for (contactID, summary) in summaries {
+            if !summary.requestRelationship.hasIncomingRequest {
+                handledIncomingInviteSourceKeys[contactID] = nil
+                handledIncomingRequestCounts[contactID] = nil
+            }
+
             guard summary.membership == .absent,
                   let summaryChannelID = summary.channelId,
                   let existingChannelState = channelStates[contactID],

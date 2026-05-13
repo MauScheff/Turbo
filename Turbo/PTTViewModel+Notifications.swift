@@ -207,11 +207,23 @@ extension PTTViewModel {
     }
 
     func handleForegroundTalkRequestNotification(userInfo: [AnyHashable: Any]) async {
+        clearTalkRequestNotifications()
         diagnostics.record(
             .pushToTalk,
             message: "Foreground talk request notification received",
             metadata: talkRequestNotificationDiagnostics(userInfo: userInfo)
         )
+        if let handle = talkRequestNotificationHandle(from: userInfo),
+           let contact = openCachedTalkRequestContactFromNotification(
+               handle: handle,
+               reason: "foreground-notification-immediate"
+           ) {
+            maybeQueuePendingForegroundTalkRequestSurface(
+                contact: contact,
+                userInfo: userInfo,
+                reason: "foreground-notification-immediate"
+            )
+        }
         await refreshRequestStateAfterTalkRequestNotification(userInfo: userInfo, reason: "foreground-notification")
         reconcileTalkRequestSurface(
             applicationState: .active,
@@ -240,6 +252,7 @@ extension PTTViewModel {
 
     func handleTalkRequestNotificationResponse(userInfo: [AnyHashable: Any]) async {
         let metadata = talkRequestNotificationDiagnostics(userInfo: userInfo)
+        clearTalkRequestNotifications()
         diagnostics.record(
             .pushToTalk,
             message: "Talk request notification opened",
@@ -254,6 +267,7 @@ extension PTTViewModel {
 
     func handleTalkRequestNotificationAcceptResponse(userInfo: [AnyHashable: Any]) async {
         let metadata = talkRequestNotificationDiagnostics(userInfo: userInfo)
+        clearTalkRequestNotifications()
         diagnostics.record(
             .pushToTalk,
             message: "Talk request notification accepted",
@@ -268,6 +282,7 @@ extension PTTViewModel {
 
     func handleTalkRequestNotificationNotNowResponse(userInfo: [AnyHashable: Any]) async {
         let metadata = talkRequestNotificationDiagnostics(userInfo: userInfo)
+        clearTalkRequestNotifications()
         diagnostics.record(
             .pushToTalk,
             message: "Talk request notification declined",
@@ -397,6 +412,7 @@ extension PTTViewModel {
 
         guard relationshipState(for: contact.id).isIncomingRequest else {
             guard !talkRequestNotificationAlreadyHandled(for: contact.id) else {
+                clearPendingForegroundTalkRequestSurface(contactID: contact.id)
                 diagnostics.record(
                     .pushToTalk,
                     message: "Ignored stale foreground talk request notification after request was already handled",
@@ -410,6 +426,11 @@ extension PTTViewModel {
                 )
                 return
             }
+            maybeQueuePendingForegroundTalkRequestSurface(
+                contact: contact,
+                userInfo: userInfo,
+                reason: reason
+            )
             recordTalkRequestProjectionInvariant(
                 handle: handle,
                 reason: reason,
@@ -418,6 +439,11 @@ extension PTTViewModel {
             scheduleTalkRequestProjectionRecovery(userInfo: userInfo, reason: reason)
             return
         }
+
+        clearPendingForegroundTalkRequestSurface(
+            contactID: contact.id,
+            inviteID: (userInfo["inviteId"] as? String)
+        )
     }
 
     func talkRequestNotificationAlreadyHandled(for contactID: UUID) -> Bool {
@@ -598,6 +624,33 @@ extension PTTViewModel {
             return
         }
         requestExpandedCall(for: contact)
+    }
+
+    private func maybeQueuePendingForegroundTalkRequestSurface(
+        contact: Contact,
+        userInfo: [AnyHashable: Any],
+        reason: String
+    ) {
+        guard !relationshipState(for: contact.id).isIncomingRequest else {
+            clearPendingForegroundTalkRequestSurface(contactID: contact.id)
+            return
+        }
+        guard !talkRequestNotificationAlreadyHandled(for: contact.id) else {
+            clearPendingForegroundTalkRequestSurface(contactID: contact.id)
+            return
+        }
+        guard let inviteID = userInfo["inviteId"] as? String, !inviteID.isEmpty else {
+            return
+        }
+        let requestCount = incomingInviteByContactID[contact.id]?.requestCount
+            ?? relationshipState(for: contact.id).requestCount
+            ?? 1
+        queuePendingForegroundTalkRequestSurface(
+            for: contact,
+            inviteID: inviteID,
+            requestCount: requestCount,
+            reason: reason
+        )
     }
 
     func requestExpandedCall(for contact: Contact) {

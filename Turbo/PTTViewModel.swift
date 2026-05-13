@@ -199,6 +199,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var audioOutputPreference: AudioOutputPreference = .loadStored()
     var pendingTalkRequestNotificationHandle: String?
     var pendingTalkRequestNotificationShouldJoin: Bool = false
+    var pendingForegroundTalkRequestSurface: IncomingTalkRequestSurface?
+    var pendingForegroundTalkRequestReceivedAt: Date?
+    let pendingForegroundTalkRequestLifetime: TimeInterval = 20
     var requestedExpandedCallContactID: UUID?
     var requestedExpandedCallSequence: Int = 0
     var uiProjectionDiagnostics: UIProjectionDiagnostics = .unknown

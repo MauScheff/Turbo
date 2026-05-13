@@ -781,6 +781,10 @@ final class MediaRuntimeState {
         sendAudioChunk != nil
     }
 
+    var hasActiveMediaRelayClient: Bool {
+        mediaRelayClient != nil
+    }
+
     func attach(session: MediaSession, contactID: UUID) {
         self.session = session
         self.contactID = contactID
@@ -1042,6 +1046,21 @@ final class MediaRuntimeState {
         transportPathState = state
     }
 
+    func surfacedTransportPathState(
+        for transition: DirectQuicUpgradeTransition
+    ) -> MediaTransportPathState {
+        guard hasActiveMediaRelayClient else {
+            return transition.pathState
+        }
+
+        switch transition {
+        case .directActivated:
+            return .direct
+        case .enteredPromoting, .updatedPromoting, .recovering, .fellBackToRelay:
+            return .fastRelay
+        }
+    }
+
     func replaceDirectQuicProbeController(with controller: DirectQuicProbeController?) {
         directQuicProbeController?.cancel(reason: "replaced")
         directQuicProbeController = controller
@@ -1100,8 +1119,9 @@ final class MediaRuntimeState {
         return true
     }
 
-    func clearMediaRelayClient(matching key: MediaRelayConnectionKey) {
+    func clearMediaRelayClient(matching key: MediaRelayConnectionKey, client: TurboMediaRelayClient) {
         guard mediaRelayConnectionKey == key else { return }
+        guard mediaRelayClient === client else { return }
         mediaRelayClient?.close()
         mediaRelayClient = nil
         mediaRelayConnectionKey = nil

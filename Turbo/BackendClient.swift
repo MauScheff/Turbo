@@ -58,6 +58,30 @@ struct TurboBackendCriticalHTTPClient: Sendable {
 
 @MainActor
 final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
+    enum ControlCommandTransportTrace: String {
+        case webSocket = "websocket"
+        case http
+    }
+
+    enum ControlCommandTracePhase: String {
+        case started
+        case sendCompleted = "send-completed"
+        case hedgeStarted = "hedge-started"
+        case responseReceived = "response-received"
+        case failed
+    }
+
+    struct ControlCommandTraceEvent: Equatable {
+        let commandKind: String
+        let transport: ControlCommandTransportTrace
+        let phase: ControlCommandTracePhase
+        let operationId: String?
+        let channelId: String?
+        let requestId: String?
+        let elapsedMs: Int?
+        let detail: String?
+    }
+
     enum WebSocketConnectionState: Equatable {
         case idle
         case connecting
@@ -92,14 +116,18 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     private var isWebSocketSuspended = false
     private let webSocketConnectTimeoutNanoseconds: UInt64 = 12_000_000_000
     private let webSocketControlCommandTimeoutNanoseconds: UInt64 = 3_000_000_000
+    private var controlCommandHedgeDelayNanoseconds: UInt64 = 150_000_000
     private let webSocketPingIntervalNanoseconds: UInt64 = 20_000_000_000
     private var capturesSentSignalsForTesting = false
     private var capturedSentSignalsForTesting: [TurboSignalEnvelope] = []
     private var pendingControlCommandResponses: [String: CheckedContinuation<Data, Error>] = [:]
+    var controlCommandHTTPResponseForTesting: (@MainActor (String, TurboControlCommandEnvelope) async throws -> Data)?
+    var controlCommandWebSocketResponseForTesting: (@MainActor (TurboControlCommandEnvelope) async throws -> Data)?
 
     var onSignal: (@MainActor (TurboSignalEnvelope) -> Void)?
     var onServerNotice: (@MainActor (String) -> Void)?
     var onWebSocketStateChange: (@MainActor (WebSocketConnectionState) -> Void)?
+    var onControlCommandTrace: (@MainActor (ControlCommandTraceEvent) -> Void)?
 
     init(config: TurboBackendConfig) {
         self.config = config
@@ -127,6 +155,15 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
 
     func setRuntimeConfigForTesting(_ config: TurboBackendRuntimeConfig) {
         runtimeConfig = config
+    }
+
+    func setControlCommandHedgeDelayForTesting(nanoseconds: UInt64) {
+        controlCommandHedgeDelayNanoseconds = nanoseconds
+    }
+
+    func setWebSocketConnectedForControlCommandTesting(sessionID: String = "test-session") {
+        currentWebSocketSessionID = sessionID
+        setWebSocketConnectionState(.connected)
     }
 
     func directQuicIceServers() async throws -> TurboDirectQuicIceServerPolicy {
@@ -275,7 +312,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             operationId: operationId,
             channelId: channelId
         )
-        return try await controlCommandRequest(
+        return try await hedgedControlCommandRequest(
             path: "/v1/channels/\(channelId)/join",
             body: envelope
         )
@@ -318,8 +355,9 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             otherHandle: otherHandle,
             otherUserId: otherUserId
         )
-        return try await controlCommandRequest(
+        return try await request(
             path: "/v1/invites",
+            method: "POST",
             body: envelope
         )
     }
@@ -765,9 +803,198 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         return try await request(path: path, method: "POST", body: body)
     }
 
-    private func webSocketControlCommand<Response: Decodable>(
-        _ envelope: TurboControlCommandEnvelope
+    private enum ControlCommandTransport {
+        case webSocket
+        case http
+
+        var label: String {
+            switch self {
+            case .webSocket:
+                return "WebSocket"
+            case .http:
+                return "HTTP"
+            }
+        }
+
+        var trace: ControlCommandTransportTrace {
+            switch self {
+            case .webSocket:
+                return .webSocket
+            case .http:
+                return .http
+            }
+        }
+    }
+
+    private func hedgedControlCommandRequest<Response: Decodable>(
+        path: String,
+        body: TurboControlCommandEnvelope
     ) async throws -> Response {
+        let requestStartedAt = DispatchTime.now().uptimeNanoseconds
+        guard canAttemptWebSocketControlCommand else {
+            return try decodeControlCommandResponse(
+                try await controlCommandData(
+                    path: path,
+                    body: body,
+                    transport: .http,
+                    requestStartedAt: requestStartedAt
+                ),
+                body: body,
+                transport: .http
+            )
+        }
+
+        return try await withThrowingTaskGroup(of: Response.self) { group in
+            group.addTask { @MainActor in
+                try self.decodeControlCommandResponse(
+                    try await self.controlCommandData(
+                        path: path,
+                        body: body,
+                        transport: .webSocket,
+                        requestStartedAt: requestStartedAt
+                    ),
+                    body: body,
+                    transport: .webSocket
+                )
+            }
+            group.addTask { @MainActor in
+                try await Task.sleep(nanoseconds: self.controlCommandHedgeDelayNanoseconds)
+                self.emitControlCommandTrace(
+                    commandKind: body.commandKind,
+                    transport: .http,
+                    phase: .hedgeStarted,
+                    operationId: body.operationId,
+                    channelId: body.channelId,
+                    requestId: nil,
+                    startedAtNanoseconds: requestStartedAt,
+                    detail: "websocket-slow"
+                )
+                self.onServerNotice?("WebSocket \(body.commandKind) slow; hedging over HTTP")
+                return try self.decodeControlCommandResponse(
+                    try await self.controlCommandData(
+                        path: path,
+                        body: body,
+                        transport: .http,
+                        requestStartedAt: requestStartedAt
+                    ),
+                    body: body,
+                    transport: .http
+                )
+            }
+
+            var lastError: Error?
+            while true {
+                do {
+                    guard let response = try await group.next() else { break }
+                    group.cancelAll()
+                    return response
+                } catch {
+                    lastError = error
+                }
+            }
+
+            throw lastError ?? TurboBackendError.invalidResponse
+        }
+    }
+
+    private var canAttemptWebSocketControlCommand: Bool {
+        guard supportsWebSocket, webSocketConnectionState == .connected else { return false }
+        return webSocketTask != nil || controlCommandWebSocketResponseForTesting != nil
+    }
+
+    private func controlCommandData(
+        path: String,
+        body: TurboControlCommandEnvelope,
+        transport: ControlCommandTransport,
+        requestStartedAt: UInt64
+    ) async throws -> Data {
+        emitControlCommandTrace(
+            commandKind: body.commandKind,
+            transport: transport.trace,
+            phase: .started,
+            operationId: body.operationId,
+            channelId: body.channelId,
+            requestId: nil,
+            startedAtNanoseconds: requestStartedAt,
+            detail: nil
+        )
+
+        do {
+            let data: Data
+            switch transport {
+            case .webSocket:
+                data = try await webSocketControlCommandData(
+                    body,
+                    requestStartedAt: requestStartedAt
+                )
+            case .http:
+                if let controlCommandHTTPResponseForTesting {
+                    data = try await controlCommandHTTPResponseForTesting(path, body)
+                } else {
+                    data = try await requestData(path: path, method: "POST", body: body)
+                }
+            }
+            emitControlCommandTrace(
+                commandKind: body.commandKind,
+                transport: transport.trace,
+                phase: .responseReceived,
+                operationId: body.operationId,
+                channelId: body.channelId,
+                requestId: nil,
+                startedAtNanoseconds: requestStartedAt,
+                detail: nil
+            )
+            return data
+        } catch {
+            emitControlCommandTrace(
+                commandKind: body.commandKind,
+                transport: transport.trace,
+                phase: .failed,
+                operationId: body.operationId,
+                channelId: body.channelId,
+                requestId: nil,
+                startedAtNanoseconds: requestStartedAt,
+                detail: error.localizedDescription
+            )
+            throw error
+        }
+    }
+
+    private func emitControlCommandTrace(
+        commandKind: String,
+        transport: ControlCommandTransportTrace,
+        phase: ControlCommandTracePhase,
+        operationId: String?,
+        channelId: String?,
+        requestId: String?,
+        startedAtNanoseconds: UInt64?,
+        detail: String?
+    ) {
+        let elapsedMs = startedAtNanoseconds.map { startedAt in
+            Int((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+        }
+        onControlCommandTrace?(
+            ControlCommandTraceEvent(
+                commandKind: commandKind,
+                transport: transport,
+                phase: phase,
+                operationId: operationId,
+                channelId: channelId,
+                requestId: requestId,
+                elapsedMs: elapsedMs,
+                detail: detail
+            )
+        )
+    }
+
+    private func webSocketControlCommandData(
+        _ envelope: TurboControlCommandEnvelope,
+        requestStartedAt: UInt64
+    ) async throws -> Data {
+        if let controlCommandWebSocketResponseForTesting {
+            return try await controlCommandWebSocketResponseForTesting(envelope)
+        }
+
         guard supportsWebSocket,
               webSocketConnectionState == .connected,
               let webSocketTask else {
@@ -783,29 +1010,63 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         let data = try JSONEncoder().encode(frame)
         let text = String(decoding: data, as: UTF8.self)
 
-        let responseData = try await withCheckedThrowingContinuation { continuation in
-            pendingControlCommandResponses[requestID] = continuation
-            Task { @MainActor [weak self] in
-                do {
-                    try await webSocketTask.send(.string(text))
-                } catch {
-                    self?.finishPendingControlCommand(requestID, result: .failure(error))
+        let responseData = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingControlCommandResponses[requestID] = continuation
+                Task { @MainActor [weak self] in
+                    do {
+                        try await webSocketTask.send(.string(text))
+                        self?.emitControlCommandTrace(
+                            commandKind: envelope.commandKind,
+                            transport: .webSocket,
+                            phase: .sendCompleted,
+                            operationId: envelope.operationId,
+                            channelId: envelope.channelId,
+                            requestId: requestID,
+                            startedAtNanoseconds: requestStartedAt,
+                            detail: nil
+                        )
+                    } catch {
+                        self?.finishPendingControlCommand(requestID, result: .failure(error))
+                    }
+                }
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: self?.webSocketControlCommandTimeoutNanoseconds ?? 3_000_000_000)
+                    self?.finishPendingControlCommand(requestID, result: .failure(TurboBackendError.webSocketUnavailable))
                 }
             }
+        } onCancel: {
             Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: self?.webSocketControlCommandTimeoutNanoseconds ?? 3_000_000_000)
-                self?.finishPendingControlCommand(requestID, result: .failure(TurboBackendError.webSocketUnavailable))
+                self?.finishPendingControlCommand(requestID, result: .failure(CancellationError()))
             }
         }
 
+        return responseData
+    }
+
+    private func decodeControlCommandResponse<Response: Decodable>(
+        _ data: Data,
+        body: TurboControlCommandEnvelope,
+        transport: ControlCommandTransport
+    ) throws -> Response {
         do {
-            return try JSONDecoder().decode(Response.self, from: responseData)
+            return try JSONDecoder().decode(Response.self, from: data)
         } catch {
-            let body = String(data: responseData, encoding: .utf8) ?? "<non-utf8 \(responseData.count) bytes>"
+            let responseBody = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
             throw TurboBackendError.invalidResponseDetails(
-                "websocket \(envelope.commandKind) decode failed: \(error.localizedDescription) body=\(body)"
+                "\(transport.label) \(body.commandKind) decode failed: \(error.localizedDescription) body=\(responseBody)"
             )
         }
+    }
+
+    private func webSocketControlCommand<Response: Decodable>(
+        _ envelope: TurboControlCommandEnvelope
+    ) async throws -> Response {
+        let responseData = try await webSocketControlCommandData(
+            envelope,
+            requestStartedAt: DispatchTime.now().uptimeNanoseconds
+        )
+        return try decodeControlCommandResponse(responseData, body: envelope, transport: .webSocket)
     }
 
     private func handleControlCommandResponseData(_ data: Data) -> Bool {
@@ -855,6 +1116,23 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         method: String = "GET",
         body: Body? = nil
     ) async throws -> Response {
+        let data = try await requestData(path: path, method: method, body: body)
+        do {
+            return try JSONDecoder().decode(Response.self, from: data)
+        } catch {
+            let responseBody = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
+            onServerNotice?("Invalid response for \(method) \(path): \(error.localizedDescription) body=\(responseBody)")
+            throw TurboBackendError.invalidResponseDetails(
+                "\(method) \(path) decode failed: \(error.localizedDescription) body=\(responseBody)"
+            )
+        }
+    }
+
+    private func requestData<Body: Encodable>(
+        path: String,
+        method: String = "GET",
+        body: Body? = nil
+    ) async throws -> Data {
         let url = config.baseURL.appending(path: path)
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -871,15 +1149,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         }
 
         if 200 ..< 300 ~= http.statusCode {
-            do {
-                return try JSONDecoder().decode(Response.self, from: data)
-            } catch {
-                let body = String(data: data, encoding: .utf8) ?? "<non-utf8 \(data.count) bytes>"
-                onServerNotice?("Invalid response for \(method) \(path): \(error.localizedDescription) body=\(body)")
-                throw TurboBackendError.invalidResponseDetails(
-                    "\(method) \(path) decode failed: \(error.localizedDescription) body=\(body)"
-                )
-            }
+            return data
         }
 
         if let error = try? JSONDecoder().decode(TurboErrorResponse.self, from: data) {
@@ -913,7 +1183,7 @@ private struct TurboDirectChannelRequest: Encodable {
     let otherUserId: String?
 }
 
-private struct TurboControlCommandEnvelope: Encodable {
+struct TurboControlCommandEnvelope: Encodable {
     let commandKind: String
     let deviceId: String
     let operationId: String?

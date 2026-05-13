@@ -827,13 +827,15 @@ nonisolated enum TurboMediaRelayCodec {
 }
 
 nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
+    static let quicIdleTimeoutMilliseconds = 120_000
+    private static let maximumReceiveChunkLength = 65_536
     private let config: TurboMediaRelayClientConfig
     private let sessionId: String
     private let localDeviceId: String
     private let peerDeviceId: String
     private let onIncomingAudioPayload: @Sendable (String) async -> Void
     private let onIncomingControlFrame: (@Sendable (TurboMediaRelayControlFrame) async -> Void)?
-    private let onDisconnected: (@Sendable () async -> Void)?
+    private let onDisconnected: (@Sendable (TurboMediaRelayClient) async -> Void)?
     private let reportEvent: (@Sendable (String, [String: String]) async -> Void)?
     private let queue = DispatchQueue(label: "turbo.media-relay-client")
     private let lock = NSLock()
@@ -851,7 +853,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         peerDeviceId: String,
         onIncomingAudioPayload: @escaping @Sendable (String) async -> Void,
         onIncomingControlFrame: (@Sendable (TurboMediaRelayControlFrame) async -> Void)? = nil,
-        onDisconnected: (@Sendable () async -> Void)? = nil,
+        onDisconnected: (@Sendable (TurboMediaRelayClient) async -> Void)? = nil,
         reportEvent: (@Sendable (String, [String: String]) async -> Void)? = nil
     ) {
         self.config = config
@@ -981,6 +983,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
                 quicOptions.securityProtocolOptions,
                 .TLSv13
             )
+            quicOptions.idleTimeout = Self.quicIdleTimeoutMilliseconds
             return NWParameters(quic: quicOptions)
         case .tcpTls:
             let tlsOptions = NWProtocolTLS.Options()
@@ -1062,7 +1065,10 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         var buffer = Data()
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TurboMediaRelayFrame, Error>) in
             func receiveNextChunk() {
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 8_192) { data, _, isComplete, error in
+                connection.receive(
+                    minimumIncompleteLength: 1,
+                    maximumLength: Self.maximumReceiveChunkLength
+                ) { data, _, isComplete, error in
                     if let error {
                         continuation.resume(
                             throwing: DirectQuicProbeError.proofFailed(error.localizedDescription)
@@ -1096,7 +1102,10 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
 
     private func receiveFrames(on connection: NWConnection) {
         guard lock.withLock({ self.connection === connection }) else { return }
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, isComplete, error in
+        connection.receive(
+            minimumIncompleteLength: 1,
+            maximumLength: Self.maximumReceiveChunkLength
+        ) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             if let error {
                 Task {
@@ -1107,7 +1116,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
                             uniquingKeysWith: { _, new in new }
                         )
                     )
-                    await self.onDisconnected?()
+                    await self.onDisconnected?(self)
                 }
                 return
             }
@@ -1175,7 +1184,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
             }
             guard !isComplete else {
                 Task {
-                    await self.onDisconnected?()
+                    await self.onDisconnected?(self)
                 }
                 return
             }
@@ -1221,6 +1230,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
             "peerDeviceId": peerDeviceId,
             "host": config.host,
             "transport": selected?.rawValue ?? "none",
+            "quicIdleTimeoutMs": String(Self.quicIdleTimeoutMilliseconds),
         ]
     }
 

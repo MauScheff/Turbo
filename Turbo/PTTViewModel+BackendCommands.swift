@@ -819,12 +819,42 @@ extension PTTViewModel {
         return cachedInvite
     }
 
+    func cachedIncomingInviteForFastAccept(
+        for request: BackendJoinRequest,
+        excludingInviteIDs: Set<String> = []
+    ) -> TurboInviteResponse? {
+        guard request.relationship.isIncomingRequest,
+              let cachedInvite = request.incomingInvite,
+              !excludingInviteIDs.contains(cachedInvite.inviteId),
+              isPendingInvite(cachedInvite),
+              inviteMatchesJoinRequest(cachedInvite, request: request, direction: "incoming") else {
+            return nil
+        }
+        return cachedInvite
+    }
+
     private func resolveIncomingInvite(
         for request: BackendJoinRequest,
         backend: BackendServices,
         excludingInviteIDs: Set<String> = []
     ) async throws -> TurboInviteResponse? {
         guard request.relationship.isIncomingRequest else { return nil }
+
+        if let cachedInvite = cachedIncomingInviteForFastAccept(
+            for: request,
+            excludingInviteIDs: excludingInviteIDs
+        ) {
+            diagnostics.record(
+                .backend,
+                message: "Using cached incoming invite for fast accept",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "handle": request.handle,
+                    "inviteId": cachedInvite.inviteId,
+                ]
+            )
+            return cachedInvite
+        }
 
         do {
             let incomingInvites = try await backend.incomingInvites()
@@ -1041,6 +1071,26 @@ extension PTTViewModel {
         return request.requestCooldownRemaining == nil
     }
 
+    func shouldCreateOutgoingInviteWithoutMetadataPrefetch(for request: BackendJoinRequest) -> Bool {
+        guard request.intent == .requestConnection else { return false }
+        guard !request.relationship.isIncomingRequest else { return false }
+        guard !request.relationship.isOutgoingRequest else { return false }
+        guard request.outgoingInvite == nil else { return false }
+        return request.requestCooldownRemaining == nil
+    }
+
+    func shouldResolveOutgoingInviteBeforeJoin(
+        for request: BackendJoinRequest,
+        contact: Contact
+    ) -> Bool {
+        guard request.relationship.isOutgoingRequest else { return false }
+        guard request.intent == .joinAcceptedOutgoingRequest else { return true }
+
+        let hasKnownChannel = contact.backendChannelId != nil || request.existingBackendChannelID != nil
+        let hasKnownPeer = contact.remoteUserId != nil || request.existingRemoteUserID != nil
+        return !(hasKnownChannel && hasKnownPeer)
+    }
+
     private func resolveBackendJoinContact(_ request: BackendJoinRequest) async throws -> ResolvedBackendJoinContact {
         guard let backend = backendServices else {
             throw TurboBackendError.invalidConfiguration
@@ -1052,8 +1102,11 @@ extension PTTViewModel {
         var contact = contacts[index]
         var createdInvite: TurboInviteResponse?
         let shouldReplaceOutgoingInvite = shouldReplaceExistingOutgoingInvite(for: request)
+        let shouldCreateOutgoingInviteWithoutMetadataPrefetch =
+            shouldCreateOutgoingInviteWithoutMetadataPrefetch(for: request)
 
-        if contact.remoteUserId == nil {
+        if contact.remoteUserId == nil,
+           !shouldCreateOutgoingInviteWithoutMetadataPrefetch {
             let remoteUser = try await backend.resolveIdentity(reference: request.handle)
             contact.remoteUserId = remoteUser.userId
             contact.handle = remoteUser.publicId
@@ -1129,7 +1182,8 @@ extension PTTViewModel {
             )
         }
 
-        if contact.backendChannelId == nil || request.relationship.isIncomingRequest {
+        if !shouldCreateOutgoingInviteWithoutMetadataPrefetch,
+           contact.backendChannelId == nil || request.relationship.isIncomingRequest {
             let identityQuery = backendPeerIdentityQuery(
                 handle: request.handle,
                 remoteUserId: contact.remoteUserId ?? request.existingRemoteUserID
@@ -1146,6 +1200,7 @@ extension PTTViewModel {
             : nil
 
         if !shouldReplaceOutgoingInvite,
+           shouldResolveOutgoingInviteBeforeJoin(for: request, contact: contact),
            let invite = try await resolveOutgoingInvite(for: request, backend: backend) {
             applyInviteMetadata(invite, to: &contact)
         } else if !request.relationship.isIncomingRequest,
@@ -1323,7 +1378,23 @@ extension PTTViewModel {
         _ backend: BackendServices,
         request: BackendJoinRequest
     ) async throws {
-        await refreshBackendJoinSessionEvidence(backend, request: request)
+        if shouldRefreshBackendJoinSessionEvidenceBeforeJoin(
+            request: request,
+            supportsWebSocket: backend.supportsWebSocket,
+            isWebSocketConnected: backend.isWebSocketConnected
+        ) {
+            await refreshBackendJoinSessionEvidence(backend, request: request)
+        } else {
+            diagnostics.record(
+                .backend,
+                message: "Skipped backend session evidence refresh before accepted join",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "handle": request.handle,
+                    "intent": String(describing: request.intent),
+                ]
+            )
+        }
         guard backend.supportsWebSocket else { return }
         guard !backend.isWebSocketConnected else { return }
 
@@ -1350,6 +1421,16 @@ extension PTTViewModel {
                 ]
             )
         }
+    }
+
+    func shouldRefreshBackendJoinSessionEvidenceBeforeJoin(
+        request: BackendJoinRequest,
+        supportsWebSocket: Bool,
+        isWebSocketConnected: Bool
+    ) -> Bool {
+        !(request.intent == .joinAcceptedOutgoingRequest
+            && supportsWebSocket
+            && isWebSocketConnected)
     }
 
     func refreshBackendJoinSessionEvidence(
@@ -1456,6 +1537,17 @@ extension PTTViewModel {
         operationId: String? = nil
     ) async throws {
         let joinOperationID = operationId ?? request.joinOperationID
+        diagnostics.record(
+            .backend,
+            message: "Backend join command started",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "handle": request.handle,
+                "channelId": channelId,
+                "operationId": joinOperationID ?? "none",
+                "intent": String(describing: request.intent),
+            ]
+        )
         try await withThrowingTaskGroup(of: BackendJoinCommandOutcome.self) { group in
             group.addTask { @MainActor in
                 _ = try await backend.joinChannel(
@@ -1483,6 +1575,16 @@ extension PTTViewModel {
                 switch outcome {
                 case .commandReturned:
                     group.cancelAll()
+                    diagnostics.record(
+                        .backend,
+                        message: "Backend join command response returned",
+                        metadata: [
+                            "contactId": request.contactID.uuidString,
+                            "handle": request.handle,
+                            "channelId": channelId,
+                            "operationId": joinOperationID ?? "none",
+                        ]
+                    )
                     return
                 case .membershipVisible:
                     group.cancelAll()
@@ -1500,6 +1602,17 @@ extension PTTViewModel {
                     continue
                 case .commandTimedOut:
                     group.cancelAll()
+                    diagnostics.record(
+                        .backend,
+                        level: .error,
+                        message: "Backend join command timed out",
+                        metadata: [
+                            "contactId": request.contactID.uuidString,
+                            "handle": request.handle,
+                            "channelId": channelId,
+                            "operationId": joinOperationID ?? "none",
+                        ]
+                    )
                     throw TurboBackendError.server("backend join command timed out")
                 }
             }
@@ -1712,6 +1825,17 @@ extension PTTViewModel {
                 completeLocalBackendJoin(for: contact)
             } else {
                 startLocalJoinAfterAcceptedBackendJoin(for: contact)
+            }
+            Task { @MainActor [weak self, contactID = contact.id] in
+                guard let self,
+                      self.desiredLocalReceiverAudioReadiness(for: contactID),
+                      self.peerIsRoutableForReceiverAudioReadiness(for: contactID) else {
+                    return
+                }
+                await self.syncLocalReceiverAudioReadinessSignal(
+                    for: contactID,
+                    reason: .channelRefresh
+                )
             }
         }
 

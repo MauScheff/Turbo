@@ -5,13 +5,16 @@ use std::{
     io::BufReader,
     net::SocketAddr,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
-use quinn::{Endpoint, ServerConfig};
+use quinn::{Endpoint, ServerConfig, TransportConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -36,7 +39,10 @@ struct Config {
 #[derive(Clone)]
 struct RelayState {
     sessions: Arc<Mutex<HashMap<String, RelaySession>>>,
+    next_connection_id: Arc<AtomicU64>,
 }
+
+const MAX_RELAY_LINE_LENGTH: usize = 64 * 1024;
 
 #[derive(Clone)]
 struct RelaySession {
@@ -47,6 +53,7 @@ struct RelaySession {
 #[derive(Clone)]
 struct RelayPeer {
     peer_device_id: String,
+    connection_id: u64,
     _transport: RelayTransport,
     tx: mpsc::Sender<String>,
     last_seen: Instant,
@@ -100,6 +107,20 @@ struct JoinedPeer {
     session_id: String,
     device_id: String,
     peer_device_id: String,
+    connection_id: u64,
+}
+
+impl RelayState {
+    fn new() -> RelayState {
+        RelayState {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            next_connection_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    fn allocate_connection_id(&self) -> u64 {
+        self.next_connection_id.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 #[tokio::main]
@@ -114,9 +135,7 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    let state = RelayState {
-        sessions: Arc::new(Mutex::new(HashMap::new())),
-    };
+    let state = RelayState::new();
 
     let cleanup_state = state.clone();
     tokio::spawn(async move {
@@ -210,8 +229,8 @@ async fn handle_quic_stream(
     state: RelayState,
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<String>(128);
-    let mut reader = Framed::new(recv, LinesCodec::new());
-    let mut writer = Framed::new(send, LinesCodec::new());
+    let mut reader = Framed::new(recv, relay_lines_codec());
+    let mut writer = Framed::new(send, relay_lines_codec());
 
     let first = reader
         .next()
@@ -278,7 +297,7 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (tx, mut rx) = mpsc::channel::<String>(128);
-    let mut framed = Framed::new(stream, LinesCodec::new());
+    let mut framed = Framed::new(stream, relay_lines_codec());
 
     let first = framed
         .next()
@@ -341,6 +360,7 @@ async fn handle_join(
         session_id,
         device_id,
         peer_device_id,
+        connection_id: state.allocate_connection_id(),
     };
 
     let mut sessions = state.sessions.lock().await;
@@ -355,6 +375,7 @@ async fn handle_join(
         joined.device_id.clone(),
         RelayPeer {
             peer_device_id: joined.peer_device_id.clone(),
+            connection_id: joined.connection_id,
             _transport: transport,
             tx,
             last_seen: Instant::now(),
@@ -364,6 +385,7 @@ async fn handle_join(
         session_id = %joined.session_id,
         device_id = %joined.device_id,
         peer_device_id = %joined.peer_device_id,
+        connection_id = joined.connection_id,
         transport = ?transport,
         "peer joined relay session"
     );
@@ -448,10 +470,24 @@ async fn handle_inbound_frame(line: &str, state: &RelayState, joined: &JoinedPee
 async fn remove_peer(state: &RelayState, joined: &JoinedPeer) {
     let mut sessions = state.sessions.lock().await;
     if let Some(session) = sessions.get_mut(&joined.session_id) {
+        let should_remove = session
+            .peers
+            .get(&joined.device_id)
+            .is_some_and(|peer| peer.connection_id == joined.connection_id);
+        if !should_remove {
+            info!(
+                session_id = %joined.session_id,
+                device_id = %joined.device_id,
+                connection_id = joined.connection_id,
+                "ignored stale peer removal"
+            );
+            return;
+        }
         session.peers.remove(&joined.device_id);
         info!(
             session_id = %joined.session_id,
             device_id = %joined.device_id,
+            connection_id = joined.connection_id,
             "peer left relay session"
         );
     }
@@ -486,6 +522,10 @@ fn validate_id(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn relay_lines_codec() -> LinesCodec {
+    LinesCodec::new_with_max_length(MAX_RELAY_LINE_LENGTH)
+}
+
 fn quic_server_config(config: &Config) -> Result<ServerConfig> {
     let certs = load_certs(&config.cert_pem)?;
     let key = load_key(&config.key_pem)?;
@@ -494,9 +534,14 @@ fn quic_server_config(config: &Config) -> Result<ServerConfig> {
         .with_single_cert(certs, key)
         .context("invalid relay certificate or key")?;
     crypto.alpn_protocols = vec![b"turbo-relay-v1".to_vec()];
-    Ok(ServerConfig::with_crypto(Arc::new(
+    let mut server_config = ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(crypto)?,
-    )))
+    ));
+    let mut transport_config = TransportConfig::default();
+    transport_config.max_idle_timeout(Some(Duration::from_secs(120).try_into()?));
+    transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
+    server_config.transport_config(Arc::new(transport_config));
+    Ok(server_config)
 }
 
 fn tls_server_config(config: &Config) -> Result<rustls::ServerConfig> {
@@ -524,4 +569,68 @@ fn load_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>> {
     rustls_pemfile::private_key(&mut reader)
         .context("failed to parse key PEM")?
         .ok_or_else(|| anyhow!("key PEM contained no private key"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Config, RelayFrame, RelayState, RelayTransport, handle_join, relay_lines_codec, remove_peer,
+    };
+    use anyhow::Result;
+    use std::{net::SocketAddr, path::PathBuf, time::Duration};
+    use tokio::sync::mpsc;
+    use tokio_util::{bytes::BytesMut, codec::Decoder};
+
+    #[test]
+    fn relay_lines_codec_accepts_large_audio_frames() -> Result<()> {
+        let mut codec = relay_lines_codec();
+        let payload = "a".repeat(12_000);
+        let line = format!(
+            "{{\"type\":\"audio\",\"session_id\":\"session\",\"sender_device_id\":\"device\",\"sequence_number\":1,\"sent_at_ms\":1,\"payload\":\"{payload}\"}}\n"
+        );
+        let mut buffer = BytesMut::from(line.as_bytes());
+
+        let decoded = codec
+            .decode(&mut buffer)?
+            .expect("expected one decoded line");
+
+        assert_eq!(decoded, line.trim_end());
+        assert!(buffer.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_peer_removal_does_not_remove_newer_connection() -> Result<()> {
+        let config = Config {
+            quic_addr: SocketAddr::from(([127, 0, 0, 1], 9443)),
+            tcp_addr: SocketAddr::from(([127, 0, 0, 1], 9444)),
+            cert_pem: PathBuf::from("unused-cert.pem"),
+            key_pem: PathBuf::from("unused-key.pem"),
+            shared_token: "secret".to_owned(),
+            session_ttl: Duration::from_secs(60),
+        };
+        let state = RelayState::new();
+        let join_line = serde_json::to_string(&RelayFrame::Join {
+            session_id: "session".to_owned(),
+            device_id: "device-a".to_owned(),
+            peer_device_id: "device-b".to_owned(),
+            token: "secret".to_owned(),
+        })?;
+        let (old_tx, _old_rx) = mpsc::channel(1);
+        let old_join =
+            handle_join(&join_line, &config, &state, RelayTransport::Quic, old_tx).await?;
+        let (new_tx, _new_rx) = mpsc::channel(1);
+        let new_join =
+            handle_join(&join_line, &config, &state, RelayTransport::Quic, new_tx).await?;
+
+        remove_peer(&state, &old_join).await;
+
+        let sessions = state.sessions.lock().await;
+        let peer = sessions
+            .get("session")
+            .and_then(|session| session.peers.get("device-a"))
+            .expect("newer peer should remain after stale removal");
+        assert_eq!(peer.connection_id, new_join.connection_id);
+        Ok(())
+    }
 }

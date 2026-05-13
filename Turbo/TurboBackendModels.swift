@@ -1515,11 +1515,17 @@ struct RecentOutgoingRequestEvidence: Equatable {
     }
 }
 
+enum OptimisticOutgoingRequestPhase: Equatable {
+    case cooldownOnly
+    case joinTransition
+}
+
 struct OptimisticOutgoingRequestEvidence: Equatable {
     let requestCount: Int
     let startedAt: Date
     let cooldownDeadline: Date
     let operationID: String?
+    let phase: OptimisticOutgoingRequestPhase
 
     func isActive(now: Date = Date()) -> Bool {
         now < cooldownDeadline

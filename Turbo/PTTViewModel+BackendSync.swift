@@ -330,7 +330,6 @@ extension PTTViewModel {
 
         let shouldPreserveRoutableReadyProjection =
             peerMembershipPresent
-            && peerDeviceConnected
             && existingSessionWasRoutable
             && existing.statusView == .ready
             && existing.selfHasActiveDevice
@@ -359,6 +358,7 @@ extension PTTViewModel {
                     "fetchedStatus": effectiveFetched.statusKind,
                     "fetchedSelfHasActiveDevice": String(effectiveFetched.selfHasActiveDevice),
                     "fetchedPeerHasActiveDevice": String(effectiveFetched.peerHasActiveDevice),
+                    "fetchedPeerDeviceConnected": String(peerDeviceConnected),
                     "fetchedRemoteAudioReadiness": String(describing: effectiveFetched.remoteAudioReadiness),
                     "existingServerTimestamp": existing.serverTimestamp ?? "none",
                     "fetchedServerTimestamp": effectiveFetched.serverTimestamp ?? "none",
@@ -1185,6 +1185,11 @@ extension PTTViewModel {
             && existing.membership.hasPeerMembership
             && (existing.membership.peerDeviceConnected || remoteTransmittingContactIDs.contains(contactID))
 
+        let concreteSessionEvidence =
+            systemSessionMatches(contactID)
+            || mediaSessionContactID == contactID
+            || remoteTransmittingContactIDs.contains(contactID)
+
         let incomingLostMembership =
             !incoming.membership.hasLocalMembership
             && !incoming.membership.hasPeerMembership
@@ -1198,6 +1203,10 @@ extension PTTViewModel {
                 && (
                     existing.conversationStatus == .receiving
                     || remoteTransmittingContactIDs.contains(contactID)
+                    || (
+                        existingSessionReady
+                        && concreteSessionEvidence
+                    )
                 )
             )
 
@@ -1446,15 +1455,40 @@ extension PTTViewModel {
     ) {
         guard shouldSurfaceDirectTransportPath(for: contactID) else { return }
 
-        mediaRuntime.updateTransportPathState(transition.pathState)
+        let surfacedPathState = mediaRuntime.surfacedTransportPathState(for: transition)
+        let suppressedByActiveMediaRelay =
+            surfacedPathState != transition.pathState && mediaRuntime.hasActiveMediaRelayClient
+
+        if suppressedByActiveMediaRelay {
+            diagnostics.record(
+                .media,
+                message: "Preserved fast relay path while processing Direct QUIC transition",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "directQuicPathState": transition.pathState.rawValue,
+                    "surfacedPathState": surfacedPathState.rawValue,
+                    "attemptId": transition.attemptId ?? "none",
+                    "reason": transition.reason ?? "none",
+                ]
+            )
+        }
+
+        mediaRuntime.updateTransportPathState(surfacedPathState)
 
         switch transition {
         case .enteredPromoting, .updatedPromoting:
-            backendStatusMessage = "Direct path promoting"
+            if !suppressedByActiveMediaRelay {
+                backendStatusMessage = "Direct path promoting"
+            }
         case .directActivated:
             backendStatusMessage = "Direct path active"
         case .recovering:
-            backendStatusMessage = "Direct path recovering"
+            if !suppressedByActiveMediaRelay {
+                backendStatusMessage = "Direct path recovering"
+            } else if backendStatusMessage.hasPrefix("Direct path")
+                || backendStatusMessage.hasPrefix("signaling ") {
+                backendStatusMessage = "Connected"
+            }
         case .fellBackToRelay:
             if backendStatusMessage.hasPrefix("Direct path")
                 || backendStatusMessage.hasPrefix("signaling ") {
@@ -1464,7 +1498,7 @@ extension PTTViewModel {
 
         if selectedContactId == contactID {
             updateStatusForSelectedContact()
-            captureDiagnosticsState("direct-quic:\(transition.pathState.rawValue)")
+            captureDiagnosticsState("direct-quic:\(surfacedPathState.rawValue)")
         }
     }
 
@@ -2416,9 +2450,15 @@ extension PTTViewModel {
                 )
             }
         } else {
-            precreateSelectedContactMediaShellIfNeeded(
-                for: contactID,
-                reason: "peer-hint-\(payload.reason)"
+            diagnostics.record(
+                .websocket,
+                message: "Deferred selected peer prewarm hint until contact selection",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": envelope.channelId,
+                    "reason": payload.reason,
+                    "recordedPeerDeviceId": envelope.fromDeviceId,
+                ]
             )
         }
     }

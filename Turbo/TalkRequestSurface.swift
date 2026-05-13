@@ -10,10 +10,18 @@ struct IncomingTalkRequestSurface: Equatable, Identifiable {
     let recencyKey: String
 
     var id: String { inviteID }
+
+    func matchesPresentation(of other: IncomingTalkRequestSurface) -> Bool {
+        contactID == other.contactID && requestCount == other.requestCount
+    }
 }
 
 struct IncomingTalkRequestCandidate: Equatable {
     let surface: IncomingTalkRequestSurface
+
+    init(surface: IncomingTalkRequestSurface) {
+        self.surface = surface
+    }
 
     init(contact: Contact, invite: TurboInviteResponse) {
         surface = IncomingTalkRequestSurface(
@@ -73,12 +81,22 @@ enum TalkRequestSurfaceReducer {
             let allowsSelectedContact,
             let allowsAlreadySurfacedInvite
         ):
+            let sortedCandidates = candidates.sorted { lhs, rhs in
+                lhs.surface.recencyKey > rhs.surface.recencyKey
+            }
             let activeInviteIDs = Set(candidates.map(\.surface.inviteID))
             nextState.surfacedInviteIDs.formIntersection(activeInviteIDs)
 
             if let activeIncomingRequest = nextState.activeIncomingRequest,
                !activeInviteIDs.contains(activeIncomingRequest.inviteID) {
-                nextState.activeIncomingRequest = nil
+                if let replacement = sortedCandidates.first(where: {
+                    $0.surface.matchesPresentation(of: activeIncomingRequest)
+                })?.surface {
+                    nextState.activeIncomingRequest = replacement
+                    nextState.surfacedInviteIDs.insert(replacement.inviteID)
+                } else {
+                    nextState.activeIncomingRequest = nil
+                }
             }
 
             guard applicationIsActive else {
@@ -89,11 +107,7 @@ enum TalkRequestSurfaceReducer {
                 return nextState
             }
 
-            let candidate = candidates
-                .sorted { lhs, rhs in
-                    lhs.surface.recencyKey > rhs.surface.recencyKey
-                }
-                .first { candidate in
+            let candidate = sortedCandidates.first { candidate in
                     (allowsSelectedContact || candidate.surface.contactID != selectedContactID)
                         && (
                             allowsAlreadySurfacedInvite

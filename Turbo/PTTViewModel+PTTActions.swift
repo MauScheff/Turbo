@@ -714,6 +714,7 @@ extension PTTViewModel {
             }
             if shouldQueueLocalConnect {
                 sessionCoordinator.queueConnect(contactID: contact.id, origin: connectOrigin)
+                syncSelectedPeerSession()
                 captureDiagnosticsState("session-connect:queued-local")
             } else {
                 captureDiagnosticsState("session-connect:request-only-local")
@@ -733,6 +734,7 @@ extension PTTViewModel {
         }
 
         sessionCoordinator.queueConnect(contactID: contact.id, origin: connectOrigin)
+        syncSelectedPeerSession()
         captureDiagnosticsState("session-connect:queued")
 
         if isJoined, let activeChannelId, let channelUUID = channelUUID(for: activeChannelId) {
@@ -814,7 +816,10 @@ extension PTTViewModel {
         case .requestConnection(let contactID):
             guard let contact = contacts.first(where: { $0.id == contactID }) else { return }
             captureDiagnosticsState("selected-peer-effect:request-connection")
-            await refreshStaleOutgoingRequestBeforeConnectIfNeeded(contactID: contactID)
+            let relationship = relationshipState(for: contactID)
+            if relationship.isOutgoingRequest, !relationship.isIncomingRequest {
+                await refreshStaleOutgoingRequestBeforeConnectIfNeeded(contactID: contactID)
+            }
             let refreshedContact = contacts.first(where: { $0.id == contactID }) ?? contact
             performConnect(to: refreshedContact, intent: .requestConnection)
         case .joinReadyPeer(let contactID):

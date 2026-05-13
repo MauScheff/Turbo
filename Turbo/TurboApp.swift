@@ -100,10 +100,12 @@ final class TurboAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     ) {
         let userInfo = notification.request.content.userInfo
         if (userInfo["event"] as? String) == "talk-request" {
+            center.removeAllDeliveredNotifications()
+            center.setBadgeCount(0)
+            completionHandler([])
             Task { @MainActor in
                 await PTTViewModel.shared.handleForegroundTalkRequestNotification(userInfo: userInfo)
             }
-            completionHandler([])
             return
         }
         completionHandler([.banner, .sound, .badge])
@@ -116,12 +118,20 @@ final class TurboAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     ) {
         let userInfo = response.notification.request.content.userInfo
         if (userInfo["event"] as? String) == "talk-request" {
+            center.removeAllDeliveredNotifications()
+            center.setBadgeCount(0)
+            let completesAfterHandling = response.actionIdentifier == TurboNotificationCategory.notNowTalkRequestAction
+            if !completesAfterHandling {
+                completionHandler()
+            }
             Task { @MainActor in
                 await PTTViewModel.shared.handleTalkRequestNotificationResponse(
                     actionIdentifier: response.actionIdentifier,
                     userInfo: userInfo
                 )
-                completionHandler()
+                if completesAfterHandling {
+                    completionHandler()
+                }
             }
             return
         }

@@ -1559,6 +1559,14 @@ enum ConversationStateMachine {
                 )
             }
 
+            if !localSessionActive, context.backendJoinSettling {
+                return makeState(
+                    .waitingForPeer(reason: .backendSessionTransition),
+                    context.connectionAttemptStatusMessage,
+                    false
+                )
+            }
+
             switch context.backendChannelReadiness {
             case .peerOnly:
                 if !localSessionActive {
@@ -1958,6 +1966,38 @@ enum ConversationStateMachine {
                 style: .accent
             )
         case .waitingForPeer:
+            if case .waitingForPeer(reason: .pendingJoin) = selectedPeerState.detail {
+                return ConversationPrimaryAction(
+                    kind: .holdToTalk,
+                    label: "Connecting...",
+                    isEnabled: false,
+                    style: .muted
+                )
+            }
+            if case .waitingForPeer(reason: .backendSessionTransition) = selectedPeerState.detail {
+                return ConversationPrimaryAction(
+                    kind: .holdToTalk,
+                    label: "Connecting...",
+                    isEnabled: false,
+                    style: .muted
+                )
+            }
+            if case .waitingForPeer(reason: .localSessionTransition) = selectedPeerState.detail {
+                return ConversationPrimaryAction(
+                    kind: .holdToTalk,
+                    label: "Connecting...",
+                    isEnabled: false,
+                    style: .muted
+                )
+            }
+            if case .waitingForPeer(reason: .peerReadyToConnect) = selectedPeerState.detail {
+                return ConversationPrimaryAction(
+                    kind: .holdToTalk,
+                    label: "Connecting...",
+                    isEnabled: false,
+                    style: .muted
+                )
+            }
             if case .waitingForPeer(reason: .localAudioPrewarm) = selectedPeerState.detail {
                 return ConversationPrimaryAction(
                     kind: .holdToTalk,
@@ -1996,7 +2036,18 @@ enum ConversationStateMachine {
                 isEnabled: selectedPeerState.allowsHoldToTalk,
                 style: .accent
             )
-        case .idle, .requested, .incomingRequest, .startingTransmit, .transmitting, .receiving:
+        case .requested:
+            return ConversationPrimaryAction(
+                kind: .connect,
+                label: talkButtonLabel(
+                    conversationState: .requested,
+                    isSelectedChannelJoined: isSelectedChannelJoined,
+                    requestCooldownRemaining: requestCooldownRemaining
+                ),
+                isEnabled: false,
+                style: .muted
+            )
+        case .idle, .incomingRequest, .startingTransmit, .transmitting, .receiving:
             return primaryAction(
                 conversationState: selectedPeerState.conversationState,
                 isSelectedChannelJoined: isSelectedChannelJoined,

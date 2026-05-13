@@ -3053,6 +3053,7 @@ extension PTTViewModel {
             metadata: metadata
         )
 
+        promoteOptimisticOutgoingRequestToJoinTransition(contactID: contactID)
         backendRuntime.markBackendJoinSettling(for: contactID)
         let localSessionAlreadyActive =
             systemSessionMatches(contactID)
