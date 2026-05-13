@@ -21,7 +21,7 @@ struct TurboHeaderView: View {
     let onRequestLocalNetworkPermission: () -> Void
     let onRequestNotificationPermission: () -> Void
 
-    private let navigationButtonWidth: CGFloat = 44
+    private let navigationButtonWidth: CGFloat = TurboGlassIconButton.size
 
     var body: some View {
         let trailingButtonCount = showsAddContactButton ? 1 : 0
@@ -143,22 +143,18 @@ struct TurboGlassIconButton: View {
     let accessibilityLabel: String
     let action: () -> Void
 
-    private let size: CGFloat = 44
+    static let size: CGFloat = 48
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.primary)
-                .frame(width: size, height: size)
+                .frame(width: Self.size, height: Self.size)
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
-        .background(.thinMaterial, in: Circle())
-        .overlay(
-            Circle()
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
         .accessibilityLabel(accessibilityLabel)
     }
 }

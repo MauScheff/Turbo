@@ -66,7 +66,7 @@ struct TurboIncomingTalkRequestBanner: View {
     }
 
     private var primaryActionTitle: String {
-        "Accept"
+        "Connect"
     }
 }
 
@@ -389,12 +389,7 @@ struct TurboTalkControlsView: View {
                             .accessibilityAddTraits(.isButton)
                             .opacity(displayedPrimaryAction.isEnabled ? 1 : 0.8)
                     } else {
-                        Button(action: joinChannel) {
-                            connectActionLabel(primaryAction)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(!primaryAction.isEnabled)
-                        .opacity(primaryAction.isEnabled ? 1 : 0.72)
+                        connectActionButton(primaryAction)
                     }
 
                 }
@@ -435,29 +430,30 @@ struct TurboTalkControlsView: View {
         action.kind == .connect && action.isEnabled && action.style == .accent
     }
 
-    private func connectActionForeground(_ action: ConversationPrimaryAction) -> Color {
-        guard action.isEnabled else { return .secondary }
-        return shouldPromoteConnectAction(action) ? .white : primaryActionTint(action.style)
-    }
-
     @ViewBuilder
-    private func connectActionLabel(_ action: ConversationPrimaryAction) -> some View {
-        let capsule = Capsule(style: .continuous)
+    private func connectActionButton(_ action: ConversationPrimaryAction) -> some View {
         let label = Text(action.label)
             .font(.headline.weight(.semibold))
-            .frame(maxWidth: TurboLayout.primaryButtonMaxWidth, minHeight: 58)
+            .frame(maxWidth: min(TurboLayout.contentMaxWidth, 340), minHeight: 60)
 
-        if shouldPromoteConnectAction(action), action.isEnabled {
-            label
-                .foregroundStyle(.white)
-                .background(capsule.fill(primaryActionTint(action.style)))
+        if shouldPromoteConnectAction(action) {
+            Button(action: joinChannel) {
+                label
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .controlSize(.large)
+            .tint(primaryActionTint(action.style))
+            .disabled(!action.isEnabled)
         } else {
-            label
-                .foregroundStyle(connectActionForeground(action))
-                .background(.thinMaterial, in: capsule)
-                .overlay(
-                    capsule.stroke(Color.accentColor.opacity(action.isEnabled ? 0.22 : 0.10), lineWidth: 1)
-                )
+            Button(action: joinChannel) {
+                label
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.capsule)
+            .controlSize(.large)
+            .tint(primaryActionTint(action.style))
+            .disabled(!action.isEnabled)
         }
     }
 }

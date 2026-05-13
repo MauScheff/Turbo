@@ -503,7 +503,7 @@ enum ConversationListSection: String, Equatable {
     var title: String {
         switch self {
         case .wantsToTalk:
-            return "Wants to Talk"
+            return "Inbox"
         case .readyToTalk:
             return "Ready to Talk"
         case .requested:

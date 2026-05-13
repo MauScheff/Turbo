@@ -31727,6 +31727,51 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func backendJoinSkipsLiveChannelSnapshotForKnownJoinSessionIntents() {
+        let viewModel = PTTViewModel()
+        let incomingAccept = BackendJoinRequest(
+            contactID: UUID(),
+            handle: "@avery",
+            intent: .requestConnection,
+            relationship: .incomingRequest(requestCount: 1),
+            existingRemoteUserID: "user-avery",
+            existingBackendChannelID: "channel-avery",
+            incomingInvite: makeInvite(direction: "incoming"),
+            outgoingInvite: nil,
+            requestCooldownRemaining: nil,
+            usesLocalHTTPBackend: false
+        )
+        let acceptedOutgoingJoin = BackendJoinRequest(
+            contactID: UUID(),
+            handle: "@avery",
+            intent: .joinAcceptedOutgoingRequest,
+            relationship: .outgoingRequest(requestCount: 1),
+            existingRemoteUserID: "user-avery",
+            existingBackendChannelID: "channel-avery",
+            incomingInvite: nil,
+            outgoingInvite: makeInvite(direction: "outgoing", inviteId: "invite-accepted"),
+            requestCooldownRemaining: nil,
+            usesLocalHTTPBackend: false
+        )
+        let readyPeerJoin = BackendJoinRequest(
+            contactID: UUID(),
+            handle: "@avery",
+            intent: .joinReadyPeer,
+            relationship: .none,
+            existingRemoteUserID: "user-avery",
+            existingBackendChannelID: "channel-avery",
+            incomingInvite: nil,
+            outgoingInvite: nil,
+            requestCooldownRemaining: nil,
+            usesLocalHTTPBackend: false
+        )
+
+        #expect(!viewModel.backendJoinNeedsLiveChannelSnapshot(request: incomingAccept))
+        #expect(!viewModel.backendJoinNeedsLiveChannelSnapshot(request: acceptedOutgoingJoin))
+        #expect(viewModel.backendJoinNeedsLiveChannelSnapshot(request: readyPeerJoin))
+    }
+
+    @MainActor
     @Test func backendJoinExecutionPlanKeepsOutgoingInviteOnRequestPathEvenWhenPeerAlreadyJoined() {
         let viewModel = PTTViewModel()
         let contactID = UUID()

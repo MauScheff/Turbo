@@ -40,7 +40,7 @@ enum TurboNotificationCategory {
     static func register(on center: UNUserNotificationCenter = .current()) {
         let accept = UNNotificationAction(
             identifier: acceptTalkRequestAction,
-            title: "Accept",
+            title: "Connect",
             options: [.foreground]
         )
         let notNow = UNNotificationAction(

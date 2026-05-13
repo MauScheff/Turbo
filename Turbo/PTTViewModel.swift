@@ -262,7 +262,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
 #if DEBUG
     private static var automaticDiagnosticsPublishDefaultEnabled: Bool {
-        ProcessInfo.processInfo.environment["TURBO_IOS_AUTOMATIC_DIAGNOSTICS_PUBLISH"] == "1"
+        ProcessInfo.processInfo.environment["TURBO_IOS_AUTOMATIC_DIAGNOSTICS_PUBLISH"] != "0"
     }
 
     private static var reducerTransitionDiagnosticsEnabled: Bool {

@@ -62,6 +62,8 @@ For BeepBeep, floating controls should share one family:
 
 Primary conversation actions, such as `Ask to Talk`, `Ask Again`, and `Accept`, should remain solid so their priority is unmistakable. Use Liquid Glass for floating controls and quiet inactive action states, not for the main action that starts or accepts a conversation.
 
+In SwiftUI, render the main conversation action as a native large capsule button. Prefer `.buttonStyle(.borderedProminent)`, `.controlSize(.large)`, and `.buttonBorderShape(.capsule)` for enabled `Ask to Talk` and `Accept` actions. Use a quieter native bordered style for disabled, cooldown, or muted states. Do not custom-paint these buttons with manual fills, outlines, blur stacks, or shadows unless the native style fails a concrete product need.
+
 Do not apply this treatment to every row or content group. Contact rows, settings content, and text-heavy surfaces should generally use spacing, dividers, semantic system backgrounds, or standard materials instead of glassy decoration.
 
 ## Product Tone

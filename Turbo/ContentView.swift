@@ -338,7 +338,7 @@ struct ContentView: View {
         return VStack(spacing: 16) {
             if focusedContact == nil {
                 TurboHeaderView(
-                    statusMessage: viewModel.topChromeStatusMessage,
+                    statusMessage: nil,
                     transportPathState: transportPathBadgeState,
                     transportPathTint: transportPathTint(
                         for: transportPathBadgeState ?? viewModel.mediaTransportPathState

@@ -286,6 +286,10 @@ extension PTTViewModel {
         return .requestOnly
     }
 
+    func backendJoinNeedsLiveChannelSnapshot(request: BackendJoinRequest) -> Bool {
+        request.intent == .joinReadyPeer
+    }
+
     private func liveJoinChannelSnapshot(
         for contact: Contact,
         backend: BackendServices
@@ -1137,7 +1141,9 @@ extension PTTViewModel {
             applyDirectChannelMetadata(channel, currentUserID: backend.currentUserID, to: &contact)
         }
 
-        let currentChannel = await liveJoinChannelSnapshot(for: contact, backend: backend)
+        let currentChannel = backendJoinNeedsLiveChannelSnapshot(request: request)
+            ? await liveJoinChannelSnapshot(for: contact, backend: backend)
+            : nil
 
         if !shouldReplaceOutgoingInvite,
            let invite = try await resolveOutgoingInvite(for: request, backend: backend) {
