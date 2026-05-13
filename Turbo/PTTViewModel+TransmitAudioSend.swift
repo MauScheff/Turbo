@@ -11,6 +11,31 @@ import AVFAudio
 import UIKit
 
 extension PTTViewModel {
+    func recordMediaRelayPeerUnavailableInvariantIfNeeded(
+        error: Error,
+        contactID: UUID,
+        channelID: String,
+        peerDeviceID: String,
+        operation: String
+    ) {
+        guard case let DirectQuicProbeError.connectionFailed(message) = error,
+              message == "media relay peer is unavailable" else { return }
+        diagnostics.recordInvariantViolation(
+            invariantID: "relay.send_without_live_peer",
+            scope: .backend,
+            message: "media relay send was attempted after relay reported peer unavailable",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": channelID,
+                "peerDeviceId": peerDeviceID,
+                "operation": operation,
+                "selectedPeerPhase": String(describing: selectedPeerState(for: contactID).phase),
+                "systemSession": String(describing: systemSessionState),
+                "error": error.localizedDescription,
+            ]
+        )
+    }
+
     func shouldTreatTransmitLeaseLossAsStop(_ error: Error) -> Bool {
         guard case let TurboBackendError.server(message) = error else { return false }
         return message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "no active transmit state for sender"
@@ -106,6 +131,13 @@ extension PTTViewModel {
                         return
                     } catch {
                         await MainActor.run {
+                            self.recordMediaRelayPeerUnavailableInvariantIfNeeded(
+                                error: error,
+                                contactID: target.contactID,
+                                channelID: target.channelID,
+                                peerDeviceID: target.deviceID,
+                                operation: "audio-payload"
+                            )
                             self.diagnostics.record(
                                 .media,
                                 level: .error,
@@ -1446,7 +1478,8 @@ extension PTTViewModel {
 
     func closeMediaSession(
         deactivateAudioSession: Bool = true,
-        preserveDirectQuic: Bool = false
+        preserveDirectQuic: Bool = false,
+        preserveMediaRelay: Bool = false
     ) {
         if let contactID = mediaSessionContactID,
            let attempt = mediaRuntime.directQuicUpgrade.attempt(for: contactID),
@@ -1471,6 +1504,16 @@ extension PTTViewModel {
                 ]
             )
         }
+        if preserveMediaRelay {
+            diagnostics.record(
+                .media,
+                message: "Preserving fast relay media path during media close",
+                metadata: [
+                    "contactId": mediaSessionContactID?.uuidString ?? "none",
+                    "reason": "system-transmit-handoff",
+                ]
+            )
+        }
         let shouldDeactivateAudioSession =
             deactivateAudioSession && !shouldPreserveAudioSessionDuringMediaClose()
         if deactivateAudioSession && !shouldDeactivateAudioSession {
@@ -1486,6 +1529,12 @@ extension PTTViewModel {
                 ]
             )
         }
-        mediaServices.reset(shouldDeactivateAudioSession, preserveDirectQuic)
+        mediaServices.reset(shouldDeactivateAudioSession, preserveDirectQuic, preserveMediaRelay)
+    }
+
+    func shouldPreserveMediaRelayDuringMediaClose(for contactID: UUID) -> Bool {
+        guard mediaSessionContactID == contactID else { return false }
+        guard mediaRuntime.hasActiveMediaRelayClient else { return false }
+        return mediaTransportPathState == .fastRelay
     }
 }

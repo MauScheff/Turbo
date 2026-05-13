@@ -346,6 +346,46 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
             }
         }
 
+        let localLiveSessionEvidence = isJoined || systemSessionValue != "none"
+        if selectedPeerRelationship == "none",
+           pendingAction == "none",
+           localLiveSessionEvidence,
+           backendSelfJoined == false,
+           backendPeerJoined == false,
+           [
+               "waiting-for-peer",
+               "ready",
+               "self-transmitting",
+               "peer-transmitting",
+           ].contains(backendChannelStatusValue),
+           [
+               "waiting-for-self",
+               "waiting-for-peer",
+               "ready",
+               "self-transmitting",
+               "peer-transmitting",
+           ].contains(backendReadinessValue) {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_absent_with_live_session_evidence",
+                    scope: .backend,
+                    message: "backend dropped durable membership while local/system session still had live evidence",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerRelationship": selectedPeerRelationship,
+                        "pendingAction": pendingAction,
+                        "isJoined": String(isJoined),
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        "backendPeerDeviceConnected": boolMetadata(backendPeerDeviceConnected),
+                    ]
+                )
+            )
+        }
+
         if phase == "peerReady",
            selectedPeerRelationship == "none",
            pendingAction == "none",
@@ -651,6 +691,40 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
                         "backendReadiness": backendReadinessValue,
                         "backendSelfJoined": boolMetadata(backendSelfJoined),
                         "backendPeerJoined": boolMetadata(backendPeerJoined),
+                    ]
+                )
+            )
+        }
+
+        let localSessionEvidenceStillLive =
+            systemSessionValue.hasPrefix("active(")
+            || mediaState == "connected"
+
+        if phase == "waitingForPeer",
+           isJoined == true,
+           hadConnectedSessionContinuity == true,
+           localSessionEvidenceStillLive,
+           !reconciliationAction.hasPrefix("teardownSelectedSession("),
+           !disconnectingTeardownInFlight,
+           backendChannelStatusValue == "idle",
+           backendSelfJoined == false,
+           backendPeerJoined == false {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.backend_idle_with_live_session_evidence",
+                    scope: .backend,
+                    message: "backend regressed to idle while local session evidence remained live",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "isJoined": String(isJoined),
+                        "systemSession": systemSessionValue,
+                        "mediaState": mediaState,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        "hadConnectedSessionContinuity": boolMetadata(hadConnectedSessionContinuity),
                     ]
                 )
             )

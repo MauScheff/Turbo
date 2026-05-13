@@ -16932,6 +16932,49 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func readyMembershipLossPreservesLiveChannelStateWhenSystemSessionIsActive() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel",
+                remoteUserId: "user-blake"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+
+        let existing = makeChannelState(status: .ready, canTransmit: true)
+        let incoming = makeChannelState(
+            status: .ready,
+            canTransmit: false,
+            selfJoined: false,
+            peerJoined: false,
+            peerDeviceConnected: false
+        )
+
+        let effective = viewModel.effectiveChannelStatePreservingLiveMembership(
+            contactID: contactID,
+            existing: existing,
+            incoming: incoming
+        )
+
+        #expect(effective.membership == .both(peerDeviceConnected: true))
+        #expect(effective.statusKind == ConversationState.ready.rawValue)
+    }
+
+    @MainActor
     @Test func signalingRecoveryPreservesReadyLiveChannelDuringTransientWaitingProjection() {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -17216,6 +17259,90 @@ struct TurboTests {
                 now: Date(timeIntervalSince1970: 110)
             )
         )
+    }
+
+    @Test func mediaRuntimeResetPreservingFastRelayKeepsRelayClientAndPath() {
+        let runtime = MediaRuntimeState()
+        let key = MediaRelayConnectionKey(
+            sessionID: "channel-1",
+            localDeviceID: "local-device",
+            peerDeviceID: "peer-device"
+        )
+        let client = TurboMediaRelayClient(
+            config: TurboMediaRelayClientConfig(
+                host: "relay.example.test",
+                quicPort: 9443,
+                tcpPort: 9444,
+                token: "token"
+            ),
+            sessionId: key.sessionID,
+            localDeviceId: key.localDeviceID,
+            peerDeviceId: key.peerDeviceID,
+            onIncomingAudioPayload: { _ in }
+        )
+
+        guard case .newAttempt(let attempt) = runtime.mediaRelayConnectionStart(for: key) else {
+            Issue.record("expected new media relay connection attempt")
+            return
+        }
+        #expect(runtime.finishMediaRelayConnectionAttempt(attempt, client: client))
+        runtime.updateTransportPathState(.fastRelay)
+
+        runtime.reset(preserveMediaRelay: true)
+
+        #expect(runtime.mediaRelayClient === client)
+        #expect(runtime.transportPathState == .fastRelay)
+
+        runtime.reset(preserveMediaRelay: false)
+
+        #expect(runtime.mediaRelayClient == nil)
+        #expect(runtime.transportPathState == .relay)
+    }
+
+    @Test func mediaRuntimeResetPreservingFastRelayStillClearsDirectQuicState() {
+        let contactID = UUID()
+        let runtime = MediaRuntimeState()
+        _ = runtime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-1",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        _ = runtime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        )
+        let key = MediaRelayConnectionKey(
+            sessionID: "channel-1",
+            localDeviceID: "local-device",
+            peerDeviceID: "peer-device"
+        )
+        let client = TurboMediaRelayClient(
+            config: TurboMediaRelayClientConfig(
+                host: "relay.example.test",
+                quicPort: 9443,
+                tcpPort: 9444,
+                token: "token"
+            ),
+            sessionId: key.sessionID,
+            localDeviceId: key.localDeviceID,
+            peerDeviceId: key.peerDeviceID,
+            onIncomingAudioPayload: { _ in }
+        )
+
+        guard case .newAttempt(let attempt) = runtime.mediaRelayConnectionStart(for: key) else {
+            Issue.record("expected new media relay connection attempt")
+            return
+        }
+        #expect(runtime.finishMediaRelayConnectionAttempt(attempt, client: client))
+        runtime.updateTransportPathState(.fastRelay)
+
+        runtime.reset(preserveMediaRelay: true)
+
+        #expect(runtime.mediaRelayClient === client)
+        #expect(runtime.transportPathState == .fastRelay)
+        #expect(runtime.directQuicUpgrade.attempt(for: contactID) == nil)
     }
 
     @MainActor
@@ -30197,6 +30324,49 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func mediaRelayPeerUnavailableInvariantIsRecorded() {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+
+        viewModel.selectedContactId = contactID
+
+        viewModel.recordMediaRelayPeerUnavailableInvariantIfNeeded(
+            error: DirectQuicProbeError.connectionFailed("media relay peer is unavailable"),
+            contactID: contactID,
+            channelID: "channel-1",
+            peerDeviceID: "peer-device",
+            operation: "audio-payload"
+        )
+
+        #expect(
+            viewModel.diagnostics.invariantViolations.contains {
+                $0.invariantID == "relay.send_without_live_peer"
+                    && $0.metadata["operation"] == "audio-payload"
+                    && $0.metadata["peerDeviceId"] == "peer-device"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func mediaRelayPeerUnavailableInvariantIgnoresOtherRelayErrors() {
+        let viewModel = PTTViewModel()
+
+        viewModel.recordMediaRelayPeerUnavailableInvariantIfNeeded(
+            error: DirectQuicProbeError.connectionFailed("media relay is not connected"),
+            contactID: UUID(),
+            channelID: "channel-1",
+            peerDeviceID: "peer-device",
+            operation: "audio-payload"
+        )
+
+        #expect(
+            !viewModel.diagnostics.invariantViolations.contains {
+                $0.invariantID == "relay.send_without_live_peer"
+            }
+        )
+    }
+
+    @MainActor
     @Test func outgoingAudioSendGateReleasesWakeGraceWhileTalkIsStillActive() async {
         let viewModel = PTTViewModel()
         let contactID = UUID()
@@ -36605,6 +36775,123 @@ struct TurboTests {
         #expect(
             store.latestError?.message
                 == "backend is idle without local session evidence, but selected peer is still connecting"
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsExportIncludesBackendIdleWithLiveSessionEvidenceInvariant() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "waitingForPeer",
+                "selectedPeerPhaseDetail": "waitingForPeer(reason: BeepBeep.SelectedPeerWaitingReason.backendSessionTransition)",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "isTransmitting": "false",
+                "systemSession": "active(contactID: 123, channelUUID: 456)",
+                "mediaState": "connected",
+                "backendChannelStatus": "idle",
+                "backendReadiness": "none",
+                "backendSelfJoined": "false",
+                "backendPeerJoined": "false",
+                "backendPeerDeviceConnected": "false",
+                "hadConnectedSessionContinuity": "true",
+                "selectedPeerStatus": "Connecting..."
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=waitingForPeer")
+
+        #expect(exported.contains("[selected.backend_idle_with_live_session_evidence]"))
+        #expect(
+            store.invariantViolations.contains {
+                $0.invariantID == "selected.backend_idle_with_live_session_evidence"
+            }
+        )
+        #expect(
+            store.latestError?.message
+                == "backend regressed to idle while local session evidence remained live"
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsExportIncludesBackendAbsentWithLiveSessionEvidenceInvariant() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "waitingForPeer",
+                "selectedPeerPhaseDetail": "waitingForPeer(reason: BeepBeep.SelectedPeerWaitingReason.backendSessionTransition)",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "isTransmitting": "false",
+                "systemSession": "active(contactID: 123, channelUUID: 456)",
+                "backendChannelStatus": "ready",
+                "backendReadiness": "ready",
+                "backendSelfJoined": "false",
+                "backendPeerJoined": "false",
+                "backendPeerDeviceConnected": "false",
+                "selectedPeerStatus": "Connecting..."
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=waitingForPeer")
+
+        #expect(exported.contains("[selected.backend_absent_with_live_session_evidence]"))
+        #expect(
+            store.invariantViolations.contains {
+                $0.invariantID == "selected.backend_absent_with_live_session_evidence"
+            }
+        )
+        #expect(
+            store.latestError?.message
+                == "backend dropped durable membership while local/system session still had live evidence"
+        )
+    }
+
+    @MainActor
+    @Test func diagnosticsSuppressesBackendIdleWithLiveSessionEvidenceInvariantWithoutLiveEvidence() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "selected-peer-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "waitingForPeer",
+                "selectedPeerPhaseDetail": "waitingForPeer(reason: BeepBeep.SelectedPeerWaitingReason.backendSessionTransition)",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "isTransmitting": "false",
+                "systemSession": "none",
+                "mediaState": "idle",
+                "backendChannelStatus": "idle",
+                "backendReadiness": "none",
+                "backendSelfJoined": "false",
+                "backendPeerJoined": "false",
+                "backendPeerDeviceConnected": "false",
+                "hadConnectedSessionContinuity": "true",
+                "selectedPeerStatus": "Connecting..."
+            ]
+        )
+
+        let exported = store.exportText(snapshot: "selectedPeerPhase=waitingForPeer")
+
+        #expect(!exported.contains("[selected.backend_idle_with_live_session_evidence]"))
+        #expect(
+            !store.invariantViolations.contains {
+                $0.invariantID == "selected.backend_idle_with_live_session_evidence"
+            }
         )
     }
 

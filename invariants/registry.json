@@ -86,6 +86,20 @@
       "status": "active"
     },
     {
+      "id": "channel.membership_regression_without_authoritative_leave",
+      "scope": "backend",
+      "owner": "backend",
+      "authoritativeSeam": "turbo.service.channels.state",
+      "predicate": "Channel membership regressed from a live projection to idle or absent without an authoritative leave, disconnect, expiry, or repair reason.",
+      "evidenceFields": ["channelId", "deviceId", "previousStatus", "nextStatus", "previousMembership", "nextMembership", "reason"],
+      "detectors": ["turbo.service.channels.state", "contracts/backend_invariant_events_manifest.json"],
+      "regressions": [],
+      "regressionException": "Backend source of truth lives in turbo/main; register the invariant now and add the emitting checker-backed regression there.",
+      "repairPolicy": "manual boundary",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
       "id": "channel.no_membership_projection_while_durable_membership_exists",
       "scope": "backend",
       "owner": "backend",
@@ -406,6 +420,34 @@
       "status": "active"
     },
     {
+      "id": "relay.send_without_live_peer",
+      "scope": "backend",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/PTTViewModel+TransmitAudioSend.swift",
+      "predicate": "A media relay send was attempted after the relay had already reported the peer unavailable.",
+      "evidenceFields": ["contactId", "channelId", "peerDeviceId", "operation", "selectedPeerPhase", "systemSession"],
+      "detectors": ["Turbo/PTTViewModel+TransmitAudioSend.swift", "Turbo/PTTViewModel+DirectQuic.swift", "Turbo/DirectQuicProbeController.swift"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "The client records the contradiction, clears the stale media relay client, and falls back to WebSocket relay until a fresh relay peer becomes available.",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
+      "id": "selected.backend_absent_with_live_session_evidence",
+      "scope": "backend",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/AppDiagnostics.swift",
+      "predicate": "Backend dropped durable channel membership while the selected session still had concrete local or system-session evidence.",
+      "evidenceFields": ["selectedPeerPhase", "pendingAction", "isJoined", "systemSession", "backendChannelStatus", "backendReadiness", "backendSelfJoined", "backendPeerJoined"],
+      "detectors": ["Turbo/AppDiagnostics.swift"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "effectiveChannelStatePreservingLiveMembership preserves the last known live channel state until an authoritative leave, disconnect, or explicit inactive-without-membership snapshot arrives.",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
       "id": "selected.backend_absent_pending_local_action_without_session",
       "scope": "convergence",
       "owner": "app",
@@ -416,6 +458,20 @@
       "regressions": ["TurboTests/TurboTests.swift"],
       "repairPolicy": "app repair",
       "repairAction": "completeAbsentBackendMembershipRecoveryIfLocalSessionEnded clears stale pending join/leave state when backend membership is already absent.",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
+      "id": "selected.backend_idle_with_live_session_evidence",
+      "scope": "backend",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/AppDiagnostics.swift",
+      "predicate": "Backend regressed to idle while the selected session still had concrete live local evidence.",
+      "evidenceFields": ["selectedPeerPhase", "selectedPeerPhaseDetail", "isJoined", "systemSession", "mediaState", "backendChannelStatus", "backendReadiness", "backendSelfJoined", "backendPeerJoined"],
+      "detectors": ["Turbo/AppDiagnostics.swift"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "effectiveChannelStatePreservingLiveMembership preserves the ready live channel state until an authoritative leave or disconnect arrives.",
       "alertPolicy": "diagnostics",
       "status": "active"
     },

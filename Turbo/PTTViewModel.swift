@@ -873,10 +873,11 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             replaceSendAudioChunk: { [weak self] handler in
                 self?.mediaRuntime.replaceSendAudioChunk(with: handler)
             },
-            reset: { [weak self] deactivateAudioSession, preserveDirectQuic in
+            reset: { [weak self] deactivateAudioSession, preserveDirectQuic, preserveMediaRelay in
                 self?.mediaRuntime.reset(
                     deactivateAudioSession: deactivateAudioSession,
-                    preserveDirectQuic: preserveDirectQuic
+                    preserveDirectQuic: preserveDirectQuic,
+                    preserveMediaRelay: preserveMediaRelay
                 )
             }
         )

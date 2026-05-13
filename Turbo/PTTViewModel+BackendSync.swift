@@ -1199,6 +1199,11 @@ extension PTTViewModel {
             incoming.status == "connecting"
             || incoming.status == ConversationState.waitingForPeer.rawValue
             || (
+                incoming.status == ConversationState.ready.rawValue
+                && existingSessionReady
+                && concreteSessionEvidence
+            )
+            || (
                 incoming.status == ConversationState.idle.rawValue
                 && (
                     existing.conversationStatus == .receiving

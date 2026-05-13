@@ -1930,6 +1930,13 @@ extension PTTViewModel {
             )
             return true
         } catch {
+            recordMediaRelayPeerUnavailableInvariantIfNeeded(
+                error: error,
+                contactID: contactID,
+                channelID: channelID,
+                peerDeviceID: peerDeviceID,
+                operation: "receiver-prewarm-request"
+            )
             diagnostics.record(
                 .media,
                 level: .error,
@@ -1982,6 +1989,13 @@ extension PTTViewModel {
             )
             return true
         } catch {
+            recordMediaRelayPeerUnavailableInvariantIfNeeded(
+                error: error,
+                contactID: contactID,
+                channelID: payload.channelId,
+                peerDeviceID: peerDeviceID,
+                operation: "receiver-prewarm-ack"
+            )
             diagnostics.record(
                 .media,
                 level: .error,

@@ -855,7 +855,8 @@ final class MediaRuntimeState {
 
     func reset(
         deactivateAudioSession: Bool = true,
-        preserveDirectQuic: Bool = false
+        preserveDirectQuic: Bool = false,
+        preserveMediaRelay: Bool = false
     ) {
         interactivePrewarmRecoveryTask?.cancel()
         interactivePrewarmRecoveryTask = nil
@@ -866,6 +867,8 @@ final class MediaRuntimeState {
             directQuicAutoProbeTask = nil
             directQuicProbeController?.cancel(reason: "media-runtime-reset")
             directQuicProbeController = nil
+        }
+        if !preserveMediaRelay {
             mediaRelayConnectionAttempt?.finish(nil)
             mediaRelayConnectionAttempt = nil
             mediaRelayConnectionKey = nil
@@ -878,8 +881,14 @@ final class MediaRuntimeState {
         session = nil
         contactID = nil
         connectionState = .idle
-        if !preserveDirectQuic {
+        if preserveDirectQuic {
+            // Keep the active direct path surfaced through a media-session handoff.
+        } else if preserveMediaRelay {
+            transportPathState = mediaRelayClient == nil ? .relay : .fastRelay
+        } else {
             transportPathState = .relay
+        }
+        if !preserveDirectQuic {
             directQuicUpgrade.reset()
             outboundReceiverPrewarmRequestIDByContactID = [:]
             handledReceiverPrewarmRequestIDs = []
@@ -1634,5 +1643,5 @@ struct MediaServices {
     let markStartupSucceeded: () -> Void
     let markStartupFailed: (MediaSessionStartupContext, String) -> Void
     let replaceSendAudioChunk: ((@Sendable (String) async throws -> Void)?) -> Void
-    let reset: (Bool, Bool) -> Void
+    let reset: (Bool, Bool, Bool) -> Void
 }

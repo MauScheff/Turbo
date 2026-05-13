@@ -847,7 +847,7 @@ extension PTTViewModel {
             recentPeerDeviceEvidenceByContactID.removeValue(forKey: contactID)
             diagnostics.record(
                 .state,
-                message: "Tearing down invalid local session after system mismatch",
+                message: "Tearing down invalid local session after selected-session reconciliation",
                 metadata: ["contactId": contactID.uuidString]
             )
             captureDiagnosticsState("selected-peer-effect:teardown-local")

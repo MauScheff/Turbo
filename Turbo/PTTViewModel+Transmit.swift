@@ -2136,6 +2136,9 @@ extension PTTViewModel {
         } else if shouldClosePrewarmedMediaBeforeSystemTransmit(for: request.contactID) {
             let deactivateAudioSession =
                 shouldDeactivatePrewarmedAudioSessionBeforeSystemTransmit(for: request.contactID)
+            let preserveDirectQuic = shouldUseDirectQuicTransport(for: request.contactID)
+            let preserveMediaRelay =
+                !preserveDirectQuic && shouldPreserveMediaRelayDuringMediaClose(for: request.contactID)
             diagnostics.record(
                 .media,
                 message: "Closing app-managed media session before system transmit handoff",
@@ -2144,13 +2147,15 @@ extension PTTViewModel {
                     "channelUUID": channelUUID.uuidString,
                     "mediaState": String(describing: mediaConnectionState),
                     "deactivateAudioSession": String(deactivateAudioSession),
-                    "preserveDirectQuic": String(shouldUseDirectQuicTransport(for: request.contactID)),
+                    "preserveDirectQuic": String(preserveDirectQuic),
+                    "preserveMediaRelay": String(preserveMediaRelay),
                     "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
                 ]
             )
             closeMediaSession(
                 deactivateAudioSession: deactivateAudioSession,
-                preserveDirectQuic: shouldUseDirectQuicTransport(for: request.contactID)
+                preserveDirectQuic: preserveDirectQuic,
+                preserveMediaRelay: preserveMediaRelay
             )
             recordTransmitStartupTiming(
                 stage: "prewarmed-media-closed",
