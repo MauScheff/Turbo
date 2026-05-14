@@ -116,6 +116,23 @@ struct BackendSyncState: Equatable {
                 continue
             }
 
+            let existingChannelStateLooksActive =
+                existingChannelState.membership.hasLocalMembership
+                || existingChannelState.membership.hasPeerMembership
+                || existingChannelState.membership.peerDeviceConnected
+                || {
+                    switch existingChannelState.conversationStatus {
+                    case .waitingForPeer, .ready, .transmitting, .receiving:
+                        return true
+                    case .idle, .requested, .incomingRequest, nil:
+                        return false
+                    }
+                }()
+
+            guard !existingChannelStateLooksActive else {
+                continue
+            }
+
             channelStates[contactID] = existingChannelState.settingMembership(.absent)
             channelReadiness[contactID] = nil
         }

@@ -10,6 +10,9 @@ not a claim that software can literally be 100% reliable across Apple
 PushToTalk, APNs, carrier networks, radios, batteries, permissions, and user
 behavior.
 
+For the practical day-to-day engineering guide, use
+[`RELIABILITY_GUIDELINES.md`](/Users/mau/Development/Turbo/RELIABILITY_GUIDELINES.md).
+
 For the step-by-step execution roadmap, use
 [`RELIABILITY_PLAN.md`](/Users/mau/Development/Turbo/RELIABILITY_PLAN.md).
 

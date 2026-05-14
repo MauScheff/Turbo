@@ -217,6 +217,11 @@ enum PendingSessionAction: Equatable {
             return false
         }
     }
+
+    func isExplicitLeaveInFlight(for contactID: UUID) -> Bool {
+        guard case .leave(.explicit(let pendingContactID)) = self else { return false }
+        return pendingContactID == nil || pendingContactID == contactID
+    }
 }
 
 struct LocalJoinAttempt: Equatable {
@@ -2134,6 +2139,10 @@ enum ConversationStateMachine {
             return .none
         }
 
+        if context.backendSignalingJoinRecoveryActive && localSessionActive && !explicitLeaveRequested {
+            return .none
+        }
+
         if context.backendMembershipIsStaleWithoutLocalSessionEvidence {
             return .clearStaleBackendMembership(contactID: context.contactID)
         }
@@ -2407,6 +2416,10 @@ private extension ConversationDerivationContext {
         if sessionTransmitReady && canTransmit {
             guard directMediaPathActive || localRelayTransportReady else {
                 return .waiting(reason: .localTransportWarmup, statusMessage: "Connecting...")
+            }
+
+            if hadConnectedSessionContinuity && authoritativeBackendReady {
+                return .ready
             }
 
             if directMediaPathActive {

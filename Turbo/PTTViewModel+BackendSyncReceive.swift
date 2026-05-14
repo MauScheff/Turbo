@@ -1,0 +1,297 @@
+//
+//  PTTViewModel+BackendSyncReceive.swift
+//  Turbo
+//
+//  Created by Codex on 13.05.2026.
+//
+
+import Foundation
+import UIKit
+
+private enum PendingPlaybackDrainDecision {
+    case notPending
+    case deferTimeout(elapsedNanoseconds: UInt64)
+    case exceeded(elapsedNanoseconds: UInt64)
+}
+
+extension PTTViewModel {
+    var encryptedAudioRecoveryMaxBufferedPayloads: Int { 16 }
+    var encryptedAudioRecoveryAttempts: Int { 6 }
+    var encryptedAudioRecoveryRetryNanoseconds: UInt64 { 250_000_000 }
+
+    private func remoteAudioTimeoutNanoseconds(for phase: RemoteReceiveTimeoutPhase) -> UInt64 {
+        switch phase {
+        case .awaitingFirstAudioChunk:
+            return remoteAudioInitialChunkTimeoutNanoseconds
+        case .drainingAudio:
+            return remoteAudioSilenceTimeoutNanoseconds
+        }
+    }
+
+    func runReceiveExecutionEffect(_ effect: ReceiveExecutionEffect) {
+        switch effect {
+        case .scheduleRemoteSilenceTimeout(let contactID, let phase, let generation):
+            let task = Task { [weak self] in
+                try? await Task.sleep(
+                    nanoseconds: self?.remoteAudioTimeoutNanoseconds(for: phase) ?? 0
+                )
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    guard
+                        let activityState = self.receiveExecutionCoordinator
+                            .state
+                            .remoteActivityByContactID[contactID],
+                        activityState.timeoutPhase == phase,
+                        activityState.activityGeneration == generation
+                    else {
+                        return
+                    }
+                    self.handleRemoteAudioSilenceTimeout(for: contactID, phase: phase)
+                }
+            }
+            receiveExecutionRuntime.replaceRemoteAudioSilenceTask(for: contactID, with: task)
+
+        case .cancelRemoteSilenceTimeout(let contactID):
+            receiveExecutionRuntime.replaceRemoteAudioSilenceTask(for: contactID, with: nil)
+
+        case .cancelAllRemoteSilenceTimeouts:
+            receiveExecutionRuntime.cancelAllRemoteAudioSilenceTasks()
+        }
+    }
+
+    func handleRemoteAudioSilenceTimeout(
+        for contactID: UUID,
+        phase: RemoteReceiveTimeoutPhase? = nil
+    ) {
+        let resolvedPhase = phase
+            ?? receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.timeoutPhase
+            ?? .drainingAudio
+        switch pendingPlaybackDrainDecision(for: contactID, phase: resolvedPhase) {
+        case .deferTimeout(let elapsedNanoseconds):
+            diagnostics.record(
+                .media,
+                message: "Deferred remote audio silence timeout while playback is still draining",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "phase": resolvedPhase.rawValue,
+                    "elapsedMilliseconds": String(elapsedNanoseconds / 1_000_000),
+                    "maxMilliseconds": String(remoteAudioPendingPlaybackDrainMaxNanoseconds / 1_000_000),
+                ]
+            )
+            runReceiveExecutionEffect(
+                .scheduleRemoteSilenceTimeout(
+                    contactID: contactID,
+                    phase: resolvedPhase,
+                    generation: receiveExecutionCoordinator
+                        .state
+                        .remoteActivityByContactID[contactID]?
+                        .activityGeneration ?? 0
+                )
+            )
+            return
+        case .exceeded(let elapsedNanoseconds):
+            diagnostics.recordInvariantViolation(
+                invariantID: "selected.receiving_stale_pending_playback_drain",
+                scope: .local,
+                message: "selectedPeerPhase=receiving while pending playback drain exceeded maximum duration",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "phase": resolvedPhase.rawValue,
+                    "elapsedMilliseconds": String(elapsedNanoseconds / 1_000_000),
+                    "maxMilliseconds": String(remoteAudioPendingPlaybackDrainMaxNanoseconds / 1_000_000),
+                    "backendChannelStatus": selectedChannelSnapshot(for: contactID)?.status?.rawValue ?? "none",
+                    "backendReadiness": selectedChannelSnapshot(for: contactID)?.readinessStatus?.kind ?? "none",
+                    "selectedPeerPhase": String(describing: selectedPeerState(for: contactID).phase),
+                ]
+            )
+        case .notPending:
+            break
+        }
+        if shouldDeferRemoteAudioSilenceTimeout(for: contactID, phase: resolvedPhase) {
+            diagnostics.record(
+                .media,
+                message: "Deferred remote audio silence timeout while peer transmit is authoritative",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "phase": resolvedPhase.rawValue,
+                    "backendChannelStatus": selectedChannelSnapshot(for: contactID)?.status?.rawValue ?? "none",
+                    "remoteActivityActive": String(remoteTransmittingContactIDs.contains(contactID)),
+                ]
+            )
+            runReceiveExecutionEffect(
+                .scheduleRemoteSilenceTimeout(
+                    contactID: contactID,
+                    phase: resolvedPhase,
+                    generation: receiveExecutionCoordinator
+                        .state
+                        .remoteActivityByContactID[contactID]?
+                        .activityGeneration ?? 0
+                )
+            )
+            return
+        }
+        receiveExecutionRuntime.replaceRemoteAudioSilenceTask(for: contactID, with: nil)
+        receiveExecutionRuntime.clearPendingPlaybackDrainDeferral(for: contactID)
+        receiveExecutionCoordinator.send(.silenceTimeoutElapsed(contactID: contactID))
+        diagnostics.record(
+            .media,
+            message: resolvedPhase == .awaitingFirstAudioChunk
+                ? "Initial remote audio chunk timed out"
+                : "Remote audio activity timed out",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "phase": resolvedPhase.rawValue,
+            ]
+        )
+
+        switch pttWakeRuntime.incomingWakeActivationState(for: contactID) {
+        case .systemActivated, .appManagedFallback:
+            pttWakeRuntime.clear(for: contactID)
+            diagnostics.record(
+                .pushToTalk,
+                message: "Cleared completed wake state after remote audio activity ended",
+                metadata: ["contactId": contactID.uuidString]
+            )
+        case .signalBuffered,
+             .awaitingSystemActivation,
+             .systemActivationTimedOutWaitingForForeground,
+             .systemActivationInterruptedByTransmitEnd,
+             .none:
+            break
+        }
+
+        finalizeReceiveMediaSessionIfNeeded(
+            for: contactID,
+            closeMessage: "Closed receive media session after remote audio silence timeout",
+            deferPrewarmMessage: "Deferred interactive audio prewarm after remote audio silence timeout"
+        )
+        clearSystemRemoteParticipantIfNeededAfterRemoteAudioEnded(for: contactID)
+
+        if selectedContactId == contactID {
+            updateStatusForSelectedContact()
+            captureDiagnosticsState("remote-audio:cleared")
+        }
+    }
+
+    private func pendingPlaybackDrainDecision(
+        for contactID: UUID,
+        phase: RemoteReceiveTimeoutPhase
+    ) -> PendingPlaybackDrainDecision {
+        guard phase == .drainingAudio else { return .notPending }
+        guard mediaSessionContactID == contactID else {
+            receiveExecutionRuntime.clearPendingPlaybackDrainDeferral(for: contactID)
+            return .notPending
+        }
+        guard mediaServices.session()?.hasPendingPlayback() == true else {
+            receiveExecutionRuntime.clearPendingPlaybackDrainDeferral(for: contactID)
+            return .notPending
+        }
+
+        let elapsedNanoseconds = receiveExecutionRuntime
+            .pendingPlaybackDrainDeferralElapsedNanoseconds(for: contactID)
+        guard elapsedNanoseconds < remoteAudioPendingPlaybackDrainMaxNanoseconds else {
+            receiveExecutionRuntime.clearPendingPlaybackDrainDeferral(for: contactID)
+            return .exceeded(elapsedNanoseconds: elapsedNanoseconds)
+        }
+        return .deferTimeout(elapsedNanoseconds: elapsedNanoseconds)
+    }
+
+    private func shouldDeferRemoteAudioSilenceTimeout(
+        for contactID: UUID,
+        phase: RemoteReceiveTimeoutPhase
+    ) -> Bool {
+        guard phase == .drainingAudio else { return false }
+        guard remoteTransmittingContactIDs.contains(contactID) else { return false }
+        guard let channelSnapshot = selectedChannelSnapshot(for: contactID) else { return false }
+        return channelSnapshot.status == .receiving
+            || channelSnapshot.readinessStatus?.isPeerTransmitting == true
+    }
+
+    func shouldResumeLocalInteractivePrewarmForRemoteReady(
+        contactID: UUID,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard applicationState == .active else { return false }
+        guard selectedContactId == contactID else { return false }
+        guard isJoined, activeChannelId == contactID else { return false }
+        guard systemSessionMatches(contactID) else { return false }
+        guard !isTransmitting else { return false }
+        guard !transmitCoordinator.state.isPressingTalk else { return false }
+        guard !isPTTAudioSessionActive else { return false }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
+        guard !remoteTransmittingContactIDs.contains(contactID) else { return false }
+
+        switch localMediaWarmupState(for: contactID) {
+        case .cold, .failed:
+            return true
+        case .prewarming, .ready:
+            return false
+        }
+    }
+
+    func resumeLocalInteractivePrewarmForRemoteReady(
+        contactID: UUID,
+        applicationState: UIApplication.State
+    ) async {
+        guard shouldResumeLocalInteractivePrewarmForRemoteReady(
+            contactID: contactID,
+            applicationState: applicationState
+        ) else { return }
+
+        diagnostics.record(
+            .media,
+            message: "Resuming local interactive audio prewarm after peer became ready",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "applicationState": String(describing: applicationState),
+            ]
+        )
+        await prewarmLocalMediaIfNeeded(for: contactID, applicationState: applicationState)
+        updateStatusForSelectedContact()
+    }
+
+    func shouldReleaseLocalInteractivePrewarmForRemoteBackgrounding(
+        contactID: UUID,
+        readinessSignalReason: ReceiverAudioReadinessReason,
+        applicationState: UIApplication.State
+    ) -> Bool {
+        guard readinessSignalReason.isBackgroundMediaClosure else { return false }
+        guard applicationState == .active else { return false }
+        guard mediaSessionContactID == contactID else { return false }
+        guard systemSessionMatches(contactID) else { return false }
+        guard isJoined, activeChannelId == contactID else { return false }
+        guard !isTransmitting else { return false }
+        guard !transmitCoordinator.state.isPressingTalk else { return false }
+        guard !isPTTAudioSessionActive else { return false }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
+        guard !remoteTransmittingContactIDs.contains(contactID) else { return false }
+        return true
+    }
+
+    func releaseLocalInteractivePrewarmForRemoteBackgrounding(
+        contactID: UUID,
+        readinessSignalReason: ReceiverAudioReadinessReason,
+        applicationState: UIApplication.State
+    ) {
+        guard shouldReleaseLocalInteractivePrewarmForRemoteBackgrounding(
+            contactID: contactID,
+            readinessSignalReason: readinessSignalReason,
+            applicationState: applicationState
+        ) else { return }
+
+        diagnostics.record(
+            .media,
+            message: "Released local interactive audio prewarm after peer backgrounded",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "applicationState": String(describing: applicationState),
+                "reason": readinessSignalReason.wireValue,
+            ]
+        )
+        closeMediaSession(
+            preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
+        )
+        updateStatusForSelectedContact()
+    }
+}

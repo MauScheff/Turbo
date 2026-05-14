@@ -121,6 +121,7 @@ Important operational commands:
 - `just synthetic-conversation-probe`
 - `just slo-dashboard <synthetic_conversation_json>`
 - `just protocol-model-checks`
+- `just swift-test-suite`
 - `just swift-test-target <name>`
 - `just reliability-gate-regressions`
 - `just reliability-gate-smoke`
@@ -132,8 +133,12 @@ Important operational commands:
 
 For deploys, the distinction is:
 
-- for the normal production release path, use `just deploy-verified`; it deploys,
-  then runs the hosted synthetic conversation canary and SLO dashboard
+- for the normal day-to-day verified deploy path, use
+  `just deploy-staging-verified`; today it still targets the production-hosted
+  base URL, but it is intentionally named for the future staging environment
+- for the strict production release path, use `just deploy-production`; it runs
+  `just production-preflight`, then deploys, then runs the hosted synthetic
+  conversation canary and SLO dashboard
 - if a deploy already happened and you only need live verification, use
   `just postdeploy-check`
 - if no interactive `ucm` process is already occupying the local codebase and
@@ -144,13 +149,29 @@ For deploys, the distinction is:
 
 In either case, if you changed backend behavior in the local Unison codebase, that change is not live on `https://beepbeep.to` until `turbo.deploy` has actually run.
 
-`just deploy-verified` keeps raw deployment and live verification separate but
-ties them into one human command. A failure after the deploy step means the
-deploy command returned successfully, but the live production surface did not
-meet the hosted conversation SLOs. Inspect the timestamped
+`just deploy-staging-verified` keeps raw deployment and live verification
+separate but ties them into one human command. It currently points at the same
+hosted environment as production until a dedicated staging environment exists.
+The command runs `just swift-test-suite`, then deploys, then runs the hosted
+verification canary.
+
+`just production-preflight` is the expensive local proof gate before a
+production release. It runs:
+
+- `just swift-test-suite`
+- `just reliability-gate-regressions`
+- `just reliability-gate-full`
+
+`just deploy-production` runs that preflight, then deploys, then verifies the
+hosted surface. A failure after the deploy step means the deploy command
+returned successfully, but the live production surface did not meet the hosted
+conversation SLOs. Inspect the timestamped
 `postdeploy-check.json`, `synthetic-conversation-probe.json`, and
 `slo-dashboard.json` artifacts printed by the command before deciding whether to
 roll forward, roll back, or convert the failure into a regression.
+
+`just deploy-verified` remains as a compatibility alias for
+`just deploy-staging-verified`.
 
 For APNs credentials, keep the `.p8` file outside the repo and expose either `TURBO_APNS_PRIVATE_KEY_PATH` or `TURBO_APNS_PRIVATE_KEY` in the local deploy environment. `turbo.deploy` resolves the path locally when present and stores the PEM text in cloud config as `TURBO_APNS_PRIVATE_KEY`, so deployed backend code should never depend on filesystem access.
 
@@ -190,6 +211,8 @@ For distributed app/backend flows that do not require a physical device, prefer 
 
 The simulator scenario commands are backed by `scripts/run_simulator_scenarios.py`, which owns the temporary runtime config, serializes scenario runs with a repo-local lock, shares the `/tmp/turbo-simulator-test.lock` simulator lane with targeted Swift tests, and retries transient XCTest bootstrap failures. Full catalog runs also allow one catalog-level retry per scenario to absorb hosted timing noise; focused single-scenario runs stay strict. Prefer the `just` recipes over direct `xcodebuild` for the scenario loop.
 
+`just swift-test-suite` is the supported full `TurboTests` bundle loop. It runs the app-side Swift test bundle with the same serialized simulator lane used by targeted tests and scenario runs, writes an `.xcresult`, and fails if the result bundle reports zero executed tests.
+
 `just swift-test-target <name>` is the supported targeted Swift Testing loop. It resolves the Swift Testing suite, invokes `xcodebuild` with the exact selector, and fails if the requested test name never appears in the output, which prevents the false-green zero-test cases that can happen with direct `-only-testing` invocations against Swift Testing tests in this repo.
 
 If you must use raw `xcodebuild -only-testing`, Swift Testing selectors need the suite type and trailing function parentheses, for example `-only-testing:TurboTests/TurboTests/audioOutputPreferenceCyclesBetweenSpeakerAndPhone()`. The same selector without `()` can build and report success while selecting zero Swift Testing tests. See [`TESTING.md`](/Users/mau/Development/Turbo/TESTING.md) for the exact selector shape and proof rules.
@@ -207,7 +230,9 @@ Use this command map to keep the reliability workflow small:
 | --- | --- | --- | --- |
 | Local regression gate | `just reliability-gate-regressions` | Primary | Proving focused code changes before deploy or before deeper scenario work. |
 | Hosted smoke gate | `just reliability-gate-smoke` | Primary | Proving simulator-backed hosted control-plane behavior before a risky release. |
-| Verified deploy | `just deploy-verified` | Primary | Normal production release path. Deploys, then proves the live hosted canary and SLOs. |
+| Staging-grade verified deploy | `just deploy-staging-verified` | Primary | Day-to-day verified deploy path. Today it still targets the hosted production base URL. |
+| Production preflight | `just production-preflight` | Primary | Run the expensive local proof gate before a production deploy. |
+| Production deploy | `just deploy-production` | Primary | Run the strict preflight, deploy, then prove the live hosted canary and SLOs. |
 | Postdeploy verification | `just postdeploy-check` | Primary | A deploy already happened, or production feels flaky and needs a fresh canary. |
 | Reliability intake | `just reliability-intake`, `just reliability-intake-shake` | Primary | Starting from a physical-device, debug, TestFlight, production-like, or shake-to-report issue. Writes human/JSON diagnostics and a replay draft when possible. |
 | Lower-level diagnostics merge | `just diagnostics-merge-pair` or `scripts/merged_diagnostics.py --json` | Building block | Reading merged diagnostics directly when you do not need the full intake artifact. |

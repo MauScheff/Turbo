@@ -138,23 +138,39 @@ Physical-device evidence is valuable. It should become an automated proof whenev
 | Local full scenario gate | `just reliability-gate-local` |
 | Protocol model checks | `just protocol-model-checks` |
 | Verify an existing deploy | `just postdeploy-check` |
-| Deploy and verify | `just deploy-verified` |
+| Staging-grade deploy and verify | `just deploy-staging-verified` |
+| Production preflight | `just production-preflight` |
+| Production deploy and verify | `just deploy-production` |
 
 ## Deploy And Hosted Verification
 
-Use one primary release path:
+Use these release paths:
 
 ```bash
-just deploy-verified
+just deploy-staging-verified
+just deploy-production
 ```
 
-That command runs the raw backend deploy, then immediately runs the hosted
-synthetic conversation canary and SLO dashboard against the live backend. A
-failure after deploy means the deploy command returned, but the live
+`just deploy-staging-verified` is the normal day-to-day verified deploy path.
+Today it still points at `https://beepbeep.to`, but it is intentionally named
+for the future staging environment. It runs `just swift-test-suite`, performs
+the deploy, then immediately runs the hosted synthetic conversation canary and
+SLO dashboard against the target base URL.
+
+`just production-preflight` is the strict local proof gate. It runs the full
+Swift test bundle, the focused regression gate, and the full hosted simulator
+scenario catalog before any production deploy is attempted.
+
+`just deploy-production` runs `just production-preflight`, then performs the raw
+deploy, then runs the hosted postdeploy canary and SLO verification. A failure
+after the deploy step means the deploy command returned, but the live
 conversation path did not meet the product-facing SLOs. Inspect the printed
 `postdeploy-check.json`, `synthetic-conversation-probe.json`, and
 `slo-dashboard.json` artifact paths before deciding whether to roll forward,
 roll back, or turn the failure into a regression.
+
+`just deploy-verified` remains as a compatibility alias for
+`just deploy-staging-verified`.
 
 If the deploy already happened and you only need to verify the live hosted
 surface, run:
@@ -204,6 +220,8 @@ Read only what the task needs:
 - [MIGRATIONS.md](/Users/mau/Development/Turbo/MIGRATIONS.md): Unison Cloud storage schema changes
 - [INVARIANTS.md](/Users/mau/Development/Turbo/INVARIANTS.md): invariant naming, placement, diagnostics, and regressions
 - [SELF_HEALING.md](/Users/mau/Development/Turbo/SELF_HEALING.md): bounded repair for recoverable invalid states
+- [RELIABILITY_GUIDELINES.md](/Users/mau/Development/Turbo/RELIABILITY_GUIDELINES.md): practical day-to-day reliability design, proof, and tool-selection guide
+- [RELIABILITY_CHECKLIST.md](/Users/mau/Development/Turbo/RELIABILITY_CHECKLIST.md): design, debugging, proof, and release checklists tied to the guidelines
 - [TLA_PLUS.md](/Users/mau/Development/Turbo/TLA_PLUS.md): protocol model checking
 - [SIMULATOR_FUZZING.md](/Users/mau/Development/Turbo/SIMULATOR_FUZZING.md): seeded distributed scenario fuzzing
 - [PRODUCTION_TELEMETRY.md](/Users/mau/Development/Turbo/PRODUCTION_TELEMETRY.md): telemetry setup, alerts, and shake reports
@@ -218,7 +236,9 @@ Backend entrypoints:
 
 - `just serve-local-http`: local HTTP route checks
 - `just serve-local`: local websocket-capable backend for simulator scenarios
-- `just deploy-verified`: normal deploy plus hosted verification
+- `just deploy-staging-verified`: day-to-day verified deploy path
+- `just production-preflight`: strict local proof gate before production
+- `just deploy-production`: strict production deploy plus hosted verification
 - `just postdeploy-check`: hosted verification after a deploy
 
 Set `TurboBackendBaseURL` in [Turbo/Info.plist](/Users/mau/Development/Turbo/Turbo/Info.plist) to the backend you are exercising:

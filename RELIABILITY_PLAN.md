@@ -6,6 +6,11 @@ This is the execution plan for making Turbo reliable by design.
 defines the north star. This document turns that goal into a staged roadmap
 that can be tackled step by step.
 
+For the practical working rules and tool-selection guidance, use
+[`RELIABILITY_GUIDELINES.md`](/Users/mau/Development/Turbo/RELIABILITY_GUIDELINES.md).
+For recurring design/debug/release review, use
+[`RELIABILITY_CHECKLIST.md`](/Users/mau/Development/Turbo/RELIABILITY_CHECKLIST.md).
+
 The target structure is:
 
 > Product behavior is represented by explicit ADTs and reducer transitions;

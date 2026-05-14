@@ -385,6 +385,8 @@ extension PTTViewModel {
 
     private func performReconciledTeardown(for contactID: UUID) {
         let backendChannelID = contacts.first { $0.id == contactID }?.backendChannelId
+        let shouldPropagateBackendLeave =
+            sessionCoordinator.pendingAction.isExplicitLeaveInFlight(for: contactID)
         scheduleDisconnectRecovery(
             contactID: contactID,
             channelUUID: pttCoordinator.state.systemChannelUUID ?? channelUUID(for: contactID),
@@ -404,7 +406,8 @@ extension PTTViewModel {
 
         if usesLocalHTTPBackend {
             Task {
-                if let contact = contacts.first(where: { $0.id == contactID }),
+                if shouldPropagateBackendLeave,
+                   let contact = contacts.first(where: { $0.id == contactID }),
                    let backendChannelId = contact.backendChannelId {
                     let request = BackendLeaveRequest(contactID: contact.id, backendChannelID: backendChannelId)
                     await ingestBackendCommandEvent(
@@ -753,7 +756,8 @@ extension PTTViewModel {
         guard backendServices != nil else { return true }
         guard let channelSnapshot = selectedChannelSnapshot(for: contactID) else { return false }
         guard channelSnapshot.membership.hasPeerMembership else { return false }
-        return channelSnapshot.requestRelationship == .none
+        guard channelSnapshot.requestRelationship == .none else { return false }
+        return peerIsRoutableForReceiverAudioReadiness(for: contactID)
     }
 
     func refreshStaleOutgoingRequestBeforeConnectIfNeeded(contactID: UUID) async {
@@ -853,31 +857,40 @@ extension PTTViewModel {
             captureDiagnosticsState("selected-peer-effect:teardown-local")
             performReconciledTeardown(for: contactID)
         case .clearStaleBackendMembership(let contactID):
-            guard selectedContactId == contactID,
-                  let contact = contacts.first(where: { $0.id == contactID }),
-                  let backendChannelId = contact.backendChannelId else { return }
-            sessionCoordinator.markReconciledTeardown(contactID: contactID)
+            guard selectedContactId == contactID else { return }
+            let backendChannelId = contacts.first(where: { $0.id == contactID })?.backendChannelId ?? "none"
             backendRuntime.clearBackendJoinSettling(for: contactID)
             recentOutgoingJoinAcceptedTokensByContactID.removeValue(forKey: contactID)
             recentOutgoingRequestEvidenceByContactID.removeValue(forKey: contactID)
             recentPeerDeviceEvidenceByContactID.removeValue(forKey: contactID)
+            sessionCoordinator.clearPendingJoin(for: contactID)
+            sessionCoordinator.clearLeaveAction(for: contactID)
+            replaceDisconnectRecoveryTask(with: nil)
             diagnostics.record(
                 .state,
-                message: "Clearing stale backend membership without local session evidence",
+                message: "Cleared local stale backend membership projection without propagating backend leave",
                 metadata: [
                     "contactId": contactID.uuidString,
                     "channelId": backendChannelId,
                 ]
             )
-            captureDiagnosticsState("selected-peer-effect:clear-stale-backend-membership")
-            let request = BackendLeaveRequest(contactID: contactID, backendChannelID: backendChannelId)
-            await ingestBackendCommandEvent(
-                .leaveRequested(request),
-                contactID: contactID,
-                channelID: backendChannelId
-            )
-            sessionCoordinator.clearLeaveAction(for: contactID)
+            backendSyncCoordinator.send(.channelStateCleared(contactID: contactID))
+            controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
             updateStatusForSelectedContact()
+            if sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
+                diagnostics.record(
+                    .state,
+                    message: "Suppressed reconciled teardown after clearing stale backend membership",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "pendingAction": String(describing: sessionCoordinator.pendingAction),
+                    ]
+                )
+                sessionCoordinator.clearLeaveAction(for: contactID)
+                replaceDisconnectRecoveryTask(with: nil)
+                updateStatusForSelectedContact()
+            }
+            captureDiagnosticsState("selected-peer-effect:clear-stale-backend-membership")
         }
     }
 
@@ -899,7 +912,7 @@ extension PTTViewModel {
             closeMediaSession()
             let shouldPropagateBackendLeave =
                 (autoRejoinContactID != nil && autoRejoinContactID != contactID)
-                || (contactID.map { sessionCoordinator.pendingAction.isLeaveInFlight(for: $0) } ?? false)
+                || (contactID.map { sessionCoordinator.pendingAction.isExplicitLeaveInFlight(for: $0) } ?? false)
 
             if shouldPropagateBackendLeave,
                let contactID,

@@ -1,0 +1,323 @@
+type turbo.domain.ActiveCallParticipantPresenceEvidence
+  = FreshChannelPresence
+  | RetainedChannelPresenceWithConnectedSession
+
+turbo.domain.activeCallParticipantLeaseDeviceId :
+  turbo.domain.ActiveCallParticipantLease -> DeviceId
+turbo.domain.activeCallParticipantLeaseDeviceId = cases
+  ActiveCallParticipantLease _ _ deviceId _ _ _ -> deviceId
+
+turbo.domain.activeCallParticipantLeaseLastSeenAt :
+  turbo.domain.ActiveCallParticipantLease -> Instant
+turbo.domain.activeCallParticipantLeaseLastSeenAt = cases
+  ActiveCallParticipantLease _ _ _ _ _ lastSeenAt -> lastSeenAt
+
+turbo.domain.activeCallParticipantPresenceEvidenceFromFacts :
+  Boolean
+  -> Boolean
+  -> Boolean
+  -> Optional turbo.domain.ActiveCallParticipantPresenceEvidence
+turbo.domain.activeCallParticipantPresenceEvidenceFromFacts
+  matchesChannelPresence
+  freshChannelPresence
+  connectedSession =
+    if not matchesChannelPresence then None
+    else if freshChannelPresence then Some FreshChannelPresence
+    else if connectedSession then Some RetainedChannelPresenceWithConnectedSession
+    else None
+
+test> turbo.domain.activeCallParticipantPresenceEvidenceFromFacts.tests.examples =
+  test.verify do
+    ensureEqual
+      (Some FreshChannelPresence)
+      (turbo.domain.activeCallParticipantPresenceEvidenceFromFacts true true false)
+    ensureEqual
+      (Some RetainedChannelPresenceWithConnectedSession)
+      (turbo.domain.activeCallParticipantPresenceEvidenceFromFacts true false true)
+    ensureEqual
+      None
+      (turbo.domain.activeCallParticipantPresenceEvidenceFromFacts true false false)
+    ensureEqual
+      None
+      (turbo.domain.activeCallParticipantPresenceEvidenceFromFacts false true true)
+
+turbo.domain.activeCallParticipantLeaseFromFacts :
+  Boolean
+  -> Optional turbo.domain.ActiveCallParticipantPresenceEvidence
+  -> Boolean
+  -> Boolean
+turbo.domain.activeCallParticipantLeaseFromFacts
+  durableMembership
+  presenceEvidence
+  connectedSession =
+    use Optional isSome
+    durableMembership && connectedSession && isSome presenceEvidence
+
+test> turbo.domain.activeCallParticipantLeaseFromFacts.tests.examples =
+  test.verify do
+    ensure
+      (turbo.domain.activeCallParticipantLeaseFromFacts
+        true
+        (Some FreshChannelPresence)
+        true)
+    ensure
+      (turbo.domain.activeCallParticipantLeaseFromFacts
+        true
+        (Some RetainedChannelPresenceWithConnectedSession)
+        true)
+    ensureEqual
+      false
+      (turbo.domain.activeCallParticipantLeaseFromFacts
+        false
+        (Some FreshChannelPresence)
+        true)
+    ensureEqual
+      false
+      (turbo.domain.activeCallParticipantLeaseFromFacts
+        true
+        None
+        true)
+    ensureEqual
+      false
+      (turbo.domain.activeCallParticipantLeaseFromFacts
+        true
+        (Some FreshChannelPresence)
+        false)
+
+turbo.store.activeCallLeases.getForDevice :
+  Database
+  -> ChannelId
+  -> UserId
+  -> DeviceId
+  -> '{Exception, Remote, Random} Optional ActiveCallParticipantLease
+turbo.store.activeCallLeases.getForDevice db channelId userId deviceId =
+  do
+    use Text ==
+    durableMembership = turbo.store.memberships.exists db channelId userId ()
+    presenceOpt = turbo.store.presence.get db deviceId ()
+    sessionOpt = turbo.store.sessions.get db deviceId ()
+    connectedSessionEvidence =
+      turbo.store.presence.internal.hasConnectedSessionEvidence db deviceId ()
+    now = now!
+    match (presenceOpt, sessionOpt) with
+      (Some presence, Some session) ->
+        presenceMatches =
+          turbo.store.presence.internal.matchesDeviceChannelPresence
+            userId
+            deviceId
+            channelId
+            presence
+        presenceEvidence =
+          turbo.domain.activeCallParticipantPresenceEvidenceFromFacts
+            presenceMatches
+            (turbo.store.presence.internal.isFresh now presence)
+            connectedSessionEvidence
+        sessionMatches =
+          match session with
+            DeviceSession sessionId sessionDeviceId sessionUserId _ connectedAt lastSeenAt ->
+              (DeviceId.toText sessionDeviceId == DeviceId.toText deviceId)
+                && (UserId.toText sessionUserId == UserId.toText userId)
+                && (turbo.domain.activeCallParticipantLeaseFromFacts
+                  durableMembership
+                  presenceEvidence
+                  connectedSessionEvidence)
+        match session with
+          DeviceSession sessionId _ _ _ connectedAt lastSeenAt ->
+            if sessionMatches then
+              Some
+                (ActiveCallParticipantLease
+                  channelId
+                  userId
+                  deviceId
+                  sessionId
+                  connectedAt
+                  lastSeenAt)
+            else None
+      _ -> None
+
+turbo.store.activeCallLeases.internal.bestForUserInChannel :
+  Database
+  -> ChannelId
+  -> UserId
+  -> [DeviceId]
+  -> Optional ActiveCallParticipantLease
+  -> '{Exception, Remote, Random} Optional ActiveCallParticipantLease
+turbo.store.activeCallLeases.internal.bestForUserInChannel
+  db
+  channelId
+  userId
+  deviceIds
+  currentBest =
+    do
+      use Instant >=
+      use turbo.store.activeCallLeases.internal bestForUserInChannel
+      match deviceIds with
+        [] -> currentBest
+        deviceId +: rest ->
+          candidate =
+            turbo.store.activeCallLeases.getForDevice
+              db
+              channelId
+              userId
+              deviceId
+              ()
+          nextBest =
+            match (candidate, currentBest) with
+              (None, _) -> currentBest
+              (Some lease, None) -> Some lease
+              (Some lease, Some bestLease) ->
+                if turbo.domain.activeCallParticipantLeaseLastSeenAt lease
+                     >= turbo.domain.activeCallParticipantLeaseLastSeenAt bestLease
+                then Some lease
+                else Some bestLease
+          bestForUserInChannel db channelId userId rest nextBest ()
+
+turbo.store.activeCallLeases.getForUserInChannel :
+  Database
+  -> ChannelId
+  -> UserId
+  -> '{Exception, Remote, Random} Optional ActiveCallParticipantLease
+turbo.store.activeCallLeases.getForUserInChannel db channelId userId =
+  do
+    indexedEntries =
+      Stream.toList
+        (rangeClosed.prefix
+          (turbo.store.presence.tables.byUserChannelDevice db)
+          turbo.store.presence.internal.userChannelPrefixOrdering
+          (userId, channelId)
+          (userId, channelId))
+    deviceIds =
+      List.map
+        (cases ((_, _, deviceId), _) -> deviceId)
+        indexedEntries
+    turbo.store.activeCallLeases.internal.bestForUserInChannel
+      db
+      channelId
+      userId
+      deviceIds
+      None
+      ()
+
+turbo.service.ws.internal.resolveEnvelopeTarget :
+  Database
+  -> UserId
+  -> DeviceId
+  -> SignalEnvelope
+  -> '{Exception, Storage, Remote, Random} Either Text SignalEnvelope
+turbo.service.ws.internal.resolveEnvelopeTarget db currentUserId currentDeviceId =
+  cases
+    SignalEnvelope kind channelId fromUserId fromDeviceId toUserId _ payload ->
+      do
+        use Boolean not
+        sameUser =
+          textEqual
+            (UserId.toText currentUserId)
+            (UserId.toText fromUserId)
+        sameDevice =
+          textEqual
+            (DeviceId.toText currentDeviceId)
+            (DeviceId.toText fromDeviceId)
+        activeTransmit = turbo.store.runtime.currentTransmit db channelId ()
+        senderIsJoined =
+          turbo.store.presence.isDeviceJoinedInChannel
+            db
+            fromUserId
+            fromDeviceId
+            channelId
+            ()
+        senderCanReadChannel =
+          turbo.store.channels.userCanReadDirectChannel
+            db
+            channelId
+            fromUserId
+            ()
+        signalUsesSetupTarget =
+          turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget kind
+        senderMatchesActiveTransmit =
+          turbo.service.ws.internal.activeTransmitMatchesSender
+            fromUserId
+            fromDeviceId
+            activeTransmit
+        transmitOwnedSignal =
+          turbo.service.ws.internal.signalUsesActiveTransmitTarget kind
+        senderAuthorizedByActiveTransmit =
+          transmitOwnedSignal && senderMatchesActiveTransmit
+        senderAuthorizedBySetupMembership =
+          signalUsesSetupTarget && senderCanReadChannel
+        senderIsAuthorized =
+          senderIsJoined
+            || senderAuthorizedByActiveTransmit
+            || senderAuthorizedBySetupMembership
+        if not sameUser || not sameDevice then
+          Left "signaling sender does not match authenticated socket"
+        else
+          _ =
+            if senderAuthorizedByActiveTransmit && not senderIsJoined
+            then
+              turbo.service.ws.internal.appendActiveTransmitSenderPresenceDriftInvariant
+                db
+                currentUserId
+                channelId
+                fromDeviceId
+                kind
+                ()
+            else ()
+          if not senderIsAuthorized then
+            Left "signaling sender device is not joined to this channel"
+          else
+            targetPlan =
+              turbo.service.ws.internal.signalTargetResolutionPlanFromActiveTransmit
+                kind
+                fromUserId
+                fromDeviceId
+                toUserId
+                activeTransmit
+            match targetPlan with
+              SignalTargetResolutionUseActiveTransmitTarget targetDeviceId ->
+                Right
+                  (SignalEnvelope
+                    kind
+                    channelId
+                    fromUserId
+                    fromDeviceId
+                    toUserId
+                    targetDeviceId
+                    payload)
+              SignalTargetResolutionUseConnectedPresence ->
+                if signalUsesSetupTarget then
+                  match turbo.service.channels.internal.peerSetupTargetDeviceId
+                    db
+                    toUserId
+                    channelId
+                    () with
+                    None ->
+                      Left "target user has no connected receiving device"
+                    Some targetDeviceId ->
+                      Right
+                        (SignalEnvelope
+                          kind
+                          channelId
+                          fromUserId
+                          fromDeviceId
+                          toUserId
+                          targetDeviceId
+                          payload)
+                else
+                  match turbo.store.activeCallLeases.getForUserInChannel
+                    db
+                    channelId
+                    toUserId
+                    () with
+                    None ->
+                      Left
+                        "target user has no connected receiving device in this channel"
+                    Some lease ->
+                      Right
+                        (SignalEnvelope
+                          kind
+                          channelId
+                          fromUserId
+                          fromDeviceId
+                          toUserId
+                          (turbo.domain.activeCallParticipantLeaseDeviceId lease)
+                          payload)

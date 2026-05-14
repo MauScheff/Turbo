@@ -14,6 +14,14 @@ just swift-test-target audioOutputPreferenceCyclesBetweenSpeakerAndPhone
 
 The wrapper resolves the Swift Testing suite, invokes `xcodebuild` with the exact `-only-testing` selector, uses the repo's serialized simulator lane, and fails if the requested Swift Testing function name never appears in the output. Use it when proving a focused Swift regression.
 
+Preferred full-bundle command:
+
+```bash
+just swift-test-suite
+```
+
+The full-suite wrapper runs the entire `TurboTests` bundle, reuses the repo's serialized simulator lane, writes an `.xcresult`, and fails if the result bundle reports zero executed tests. Use it when you want all app-side unit/integration tests rather than one focused Swift Testing function or the end-to-end simulator scenario catalog.
+
 If raw `xcodebuild` is unavoidable, include the suite type and the trailing function parentheses:
 
 ```bash
@@ -52,6 +60,7 @@ Those forms can return a successful build/test command with zero selected Swift 
 For proof, require at least one of:
 
 - `just swift-test-target <name>` exits successfully
+- `just swift-test-suite` exits successfully
 - the log contains Swift Testing lines such as `Test <name>() started` and `Test <name>() passed`
 - an xcresult summary reports `totalTestCount` greater than zero:
 

@@ -1,0 +1,38 @@
+turbo.store.activeCallLeases.getForDevice :
+  Database
+  -> ChannelId
+  -> UserId
+  -> DeviceId
+  -> '{Exception, Remote, Random} Optional ActiveCallParticipantLease
+turbo.store.activeCallLeases.getForDevice db channelId userId deviceId =
+  do
+    use Text ==
+    durableMembership = memberships.exists db channelId userId ()
+    presenceOpt = presence.get db deviceId ()
+    sessionOpt = sessions.get db deviceId ()
+    now = now!
+    match (presenceOpt, sessionOpt) with
+      (Some presence, Some session) ->
+        presenceMatches =
+          matchesDeviceChannelPresence userId deviceId channelId presence
+        presenceFresh =
+          targetAudioReadySuppressesWake
+            presenceMatches
+            (presence.internal.isFresh now presence)
+        connectedSessionEvidence =
+          turbo.store.presence.internal.hasConnectedSessionEvidence db deviceId ()
+        sessionMatches =
+          (DeviceSession sessionId sessionDeviceId sessionUserId _ connectedAt lastSeenAt) = session
+          targetAudioReadySuppressesWake
+            (targetAudioReadySuppressesWake
+              (DeviceId.toText sessionDeviceId == DeviceId.toText deviceId)
+              (UserId.toText sessionUserId == UserId.toText userId))
+            (activeCallParticipantLeaseFromFacts
+              durableMembership
+              presenceFresh
+              connectedSessionEvidence)
+        (DeviceSession sessionId _ _ _ connectedAt lastSeenAt) = session
+        if sessionMatches
+        then Some (ActiveCallParticipantLease channelId userId deviceId sessionId connectedAt lastSeenAt)
+        else None
+      _                             -> None

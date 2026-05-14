@@ -30,6 +30,9 @@ deploy-force:
   just bump-deploy-stamp
   just deploy
 
+deploy-staging:
+  just deploy
+
 postdeploy-check base="https://beepbeep.to" caller="@quinn" callee="@sasha" iterations="1" output_dir="/tmp/turbo-postdeploy-check" insecure="--insecure":
   python3 scripts/postdeploy_check.py \
     --base-url "{{base}}" \
@@ -39,9 +42,23 @@ postdeploy-check base="https://beepbeep.to" caller="@quinn" callee="@sasha" iter
     --output-dir "{{output_dir}}" \
     {{insecure}}
 
-deploy-verified base="https://beepbeep.to" caller="@quinn" callee="@sasha" iterations="1" output_dir="/tmp/turbo-postdeploy-check" insecure="--insecure":
+deploy-staging-verified base="https://beepbeep.to" caller="@quinn" callee="@sasha" iterations="1" output_dir="/tmp/turbo-postdeploy-check" insecure="--insecure":
+  just swift-test-suite
+  just deploy-staging
+  just postdeploy-check "{{base}}" "{{caller}}" "{{callee}}" "{{iterations}}" "{{output_dir}}" "{{insecure}}"
+
+production-preflight:
+  just swift-test-suite
+  just reliability-gate-regressions
+  just reliability-gate-full
+
+deploy-production base="https://beepbeep.to" caller="@quinn" callee="@sasha" iterations="1" output_dir="/tmp/turbo-postdeploy-check-production" insecure="--insecure":
+  just production-preflight
   just deploy
   just postdeploy-check "{{base}}" "{{caller}}" "{{callee}}" "{{iterations}}" "{{output_dir}}" "{{insecure}}"
+
+deploy-verified base="https://beepbeep.to" caller="@quinn" callee="@sasha" iterations="1" output_dir="/tmp/turbo-postdeploy-check" insecure="--insecure":
+  just deploy-staging-verified "{{base}}" "{{caller}}" "{{callee}}" "{{iterations}}" "{{output_dir}}" "{{insecure}}"
 
 testflight:
   direnv exec . python3 scripts/start_testflight_release.py
@@ -299,8 +316,11 @@ protocol-session-generation-model-check tla_jar="/tmp/tla2tools.jar" output_dir=
 swift-test-target name:
   python3 scripts/run_targeted_swift_tests.py --name "{{name}}"
 
+swift-test-suite:
+  python3 scripts/run_swift_test_suite.py
+
 reliability-gate-regressions:
-  python3 -m py_compile scripts/run_simulator_scenarios.py scripts/run_targeted_swift_tests.py scripts/merged_diagnostics.py scripts/reliability_intake.py scripts/check_invariant_registry.py scripts/convert_production_replay.py scripts/synthetic_conversation_probe.py scripts/slo_dashboard.py scripts/protocol_model_check.py scripts/postdeploy_check.py
+  python3 -m py_compile scripts/run_simulator_scenarios.py scripts/run_targeted_swift_tests.py scripts/run_swift_test_suite.py scripts/merged_diagnostics.py scripts/reliability_intake.py scripts/check_invariant_registry.py scripts/convert_production_replay.py scripts/synthetic_conversation_probe.py scripts/slo_dashboard.py scripts/protocol_model_check.py scripts/postdeploy_check.py
   python3 scripts/convert_production_replay.py --merged-diagnostics-json fixtures/production_replay/merged_diagnostics.json --output-dir /tmp/turbo-production-replay-smoke --name fixture_production_replay
   python3 scripts/synthetic_conversation_probe.py --fixture-report fixtures/synthetic_conversation_probe/route_probe_success.json --artifact-dir /tmp/turbo-synthetic-conversation-probe-smoke --iterations 2 --label fixture-smoke
   python3 scripts/slo_dashboard.py --synthetic-conversation /tmp/turbo-synthetic-conversation-probe-smoke/synthetic-conversation-probe.json --output-dir /tmp/turbo-slo-dashboard-smoke --name fixture-slo-dashboard --fail-on-breach

@@ -4,8 +4,8 @@
   "events": [
     {
       "invariantId": "backend.ptt_push_target_missing_token",
-      "detector": "turbo.service.channels.pttPushTarget",
-      "authoritativeSeam": "backend active-transmit wake target lookup",
+      "detector": "turbo.service.channels.internal.exactWakeTargetTokenOrInvariant",
+      "authoritativeSeam": "backend exact wake-target token lookup",
       "evidenceFields": ["channelId", "senderDeviceId", "targetUserId", "targetDeviceId", "startedAt"]
     },
     {

@@ -1,0 +1,157 @@
+turbo.store.presence.internal.userPrefixOrdering : UserId -> (UserId, DeviceId) -> Ordering
+turbo.store.presence.internal.userPrefixOrdering prefix = cases (candidateUserId, _) ->
+  Universal.ordering prefix candidateUserId
+
+turbo.store.presence.tables.byUserDevice : Database -> OrderedTable (UserId, DeviceId) DevicePresence
+turbo.store.presence.tables.byUserDevice db =
+  OrderedTable.named db "turboPresenceByUserDevice_v1" Universal.ordering
+
+turbo.store.presence.internal.primaryPresenceEntries :
+  Database
+  -> [((UserId, DeviceId), DevicePresence)]
+  -> '{Exception, Remote} [(DeviceId, DevicePresence)]
+turbo.store.presence.internal.primaryPresenceEntries db entries = do
+  match entries with
+    []                              -> []
+    ((_, deviceId), _) +: remaining ->
+      rest = turbo.store.presence.internal.primaryPresenceEntries db remaining ()
+      match OrderedTable.tryRead (turbo.store.presence.tables.byDevice db) deviceId with
+        Some presence -> (deviceId, presence) +: rest
+        None          -> rest
+
+turbo.store.presence.getForUser : Database -> UserId -> '{Exception, Remote, Random} Optional DevicePresence
+turbo.store.presence.getForUser db userId = do
+  indexedEntries =
+    Stream.toList
+      (rangeClosed.prefix
+        (turbo.store.presence.tables.byUserDevice db)
+        turbo.store.presence.internal.userPrefixOrdering
+        userId
+        userId)
+  entries = turbo.store.presence.internal.primaryPresenceEntries db indexedEntries ()
+  turbo.store.presence.internal.firstFreshPresenceForUser db userId entries ()
+
+turbo.store.presence.getConnectedForUser : Database -> UserId -> '{Exception, Remote, Random} Optional DevicePresence
+turbo.store.presence.getConnectedForUser db userId = do
+  indexedEntries =
+    Stream.toList
+      (rangeClosed.prefix
+        (turbo.store.presence.tables.byUserDevice db)
+        turbo.store.presence.internal.userPrefixOrdering
+        userId
+        userId)
+  entries = turbo.store.presence.internal.primaryPresenceEntries db indexedEntries ()
+  turbo.store.presence.internal.firstConnectedPresenceForUser db userId entries ()
+
+turbo.store.presence.upsert : Database -> DeviceId -> UserId -> DevicePresenceStatus -> Optional ChannelId -> '{Exception, Storage, Remote, Random} DevicePresence
+turbo.store.presence.upsert db deviceId userId status currentChannelId = do
+  use OrderedTable write.tx
+  table = turbo.store.presence.tables.byDevice db
+  userIndex = turbo.store.presence.tables.byUserDevice db
+  channelIndex = turbo.store.presence.tables.byUserChannelDevice db
+  now = now!
+  transact (OrderedTable.database table) do
+    oldPresence = OrderedTable.tryRead.tx table deviceId
+    _ = match oldPresence with
+      Some (DevicePresence oldDeviceId oldUserId _ oldChannelId _) ->
+        _ = OrderedTable.delete.tx userIndex (oldUserId, oldDeviceId)
+        match oldChannelId with
+          Some oldChannelId -> OrderedTable.delete.tx channelIndex (oldUserId, oldChannelId, oldDeviceId)
+          None              -> ()
+      None                                                    -> ()
+    presence = DevicePresence deviceId userId status currentChannelId now
+    _ = write.tx table deviceId presence
+    _ = write.tx userIndex (userId, deviceId) presence
+    _ = match (status, currentChannelId) with
+      (DevicePresenceStatus.Online, Some channelId) -> write.tx channelIndex (userId, channelId, deviceId) presence
+      _                                             -> ()
+    presence
+
+turbo.service.dev.internal.deletePresenceRow : Database -> (DeviceId, DevicePresence) ->{Remote} ()
+turbo.service.dev.internal.deletePresenceRow db = cases
+  (key, DevicePresence deviceId userId _ currentChannelId _) ->
+    use OrderedTable delete
+    _ = delete (turbo.store.presence.tables.byDevice db) key
+    _ = delete (turbo.store.presence.tables.byUserDevice db) (userId, deviceId)
+    _ = match currentChannelId with
+      Some channelId -> delete (turbo.store.presence.tables.byUserChannelDevice db) (userId, channelId, deviceId)
+      None           -> ()
+    ()
+
+turbo.service.dev.internal.clearDeviceState : Database -> DeviceId -> '{Exception, Storage, Remote} ()
+turbo.service.dev.internal.clearDeviceState db deviceId = do
+  presenceOpt = OrderedTable.tryRead (turbo.store.presence.tables.byDevice db) deviceId
+  _ = match presenceOpt with
+    Some (DevicePresence _ userId _ currentChannelId _) ->
+      _ = OrderedTable.delete (turbo.store.presence.tables.byUserDevice db) (userId, deviceId)
+      match currentChannelId with
+        Some channelId -> OrderedTable.delete (turbo.store.presence.tables.byUserChannelDevice db) (userId, channelId, deviceId)
+        None           -> ()
+    None                                             -> ()
+  _ = OrderedTable.delete (turbo.store.presence.tables.byDevice db) deviceId
+  match OrderedTable.tryRead (turbo.store.sessions.tables.byDevice db) deviceId with
+    Some session ->
+      _ = SignalInbox.delete (inbox session) ()
+      _ = OrderedTable.delete (turbo.store.sessions.tables.byDevice db) deviceId
+      _ = OrderedTable.delete (turbo.store.sockets.tables.byDevice db) deviceId
+      ()
+    None         ->
+      _ = OrderedTable.delete (turbo.store.sockets.tables.byDevice db) deviceId
+      ()
+
+turbo.service.dev.internal.performReset : Database -> '{Exception, Storage, Remote} ResetSummary
+turbo.service.dev.internal.performReset db = do
+  use List foreach size
+  use OrderedTable toStream
+  use Stream toList
+  runtimeRows = toList (toStream (turbo.store.runtime.tables.byChannel db))
+  _ = foreach (turbo.service.dev.internal.deleteRuntimeRow db) runtimeRows
+  presenceRows = toList (toStream (turbo.store.presence.tables.byDevice db))
+  _ = foreach (turbo.service.dev.internal.deletePresenceRow db) presenceRows
+  presenceUserRows = toList (toStream (turbo.store.presence.tables.byUserDevice db))
+  _ = foreach (cases (key, _) -> OrderedTable.delete (turbo.store.presence.tables.byUserDevice db) key) presenceUserRows
+  tokenRows = toList (toStream (turbo.store.tokens.tables.byChannelUserDevice db))
+  _ = foreach (turbo.service.dev.internal.deleteTokenRow db) tokenRows
+  ephemeralEnvironmentRows = toList (toStream (turbo.store.apnsEnvironments.tables.ephemeralByChannelUserDevice db))
+  _ = foreach (turbo.store.apnsEnvironments.deleteEphemeralRow db) ephemeralEnvironmentRows
+  alertEnvironmentRows = toList (toStream (turbo.store.apnsEnvironments.tables.alertByUserDevice db))
+  _ = foreach (turbo.store.apnsEnvironments.deleteAlertRow db) alertEnvironmentRows
+  inviteIdRows = toList (toStream (turbo.store.invites.tables.byId db))
+  _ = foreach (turbo.service.dev.internal.deleteInviteIdRow db) inviteIdRows
+  inviteFromRows = toList (toStream (turbo.store.invites.tables.byFromCreatedAt db))
+  _ = foreach (turbo.service.dev.internal.deleteInviteFromRow db) inviteFromRows
+  inviteToRows = toList (toStream (turbo.store.invites.tables.byToCreatedAt db))
+  _ = foreach (turbo.service.dev.internal.deleteInviteToRow db) inviteToRows
+  membershipRows = toList (toStream (turbo.store.memberships.tables.byChannelUser db))
+  _ = foreach (turbo.service.dev.internal.deleteMembershipRow db) membershipRows
+  sessionRows = toList (toStream (turbo.store.sessions.tables.byDevice db))
+  _ = foreach (turbo.service.dev.internal.deleteSessionRow db) sessionRows
+  channelRows = toList (toStream (turbo.store.channels.tables.byId db))
+  _ = foreach (turbo.service.dev.internal.deleteChannelRow db) channelRows
+  participantRows = toList (toStream (turbo.store.channels.tables.byParticipantCreatedAt db))
+  _ = foreach (turbo.service.dev.internal.deleteChannelParticipantRow db) participantRows
+  userPairRows = toList (toStream (turbo.store.channels.tables.byUserPair db))
+  _ = foreach (turbo.service.dev.internal.deleteChannelUserPairRow db) userPairRows
+  savedContactOwnerRows = toList (toStream (turbo.store.savedContacts.tables.byOwnerUser db))
+  _ = foreach (turbo.service.dev.internal.deleteSavedContactOwnerRow db) savedContactOwnerRows
+  controlCommandRows = toList (toStream (turbo.store.controlCommands.tables.byActorOperation db))
+  _ = foreach (turbo.service.dev.internal.deleteControlCommandRow db) controlCommandRows
+  wakeJobRowCount = turbo.store.wakeJobs.clearPending db ()
+  wakeEventRowCount = turbo.store.devWakeEvents.clearRecent db ()
+  invariantEventRowCount = turbo.store.devInvariantEvents.clearRecent db ()
+  ResetSummary
+    (size runtimeRows)
+    (size presenceRows)
+    (size tokenRows)
+    (size inviteIdRows)
+    (size inviteFromRows)
+    (size inviteToRows)
+    (size membershipRows)
+    (size sessionRows)
+    0
+    (size channelRows)
+    (size userPairRows)
+    wakeJobRowCount
+    wakeEventRowCount
+    invariantEventRowCount
+    (size controlCommandRows)

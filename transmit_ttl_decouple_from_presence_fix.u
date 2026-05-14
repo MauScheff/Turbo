@@ -1,0 +1,142 @@
+turbo.store.runtime.internal.leaseDuration : time.Duration
+turbo.store.runtime.internal.leaseDuration = time.Duration.seconds +15
+
+turbo.store.runtime.beginTransmit :
+  Database
+  -> ChannelId
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> DeviceId
+  -> '{Exception, Storage, Remote, Random} Either Text TransmitState
+turbo.store.runtime.beginTransmit db channelId fromUserId fromDeviceId toUserId toDeviceId =
+  do
+    use Instant +
+    use OrderedTable write.tx
+    table = byChannel db
+    now = now!
+    expiresAt = now + turbo.store.runtime.internal.leaseDuration
+    transact (OrderedTable.database table) do
+      match OrderedTable.tryRead.tx table channelId with
+        Some state ->
+          if isExpired now state
+          then
+            _ = OrderedTable.delete.tx table channelId
+            state = TransmitState channelId fromUserId fromDeviceId toUserId toDeviceId now expiresAt
+            _ = write.tx table channelId state
+            Right state
+          else Left "channel already transmitting"
+        None       ->
+          state = TransmitState channelId fromUserId fromDeviceId toUserId toDeviceId now expiresAt
+          _ = write.tx table channelId state
+          Right state
+
+turbo.service.channels.beginTransmit : Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.channels.beginTransmit db = do
+  use Parser /
+  use Text ++
+  use object empty
+  channelIdText = route POST (s "v1" / s "channels" / Parser.text / s "begin-transmit")
+  match requireUser db () with
+    Left err          -> unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      currentHandle =
+        (User _ handleText _ _ _) = currentUser
+        handleText
+      currentDisplayName =
+        (User _ _ displayName _ _) = currentUser
+        displayName
+      fields = decodeJson (Decoder.object Decoder.text)
+      channelId = ChannelId.fromText channelIdText
+      match Map.get "deviceId" fields with
+        Some deviceIdText ->
+          senderDeviceId = DeviceId.fromText deviceIdText
+          senderActive = hasForDevice db channelId currentUserId senderDeviceId ()
+          if Boolean.not senderActive
+          then unauthorized.json (empty |> addText "error" "sender device is not active in this channel")
+          else
+            resolvedTarget = resolveTransmitTarget db channelId currentUserId ()
+            match resolvedTarget with
+              Left err                             -> badRequest.json (empty |> addText "error" err)
+              Right (targetUserId, targetDeviceId) ->
+                result = runtime.beginTransmit db channelId currentUserId senderDeviceId targetUserId targetDeviceId ()
+                match result with
+                  Left err    -> badRequest.json (empty |> addText "error" err)
+                  Right state ->
+                    devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+                    (startedAt, expiresAt, senderDeviceId, transmitIdText) =
+                      (TransmitState _ _ fromDeviceId _ _ startedAt expiresAt) = state
+                      (Instant.toText startedAt, Instant.toText expiresAt, fromDeviceId, transmitId state)
+                    _ = forkAt pool() do
+                      toRemote do
+                        _ = sendTransmitPrepareIfTargetConnected db channelId currentUserId senderDeviceId targetUserId targetDeviceId ()
+                        ()
+                    _ = sendWakePushUnlessTargetAudioReady db channelId currentHandle currentDisplayName currentUserId senderDeviceId targetUserId targetDeviceId startedAt ()
+                    _ = forkAt pool() do
+                      toRemote do
+                        _ = internal.send "backend.transmit.begin_granted" "backend" "notice" currentUserId (Some currentHandle) (Some senderDeviceId) (Some channelId) (Some targetUserId) (Some targetDeviceId) None None None (Some "begin-transmit") None (Some "backend transmit lease granted") (Some ("transmitId=" ++ transmitIdText ++ " startedAt=" ++ startedAt ++ " expiresAt=" ++ expiresAt)) devTraffic false ()
+                        ()
+                    ok.json (empty |> addText "channelId" channelIdText |> addText "status" "transmitting" |> addText "transmitId" transmitIdText |> addText "startedAt" startedAt |> addText "expiresAt" expiresAt |> addText "targetUserId" (UserId.toText targetUserId) |> addText "targetDeviceId" (DeviceId.toText targetDeviceId))
+        None              -> badRequest.json (empty |> addText "error" "missing deviceId")
+
+turbo.service.routes.channels : Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.routes.channels db =
+  use Route or
+  or (channels.direct db) (or (channels.join db) (or (leave db) (or (channels.state db) (or (revokeEphemeralToken db) (or (channels.ephemeralToken db) (or (pttPushTarget db) (or (channels.beginTransmit db) (or (channels.renewTransmit db) (or (channels.endTransmit db) (readiness db))))))))))
+
+turbo.service.apiWithConfig : Text -> Boolean -> Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.apiWithConfig mode supportsWebSocket db =
+  use Route or
+  or health (or (service.config mode supportsWebSocket) (or (iceServers db) (or (uploadEvent db) (or (internal.routes db) (or (dev db) (or (service.presence.heartbeat db) (or (background db) (or (offline db) (or (auth db) (or (users db) (or (invites db) (channels db))))))))))))
+
+turbo.service.api : Database -> '{Route, Config, Exception, Http, Storage, Remote, Random, Log} ()
+turbo.service.api db = apiWithConfig "cloud" true db
+
+turbo.service.web : Database -> '{Route, Config, Exception, Http, OpenWebSocket, Storage, Remote, WebSockets, Random, Log} ()
+turbo.service.web db =
+  use Route or
+  or (api db) (or (ws db) (share db))
+
+turbo.serveLocal : '{IO, Exception} ServiceHash HttpRequest (Either HttpResponse (WebSocket ->{Remote, WebSockets} ()))
+turbo.serveLocal = do
+  use Text ++
+  setBuffering stdOut LineBuffering
+  config = LocalCloudConfig.default() |> printBanners.set true |> LocalCloudConfig.httpPort.set (Port.number 8090)
+  Random.run do
+    Threads.run do
+      hash = local.impl config do
+        env = Environment.default()
+        database = Database.named "turbo-local-control-plane"
+        Database.assign database env
+        localWebService = web database
+        hash = Route.deployWebSocket env localWebService
+        serviceName = ServiceName.named "turbo"
+        namedUri = ServiceName.assign serviceName hash
+        namedTxt0 = URI.toText namedUri
+        namedTxt = if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+        hashText = ServiceHash.toText hash
+        printLine ("Named: " ++ namedTxt)
+        printLine ("Hash:  http://localhost:8090/h/" ++ hashText ++ "/")
+        hash
+      printLine "Local Cloud computation starting on port 8090. Press Enter to stop it.\n"
+      _ = match catch do readLine() with
+        Right _ -> ()
+        Left _  -> ()
+      hash
+
+turbo.deploy : '{IO, Exception} URI
+turbo.deploy = Cloud.main do
+  env = Environment.named "turbo-production-v6"
+  database = Database.named "turbo-control-plane-v5"
+  _ = seedCurrentOsEnv env ()
+  Database.assign database env
+  serviceHash = Route.deployWebSocket env (web database)
+  serviceName = ServiceName.named "turbo-v6"
+  _ = catch do ServiceName.unassign serviceName
+  uri = ServiceName.assign serviceName serviceHash
+  _ = catch do deleteDomainMapping (HostName "beepbeep.to")
+  _ = createDomainMapping (HostName "beepbeep.to") (ServiceName.name serviceName)
+  uri
