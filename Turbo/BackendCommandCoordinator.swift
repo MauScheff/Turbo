@@ -150,7 +150,8 @@ enum BackendCommandReducer {
                 }
                 if activeRequest.intent == .requestConnection,
                    request.intent == .requestConnection,
-                   !activeRequest.relationship.isIncomingRequest,
+                   activeRequest.relationship == .none,
+                   request.relationship.isOutgoingRequest,
                    !request.relationship.isIncomingRequest {
                     return BackendCommandTransition(state: nextState)
                 }

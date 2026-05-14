@@ -1,0 +1,18 @@
+turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization :
+  SignalKind -> Boolean
+turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization = cases
+  ReceiverReady    -> true
+  ReceiverNotReady -> true
+  _                -> false
+
+test>
+  turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization.tests.examples =
+    verify do
+      ensureEqual true
+        (turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization
+          ReceiverReady)
+      ensureEqual true
+        (turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization
+          ReceiverNotReady)
+      ensureEqual false
+        (turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization Offer)

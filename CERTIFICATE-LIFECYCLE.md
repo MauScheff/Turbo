@@ -1,5 +1,9 @@
 # Direct QUIC Certificate Lifecycle
 
+Status: active reference.
+Canonical home for: Direct QUIC fingerprint-only device identity, certificate lifecycle, registration contract, and verification checks.
+Related docs: [`DIRECT_QUIC_TRANSPORT.md`](/Users/mau/Development/Turbo/DIRECT_QUIC_TRANSPORT.md) owns the broader Direct QUIC transport plan.
+
 ## Summary
 
 Production Direct QUIC uses a fingerprint-only device identity model.
@@ -99,4 +103,3 @@ For physical-device verification, connect two devices and confirm diagnostics sh
 - Direct QUIC offer/answer fingerprints;
 - `Direct QUIC media path activated`;
 - no `certificateDerBase64` in registration or readiness payloads.
-

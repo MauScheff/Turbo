@@ -897,7 +897,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         guard let connection else {
             throw DirectQuicProbeError.connectionFailed("media relay is not connected")
         }
-        if isPeerUnavailableFresh() {
+        if hasFreshPeerUnavailable() {
             throw DirectQuicProbeError.connectionFailed("media relay peer is unavailable")
         }
         try await send(frame, on: connection)
@@ -916,7 +916,7 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         guard let connection else {
             throw DirectQuicProbeError.connectionFailed("media relay is not connected")
         }
-        if isPeerUnavailableFresh() {
+        if hasFreshPeerUnavailable() {
             throw DirectQuicProbeError.connectionFailed("media relay peer is unavailable")
         }
         try await send(
@@ -1199,19 +1199,19 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
         }
     }
 
-    private func markPeerUnavailable() {
+    func markPeerUnavailable() {
         lock.withLock {
             peerUnavailableSince = Date()
         }
     }
 
-    private func clearPeerUnavailable() {
+    func clearPeerUnavailable() {
         lock.withLock {
             peerUnavailableSince = nil
         }
     }
 
-    private func isPeerUnavailableFresh(now: Date = Date()) -> Bool {
+    func hasFreshPeerUnavailable(now: Date = Date()) -> Bool {
         lock.withLock {
             guard let peerUnavailableSince else { return false }
             if now.timeIntervalSince(peerUnavailableSince) <= peerUnavailableFreshnessWindow {

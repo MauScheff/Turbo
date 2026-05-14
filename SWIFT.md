@@ -1,6 +1,12 @@
 # Swift / iOS Guide
 
+Status: active guide.
+Canonical home for: Swift/iOS architecture rules, app-side implementation expectations, component boundaries, and Swift ADT patterns.
+Related docs: [`APP_STATE.md`](/Users/mau/Development/Turbo/APP_STATE.md) owns app-visible state semantics; [`SWIFT_DEBUGGING.md`](/Users/mau/Development/Turbo/SWIFT_DEBUGGING.md) owns simulator/device/PTT/audio debugging loops.
+
 This file contains the app-side architecture and working rules for Swift, SwiftUI, PushToTalk integration, and client-side state management.
+
+Use [`WORKFLOW.md`](/Users/mau/Development/Turbo/WORKFLOW.md) for the canonical state-machine, ownership, invariant, and proof model.
 
 For simulator/device/PTT debugging loops and operational debugging guidance, use:
 
@@ -10,23 +16,8 @@ For simulator/device/PTT debugging loops and operational debugging guidance, use
 
 ## Product engineering expectations
 
-- Build toward a production-grade system by default:
-  - explicit invariants
-  - deterministic state transitions
-  - strong observability
-  - repeatable verification loops
-  - minimal hidden coupling between app, backend, and Apple frameworks
 - Improve the shape of the system as you solve a bug. If the fix leaves the overall structure worse, it is not done.
 - Do not describe work as "hardening" unless the underlying design is already sound. First investigate the failure deeply, identify the real invariant that is broken, and solve that cleanly.
-- Prefer the most elegant solution that fixes the issue both locally and globally over a narrow mitigation that only masks one symptom.
-- Prefer explicit state machines or reducer-style state transition logic for session, signaling, and UX coordination problems.
-- When the domain can be in exactly one of several modes, model it as an enum with associated values instead of a bag of booleans.
-  - keep state-specific payloads inside the corresponding case
-  - preserve weird but real distributed cases as first-class variants instead of flattening them away
-  - example: simultaneous incoming and outgoing requests should be a real relationship case, not "incoming wins" or "outgoing wins" precedence hidden in call sites
-- Prefer a functional core / imperative shell split when feasible:
-  - pure derivation and transition logic in testable units
-  - side effects isolated in coordinators, clients, or adapters
 - Prefer component-driven development on the app side:
   - views render derived state
   - domain types own business rules
@@ -57,34 +48,95 @@ For simulator/device/PTT debugging loops and operational debugging guidance, use
 - For iOS refactors, prefer extracting small dedicated types/files over growing `ContentView.swift`.
 - For backend and app integration, keep repeatable probes and smoke checks checked into the repo when they materially improve iteration speed.
 
-## Default architecture pattern
+## App Architecture Pattern
 
-This is the default shape we want across the app, and usually across the system wherever it fits:
+Apply the global workflow model this way on the app side:
 
 - Keep the UI thin.
   - views render derived state
   - views emit user intents
   - views should not own business-state truth
-- Model each workflow around one canonical domain state machine.
-  - use enums with associated values for mutually exclusive phases
-  - keep phase-specific data inside the matching case
-  - do not spread the same truth across parallel booleans, optional fields, and UI latches
 - Normalize every input into typed events before it reaches the core.
   - UI gestures, backend updates, websocket signals, and Apple/PTT callbacks should all become explicit domain events
   - reducers or transition functions should decide the next valid state
-- Prefer a functional core / imperative shell split.
-  - the core should derive state and transitions with pure or mostly-pure functions
-  - adapters, clients, and coordinators should contain framework calls and side effects
-- Store canonical state once and derive projections from it.
-  - selected-contact UI state, button labels, status text, and diagnostics summaries should be projections, not competing sources of truth
-- Make important transitions idempotent and replay-safe.
-  - duplicate delivery, retries, reconnects, and reordered signals should converge on the same valid state
-  - explicit stop or release should dominate stale late-arriving events
 - Make the system observable at the state-machine seam.
   - log meaningful transitions, invariants, and rejected events
   - prefer diagnostics that explain why a transition happened or was ignored
 
 When a code path does not currently match this shape, the preferred direction is to move more logic into typed state, typed events, and derived projections rather than adding another local flag or UI workaround.
+
+## Swift ADT Patterns
+
+Use Swift enums and structs to model ADTs consistently:
+
+| ADT concept | Swift construct |
+| --- | --- |
+| Sum type: one of many variants | `enum`, usually with associated values |
+| Product type: fields that coexist | `struct` |
+| Recursive type | `indirect enum` |
+| Open/extensible family | `protocol` |
+
+Use an enum with associated values for any closed set of variants:
+
+```swift
+enum Result<Value> {
+    case success(Value)
+    case failure(Error)
+}
+```
+
+Always handle enums with exhaustive `switch` statements. Prefer associated values over optional fields when data only exists in one case.
+
+Use structs for product data:
+
+```swift
+struct User {
+    let id: Int
+    let name: String
+}
+```
+
+Prefer immutable stored values where practical. Use `indirect enum` for recursive domains:
+
+```swift
+indirect enum Tree<Value> {
+    case empty
+    case node(left: Tree, value: Value, right: Tree)
+}
+```
+
+Use protocols when the set of cases must be open and extensible:
+
+```swift
+protocol Shape {
+    func area() -> Double
+}
+```
+
+Mental model:
+
+- `AND` means `struct`.
+- `OR` means `enum`.
+- `Optional` is already an ADT: `.none` or `.some(Wrapped)`.
+- Invalid states should be unrepresentable.
+
+Good:
+
+```swift
+enum Payment {
+    case cash
+    case card(number: String)
+}
+```
+
+Bad:
+
+```swift
+struct Payment {
+    let isCash: Bool
+    let cardNumber: String?
+}
+```
 
 ## Current app shape
 

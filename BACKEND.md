@@ -1,6 +1,19 @@
 # Backend / Control-Plane Guide
 
+Status: active backend working guide.
+
+Canonical home for backend ownership rules, storage/query design constraints, schema-change discipline, backend invariants, and app/backend bug triage.
+
+Related docs:
+
+- [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md) owns exact deploy, probe, APNs helper, local server, and diagnostics commands.
+- [`BACKEND_STRUCTURE.md`](/Users/mau/Development/Turbo/BACKEND_STRUCTURE.md) owns the quick Unison namespace map.
+- [`Server/backend_architecture.md`](/Users/mau/Development/Turbo/Server/backend_architecture.md) owns the agreed v1 backend architecture reference.
+- [`APNS_DELIVERY_PLAN.md`](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md) owns the current interim APNs delivery plan.
+
 Use this file for backend, Unison Cloud, routes, storage/query design, deploy/probe work, and APNs wake-path debugging.
+
+Use [`WORKFLOW.md`](/Users/mau/Development/Turbo/WORKFLOW.md) for the canonical ownership, invariant, modeling, and proof model.
 
 ## Scope
 
@@ -25,8 +38,8 @@ Explicit non-goal for v1:
 
 Start here for backend design:
 
-- [`Server/unison_ptt_handoff.md`](/Users/mau/Development/Turbo/Server/unison_ptt_handoff.md)
 - [`Server/backend_architecture.md`](/Users/mau/Development/Turbo/Server/backend_architecture.md)
+- [`BACKEND_STRUCTURE.md`](/Users/mau/Development/Turbo/BACKEND_STRUCTURE.md)
 
 ## Unison Cloud storage rules
 
@@ -43,6 +56,17 @@ When changing backend storage or query paths in this repo:
 - For contact/session queries, optimize for the active user's relationship-backed subset, not the entire dev directory.
 
 If a hosted failure looks like an intermittent server error, check transaction shape and table-scan behavior before blaming the platform.
+
+## Current-truth projection rules
+
+Stale rows may exist, but stale rows must never be sufficient to project current truth. Call-critical backend projections should derive from typed current-state predicates, not raw storage rows.
+
+Classify every call-critical backend fact before using it to authorize, display, or route behavior:
+
+- durable/monotonic: facts that can safely accumulate or remain true until explicitly superseded
+- leased/epoched runtime state: presence, readiness, signaling authorization, wake target, active transmit, relay/session facts, and anything that can become false because time, connection, device, or ownership changed
+
+Runtime truth should be leased, fenced, expiring, or invalidated. A route should not treat an old presence row, readiness row, token row, websocket row, or active-transmit row as current unless the typed predicate says it is current for the relevant user, device, channel, session, and epoch.
 
 ## Persisted schema changes
 
@@ -64,9 +88,7 @@ If production is already in the bad state, the usual recovery path is to redeplo
 
 ## Backend invariants
 
-Yes, the backend needs the same invariant discipline for backend-owned truth, but not a separate invariant system.
-
-Use the same pattern described in [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md):
+Backend-owned truth uses the shared invariant system described in [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md):
 
 - when the backend is authoritative for a fact, detect the invariant at the backend seam
 - emit a stable invariant ID for the broken truth through `turbo.service.internal.appendInvariantEvent`
@@ -85,17 +107,7 @@ Do not make the client prove a rule that only the backend can know.
 
 ## Mixed app/backend bug workflow
 
-For distributed-state or app/backend contract bugs, do not assume the first visible client symptom is the source.
-
-Work the problem in this order:
-
-1. restate the report as a broken shared fact
-2. identify who is authoritative for that fact
-3. inspect the backend projection or route that produces the fact
-4. inspect the client projection that renders or derives from it
-5. add or strengthen an invariant at the authoritative seam
-6. fix the subsystem that violated the invariant
-7. keep any client-side guardrail only as a secondary defense, not the primary fix
+For distributed-state or app/backend contract bugs, follow [`WORKFLOW.md`](/Users/mau/Development/Turbo/WORKFLOW.md). Do not assume the first visible client symptom is the source.
 
 For Turbo, the backend is usually authoritative for:
 
@@ -108,39 +120,24 @@ If the backend can project stale, contradictory, or one-sided session truth, fix
 
 ## Verification loops
 
-Deploy / probe:
+Use [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md) for exact deploy, postdeploy, route-probe, reset, local-server, and simulator-scenario commands.
 
-- `just deploy-verified`
-- `just postdeploy-check`
-- `just deploy`
-- `just route-probe`
-- `just reset-all https://beepbeep.to`
+Backend-specific verification rules:
 
-Use `just deploy-verified` for the normal hosted release path: it runs the raw
-deploy and then verifies the live synthetic conversation SLOs. Use
-`just postdeploy-check` when the deploy already happened and you only need live
-hosted verification.
-
-Use `just deploy` when no interactive `ucm` process is already holding the local codebase.
-If you are already working inside a live `ucm` session, `just deploy` can block on the codebase lock; run `turbo.deploy` from that existing MCP/UCM session instead.
-If you changed backend behavior in the local Unison codebase, that change is not live on `https://beepbeep.to` until `turbo.deploy` has actually run.
-
-Local backend loop:
-
-- `just serve-local`
-- `just simulator-scenario-local foreground-ptt http://localhost:8090/s/turbo`
-- `just simulator-scenario-merge-local http://localhost:8090/s/turbo`
+- If backend behavior changed in the local Unison codebase, that change is not live on `https://beepbeep.to` until `turbo.deploy` has actually run.
+- If an interactive `ucm` process is already holding the local codebase, a wrapper that starts another UCM process can block; use the existing MCP/UCM session to run `turbo.deploy`.
+- Hosted verification should prove the live control-plane surface, not just that deployment returned successfully.
+- Local backend verification should use the same backend implementation through `turbo.serveLocal`; do not introduce a fake local backend to make tests pass.
 
 ## APNs / wake debugging
 
-Keep APNs credentials out of the repo. The local deploy environment may provide either `TURBO_APNS_PRIVATE_KEY_PATH` or `TURBO_APNS_PRIVATE_KEY` plus `TURBO_APNS_TEAM_ID` and `TURBO_APNS_KEY_ID`. `turbo.deploy` resolves the local path when needed and stores the PEM contents in cloud config as `TURBO_APNS_PRIVATE_KEY`, so deployed backend code should read config values, not filesystem paths.
+Keep APNs credentials out of the repo. Exact environment variable names and helper commands live in [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md); the current interim delivery design lives in [`APNS_DELIVERY_PLAN.md`](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md).
 
-Current interim APNs sending also requires:
+Backend APNs rules:
 
-- `TURBO_APNS_WORKER_SECRET`
-- `TURBO_APNS_WORKER_BASE_URL`
-
-Both must be visible to `turbo.deploy`, and both must then be verified from the live deployed service via `Config.lookup`, not inferred from local shell state.
+- `turbo.deploy` must copy required APNs config into cloud config; deployed backend code should read config values, not local filesystem paths.
+- Runtime config must be verified from the live deployed service, not inferred from local shell state.
+- Wake-send attempts should be recorded in backend diagnostics so merged diagnostics can show the wake timeline inline.
 
 ## Deploying new backend env vars
 
@@ -154,10 +151,8 @@ This is part of the implementation, not optional operational cleanup. A new back
 
 For background / lock-screen PushToTalk work, treat the loop as:
 
-1. `direnv exec . just ptt-push-target <channel_id> <backend> <sender>` to prove the receiver token exists
-2. use the current production APNs sender path:
-   - direct Unison Cloud send only after the upstream runtime support is merged and deployed
-   - until then, the interim sender should be the Cloudflare worker path documented in [`APNS_DELIVERY_PLAN.md`](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md)
+1. prove the receiver token exists through the backend wake-target surface
+2. use the current production APNs sender path documented in [`APNS_DELIVERY_PLAN.md`](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md)
 3. only then use physical-device diagnostics to debug post-wake playback or Apple PTT behavior
 
 The intended long-term wake architecture is:

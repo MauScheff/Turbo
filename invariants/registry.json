@@ -255,6 +255,20 @@
       "status": "active"
     },
     {
+      "id": "ui.call_screen_visible_for_requested_peer",
+      "scope": "local",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/ContentView.swift UI projection",
+      "predicate": "The visible call screen is rendered for a selected peer whose authoritative client projection is still requested.",
+      "evidenceFields": ["uiCallScreenVisible", "uiCallScreenContact", "uiCallScreenRequestedExpanded", "uiCallScreenMinimized", "uiSelectedPeerPhase", "selectedPeerPhase"],
+      "detectors": ["Turbo/AppDiagnostics.swift", "scripts/merged_diagnostics.py"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "Requested state may show request affordances, but call-screen presentation must stay collapsed until join evidence or a live call phase exists.",
+      "alertPolicy": "strict diagnostics",
+      "status": "active"
+    },
+    {
       "id": "media.e2ee_replayed_audio_packet",
       "scope": "local",
       "owner": "app",
@@ -572,6 +586,34 @@
       "repairPolicy": "app repair",
       "repairAction": "scheduleDisconnectRecovery retries system leave, resets local PTT/media/transmit runtime, clears pending leave, and refreshes backend membership.",
       "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
+      "id": "selected.call_visible_peer_online",
+      "scope": "local",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/AppDiagnostics.swift state capture",
+      "predicate": "The call screen is visible while the authoritative selected-peer projection is still plain online/requestable.",
+      "evidenceFields": ["selectedContact", "selectedPeerPhase", "selectedPeerStatus", "uiCallScreenVisible", "uiCallScreenContact", "uiPrimaryActionKind"],
+      "detectors": ["Turbo/AppDiagnostics.swift", "scripts/merged_diagnostics.py"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "Call-screen presentation must stay collapsed while selectedPeerPhase remains idle/online; plain requestable state belongs on the detail or home surface until a live/joining phase exists.",
+      "alertPolicy": "strict diagnostics",
+      "status": "active"
+    },
+    {
+      "id": "selected.request_call_flap",
+      "scope": "local",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/AppDiagnostics.swift state capture sequence",
+      "predicate": "Selected route toggled from requested to call-visible and back to requested for the same contact without a selected-peer phase change.",
+      "evidenceFields": ["selectedContact", "selectedPeerPhase", "currentUiCallScreenVisible", "previousUiCallScreenVisible", "oldestUiCallScreenVisible"],
+      "detectors": ["Turbo/AppDiagnostics.swift"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "Call-screen visibility must remain collapsed while selectedPeerPhase stays requested; expansion and dismissal transitions must not oscillate without a live-phase transition.",
+      "alertPolicy": "strict diagnostics",
       "status": "active"
     },
     {

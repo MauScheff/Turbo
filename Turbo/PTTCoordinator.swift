@@ -231,7 +231,13 @@ struct PTTSessionState: Equatable {
 enum PTTEvent: Equatable {
     case restoredChannel(channelUUID: UUID, contactID: UUID?)
     case didJoinChannel(channelUUID: UUID, contactID: UUID?, reason: String)
-    case didLeaveChannel(channelUUID: UUID, contactID: UUID?, reason: String, autoRejoinContactID: UUID?)
+    case didLeaveChannel(
+        channelUUID: UUID,
+        contactID: UUID?,
+        reason: String,
+        autoRejoinContactID: UUID?,
+        shouldPropagateBackendLeave: Bool
+    )
     case failedToJoinChannel(channelUUID: UUID, contactID: UUID?, reason: PTTJoinFailureReason)
     case failedToLeaveChannel(channelUUID: UUID, message: String)
     case didBeginTransmitting(channelUUID: UUID, origin: SystemTransmitBeginOrigin)
@@ -243,7 +249,11 @@ enum PTTEvent: Equatable {
 
 enum PTTEffect: Equatable {
     case syncJoinedChannel(contactID: UUID?)
-    case syncLeftChannel(contactID: UUID?, autoRejoinContactID: UUID?)
+    case syncLeftChannel(
+        contactID: UUID?,
+        autoRejoinContactID: UUID?,
+        shouldPropagateBackendLeave: Bool
+    )
     case closeMediaSession
     case handleSystemTransmitFailure(String)
 }
@@ -285,13 +295,25 @@ enum PTTReducer {
             nextState.lastJoinFailure = nil
             effects.append(.syncJoinedChannel(contactID: contactID))
 
-        case .didLeaveChannel(let channelUUID, let contactID, _, let autoRejoinContactID):
+        case .didLeaveChannel(
+            let channelUUID,
+            let contactID,
+            _,
+            let autoRejoinContactID,
+            let shouldPropagateBackendLeave
+        ):
             if nextState.systemChannelUUID == channelUUID {
                 nextState.clearSystemSession()
             }
             nextState.lastError = nil
             nextState.lastJoinFailure = nil
-            effects.append(.syncLeftChannel(contactID: contactID, autoRejoinContactID: autoRejoinContactID))
+            effects.append(
+                .syncLeftChannel(
+                    contactID: contactID,
+                    autoRejoinContactID: autoRejoinContactID,
+                    shouldPropagateBackendLeave: shouldPropagateBackendLeave
+                )
+            )
 
         case .failedToJoinChannel(let channelUUID, let contactID, let reason):
             let failureAppliesToCurrentSession =

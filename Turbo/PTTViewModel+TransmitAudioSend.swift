@@ -11,6 +11,11 @@ import AVFAudio
 import UIKit
 
 extension PTTViewModel {
+    func isMediaRelayPeerUnavailable(_ error: Error) -> Bool {
+        guard case let DirectQuicProbeError.connectionFailed(message) = error else { return false }
+        return message == "media relay peer is unavailable"
+    }
+
     func recordMediaRelayPeerUnavailableInvariantIfNeeded(
         error: Error,
         contactID: UUID,
@@ -18,8 +23,7 @@ extension PTTViewModel {
         peerDeviceID: String,
         operation: String
     ) {
-        guard case let DirectQuicProbeError.connectionFailed(message) = error,
-              message == "media relay peer is unavailable" else { return }
+        guard isMediaRelayPeerUnavailable(error) else { return }
         diagnostics.recordInvariantViolation(
             invariantID: "relay.send_without_live_peer",
             scope: .backend,
@@ -32,6 +36,30 @@ extension PTTViewModel {
                 "selectedPeerPhase": String(describing: selectedPeerState(for: contactID).phase),
                 "systemSession": String(describing: systemSessionState),
                 "error": error.localizedDescription,
+            ]
+        )
+    }
+
+    func clearStaleMediaRelayClient(
+        localDeviceID: String,
+        channelID: String,
+        peerDeviceID: String,
+        client: TurboMediaRelayClient,
+        reason: String
+    ) {
+        let key = MediaRelayConnectionKey(
+            sessionID: channelID,
+            localDeviceID: localDeviceID,
+            peerDeviceID: peerDeviceID
+        )
+        mediaRuntime.clearMediaRelayClient(matching: key, client: client)
+        diagnostics.record(
+            .media,
+            message: "Cleared stale media relay client after peer unavailable",
+            metadata: [
+                "channelId": channelID,
+                "peerDeviceId": peerDeviceID,
+                "reason": reason,
             ]
         )
     }
@@ -148,12 +176,15 @@ extension PTTViewModel {
                                     "error": error.localizedDescription,
                                 ]
                             )
-                            let key = MediaRelayConnectionKey(
-                                sessionID: target.channelID,
-                                localDeviceID: fromDeviceID,
-                                peerDeviceID: target.deviceID
-                            )
-                            self.mediaRuntime.clearMediaRelayClient(matching: key, client: relayClient)
+                            if self.isMediaRelayPeerUnavailable(error) {
+                                self.clearStaleMediaRelayClient(
+                                    localDeviceID: fromDeviceID,
+                                    channelID: target.channelID,
+                                    peerDeviceID: target.deviceID,
+                                    client: relayClient,
+                                    reason: "audio-payload"
+                                )
+                            }
                         }
                     }
                 }
@@ -314,6 +345,18 @@ extension PTTViewModel {
         }
         switch start {
         case .existingClient(let client):
+            if client.hasFreshPeerUnavailable() {
+                await MainActor.run {
+                    clearStaleMediaRelayClient(
+                        localDeviceID: localDeviceId,
+                        channelID: channelID,
+                        peerDeviceID: peerDeviceID,
+                        client: client,
+                        reason: "peer-unavailable-reuse-blocked"
+                    )
+                }
+                return nil
+            }
             return client
         case .existingAttempt(let attempt):
             return await attempt.wait()

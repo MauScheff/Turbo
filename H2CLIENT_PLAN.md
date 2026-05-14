@@ -1,5 +1,9 @@
 # H2 Client Plan
 
+Status: active/paused implementation plan.
+Canonical home for: standalone Unison HTTP/2 client boundary, MVP shape, implementation phases, and APNs transport proof requirements.
+Related docs: [`APNS_DELIVERY_PLAN.md`](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md) owns Turbo APNs delivery architecture; [`APNS_ES256_PLAN.md`](/Users/mau/Development/Turbo/APNS_ES256_PLAN.md) owns ES256 signing work.
+
 ## Goal
 
 Build a standalone Unison project that provides the smallest viable outbound

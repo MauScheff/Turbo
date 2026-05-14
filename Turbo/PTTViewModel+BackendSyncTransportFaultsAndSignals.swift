@@ -1802,6 +1802,7 @@ extension PTTViewModel {
         guard localSessionEstablished else { return false }
         guard effectiveChannelReadiness?.selfHasActiveDevice == false else { return false }
         guard backendRuntime.signalingJoinRecoveryTask == nil else { return false }
+        guard !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) else { return false }
         guard !shouldUseLiveCallControlPlaneReconnectGrace(for: contactID) else { return false }
         return !backendRuntime.isBackendJoinSettling(for: contactID)
     }

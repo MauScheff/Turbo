@@ -1,320 +1,107 @@
 # Reliability Guidelines
 
-This document is the practical reliability guide for day-to-day work in Turbo.
+This is the reliability companion to [`WORKFLOW.md`](/Users/mau/Development/Turbo/WORKFLOW.md).
 
-- [`RELIABILITY_GOALS.md`](/Users/mau/Development/Turbo/RELIABILITY_GOALS.md)
-  is the north star.
-- [`RELIABILITY_PLAN.md`](/Users/mau/Development/Turbo/RELIABILITY_PLAN.md)
-  is the longer execution roadmap.
-- This file explains how to reason, model, test, and iterate so the system
-  moves toward maximum reliability in concrete engineering work.
+Use `WORKFLOW.md` for the canonical ownership, invariant, modeling, and proof model. Use this file for reliability-specific framing and review questions.
 
-The target is not "write more tests." The target is:
+Related docs:
 
-> Every important claim has a clear owner, a named invariant, a narrow proof,
+- [`RELIABILITY_PLAN.md`](/Users/mau/Development/Turbo/RELIABILITY_PLAN.md): strategic reliability architecture and workstreams
+- [`RELIABILITY_CHECKLIST.md`](/Users/mau/Development/Turbo/RELIABILITY_CHECKLIST.md): practical checklists
+- [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md): invariant registry and emission rules
+- [`SELF_HEALING.md`](/Users/mau/Development/Turbo/SELF_HEALING.md): bounded repair rules
+
+## Reliability Target
+
+`100% reliable` is not one huge test suite. It means:
+
+> Every important claim has a clear owner, a precise invariant, a narrow proof,
 > and production-visible evidence when it fails.
 
-## What "100% Reliable" Means Here
-
-Turbo cannot literally guarantee perfect behavior across Apple PushToTalk, APNs,
-carrier networks, batteries, permissions, radios, and process death.
-
-The practical definition is:
-
-- illegal states are made unrepresentable where possible
-- remaining invalid states are detected at the authoritative seam
-- recoverable invalid states are repaired through a bounded idempotent path
-- retries, duplicates, reordering, reconnects, and stale data converge back to
-  the same valid state
-- production failures become deterministic diagnostics, replays, invariants, and
-  regressions instead of stories
-
-## Core Model
-
-Reliability in Turbo should be built from a small set of mathematical ideas used
-in a pragmatic way:
-
-- **State machines**
-  - model workflows as `State + Event -> NewState + Commands`
-- **ADTs / sum types**
-  - when a thing can be in exactly one mode, encode it as one variant, not a bag
-    of booleans
-- **Invariants**
-  - facts that must always hold
-- **Preconditions**
-  - facts that must hold before an event or command is accepted
-- **Postconditions**
-  - facts that must hold after a transition or route completes
-- **Idempotence**
-  - retries and duplicate deliveries should be safe
-- **Convergence**
-  - reconnect, refresh, replay, and reordering should move replicas back toward
-    the same valid truth
-- **Leases / epochs / fencing**
-  - runtime truth should expire or be superseded explicitly so stale rows cannot
-    be mistaken for current capability
-
-## Design Rules
-
-### 1. Start With Ownership
-
-Before editing code, restate the bug as a broken fact and decide who owns that
-fact.
-
-Common owners:
-
-- backend/shared truth
-- client-local reducer or projection
-- pair/convergence rule requiring merged evidence
-- Apple/PTT/audio boundary
-
-Do not fix a backend-owned contradiction only in Swift because the UI happened
-to show it first.
-
-### 2. Treat The Backend As The Authority For Shared Truth
-
-The backend should own:
-
-- channel membership
-- request/session relationship truth
-- readiness and wake target truth
-- active transmit ownership
-- distributed convergence after retry/reconnect/disconnect
-
-The client should own:
-
-- local gesture state
-- local audio/session/framework state
-- optimistic local intent
-- UI projection of already-owned facts
-
-When app and backend both represent the same concept, backend/domain truth
-should lead and the client should derive from it.
-
-### 3. Prefer ADTs Over Boolean Bundles
-
-Good:
-
-- explicit relationship variants
-- explicit readiness variants
-- explicit session phases with phase-specific payloads
-
-Bad:
-
-- `isReady`, `isJoined`, `isConnecting`, `isReceiving` combinations that can
-  contradict each other
-- stringly typed status fields that decide behavior deep in reducers
-
-If a weird distributed case is real, model it as a real state instead of hiding
-it behind precedence rules.
-
-### 4. Store Canonical Truth Once, Derive Everything Else
-
-The same fact should not live independently in:
-
-- UI latches
-- coordinator booleans
-- backend projections
-- diagnostics text
-
-Prefer one canonical fact plus derived projections.
-
-### 5. Runtime Facts Need Epochs, Leases, Or Tombstones
-
-Durable facts and runtime facts should not be modeled the same way.
-
-- durable facts can often be monotonic
-- runtime facts go stale and need lease, epoch, or fencing discipline
-
-Current backend direction:
-
-> stale rows may exist, but stale rows must never be sufficient to project
-> current truth
-
-That is the right rule for presence, readiness, active transmit, wake targets,
-and other call-critical runtime facts.
-
-### 6. Invalid State Must Fail Closed
-
-If the system cannot prove a capability, it should not project that capability.
-
-Examples:
-
-- do not show `ready` if backend/audio evidence does not support transmit
-- do not authorize transmit from stale membership
-- do not project receiving without joined/session evidence
-
-### 7. Self-Healing Is A Real Design Tool
-
-When a bad state is clearly invalid and safely recoverable:
-
-- detect it at the authoritative seam
-- emit a stable invariant ID
-- run one bounded idempotent repair
-- keep repair evidence in diagnostics
-- prove both:
-  - the bad state repairs
-  - the nearby valid in-flight state does not repair
-
-Use [`SELF_HEALING.md`](/Users/mau/Development/Turbo/SELF_HEALING.md) for the
-repair rules.
-
-## The Reliability Loop
-
-This should be the default operating loop:
-
-1. A human reports the failure in product language.
-2. The agent collects diagnostics with `just reliability-intake` or
-   `just reliability-intake-shake`.
-3. The broken fact is classified by owner.
-4. The contradiction is named as an invariant.
-5. The narrowest failing proof is added.
-6. The owning subsystem is fixed.
-7. The narrow proof passes.
-8. The appropriate gate or hosted verification is run.
-9. The bug remains as a permanent regression.
-
-Express bug reports in this shape when possible:
+The Turbo reliability loop is:
 
 ```text
-observer -> subject -> initial conditions -> event sequence -> expected
-invariant -> observed violation
+report -> diagnostics -> owner -> invariant/regression -> fix -> prove -> release/check
 ```
 
-## Proof Order
+Turbo cannot literally guarantee perfect behavior across Apple PushToTalk, APNs, carrier networks, batteries, permissions, radios, and process death.
 
-Use the narrowest proof that can actually prove the claim.
+The practical target is:
 
-1. **Swift reducer/domain/property tests**
-   - pure app rules
-   - projection logic
-   - idempotence and convergence rules
-2. **Unison/backend tests or route probes**
-   - backend-owned truth
-   - route/store/projection semantics
-3. **Deterministic simulator scenarios**
-   - distributed app/backend journeys
-   - reconnect, refresh, partial join, wake-capable flows, transport faults
-4. **Strict merged diagnostics**
-   - pair and convergence contradictions
-5. **TLA+ model checks**
-   - protocol interleavings
-   - retries, duplicates, reordering, stale snapshots, lease expiry
-6. **Physical-device checks**
-   - only for Apple/PTT/audio/background/lock-screen boundaries
+- Pure app/backend logic: make illegal states unrepresentable where possible.
+- Distributed behavior: prove safety under retries, stale data, reconnects, drops, duplicates, and reordering.
+- Apple/network/cloud boundaries: make them observable, fail closed, self-healing where safe, and checked by SLOs/probes.
 
-Do not use an expensive scenario or device loop to prove a pure reducer rule if
-a fast property test can prove it better.
+The mindset shift is: stop asking "what test catches this UI bug?" and ask "what impossible state did we allow, who owned that truth, and how do we make that class impossible or detectable forever?"
 
-## Which Tool To Use When
+## How To Use Math
 
-### Field Or Device Report
+Use math in the boring, useful way:
 
-Start here when the issue came from debug, TestFlight, production-like, or a
-physical device:
+- Model workflows as state machines: `State + Event -> NewState + Commands`.
+- Use ADTs/enums instead of boolean bundles for mutually exclusive modes.
+- Define invariants: "this must always be true."
+- Define preconditions: "this event is only valid if..."
+- Define postconditions: "after this transition, this must be true."
+- Make operations idempotent, replay-safe, and order-robust.
+- Use leases and epochs for runtime truth so stale facts cannot masquerade as current truth.
+- Treat durable state as monotonic/convergent where possible; treat runtime state as leased, fenced, and expiring.
 
-- `just reliability-intake @handle [peer]`
-- `just reliability-intake-shake @handle <incidentId> [peer]`
+## Reliability-Specific Rules
 
-Use this to gather merged diagnostics, classify ownership, and produce a replay
-candidate when possible.
+- Start with ownership. Do not fix a backend-owned contradiction only in Swift because the UI showed it first.
+- Treat durable facts and runtime facts differently. Runtime facts such as presence, readiness, active transmit, and wake targets need lease, epoch, fencing, tombstone, or invalidation discipline.
+- Fail closed when capability cannot be proven. Do not show or authorize `ready`, `receiving`, transmit, or wake behavior from stale or incomplete evidence.
+- Use self-healing only for provably invalid and safely recoverable states. Repairs must be bounded, idempotent, diagnostic-visible, and proven against nearby valid in-flight states.
+- Keep production evidence in mind while designing the invariant. A bug that can happen in TestFlight or production must emit or preserve enough facts to reconstruct the contradiction.
 
-### Pure App Rule
+## Tool Selection
 
-Use:
+Use the thinnest tool that proves the claim. Use [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md) for command details.
 
-- `just swift-test-target <name>`
-- `just swift-test-suite`
+| Need | Tool |
+| --- | --- |
+| Pure Swift reducer/projection rule | `just swift-test-target <name>` |
+| Full app-side test confidence | `just swift-test-suite` |
+| Backend-owned truth | Unison MCP/UCM tests, backend probes |
+| Distributed app/backend journey | `just simulator-scenario <name>` |
+| Full scenario catalog | `just simulator-scenario-suite` |
+| Pair/convergence diagnostics | `just simulator-scenario-merge-strict` |
+| Field/TestFlight/device report | `just reliability-intake` or `just reliability-intake-shake` |
+| Retry/drop/reorder/reconnect families | `just simulator-fuzz-local <seed> <count>` |
+| Protocol interleavings | `just protocol-model-checks` |
+| Hosted route/control-plane confidence | `just synthetic-conversation-probe`, `just slo-dashboard`, or `just postdeploy-check` |
+| Verified deploy | `just deploy-staging-verified` or `just deploy-production` |
+| Apple/PTT/audio boundary | Physical device check after lower layers are proven |
 
-This is the first proof lane for reducer transitions, projections, local
-invariants, and self-healing behavior.
+## Iteration Rule
 
-### Backend-Owned Truth
+For reliability work:
 
-Use:
+1. Restate the symptom as a broken fact.
+2. Decide who owns that fact: backend, client reducer, pair/convergence, or Apple boundary.
+3. Add or strengthen the invariant at that owner seam.
+4. Write the narrowest failing proof.
+5. Fix the owner, not the visible symptom.
+6. Run the narrow proof.
+7. Run the right gate for the blast radius.
+8. Keep diagnostics good enough that the next production failure is reconstructable.
 
-- Unison MCP / UCM to inspect and update `turbo/main`
-- backend tests
-- `just route-probe`
-- `just route-probe-local`
+## Recommended Changes
 
-Use this when the backend owns the fact and the client is only rendering it.
+Current high-leverage reliability work should keep moving in these directions:
 
-### Distributed Control-Plane Journey
+- Make invariant-first work non-negotiable. Every serious bug should become a named rule in [`invariants/registry.json`](/Users/mau/Development/Turbo/invariants/registry.json), with detection at the authoritative seam described by [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md).
+- Continue the backend stale-truth audit. Classify every call-critical backend fact as durable/monotonic or leased/epoched runtime state: presence, readiness, signaling authorization, wake target, active transmit, relay/session facts.
+- Push more behavior into typed reducers and projections. UI should render derived state, not own truth. This direction is documented in [`SWIFT.md`](/Users/mau/Development/Turbo/SWIFT.md).
+- Add lower-level property/reducer tests under every simulator scenario. Scenarios are valuable but expensive; the pure invariant underneath should usually have a fast Swift or Unison proof.
+- Use TLA+ for protocol questions before implementation gets complicated: reconnect, stale snapshots, duplicated/dropped/reordered signals, lease expiry, active transmitter ownership, and wake targeting. See [`TLA_PLUS.md`](/Users/mau/Development/Turbo/TLA_PLUS.md).
+- Run simulator fuzzing regularly, then promote minimized failures into checked-in scenarios only when they are stable and meaningful. See [`SIMULATOR_FUZZING.md`](/Users/mau/Development/Turbo/SIMULATOR_FUZZING.md).
+- Treat self-healing as a formal repair pattern, not a UI patch. Repairs must be bounded, idempotent, observable, and tested against nearby valid in-flight states. See [`SELF_HEALING.md`](/Users/mau/Development/Turbo/SELF_HEALING.md).
 
-Use:
+## Good Reliability Work
 
-- `just simulator-scenario <name>`
-- `just simulator-scenario-suite`
-- `just simulator-scenario-merge-strict`
-
-This is the main proof loop for app/backend behavior that does not require the
-real Apple boundary.
-
-### Generated Failure Families
-
-Use:
-
-- `just simulator-fuzz-local <seed> <count>`
-- `just simulator-fuzz-replay <artifact-dir>`
-- `just simulator-fuzz-shrink <artifact-dir>`
-
-Use fuzzing for duplicates, drops, reordering, reconnects, refresh races,
-restart, and timing perturbations. Promote stable minimized failures into
-checked-in scenarios only after they are useful as regressions.
-
-### Protocol Semantics
-
-Use:
-
-- `just protocol-model-checks`
-
-Use TLA+ when the question is about protocol design rather than one specific
-implementation trace.
-
-### Hosted Confidence
-
-Use:
-
-- `just reliability-gate-regressions`
-- `just reliability-gate-smoke`
-- `just reliability-gate-full`
-- `just reliability-gate-local`
-- `just postdeploy-check`
-- `just deploy-staging-verified`
-- `just deploy-production`
-
-Use the smallest gate that matches the risk of the change.
-
-## Expected Working Style
-
-### When Investigating A Bug
-
-- start from the smallest authoritative docs and source
-- classify ownership before editing
-- add the invariant before or with the fix
-- prefer fixing the source over adding UI masking
-- keep the proof close to the owner seam
-
-### When Designing New Behavior
-
-- decide the canonical state machine first
-- decide who owns each fact
-- decide what is durable truth versus runtime truth
-- define invalid states explicitly
-- define retry/duplicate/reorder/reconnect semantics before coding
-- define observability and correlation IDs as part of the feature
-
-### When Shipping Risky Changes
-
-- prefer feature flags for risky protocol work
-- run the appropriate gate before deploy
-- run hosted verification after deploy
-- inspect artifacts rather than trusting a green command at face value
-
-## What Good Reliability Work Looks Like
-
-A good reliability fix usually leaves behind:
+A strong reliability fix usually leaves behind:
 
 - one stable invariant ID
 - one authoritative detector
@@ -331,29 +118,17 @@ A weak fix usually looks like:
 - a scenario added without a lower-level proof underneath it
 - repeated manual reproduction instead of a checked-in regression
 
-## Recommended Reliability Review Questions
+## Review Questions
 
-Use these questions during design and implementation reviews:
+Use these during design, implementation, debugging, and release review:
 
 - What exact fact can be wrong here?
 - Who is authoritative for that fact?
 - Is this state modeled as an ADT or as scattered flags?
 - What stale runtime fact could be mistaken for current truth?
-- What happens under retry, duplicate, reconnect, reorder, refresh, restart,
-  and timeout?
+- What happens under retry, duplicate, reconnect, reorder, refresh, restart, and timeout?
 - What invariant would name the contradiction?
 - Where should that invariant be detected?
 - What is the narrowest proof lane?
 - Can the system repair this safely and idempotently?
 - If this fails in production, what evidence will we have?
-
-## References
-
-- [`README.md`](/Users/mau/Development/Turbo/README.md)
-- [`INVARIANTS.md`](/Users/mau/Development/Turbo/INVARIANTS.md)
-- [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md)
-- [`SIMULATOR_FUZZING.md`](/Users/mau/Development/Turbo/SIMULATOR_FUZZING.md)
-- [`TLA_PLUS.md`](/Users/mau/Development/Turbo/TLA_PLUS.md)
-- [`SELF_HEALING.md`](/Users/mau/Development/Turbo/SELF_HEALING.md)
-- [`SWIFT.md`](/Users/mau/Development/Turbo/SWIFT.md)
-- [`BACKEND.md`](/Users/mau/Development/Turbo/BACKEND.md)

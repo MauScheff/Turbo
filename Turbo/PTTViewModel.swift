@@ -184,6 +184,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var optimisticOutgoingRequestEvidenceByContactID: [UUID: OptimisticOutgoingRequestEvidence] = [:]
     var recentPeerDeviceEvidenceByContactID: [UUID: RecentPeerDeviceEvidence] = [:]
     var selectedContactPrewarmInFlight: Set<UUID> = []
+    var selectedContactPrewarmedSelectionContactID: UUID?
     var selectedContactPrewarmPipelineEnabled: Bool = true
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
     private var diagnosticsAutoPublishPendingTrigger: String?
@@ -199,6 +200,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var audioOutputPreference: AudioOutputPreference = .loadStored()
     var pendingTalkRequestNotificationHandle: String?
     var pendingTalkRequestNotificationShouldJoin: Bool = false
+    var foregroundTalkRequestNotificationPrewarmedInviteIDs: Set<String> = []
     var pendingForegroundTalkRequestSurface: IncomingTalkRequestSurface?
     var pendingForegroundTalkRequestReceivedAt: Date?
     let pendingForegroundTalkRequestLifetime: TimeInterval = 20
@@ -269,7 +271,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     private static var reducerTransitionDiagnosticsEnabled: Bool {
-        ProcessInfo.processInfo.environment["TURBO_IOS_REDUCER_TRANSITION_DIAGNOSTICS"] == "1"
+        Self.isRunningAutomatedTests
+            || ProcessInfo.processInfo.environment["TURBO_IOS_REDUCER_TRANSITION_DIAGNOSTICS"] == "1"
     }
 
     private static var selectedContactPrewarmPipelineDefaultEnabled: Bool {

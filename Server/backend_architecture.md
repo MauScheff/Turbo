@@ -1,5 +1,9 @@
 # Turbo Backend Architecture
 
+Status: active reference.
+Canonical home for: agreed v1 backend architecture, durable/runtime data model, websocket signaling, route surface, and backend control-plane responsibilities.
+Related docs: [`BACKEND.md`](/Users/mau/Development/Turbo/BACKEND.md) owns agent-facing backend workflow rules; [`BACKEND_STRUCTURE.md`](/Users/mau/Development/Turbo/BACKEND_STRUCTURE.md) owns the quick namespace map.
+
 ## Purpose
 
 This document defines the agreed v1 backend architecture for Turbo.
@@ -23,6 +27,14 @@ Build the simplest viable backend for 1:1 Push-to-Talk:
 - websocket signaling
 - single active transmitter enforcement
 - local development entrypoint with stub push logging
+
+Explicit v1 non-goals:
+
+- no media relay or SFU
+- no group channels
+- no Android
+- no advanced moderation/admin features
+- no message history beyond minimal audit/logging
 
 ### later
 
@@ -101,32 +113,14 @@ The public channel and membership model should remain unchanged.
 
 ## Backend modules
 
-Suggested module layout:
+Current backend namespaces are indexed in [`BACKEND_STRUCTURE.md`](/Users/mau/Development/Turbo/BACKEND_STRUCTURE.md).
 
-- `turbo.domain`
-- `turbo.auth`
-- `turbo.codec.json`
-- `turbo.store.users`
-- `turbo.store.devices`
-- `turbo.store.channels`
-- `turbo.store.memberships`
-- `turbo.store.tokens`
-- `turbo.store.presence`
-- `turbo.store.runtime`
-- `turbo.service.http`
-- `turbo.service.ws`
-- `turbo.push`
-- `turbo`
+The architectural layering is:
 
-This follows the same broad structure as `cuts`: domain types, store modules, service layer, and top-level entrypoints.
-
-Current scratch/codebase layout already mirrors this plan:
-
-- `turbo_domain.u`
-- `turbo_store_auth.u`
-- `turbo_runtime_store.u`
-- `turbo_service_http.u`
-- `turbo_service_ws.u`
+- `turbo.domain`: durable records, runtime records, envelopes, readiness/wake types, and derived control-plane status helpers
+- `turbo.store.*`: Unison Cloud table layouts, projections, transactional updates, and query-shaped accessors
+- `turbo.service.*`: HTTP routes, websocket lifecycle, route composition, JSON boundaries, diagnostics, and internal worker surfaces
+- `turbo.*`: deploy/local entrypoints, auth/config helpers, APNs support, schema drift checks, and cross-cutting infrastructure
 
 ## Data model
 
@@ -274,7 +268,7 @@ Flow:
 1. client sends `begin-transmit` with only the sender `deviceId`
 2. backend verifies the sender is a channel member
 3. backend resolves the other direct-channel member
-4. backend selects that user's currently online device presence for the same channel
+4. backend selects that user's foreground-ready device or token-backed wake target for the same channel
 5. backend creates the transmit lock using the resolved target device
 
 This keeps target-device choice authoritative on the server and avoids trusting the client to nominate a receiver.
@@ -318,6 +312,22 @@ Supported `type` values in v1:
 
 The backend treats `payload` as opaque text in v1. That keeps the signaling contract transport-agnostic and avoids baking SDP or ICE structure into backend logic.
 
+### envelope shape
+
+Use a transport-agnostic envelope:
+
+```json
+{
+  "type": "offer",
+  "channelId": "uuid",
+  "fromUserId": "u_123",
+  "fromDeviceId": "d_abc",
+  "toUserId": "u_456",
+  "toDeviceId": "d_xyz",
+  "payload": {}
+}
+```
+
 ### authorization and forwarding rules
 
 - the authenticated websocket user must match `fromUserId`
@@ -327,15 +337,14 @@ The backend treats `payload` as opaque text in v1. That keeps the signaling cont
 - the backend resolves the active receiving device for `toUserId` from channel presence
 - the backend forwards only to that server-selected device
 - if no active receiving device exists, the sender receives an error frame
-4. client joins that backend-issued channel
 
-### join
+For `receiver-ready` and `receiver-not-ready`, the websocket signal is not the source of truth by itself. The backend persists the sender's current-session audio readiness and exposes the authoritative merged view on `/v1/channels/:channelId/readiness/:deviceId` under `audioReadiness`.
 
-Join means:
+Wake capability is modeled separately from connected audio readiness. The same readiness route exposes token-backed wake capability under `wakeReadiness`, so the app can distinguish:
 
-- membership is confirmed
-- selected device is marked present in the channel
-- later, the client uploads its ephemeral PTT token for that channel
+- connected peer, audio path not yet ready
+- disconnected peer, wake-capable
+- disconnected peer, not wake-capable
 
 ## PTT token lifecycle
 
@@ -352,61 +361,6 @@ Rules:
 - replace previous token for the same tuple
 - allow token invalidation later
 - never expose stored tokens to other clients
-
-## Signaling model
-
-The first backend milestone includes real websocket signaling.
-
-### connection
-
-Client opens an authenticated websocket and identifies:
-
-- `userId`
-- `deviceId`
-
-### supported messages
-
-- `offer`
-- `answer`
-- `ice-candidate`
-- `hangup`
-- `transmit-start`
-- `transmit-stop`
-- `receiver-ready`
-- `receiver-not-ready`
-
-### server checks
-
-For every message:
-
-- sender must own the sending device
-- sender must be a member of the channel
-- target must be the intended peer device in that channel
-- malformed or unauthorized messages are rejected
-
-For `receiver-ready` and `receiver-not-ready`, the websocket signal is not the source of truth by itself. The backend persists the sender's current-session audio readiness and exposes the authoritative merged view on `/v1/channels/:channelId/readiness/:deviceId` under `audioReadiness`.
-
-Wake capability is modeled separately from connected audio readiness. The same readiness route now exposes token-backed wake capability under `wakeReadiness`, so the app can distinguish:
-
-- connected peer, audio path not yet ready
-- disconnected peer, wake-capable
-- disconnected peer, not wake-capable
-
-### envelope shape
-
-Use a transport-agnostic envelope:
-
-```json
-{
-  "type": "offer",
-  "channelId": "uuid",
-  "fromUserId": "u_123",
-  "fromDeviceId": "d_abc",
-  "toUserId": "u_456",
-  "toDeviceId": "d_xyz",
-  "payload": {}
-}
-```
 
 ## Transmit lifecycle
 
@@ -450,6 +404,36 @@ Keep push sending behind an interface so it can later:
 - send real APNs PushToTalk requests
 - invalidate tokens on APNs rejection
 
+APNs PushToTalk sends must use:
+
+- push type: `pushtotalk`
+- topic: `<bundle-id>.voip-ptt`
+- high priority delivery for wakeups
+- immediate expiration semantics for stale audio wakeups
+
+Payloads can include app-specific metadata such as:
+
+- `channelId`
+- sender identity
+- event type such as `audio-available`
+
+Example payload shape:
+
+```json
+{
+  "aps": {},
+  "channelId": "3f4f6e6f-0f9a-4ab2-a2d6-4e5f7d7e9b01",
+  "speaker": {
+    "userId": "u_123",
+    "displayName": "Alice"
+  },
+  "event": "audio-available"
+}
+```
+
+The iOS app still owns the Apple PushToTalk lifecycle. The backend owns target
+selection, wake eligibility, APNs send attempt identity, and wake diagnostics.
+
 ## API surface
 
 ### HTTP
@@ -469,35 +453,82 @@ Keep push sending behind an interface so it can later:
 - authenticated websocket endpoint
 - signaling message exchange using the shared envelope
 
+## Failure handling
+
+### Token issues
+
+- If the recipient has no valid ephemeral token for the channel, `begin-transmit`
+  returns a clear error unless foreground connected audio readiness is enough for
+  the selected transmit path.
+- If APNs rejects a token, remove or invalidate it.
+- Token storage and invalidation are scoped to `channel + user + device`.
+
+### Presence issues
+
+- If the target device is offline, still try APNs wake when a token-backed wake
+  target exists.
+- If websocket is disconnected, do not assume the channel is invalid.
+- Presence and session state must converge after reconnect, retry, duplicate
+  delivery, and stale websocket signals.
+
+### Signaling issues
+
+- Reject malformed or unauthorized signaling.
+- If offer/answer exchange times out, clear or repair runtime state through the
+  owning subsystem.
+- Include debug-friendly error codes and diagnostics evidence.
+
+### Concurrency issues
+
+- Only one active transmitter may exist per 1:1 channel.
+- Overlapping transmit attempts must be rejected or serialized.
+- Begin/end transmit behavior must be safe under retry and duplicate delivery.
+
+## Security requirements
+
+- All endpoints require auth.
+- Device actions must be scoped to the owning user.
+- Signaling messages must be authorized by channel membership.
+- Arbitrary websocket routing across channels is forbidden.
+- PTT tokens must never be exposed to clients other than the owning
+  device/backend path that provided them.
+- APNs credentials must be stored in managed environment/config secrets, not in
+  checked-in files.
+
+## Logging and observability
+
+Backend diagnostics should preserve enough evidence to debug signaling, wake,
+and transmit issues without reconstructing behavior from prose logs.
+
+Important events:
+
+- user authenticated
+- device registered
+- channel created or looked up
+- channel joined or left
+- ephemeral token stored, replaced, revoked, or invalidated
+- begin-transmit called
+- wake/APNs push attempted, succeeded, rejected, or failed
+- offer relayed
+- answer relayed
+- ICE candidate relayed
+- receiver-ready or receiver-not-ready persisted
+- transmit ended
+- websocket connected or disconnected
+
+Include where possible:
+
+- `userId`
+- `deviceId`
+- `channelId`
+- timestamp
+- result or failure reason
+- transmit, wake, attempt, or session correlation IDs
+
 ## Local development workflow
 
-Target workflow:
-
-1. run `turbo.serveLocal`
-2. point the iOS app at local HTTP and websocket endpoints
-3. use dev auth users
-4. inspect console logs for stub push events and signaling traces
+Local development uses the same backend implementation through `turbo.serveLocal`, dev auth users, local HTTP/websocket endpoints, and stub push logging. Exact local server and scenario commands live in [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md).
 
 ## Documentation and testing expectations
 
-For core Unison code in this backend:
-
-- add `.doc` definitions for exported or user-facing functions and important types
-- add example tests for pure logic
-- add property-based tests for core pure functions where useful
-- explicitly call out functions that are not good candidates for property testing
-
-## First implementation slice
-
-Recommended first slice:
-
-1. core domain types
-2. users/dev auth
-3. device registration
-4. direct channel creation/lookup
-5. join + ephemeral token ingest
-6. websocket signaling
-7. begin/end transmit runtime state
-8. local entrypoint
-
-This is enough to exercise the full control plane before real pushes are added.
+For core Unison backend code, exported/user-facing functions and important types need `.doc` definitions, pure logic needs example tests, and core pure functions should get property tests when the property is meaningful. Full Unison workflow rules live in [`UNISON.md`](/Users/mau/Development/Turbo/UNISON.md).

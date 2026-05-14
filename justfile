@@ -72,6 +72,9 @@ route-probe:
 backend-stability-probe base="https://beepbeep.to" handle="@mau" iterations="10" timeout="8":
   python3 scripts/backend_stability_probe.py --base-url "{{base}}" --handle "{{handle}}" --iterations "{{iterations}}" --timeout "{{timeout}}"
 
+websocket-stability-probe base="https://beepbeep.to" caller="@quinn" callee="@sasha" duration="90" heartbeat_interval="20" telemetry_interval="0" insecure="--insecure":
+  python3 scripts/websocket_stability_probe.py --base-url "{{base}}" --caller "{{caller}}" --callee "{{callee}}" --duration "{{duration}}" --heartbeat-interval "{{heartbeat_interval}}" --telemetry-interval "{{telemetry_interval}}" {{insecure}}
+
 direct-quic-provisioning-probe:
   .venv/bin/python scripts/direct_quic_provisioning_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
 
@@ -223,6 +226,9 @@ simulator-scenario-merge-strict base="https://beepbeep.to" handle_a="@avery" han
     --device "{{handle_a}}=sim-scenario-avery" \
     --device "{{handle_b}}=sim-scenario-blake"
 
+simulator-scenario-hosted-strict scenario="" base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" insecure="--insecure":
+  sh -c 'device_a="sim-scenario-avery-$(uuidgen | tr "[:upper:]" "[:lower:]")"; device_b="sim-scenario-blake-$(uuidgen | tr "[:upper:]" "[:lower:]")"; python3 scripts/run_simulator_scenarios.py --scenario "{{scenario}}" --base-url "{{base}}" --handle-a "{{handle_a}}" --handle-b "{{handle_b}}" --device-id-a "$device_a" --device-id-b "$device_b" && python3 scripts/merged_diagnostics.py --base-url "{{base}}" {{insecure}} --fail-on-violations --device "{{handle_a}}=$device_a" --device "{{handle_b}}=$device_b"'
+
 simulator-scenario-local scenario="" base="http://localhost:8090/s/turbo" handle_a="@avery" handle_b="@blake":
   python3 scripts/run_simulator_scenarios.py \
     --scenario "{{scenario}}" \
@@ -333,13 +339,11 @@ reliability-gate-regressions:
 
 reliability-gate-smoke:
   just reliability-gate-regressions
-  just simulator-scenario "presence_online_projection,request_accept_ready_refresh_stability,background_wake_refresh_stability"
-  just simulator-scenario-merge-strict
+  just simulator-scenario-hosted-strict "presence_online_projection,request_accept_ready_refresh_stability,background_wake_refresh_stability"
 
 reliability-gate-full:
   just reliability-gate-regressions
-  just simulator-scenario-suite
-  just simulator-scenario-merge-strict
+  just simulator-scenario-hosted-strict
 
 reliability-gate-local:
   just reliability-gate-regressions

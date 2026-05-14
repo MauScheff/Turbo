@@ -16,6 +16,18 @@
       "summary": "selected backend ready while one projection is not live"
     }
   ],
+  "currentViolations": [],
+  "historicalViolations": [
+    {
+      "invariantId": "selected.backend_ready_ui_not_live",
+      "message": "backend is ready while selected UI is idle",
+      "metadata": {},
+      "scope": "local",
+      "source": "structured",
+      "subject": "@prodavery",
+      "timestamp": "2026-05-10T10:00:07Z"
+    }
+  ],
   "reports": [
     {
       "appVersion": "1.0",

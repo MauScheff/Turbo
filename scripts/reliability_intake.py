@@ -242,6 +242,7 @@ def write_summary(
         telemetry_reports = payload_list(payload, "telemetrySnapshotReports")
         warnings = payload_list(payload, "sourceWarnings")
         violations = payload_list(payload, "violations")
+        current_violations, historical_violations = split_violations(payload)
         telemetry_count = payload.get("telemetryEventCount", 0)
         incident_found = incident_marker_found(payload, args.incident_id)
 
@@ -252,6 +253,8 @@ def write_summary(
                 f"- telemetry events: `{telemetry_count}`",
                 f"- source warnings: `{len(warnings)}`",
                 f"- invariant violations: `{len(violations)}`",
+                f"- current invariant violations: `{len(current_violations)}`",
+                f"- historical invariant violations: `{len(historical_violations)}`",
             ]
         )
         if args.incident_id.strip():
@@ -298,9 +301,9 @@ def write_summary(
                     f"{warning.get('source', 'unknown')}: {warning.get('message', '')}"
                 )
 
-        if violations:
-            lines.extend(["", "## Invariant Violations", ""])
-            for violation in violations[:20]:
+        if current_violations:
+            lines.extend(["", "## Current Invariant Violations", ""])
+            for violation in current_violations[:20]:
                 timestamp = violation.get("timestamp") or "no timestamp"
                 lines.append(
                     f"- `{violation.get('invariantId', 'unknown')}` "
@@ -309,8 +312,22 @@ def write_summary(
                     f"subject=`{violation.get('subject', 'unknown')}` "
                     f"at `{timestamp}`"
                 )
-            if len(violations) > 20:
-                lines.append(f"- ... `{len(violations) - 20}` more")
+            if len(current_violations) > 20:
+                lines.append(f"- ... `{len(current_violations) - 20}` more")
+
+        if historical_violations:
+            lines.extend(["", "## Historical Invariant Violations", ""])
+            for violation in historical_violations[:20]:
+                timestamp = violation.get("timestamp") or "no timestamp"
+                lines.append(
+                    f"- `{violation.get('invariantId', 'unknown')}` "
+                    f"scope=`{violation.get('scope', 'unknown')}` "
+                    f"source=`{violation.get('source', 'unknown')}` "
+                    f"subject=`{violation.get('subject', 'unknown')}` "
+                    f"at `{timestamp}`"
+                )
+            if len(historical_violations) > 20:
+                lines.append(f"- ... `{len(historical_violations) - 20}` more")
 
         shake_events = find_shake_events(payload)
         if shake_events:
@@ -369,6 +386,16 @@ def payload_list(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def split_violations(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    has_split_keys = "currentViolations" in payload or "historicalViolations" in payload
+    if has_split_keys:
+        return (
+            payload_list(payload, "currentViolations"),
+            payload_list(payload, "historicalViolations"),
+        )
+    return (payload_list(payload, "violations"), [])
 
 
 def has_at_least_two_subjects(payload: dict[str, Any], handles: list[str]) -> bool:

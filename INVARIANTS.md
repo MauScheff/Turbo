@@ -2,7 +2,7 @@
 
 This repo treats reliability bugs as broken named truths, not as ad hoc log strings.
 
-Use this file when a bug report says some state "should be impossible", especially for distributed state, backend truth, app/backend contracts, selected-session projection, reconnect/retry behavior, or stale state. For recoverable invalid states, pair this with `SELF_HEALING.md`.
+Use this file when a bug report says some state "should be impossible", especially for distributed state, backend truth, app/backend contracts, selected-session projection, reconnect/retry behavior, or stale state. Use [`WORKFLOW.md`](/Users/mau/Development/Turbo/WORKFLOW.md) for the global ownership/proof model. For recoverable invalid states, pair this with `SELF_HEALING.md`.
 
 ## Core Model
 

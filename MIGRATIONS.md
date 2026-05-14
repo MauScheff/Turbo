@@ -117,6 +117,14 @@ If production is already wedged because deployed code cannot deserialize old row
 
 Environment/database rotation fixes availability by abandoning the unreadable data. It does not explain or repair the schema drift, so it should leave behind a follow-up to add a fixture, migration, or reset path.
 
+Before rotating because the hosted backend "feels flaky", distinguish schema/storage failure from transport or simulator-lane instability:
+
+- run a raw hosted probe such as `just route-probe` or `just backend-stability-probe`
+- if those probes fail across the same hosted base URL, environment rotation may be a reasonable disposable-env recovery
+- if raw hosted probes pass but hosted simulator scenarios are timing out with `NSURLErrorDomain -1001/-1005`, treat that as app/transport/test-lane instability, not proof of schema drift
+
+Never make environment/database rotation an automatic production response. It is an operator decision for disposable environments, staging/dev recovery, or an explicitly approved emergency action.
+
 ## Definition of done
 
 A backend schema change is not done until:

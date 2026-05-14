@@ -383,7 +383,7 @@ extension PTTViewModel {
         }
     }
 
-    private func performReconciledTeardown(for contactID: UUID) {
+    func performReconciledTeardown(for contactID: UUID) {
         let backendChannelID = contacts.first { $0.id == contactID }?.backendChannelId
         let shouldPropagateBackendLeave =
             sessionCoordinator.pendingAction.isExplicitLeaveInFlight(for: contactID)
@@ -444,6 +444,14 @@ extension PTTViewModel {
         try? pttSystemClient.leaveChannel(channelUUID: systemChannelUUID)
         statusMessage = "Peer disconnected"
         captureDiagnosticsState("session-teardown:ptt-leave-requested")
+    }
+
+    func prepareReconciledTeardownState(for contactID: UUID) {
+        sessionCoordinator.markReconciledTeardown(contactID: contactID)
+        backendRuntime.clearBackendJoinSettling(for: contactID)
+        recentOutgoingJoinAcceptedTokensByContactID.removeValue(forKey: contactID)
+        recentOutgoingRequestEvidenceByContactID.removeValue(forKey: contactID)
+        recentPeerDeviceEvidenceByContactID.removeValue(forKey: contactID)
     }
 
     func initializeIfNeeded() async {
@@ -844,11 +852,7 @@ extension PTTViewModel {
             joinPTTChannel(for: contact)
         case .teardownLocalSession(let contactID):
             guard selectedContactId == contactID else { return }
-            sessionCoordinator.markReconciledTeardown(contactID: contactID)
-            backendRuntime.clearBackendJoinSettling(for: contactID)
-            recentOutgoingJoinAcceptedTokensByContactID.removeValue(forKey: contactID)
-            recentOutgoingRequestEvidenceByContactID.removeValue(forKey: contactID)
-            recentPeerDeviceEvidenceByContactID.removeValue(forKey: contactID)
+            prepareReconciledTeardownState(for: contactID)
             diagnostics.record(
                 .state,
                 message: "Tearing down invalid local session after selected-session reconciliation",
@@ -907,12 +911,9 @@ extension PTTViewModel {
             } else {
                 updateStatusForSelectedContact()
             }
-        case .syncLeftChannel(let contactID, let autoRejoinContactID):
+        case .syncLeftChannel(let contactID, let autoRejoinContactID, let shouldPropagateBackendLeave):
             tearDownTransmitRuntime(resetCoordinator: true)
             closeMediaSession()
-            let shouldPropagateBackendLeave =
-                (autoRejoinContactID != nil && autoRejoinContactID != contactID)
-                || (contactID.map { sessionCoordinator.pendingAction.isExplicitLeaveInFlight(for: $0) } ?? false)
 
             if shouldPropagateBackendLeave,
                let contactID,

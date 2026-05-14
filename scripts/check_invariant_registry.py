@@ -39,7 +39,6 @@ SCAN_ROOTS = [
     "Server",
     "INVARIANTS.md",
     "STATE_MACHINE_TESTING.md",
-    "RELIABILITY_PLAN.md",
     "SELF_HEALING.md",
     "TOOLING.md",
 ]

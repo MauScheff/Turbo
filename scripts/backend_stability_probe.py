@@ -38,6 +38,8 @@ def run_request(
     timeout_seconds: float,
     handle: str,
     body: dict[str, Any] | None = None,
+    authenticated: bool = False,
+    expected_device_id: str | None = None,
     insecure: bool = False,
 ) -> RequestResult:
     url = endpoint_url(base_url, path)
@@ -53,16 +55,19 @@ def run_request(
     ]
     if insecure:
         command.append("-k")
-    if endpoint == "auth":
+    if authenticated:
         command.extend([
             "-H",
             f"x-turbo-user-handle: {handle}",
             "-H",
             f"Authorization: Bearer {handle}",
+        ])
+    if body is not None:
+        command.extend([
             "-H",
             "Content-Type: application/json",
             "--data-binary",
-            json.dumps(body or {}),
+            json.dumps(body),
         ])
     started = time.monotonic()
     completed = subprocess.run(command + [url], capture_output=True, text=True)
@@ -74,7 +79,10 @@ def run_request(
     response = stdout
     marker = "__curl_http_code="
     if marker in stdout:
-        response, metrics = stdout.rsplit("\n", 1)
+        if "\n" in stdout:
+            response, metrics = stdout.rsplit("\n", 1)
+        else:
+            response, metrics = "", stdout
         parts = dict(
             part.split("=", 1)
             for part in metrics.split()
@@ -86,6 +94,15 @@ def run_request(
         except ValueError:
             curl_time_ms = elapsed_ms
     ok = completed.returncode == 0 and 200 <= http_code < 300
+    validation_error = None
+    if ok:
+        validation_error = validate_response(
+            endpoint=endpoint,
+            response=response,
+            expected_device_id=expected_device_id,
+        )
+        if validation_error is not None:
+            ok = False
     return RequestResult(
         iteration=iteration,
         endpoint=endpoint,
@@ -94,9 +111,41 @@ def run_request(
         ok=ok,
         httpCode=http_code,
         durationMs=curl_time_ms,
-        error=None if ok else (stderr or f"curl exited {completed.returncode}"),
+        error=None if ok else (validation_error or stderr or f"curl exited {completed.returncode}"),
         responsePreview=response[:240],
     )
+
+
+def validate_response(
+    *,
+    endpoint: str,
+    response: str,
+    expected_device_id: str | None,
+) -> str | None:
+    if endpoint not in {"device", "heartbeat", "telemetry"}:
+        return None
+    try:
+        parsed = json.loads(response)
+    except json.JSONDecodeError:
+        return f"{endpoint} returned invalid JSON"
+    if not isinstance(parsed, dict):
+        return f"{endpoint} returned unexpected payload type"
+    if endpoint in {"device", "heartbeat"}:
+        actual_device_id = str(parsed.get("deviceId") or "")
+        if expected_device_id and actual_device_id != expected_device_id:
+            return (
+                f"{endpoint} deviceId mismatch: expected {expected_device_id}, "
+                f"got {actual_device_id or 'missing'}"
+            )
+    if endpoint == "heartbeat":
+        status = str(parsed.get("status") or "")
+        if not status:
+            return "heartbeat response missing status"
+    if endpoint == "telemetry":
+        status = str(parsed.get("status") or "")
+        if not status:
+            return "telemetry response missing status"
+    return None
 
 
 def summarize(results: list[RequestResult]) -> dict[str, Any]:
@@ -134,17 +183,57 @@ def main() -> int:
 
     results: list[RequestResult] = []
     for iteration in range(1, args.iterations + 1):
+        device_id = f"stability-probe-{iteration}"
         requests = [
-            ("health", "GET", "v1/health", None),
-            ("config", "GET", "v1/config", None),
+            ("health", "GET", "v1/health", None, False, None),
+            ("config", "GET", "v1/config", None, False, None),
             (
                 "auth",
                 "POST",
                 "v1/auth/session",
-                {"deviceId": f"stability-probe-{iteration}", "deviceLabel": "backend-stability-probe"},
+                {"deviceId": device_id, "deviceLabel": "backend-stability-probe"},
+                True,
+                None,
+            ),
+            (
+                "device",
+                "POST",
+                "v1/devices/register",
+                {"deviceId": device_id, "deviceLabel": "backend-stability-probe"},
+                True,
+                device_id,
+            ),
+            (
+                "heartbeat",
+                "POST",
+                "v1/presence/heartbeat",
+                {"deviceId": device_id},
+                True,
+                device_id,
+            ),
+            (
+                "telemetry",
+                "POST",
+                "v1/telemetry/events",
+                {
+                    "eventName": "backend.stability.probe",
+                    "source": "probe",
+                    "severity": "info",
+                    "userHandle": args.handle,
+                    "deviceId": device_id,
+                    "appVersion": f"backend-stability-probe:{iteration}",
+                    "phase": "probe",
+                    "reason": "stability",
+                    "message": "backend stability probe",
+                    "metadataText": json.dumps({"iteration": str(iteration)}),
+                    "devTraffic": "true",
+                    "alert": "false",
+                },
+                True,
+                device_id,
             ),
         ]
-        for endpoint, method, path, body in requests:
+        for endpoint, method, path, body, authenticated, expected_device_id in requests:
             result = run_request(
                 base_url=args.base_url,
                 iteration=iteration,
@@ -154,6 +243,8 @@ def main() -> int:
                 timeout_seconds=args.timeout,
                 handle=args.handle,
                 body=body,
+                authenticated=authenticated,
+                expected_device_id=expected_device_id,
                 insecure=args.insecure,
             )
             results.append(result)

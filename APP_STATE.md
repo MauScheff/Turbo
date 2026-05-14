@@ -1,5 +1,9 @@
 # App State Guide
 
+Status: active reference.
+Canonical home for: app-visible conversation state layers, selected-peer derivation, readiness ADTs, and happy-path transition examples.
+Related docs: [`SWIFT.md`](/Users/mau/Development/Turbo/SWIFT.md) owns Swift architecture rules; [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md) owns scenario mechanics.
+
 This document explains how the iOS app models a conversation, especially around Push-to-Talk (PTT) session setup, transmit, and teardown.
 
 It is intentionally app-focused. For broader app architecture, read [SWIFT.md](/Users/mau/Development/Turbo/SWIFT.md). For simulator/device debugging loops, read [SWIFT_DEBUGGING.md](/Users/mau/Development/Turbo/SWIFT_DEBUGGING.md).

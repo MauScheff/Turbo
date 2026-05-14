@@ -1,0 +1,435 @@
+turbo.domain.audioReadyDeviceCountsAsActive :
+  Boolean -> AudioReadinessStatus -> Boolean
+turbo.domain.audioReadyDeviceCountsAsActive hasActiveLease audioStatus =
+  hasActiveLease && match audioStatus with
+    AudioReadinessWakeCapable -> false
+    _                         -> true
+
+turbo.domain.audioReadyDeviceCountsAsActive.tests.examples : [Result]
+turbo.domain.audioReadyDeviceCountsAsActive.tests.examples = test.verify do
+  ensureEqual
+    true
+    (turbo.domain.audioReadyDeviceCountsAsActive
+      true
+      AudioReadinessReady)
+  ensureEqual
+    true
+    (turbo.domain.audioReadyDeviceCountsAsActive
+      true
+      AudioReadinessWaiting)
+  ensureEqual
+    false
+    (turbo.domain.audioReadyDeviceCountsAsActive
+      true
+      AudioReadinessWakeCapable)
+  ensureEqual
+    false
+    (turbo.domain.audioReadyDeviceCountsAsActive
+      false
+      AudioReadinessReady)
+
+turbo.service.channels.readiness :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.readiness db = do
+  use Boolean not
+  use Optional map
+  use Parser / text
+  use Text ==
+  use object add empty
+  (channelIdText, deviceIdText) =
+    route GET (s "v1" / s "channels" / text / s "readiness" / text => Tuple.pair)
+  match requireUser db () with
+    Left err ->
+      unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      channelId = ChannelId.fromText channelIdText
+      currentDeviceId = DeviceId.fromText deviceIdText
+      canReadChannel = userCanReadDirectChannel db channelId currentUserId ()
+      if not canReadChannel then
+        unauthorized.json (empty |> addText "error" "not a channel participant")
+      else
+        channelOpt = OrderedTable.tryRead (channels.tables.byId db) channelId
+        match channelOpt with
+          None ->
+            notFound.json (empty |> addText "error" "channel not found")
+          Some channel ->
+            peerUserId =
+              (DirectChannel _ lowUserId highUserId _) = channel
+              if UserId.toText lowUserId == UserId.toText currentUserId
+              then highUserId
+              else lowUserId
+            selfPresence = presence.get db currentDeviceId ()
+            rawSelfHasActiveDevice = match selfPresence with
+              Some presence ->
+                matchesDeviceChannelPresence currentUserId currentDeviceId channelId presence
+              None ->
+                false
+            selfLease = getForDevice db channelId currentUserId currentDeviceId ()
+            rawSelfLeaseActive = isSome selfLease
+            selfAudioStatus =
+              if rawSelfLeaseActive then
+                match statusForCurrentSession db channelId currentUserId currentDeviceId () with
+                  AudioReadinessUnknown -> AudioReadinessWaiting
+                  status                -> status
+              else
+                AudioReadinessUnknown
+            selfHasActiveDevice =
+              audioReadyDeviceCountsAsActive rawSelfLeaseActive selfAudioStatus
+            _ =
+              if targetAudioReadySuppressesWake rawSelfHasActiveDevice (not selfHasActiveDevice)
+              then appendStaleSelfPresenceProjectedLiveInvariant db currentUserId channelId currentDeviceId "readiness" ()
+              else ()
+            rawPeerPresence = getRawForUserInChannel db peerUserId channelId ()
+            peerLease = activeCallLeases.getForUserInChannel db channelId peerUserId ()
+            _ = match (rawPeerPresence, peerLease) with
+              (Some (DevicePresence peerDeviceId _ _ _ _), None) ->
+                appendStalePeerPresenceProjectedLiveInvariant db currentUserId channelId currentDeviceId peerDeviceId "readiness" ()
+              _ ->
+                ()
+            rawPeerHasActiveDevice = isSome peerLease
+            rawPeerTargetDeviceId = match peerLease with
+              Some lease -> Some (activeCallParticipantLeaseDeviceId lease)
+              None       -> None
+            peerWakeTargetDeviceId =
+              map
+                (cases EphemeralToken _ _ tokenDeviceId _ _ -> tokenDeviceId)
+                (latestForUserInChannel db channelId peerUserId ())
+            peerBaseAudioStatus = match rawPeerTargetDeviceId with
+              Some targetDeviceId ->
+                match statusForCurrentSession db channelId peerUserId targetDeviceId () with
+                  AudioReadinessUnknown -> AudioReadinessWaiting
+                  status                -> status
+              None ->
+                AudioReadinessUnknown
+            peerAudioStatus = match (peerBaseAudioStatus, wakeCapabilityStatusFromOptionalDeviceId peerWakeTargetDeviceId) with
+              (AudioReadinessWaiting, WakeCapable _) -> AudioReadinessWakeCapable
+              _                                      -> peerBaseAudioStatus
+            peerHasActiveDevice =
+              audioReadyDeviceCountsAsActive rawPeerHasActiveDevice peerAudioStatus
+            peerTargetDeviceId =
+              if peerHasActiveDevice then rawPeerTargetDeviceId else None
+            peerDirectQuicIdentity = match peerTargetDeviceId with
+              Some targetDeviceId ->
+                match directQuicIdentity.get db targetDeviceId () with
+                  Some identity -> if directQuicDeviceIdentityIsActive identity then Some identity else None
+                  None          -> None
+              None ->
+                None
+            peerMediaEncryptionIdentity = match peerTargetDeviceId with
+              Some targetDeviceId ->
+                match mediaEncryptionIdentity.get db targetDeviceId () with
+                  Some identity -> if mediaEncryptionDeviceIdentityIsActive identity then Some identity else None
+                  None          -> None
+              None ->
+                None
+            selfWakeTargetDeviceId =
+              map
+                (cases EphemeralToken _ _ tokenDeviceId _ _ -> tokenDeviceId)
+                (tokens.get db channelId currentUserId currentDeviceId ())
+            audioReadiness =
+              ChannelAudioReadiness selfAudioStatus peerAudioStatus peerTargetDeviceId
+            wakeReadiness =
+              ChannelWakeReadiness
+                (wakeCapabilityStatusFromOptionalDeviceId selfWakeTargetDeviceId)
+                (wakeCapabilityStatusFromOptionalDeviceId peerWakeTargetDeviceId)
+            activeTransmit = currentTransmit db channelId ()
+            activeTransmitterUserId =
+              map (cases TransmitState _ activeUserId _ _ _ _ _ -> activeUserId) activeTransmit
+            activeTransmitExpiresAt =
+              map (cases TransmitState _ _ _ _ _ _ expiresAt -> Instant.toText expiresAt) activeTransmit
+            activeTransmitId = map transmitId activeTransmit
+            readiness =
+              channelReadinessStatusFromDevices
+                currentUserId
+                selfHasActiveDevice
+                peerHasActiveDevice
+                activeTransmitterUserId
+            projectionEpoch = Instant.toText now!
+            base =
+              empty
+                |> addText "channelId" channelIdText
+                |> addText "stateEpoch" projectionEpoch
+                |> addText "serverTimestamp" projectionEpoch
+                |> addText "peerUserId" (UserId.toText peerUserId)
+                |> addBoolean "selfHasActiveDevice" selfHasActiveDevice
+                |> addBoolean "peerHasActiveDevice" peerHasActiveDevice
+                |> add "readiness" (channelReadinessStatusJson readiness)
+                |> add "audioReadiness" (channelAudioReadinessJson audioReadiness)
+                |> add "wakeReadiness" (channelWakeReadinessJson wakeReadiness)
+                |> addOptionalText "activeTransmitterUserId" (map UserId.toText activeTransmitterUserId)
+                |> addOptionalText "activeTransmitId" activeTransmitId
+                |> addOptionalText "activeTransmitExpiresAt" activeTransmitExpiresAt
+                |> addText "status" (channelReadinessStatusKindText readiness)
+            withDirect = match peerDirectQuicIdentity with
+              Some identity -> base |> add "peerDirectQuicIdentity" (directQuicDeviceIdentityJson identity)
+              None          -> base
+            payload = match peerMediaEncryptionIdentity with
+              Some identity -> withDirect |> add "peerMediaEncryptionIdentity" (mediaEncryptionDeviceIdentityJson identity)
+              None          -> withDirect
+            ok.json payload
+
+turbo.service.channels.state :
+  Database -> '{Route, Exception, Storage, Remote, Random} ()
+turbo.service.channels.state db = do
+  use Optional map
+  use Parser / text
+  use object add empty
+  (channelIdText, deviceIdText) =
+    route GET (s "v1" / s "channels" / text / s "state" / text => Tuple.pair)
+  match requireUser db () with
+    Left err ->
+      unauthorized.json (empty |> addText "error" err)
+    Right currentUser ->
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      channelId = ChannelId.fromText channelIdText
+      deviceId = DeviceId.fromText deviceIdText
+      match OrderedTable.tryRead (channels.tables.byId db) channelId with
+        None ->
+          notFound.json (empty |> addText "error" "channel not found")
+        Some (DirectChannel _ lowUserId highUserId _) ->
+          peerUserId =
+            if userIdEqual lowUserId currentUserId then highUserId else lowUserId
+          peerHandle = match users.getById db peerUserId () with
+            Some (User _ handleText _ _ _) -> handleText
+            None                           -> UserId.toText peerUserId
+          selfPresence = presence.get db deviceId ()
+          selfOnline = match selfPresence with
+            Some presence -> presenceMatches currentUserId presence
+            None          -> false
+          rawSelfJoined = match selfPresence with
+            Some presence ->
+              matchesDeviceChannelPresence currentUserId deviceId channelId presence
+            None ->
+              false
+          activeSelfLease = getForDevice db channelId currentUserId deviceId ()
+          normalizedSelfJoined = isSome activeSelfLease
+          _ =
+            if targetAudioReadySuppressesWake rawSelfJoined (Boolean.not normalizedSelfJoined)
+            then appendStaleSelfPresenceProjectedLiveInvariant db currentUserId channelId deviceId "state" ()
+            else ()
+          peerPresence = getForUser db peerUserId ()
+          peerOnline = isSome peerPresence
+          rawPeerPresence = getRawForUserInChannel db peerUserId channelId ()
+          activePeerLease = activeCallLeases.getForUserInChannel db channelId peerUserId ()
+          _ = match (rawPeerPresence, activePeerLease) with
+            (Some (DevicePresence peerDeviceId _ _ _ _), None) ->
+              appendStalePeerPresenceProjectedLiveInvariant db currentUserId channelId deviceId peerDeviceId "state" ()
+            _ ->
+              ()
+          incomingInvite = incomingInviteForChannel db currentUserId peerUserId channelId ()
+          outgoingInvite = outgoingInviteForChannel db currentUserId peerUserId channelId ()
+          hasIncomingRequest = isSome incomingInvite
+          hasOutgoingRequest = isSome outgoingInvite
+          hasPendingRequest = Boolean.or hasIncomingRequest hasOutgoingRequest
+          activeSelfJoined = isSome activeSelfLease
+          activePeerJoined = isSome activePeerLease
+          rawPeerTargetDeviceId = match activePeerLease with
+            Some lease -> Some (activeCallParticipantLeaseDeviceId lease)
+            None       -> None
+          peerWakeTargetDeviceId =
+            map
+              (cases EphemeralToken _ _ tokenDeviceId _ _ -> tokenDeviceId)
+              (latestForUserInChannel db channelId peerUserId ())
+          peerBaseAudioStatus = match rawPeerTargetDeviceId with
+            Some targetDeviceId ->
+              match statusForCurrentSession db channelId peerUserId targetDeviceId () with
+                AudioReadinessUnknown -> AudioReadinessWaiting
+                status                -> status
+            None ->
+              AudioReadinessUnknown
+          peerAudioStatus = match (peerBaseAudioStatus, wakeCapabilityStatusFromOptionalDeviceId peerWakeTargetDeviceId) with
+            (AudioReadinessWaiting, WakeCapable _) -> AudioReadinessWakeCapable
+            _                                      -> peerBaseAudioStatus
+          activePeerDeviceConnected =
+            audioReadyDeviceCountsAsActive activePeerJoined peerAudioStatus
+          membership =
+            stateMembershipFromActiveLeases
+              hasPendingRequest
+              activeSelfJoined
+              activePeerJoined
+              activePeerDeviceConnected
+          selfJoined = channelMembershipHasLocalMembership membership
+          peerJoined = channelMembershipHasPeerMembership membership
+          peerDeviceConnected = channelMembershipPeerDeviceConnected membership
+          requestCount = pendingCount incomingInvite outgoingInvite
+          requestRelationship =
+            requestRelationshipFromFlags
+              hasIncomingRequest
+              hasOutgoingRequest
+              requestCount
+          activeTransmit = currentTransmit db channelId ()
+          activeTransmitterUserId = map transmitUserId activeTransmit
+          activeTransmitExpiresAt = map transmitExpiresAtText activeTransmit
+          activeTransmitId = map transmitId activeTransmit
+          conversationStatus =
+            channelStateStatusFromView
+              currentUserId
+              membership
+              requestRelationship
+              peerOnline
+              activeTransmitterUserId
+          _ =
+            if channelStateStatusConnectsWithoutMembershipOrRequest
+                 membership
+                 requestRelationship
+                 conversationStatus
+            then appendConnectingWithoutMembershipOrRequestInvariant db currentUserId channelId ()
+            else ()
+          projectionEpoch = Instant.toText now!
+          ok.json
+            (empty
+              |> addText "channelId" channelIdText
+              |> addText "stateEpoch" projectionEpoch
+              |> addText "serverTimestamp" projectionEpoch
+              |> addText "selfUserId" (UserId.toText currentUserId)
+              |> addText "peerUserId" (UserId.toText peerUserId)
+              |> addText "peerHandle" peerHandle
+              |> addBoolean "selfOnline" selfOnline
+              |> addBoolean "peerOnline" peerOnline
+              |> addBoolean "selfJoined" selfJoined
+              |> addBoolean "peerJoined" peerJoined
+              |> addBoolean "peerDeviceConnected" peerDeviceConnected
+              |> addBoolean "hasIncomingRequest" hasIncomingRequest
+              |> addBoolean "hasOutgoingRequest" hasOutgoingRequest
+              |> addNat "requestCount" requestCount
+              |> add "membership" (channelMembershipJson membership)
+              |> add "requestRelationship" (requestRelationshipJson requestRelationship)
+              |> add "conversationStatus" (channelStateStatusJson conversationStatus)
+              |> addOptionalText "activeTransmitterUserId" (map UserId.toText activeTransmitterUserId)
+              |> addOptionalText "activeTransmitId" activeTransmitId
+              |> addOptionalText "transmitLeaseExpiresAt" activeTransmitExpiresAt
+              |> addText "status" (channelStateStatusKindText conversationStatus)
+              |> addBoolean "canTransmit" (canTransmit currentUserId selfOnline peerOnline membership activeTransmitterUserId))
+
+turbo.service.contacts.internal.summaryJson :
+  Database
+  -> UserId
+  -> Optional DevicePresence
+  -> User
+  -> '{Exception, Storage, Remote, Random} Optional Json
+turbo.service.contacts.internal.summaryJson db currentUserId selfPresence user =
+  do
+    use Boolean or
+    use object add
+    (User otherUserId handleText displayName _ _) = user
+    if userIdEqual currentUserId otherUserId then
+      None
+    else
+      directChannelOpt = internal.directChannel db currentUserId otherUserId ()
+      peerPresence = getForUser db otherUserId ()
+      peerConnectedPresence = getConnectedForUser db otherUserId ()
+      rawPeerOnline = match peerPresence with
+        None ->
+          false
+        Some (DevicePresence _ _ presenceStatus _ _) ->
+          match presenceStatus with
+            DevicePresenceStatus.Online  -> true
+            DevicePresenceStatus.Offline -> false
+      peerOnline =
+        summaryPeerPresenceIsOnline rawPeerOnline (isSome peerConnectedPresence)
+      channelFacts = match directChannelOpt with
+        None ->
+          (None, false, false, false, None, None, None)
+        Some (DirectChannel channelId _ _ _) ->
+          activeSelfJoined =
+            selfJoinedChannel db currentUserId channelId selfPresence ()
+          activePeerLease =
+            turbo.store.activeCallLeases.getForUserInChannel db channelId otherUserId ()
+          activePeerJoined = isSome activePeerLease
+          rawPeerTargetDeviceId = match activePeerLease with
+            Some lease -> Some (activeCallParticipantLeaseDeviceId lease)
+            None       -> None
+          peerWakeTargetDeviceId =
+            Optional.map
+              (cases EphemeralToken _ _ tokenDeviceId _ _ -> tokenDeviceId)
+              (tokens.latestForUserInChannel db channelId otherUserId ())
+          peerBaseAudioStatus = match rawPeerTargetDeviceId with
+            Some targetDeviceId ->
+              match receiverAudioReadiness.statusForCurrentSession
+                db
+                channelId
+                otherUserId
+                targetDeviceId
+                () with
+                AudioReadinessUnknown -> AudioReadinessWaiting
+                status                -> status
+            None ->
+              AudioReadinessUnknown
+          peerAudioStatus = match (peerBaseAudioStatus, wakeCapabilityStatusFromOptionalDeviceId peerWakeTargetDeviceId) with
+            (AudioReadinessWaiting, WakeCapable _) -> AudioReadinessWakeCapable
+            _                                      -> peerBaseAudioStatus
+          activePeerDeviceConnected =
+            audioReadyDeviceCountsAsActive activePeerJoined peerAudioStatus
+          incomingInvite =
+            incomingInviteForChannel db currentUserId otherUserId channelId ()
+          outgoingInvite =
+            outgoingInviteForChannel db currentUserId otherUserId channelId ()
+          hasPendingRequest = or (isSome incomingInvite) (isSome outgoingInvite)
+          membershipView =
+            stateMembershipFromActiveLeases
+              hasPendingRequest
+              activeSelfJoined
+              activePeerJoined
+              activePeerDeviceConnected
+          selfJoined = channelMembershipHasLocalMembership membershipView
+          peerJoined = channelMembershipHasPeerMembership membershipView
+          peerDeviceConnected = channelMembershipPeerDeviceConnected membershipView
+          activeTransmit = currentTransmit db channelId ()
+          activeTransmitterUserId = Optional.map transmitUserId activeTransmit
+          (Some (ChannelId.toText channelId), selfJoined, peerJoined, peerDeviceConnected, incomingInvite, outgoingInvite, activeTransmitterUserId)
+      (channelIdTextOpt, selfJoined, peerJoined, peerDeviceConnected, incomingInvite, outgoingInvite, activeTransmitterUserId) = channelFacts
+      hasIncomingRequest = isSome incomingInvite
+      hasOutgoingRequest = isSome outgoingInvite
+      requestCount = pendingCount incomingInvite outgoingInvite
+      requestRelationship =
+        requestRelationshipFromFlags
+          hasIncomingRequest
+          hasOutgoingRequest
+          requestCount
+      membership =
+        channelMembershipFromFlags selfJoined peerJoined peerDeviceConnected
+      summaryStatus =
+        contactSummaryStatusFromView
+          currentUserId
+          peerOnline
+          membership
+          requestRelationship
+          activeTransmitterUserId
+      _ =
+        if summaryConnectableWithoutLivePeerOrRequest
+             summaryStatus
+             requestRelationship
+             peerDeviceConnected
+             activeTransmitterUserId
+        then
+          appendSummaryConnectableWithoutLivePeerOrRequestInvariant
+            db
+            currentUserId
+            otherUserId
+            channelIdTextOpt
+            summaryStatus
+            ()
+        else ()
+      isActiveConversation =
+        or
+          (channelMembershipHasLocalMembership membership)
+          (or
+            (channelMembershipHasPeerMembership membership)
+            (isSome activeTransmitterUserId))
+      Some
+        (userIdentityJson user
+          |> addOptionalText "channelId" channelIdTextOpt
+          |> addBoolean "isOnline" peerOnline
+          |> addBoolean "hasIncomingRequest" hasIncomingRequest
+          |> addBoolean "hasOutgoingRequest" hasOutgoingRequest
+          |> addNat "requestCount" requestCount
+          |> add "membership" (channelMembershipJson membership)
+          |> add "requestRelationship" (requestRelationshipJson requestRelationship)
+          |> add "summaryStatus" (contactSummaryStatusJson summaryStatus)
+          |> addBoolean "isActiveConversation" isActiveConversation
+          |> addText "badgeStatus" (contactSummaryStatusKindText summaryStatus))

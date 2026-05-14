@@ -1,5 +1,16 @@
 # Swift / iOS Debugging Guide
 
+Status: active debugging guide.
+
+Canonical home for app-side debugging interpretation, device escalation, PushToTalk/audio log reading, client-only debug toggles, and Apple boundary loops.
+
+Related docs:
+
+- [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md) owns exact commands, flags, wrappers, and operational entrypoints.
+- [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md) owns the report-to-scenario proof workflow.
+- [`scenarios/README.md`](/Users/mau/Development/Turbo/scenarios/README.md) owns the scenario catalog and scenario JSON reference.
+- [`PRODUCTION_TELEMETRY.md`](/Users/mau/Development/Turbo/PRODUCTION_TELEMETRY.md) owns telemetry and shake-report setup details.
+
 This file contains simulator, device, PushToTalk, audio-session, and operational debugging guidance for the app side.
 
 Use it when the task is about:
@@ -31,34 +42,18 @@ Optimize for:
 
 - Debug builds keep state captures in the local diagnostics ring/log and coalesce automatic latest full diagnostics transcript uploads to the backend. Routine state captures are not emitted to Cloudflare telemetry by default; enable `TURBO_IOS_STATE_CAPTURE_TELEMETRY=1` only for a targeted short debugging run that needs a raw remote state timeline.
 - For long or intense physical-device sessions, use merged diagnostics first. Cloudflare telemetry gives the compact event timeline, while backend latest diagnostics gives the full transcript anchor with audio and local state detail.
-- The backend now supports exact-device diagnostics reads for simulator identities too, so `just simulator-scenario-merge` is part of the normal loop.
-- For physical-device timelines, use `python3 scripts/merged_diagnostics.py @mau @bau`; it merges Cloudflare telemetry by default when credentials are available and treats missing latest backend snapshots as source warnings.
+- The backend supports exact-device diagnostics reads for simulator identities too, so simulator scenarios and merged simulator diagnostics are part of the normal loop.
+- For physical-device timelines, use the merged diagnostics entrypoints documented in [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md). They merge Cloudflare telemetry by default when credentials are available and treat missing latest backend snapshots as source warnings.
 - Agents should not ask for manual in-app diagnostics upload during the normal debug loop. If a current debug build has recent activity and `merged_diagnostics.py` cannot find a backend latest snapshot, investigate auto-publish/backend diagnostics rather than changing the workflow to manual upload.
-- The simulator scenario runner is controlled by a temporary repo-local file `.scenario-runtime-config.json` that `just simulator-scenario` creates and removes through `scripts/run_simulator_scenarios.py`. Do not check this file in or depend on it manually.
-- The scenario runner now serializes scenario invocations with `.scenario-test.lock`, shares the `/tmp/turbo-simulator-test.lock` simulator lane with targeted Swift tests, and retries transient XCTest bootstrap crashes automatically. Full catalog runs also retry each catalog scenario once for hosted timing noise, while focused single-scenario runs remain strict. Use the `just` entrypoints instead of invoking `xcodebuild` manually when you want the stable loop.
-- For targeted Swift Testing runs, use `just swift-test-target <name>` instead of raw `-only-testing`. The wrapper fails if the requested test name never actually executes, which prevents false-green zero-test runs.
-- If raw `xcodebuild -only-testing` is unavoidable for a Swift `@Test`, use `TurboTests/<suite>/<function>()` with the trailing parentheses, for example `-only-testing:TurboTests/TurboTests/audioOutputPreferenceCyclesBetweenSpeakerAndPhone()`. Without `()`, Xcode can select zero Swift Testing tests.
-- If `xcodebuild` says the simulator scenario command succeeded unusually quickly, confirm that tests actually ran. Swift Testing does not use the same selector behavior as classic XCTest, so a bad `-only-testing` filter can silently run zero tests. Prefer the proof rules in [`TESTING.md`](/Users/mau/Development/Turbo/TESTING.md).
+- Scenario runner locking, runtime config, retry behavior, and Swift Testing selector rules live in [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md) and [`TESTING.md`](/Users/mau/Development/Turbo/TESTING.md). The debugging rule is simple: prefer the `just` wrappers, and do not trust an unusually fast run until the wrapper proves nonzero tests executed.
 
 ## Merged diagnostics workflow
 
-For physical-device reports, start with:
+Use [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md) for the exact `just reliability-intake`, `just reliability-intake-shake`, and direct `merged_diagnostics.py` command forms. This guide only documents how to read the result.
 
-```bash
-python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 @mau @bau
-```
+Backend latest snapshots are fetched by default. Full backend transcripts are separate from Cloudflare telemetry metadata; enabling fuller telemetry rendering does not enable or disable backend transcript collection.
 
-When saving an artifact for an agent to grep during an investigation, use:
-
-```bash
-python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 2 --telemetry-limit 500 --full-metadata @mau @bau > /tmp/turbo-merged-diagnostics.txt
-```
-
-Backend latest snapshots are fetched by default. `--full-metadata` only affects Cloudflare telemetry rendering in the human timeline; it does not enable or disable full backend transcripts.
-
-Use the tester's actual handles when they are not `@mau` and `@bau`. Add `--json` when you need to count events, compare transport digests, or script over the result. Add `--insecure` only for local certificate-root problems.
-
-If the first diagnostics fetch fails while querying Cloudflare telemetry because local Python cannot verify the certificate chain, rerun the same merged diagnostics command with `--insecure`. That flag is the repo-supported development workaround for this local certificate-root issue; it only relaxes TLS verification for the local diagnostics fetch and should not change the interpretation of backend or telemetry evidence.
+Use the tester's actual handles. Use JSON output when you need to count events, compare transport digests, or script over the result. If local Python cannot verify the certificate chain while querying Cloudflare telemetry, the repo-supported development workaround is the insecure diagnostics fetch documented in [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md); that changes local fetch verification only, not the interpretation of backend or telemetry evidence.
 
 Read the result in layers:
 
@@ -82,11 +77,7 @@ Inspect it in this order:
 1. Read the Discord alert or telemetry event for `incidentId`, `userHandle`, `deviceId`, `uploadedAt`, `diagnosticsLatestURL`, `channelId`, and `peerHandle`.
 2. Fetch the full transcript from the `diagnosticsLatestURL`, or use `just diagnostics-latest <device_id> https://beepbeep.to <user_handle>` if the route needs auth headers.
 3. Verify the transcript contains `Shake report requested` with the same `incidentId`; if the user filled out the prompt, inspect `userReport`.
-4. Run merged diagnostics around the same time. Include `peerHandle` when the alert has one:
-
-```bash
-python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 2 --telemetry-limit 500 --full-metadata <user_handle> <peer_handle>
-```
+4. Run merged diagnostics around the same time. Include `peerHandle` when the alert has one.
 
 If there is no peer, run the same command with only the reporting handle. The current report link is a latest-snapshot pointer, so use `incidentId` and `uploadedAt` to avoid reading a later upload by mistake.
 
@@ -171,10 +162,12 @@ Those fields are useful when a merged timeline looks like the requester skipped 
 
 ## Scenario-driven simulator loop
 
-Prefer this order for distributed control-plane bugs:
+Use [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md) for the scenario proof workflow and [`scenarios/README.md`](/Users/mau/Development/Turbo/scenarios/README.md) for the exact scenario commands and JSON shape.
 
-1. `just simulator-scenario <scenario>`
-2. `just simulator-scenario-merge`
+For distributed control-plane bugs, the app-side debugging order is:
+
+1. run the smallest useful scenario
+2. merge diagnostics
 3. inspect the merged timeline
 4. only then move to physical devices for Apple/PTT/audio/background behavior
 
@@ -206,21 +199,6 @@ Before deciding the fix location:
 4. add an invariant at the seam that can actually prove the contradiction
 
 If the backend-owned fact is wrong, the frontend may add guardrails or better diagnostics, but that is not the primary fix.
-
-Useful commands:
-
-- `just reliability-gate-smoke`
-- `just reliability-gate-full`
-- `just simulator-scenario`
-- `just simulator-scenario foreground-ptt`
-- `just simulator-scenario request_accept_ready`
-- `just simulator-scenario-merge`
-
-Current source of truth:
-
-- the `simulatorDistributedJoinScenario()` result
-- the merged simulator diagnostics timeline
-- the regular `TurboTests` unit suite
 
 ## Device escalation rules
 
@@ -345,7 +323,7 @@ Foreground signaling can still use the app websocket, but background receive nee
 - until that lands, use the interim backend-triggered Cloudflare sender plan in [APNS_DELIVERY_PLAN.md](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md)
 - the backend chooses the authoritative wake target on `/ptt-push-target` and `/readiness.wakeReadiness`
 - the long-term hosted path is still for `begin-transmit` to build the APNs JWT in Unison and perform the `pushtotalk` send directly with `Http.request`
-- wake-send results are uploaded to the backend dev diagnostics surface, so `python3 scripts/merged_diagnostics.py ...` now includes `[wake:apns] ...` entries in the merged timeline
+- wake-send results are uploaded to the backend dev diagnostics surface, so merged diagnostics includes `[wake:apns] ...` entries in the timeline
 - `ptt-apns-worker` and `ptt-apns-bridge` are still available only as legacy/debug helpers
 - the app uploads the ephemeral PushToTalk token it receives while joined
 - the backend uses that token to send a `pushtotalk` APNs push when a remote speaker starts

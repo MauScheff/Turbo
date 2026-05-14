@@ -247,26 +247,56 @@ def diagnostics_objectives(artifacts: list[dict[str, Any]]) -> list[Objective]:
     if not artifacts:
         return []
 
-    violations: list[dict[str, Any]] = []
+    current_violations: list[dict[str, Any]] = []
+    historical_violations: list[dict[str, Any]] = []
     for artifact in artifacts:
-        artifact_violations = artifact.get("violations")
-        if isinstance(artifact_violations, list):
-            violations.extend(item for item in artifact_violations if isinstance(item, dict))
+        artifact_current, artifact_historical = split_diagnostics_violations(artifact)
+        current_violations.extend(artifact_current)
+        historical_violations.extend(artifact_historical)
+
     by_id: dict[str, int] = {}
-    for violation in violations:
+    for violation in current_violations:
         invariant_id = str(violation.get("invariantId") or "unknown")
         by_id[invariant_id] = by_id.get(invariant_id, 0) + 1
+
+    historical_by_id: dict[str, int] = {}
+    for violation in historical_violations:
+        invariant_id = str(violation.get("invariantId") or "unknown")
+        historical_by_id[invariant_id] = historical_by_id.get(invariant_id, 0) + 1
 
     return [
         Objective(
             name="merged_diagnostics_invariant_violations",
-            status="pass" if not violations else "breach",
-            observed=str(len(violations)),
+            status="pass" if not current_violations else "breach",
+            observed=str(len(current_violations)),
             target="0",
             source=joined_sources(artifacts),
-            details={"byInvariantId": dict(sorted(by_id.items()))},
+            details={
+                "currentCount": len(current_violations),
+                "historicalCount": len(historical_violations),
+                "byInvariantId": dict(sorted(by_id.items())),
+                "historicalByInvariantId": dict(sorted(historical_by_id.items())),
+            },
         )
     ]
+
+
+def split_diagnostics_violations(
+    artifact: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    has_split_keys = "currentViolations" in artifact or "historicalViolations" in artifact
+    if has_split_keys:
+        current = artifact.get("currentViolations")
+        historical = artifact.get("historicalViolations")
+        return (
+            [item for item in current if isinstance(item, dict)] if isinstance(current, list) else [],
+            [item for item in historical if isinstance(item, dict)] if isinstance(historical, list) else [],
+        )
+
+    artifact_violations = artifact.get("violations")
+    if isinstance(artifact_violations, list):
+        return ([item for item in artifact_violations if isinstance(item, dict)], [])
+    return ([], [])
 
 
 def aggregate_check_stats(artifacts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

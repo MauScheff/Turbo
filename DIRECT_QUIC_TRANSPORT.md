@@ -1,5 +1,9 @@
 # Direct QUIC Transport Plan
 
+Status: active plan/reference.
+Canonical home for: Direct QUIC transport decision, transport states, signaling model, promotion/demotion, rollout, and verification.
+Related docs: [`CERTIFICATE-LIFECYCLE.md`](/Users/mau/Development/Turbo/CERTIFICATE-LIFECYCLE.md) owns Direct QUIC device identity and certificate lifecycle details.
+
 ## Decision
 
 Turbo should keep the existing relay transport as the guaranteed path and add an opportunistic direct-path upgrade over `Network.framework` QUIC.

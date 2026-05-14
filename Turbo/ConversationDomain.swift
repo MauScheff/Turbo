@@ -2410,6 +2410,10 @@ private extension ConversationDerivationContext {
 
         if shouldPreserveConnectedReadinessDuringControlPlaneTransition,
            !canTransmit {
+            if remoteAudioReadinessState == .wakeCapable,
+               case .wakeCapable = remoteWakeCapabilityState {
+                return .wakeReady
+            }
             return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
         }
 

@@ -2173,7 +2173,20 @@ def analyze_reports(
                 or snapshot_bool(snapshot, "backendPeerJoined") is True
             )
 
-        if snapshot_has_connectable_or_joining_session(left.snapshot, left_phase) and snapshot_lacks_session_context(right.snapshot):
+        def snapshot_lacks_equivalent_connectable_projection(
+            snapshot: dict[str, str], phase: str
+        ) -> bool:
+            if snapshot_lacks_session_context(snapshot):
+                return True
+
+            return (
+                phase in {"idle", "requested", "incomingRequest"}
+                and not snapshot_has_connectable_or_joining_session(snapshot, phase)
+            )
+
+        if snapshot_has_connectable_or_joining_session(
+            left.snapshot, left_phase
+        ) and snapshot_lacks_equivalent_connectable_projection(right.snapshot, right_phase):
             violations.append(
                 build_violation(
                     subject="pair",
@@ -2186,7 +2199,9 @@ def analyze_reports(
                 )
             )
 
-        if snapshot_has_connectable_or_joining_session(right.snapshot, right_phase) and snapshot_lacks_session_context(left.snapshot):
+        if snapshot_has_connectable_or_joining_session(
+            right.snapshot, right_phase
+        ) and snapshot_lacks_equivalent_connectable_projection(left.snapshot, left_phase):
             violations.append(
                 build_violation(
                     subject="pair",
@@ -2226,6 +2241,28 @@ def analyze_reports(
             )
 
     return dedupe_violations(violations)
+
+
+def classify_violations(
+    reports: list[Report],
+    telemetry_reports: list[Report],
+    telemetry_events: list[TelemetryEvent],
+) -> tuple[list[InvariantViolation], list[InvariantViolation], list[InvariantViolation]]:
+    correlation_reports = reports + telemetry_reports
+    current_violations = dedupe_violations(analyze_reports(correlation_reports))
+    current_violation_keys = {violation_identity(violation) for violation in current_violations}
+
+    violations = list(current_violations)
+    violations.extend(telemetry_invariant_violations(telemetry_events))
+    violations = dedupe_violations(violations)
+
+    historical_violations = [
+        violation
+        for violation in violations
+        if violation_identity(violation) not in current_violation_keys
+    ]
+
+    return violations, current_violations, historical_violations
 
 
 def render_violation(violation: InvariantViolation) -> str:
@@ -2337,10 +2374,20 @@ def main() -> int:
 
     telemetry_events: list[TelemetryEvent] = []
     if args.include_telemetry:
+        # Exact device mappings should not implicitly widen telemetry back out to the
+        # full handle history. That breaks strict simulator-hosted proofs because old
+        # hosted runs for the same handles get merged into the current device-scoped run.
+        telemetry_handles = list(handles)
+        if not telemetry_handles and not requested_devices:
+            telemetry_handles = [report.handle for report in reports]
+
+        telemetry_device_ids = [device_id for _, device_id in requested_devices if device_id]
+        if not telemetry_device_ids:
+            telemetry_device_ids = [report.device_id for report in reports]
+
         telemetry_events = fetch_telemetry_events(
-            [handle for handle, _ in requested_subjects] or [report.handle for report in reports],
-            [device_id for _, device_id in requested_subjects if device_id]
-            + [report.device_id for report in reports],
+            telemetry_handles,
+            telemetry_device_ids,
             hours=args.telemetry_hours,
             limit=args.telemetry_limit,
             dataset=args.telemetry_dataset,
@@ -2349,20 +2396,11 @@ def main() -> int:
         )
 
     telemetry_reports = telemetry_snapshot_reports(telemetry_events, reports)
-    correlation_reports = reports + telemetry_reports
-    current_violations = dedupe_violations(
-        analyze_reports(reports, include_recorded_violations=False)
+    violations, current_violations, historical_violations = classify_violations(
+        reports,
+        telemetry_reports,
+        telemetry_events,
     )
-    current_violation_keys = {violation_identity(violation) for violation in current_violations}
-
-    violations = analyze_reports(correlation_reports)
-    violations.extend(telemetry_invariant_violations(telemetry_events))
-    violations = dedupe_violations(violations)
-    historical_violations = [
-        violation
-        for violation in violations
-        if violation_identity(violation) not in current_violation_keys
-    ]
 
     timeline = merged_events(
         reports,

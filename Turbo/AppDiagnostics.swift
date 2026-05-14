@@ -123,6 +123,17 @@ struct UIProjectionDiagnostics: Codable, Equatable {
             )
         }
 
+        if selectedPeerPhase == "requested" {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "ui.call_screen_visible_for_requested_peer",
+                    scope: .local,
+                    message: "call screen is visible while selectedPeerPhase=requested",
+                    metadata: metadata
+                )
+            )
+        }
+
         if primaryActionKind == "holdToTalk",
            selectedPeerPhase == "idle" || selectedPeerPhase == "requested" || selectedPeerPhase == "incomingRequest" {
             violations.append(
@@ -313,7 +324,8 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
             || backendReadinessValue == "self-transmitting"
         if phase == "ready",
            backendCanTransmit == false,
-           !backendIsSelfTransmitting {
+           !backendIsSelfTransmitting,
+           transmitPhase != "stopping" {
             violations.append(
                 DiagnosticsInvariantViolationCandidate(
                     invariantID: "selected.ready_while_backend_cannot_transmit",
@@ -1352,8 +1364,11 @@ final class DiagnosticsStore {
         if stateCaptures.first?.fields == fields {
             recordInvariantViolationCandidatesOnMain(
                 reason: reason,
-                candidates: (localSessionProjection?.derivedInvariantCandidates ?? [])
-                    + (uiProjection?.derivedInvariantCandidates ?? [])
+                candidates: additionalInvariantCandidates(
+                    currentCapture: stateCaptures.first,
+                    localSessionProjection: localSessionProjection,
+                    uiProjection: uiProjection
+                )
             )
             return
         }
@@ -1379,8 +1394,111 @@ final class DiagnosticsStore {
 
         recordInvariantViolationCandidatesOnMain(
             reason: reason,
-            candidates: (localSessionProjection?.derivedInvariantCandidates ?? [])
-                + (uiProjection?.derivedInvariantCandidates ?? [])
+            candidates: additionalInvariantCandidates(
+                currentCapture: capture,
+                localSessionProjection: localSessionProjection,
+                uiProjection: uiProjection
+            )
+        )
+    }
+
+    private func additionalInvariantCandidates(
+        currentCapture: DiagnosticsStateCapture?,
+        localSessionProjection: LocalSessionDiagnosticsProjection?,
+        uiProjection: UIProjectionDiagnostics?
+    ) -> [DiagnosticsInvariantViolationCandidate] {
+        var invariantCandidates = (localSessionProjection?.derivedInvariantCandidates ?? [])
+            + (uiProjection?.derivedInvariantCandidates ?? [])
+
+        if let callVisiblePeerOnlineCandidate = callVisiblePeerOnlineCandidate(currentCapture: currentCapture) {
+            invariantCandidates.append(callVisiblePeerOnlineCandidate)
+        }
+
+        if let flapCandidate = requestedCallFlapCandidate() {
+            invariantCandidates.append(flapCandidate)
+        }
+
+        return invariantCandidates
+    }
+
+    private func callVisiblePeerOnlineCandidate(
+        currentCapture: DiagnosticsStateCapture?
+    ) -> DiagnosticsInvariantViolationCandidate? {
+        guard let current = currentCapture else { return nil }
+
+        let selectedPeerPhase = current.fields["selectedPeerPhase"]
+        let callScreenVisible = current.fields["uiCallScreenVisible"]
+        let selectedPeerStatus = current.fields["selectedPeerStatus"]
+
+        guard selectedPeerPhase == "idle",
+              callScreenVisible == "true" else {
+            return nil
+        }
+
+        return DiagnosticsInvariantViolationCandidate(
+            invariantID: "selected.call_visible_peer_online",
+            scope: .local,
+            message: "call screen is visible while selected peer projection is still plain online/requestable",
+            metadata: [
+                "selectedContact": current.fields["selectedContact"] ?? "none",
+                "selectedPeerPhase": selectedPeerPhase ?? "none",
+                "selectedPeerStatus": selectedPeerStatus ?? "none",
+                "uiCallScreenVisible": callScreenVisible ?? "none",
+                "uiCallScreenContact": current.fields["uiCallScreenContact"] ?? "none",
+                "uiPrimaryActionKind": current.fields["uiPrimaryActionKind"] ?? "none",
+                "reason": current.reason,
+            ]
+        )
+    }
+
+    private func requestedCallFlapCandidate() -> DiagnosticsInvariantViolationCandidate? {
+        guard stateCaptures.count >= 3 else { return nil }
+
+        let current = stateCaptures[0]
+        let previous = stateCaptures[1]
+        let oldest = stateCaptures[2]
+
+        let currentContact = current.fields["selectedContact"]
+        let previousContact = previous.fields["selectedContact"]
+        let oldestContact = oldest.fields["selectedContact"]
+        guard currentContact != nil,
+              currentContact == previousContact,
+              previousContact == oldestContact else {
+            return nil
+        }
+
+        let currentPhase = current.fields["selectedPeerPhase"]
+        let previousPhase = previous.fields["selectedPeerPhase"]
+        let oldestPhase = oldest.fields["selectedPeerPhase"]
+        guard currentPhase == "requested",
+              previousPhase == "requested",
+              oldestPhase == "requested" else {
+            return nil
+        }
+
+        let currentCallVisible = current.fields["uiCallScreenVisible"]
+        let previousCallVisible = previous.fields["uiCallScreenVisible"]
+        let oldestCallVisible = oldest.fields["uiCallScreenVisible"]
+        guard currentCallVisible == "false",
+              previousCallVisible == "true",
+              oldestCallVisible == "false" else {
+            return nil
+        }
+
+        return DiagnosticsInvariantViolationCandidate(
+            invariantID: "selected.request_call_flap",
+            scope: .local,
+            message: "selected route flapped between requested and call-visible without a phase change",
+            metadata: [
+                "selectedContact": currentContact ?? "none",
+                "selectedPeerPhase": currentPhase ?? "none",
+                "currentUiCallScreenVisible": currentCallVisible ?? "none",
+                "previousUiCallScreenVisible": previousCallVisible ?? "none",
+                "oldestUiCallScreenVisible": oldestCallVisible ?? "none",
+                "currentReason": current.reason,
+                "previousReason": previous.reason,
+                "oldestReason": oldest.reason,
+            ]
         )
     }
 

@@ -307,6 +307,108 @@ extension PTTViewModel {
         captureDiagnosticsState("backend-signaling:recovery-scheduled")
     }
 
+    func handleBackendWebSocketStatusNotice(_ notice: TurboWebSocketStatusNotice) {
+        switch notice.status {
+        case "connected":
+            return
+        case "peer-left":
+            handleBackendPeerLeftStatusNotice(notice)
+        default:
+            handleBackendServerNotice("WebSocket \(notice.status)")
+        }
+    }
+
+    func handleBackendPeerLeftStatusNotice(_ notice: TurboWebSocketStatusNotice) {
+        guard let channelId = notice.channelId,
+              let fromUserId = notice.fromUserId,
+              let fromDeviceId = notice.fromDeviceId else {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Rejected peer left websocket notice because fields were missing",
+                metadata: [
+                    "status": notice.status,
+                    "channelId": notice.channelId ?? "none",
+                    "fromUserId": notice.fromUserId ?? "none",
+                    "fromDeviceId": notice.fromDeviceId ?? "none",
+                ]
+            )
+            return
+        }
+        guard let contact = contacts.first(where: { $0.backendChannelId == channelId }) else {
+            diagnostics.record(
+                .websocket,
+                message: "Ignored peer left websocket notice for unknown channel",
+                metadata: [
+                    "channelId": channelId,
+                    "fromUserId": fromUserId,
+                    "fromDeviceId": fromDeviceId,
+                ]
+            )
+            return
+        }
+        if let remoteUserId = contact.remoteUserId,
+           remoteUserId != fromUserId {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Rejected peer left websocket notice from unexpected peer user",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "channelId": channelId,
+                    "fromUserId": fromUserId,
+                    "expectedRemoteUserId": remoteUserId,
+                    "fromDeviceId": fromDeviceId,
+                ]
+            )
+            return
+        }
+
+        let contactID = contact.id
+        diagnostics.record(
+            .websocket,
+            message: "Peer left websocket notice received",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": channelId,
+                "fromUserId": fromUserId,
+                "fromDeviceId": fromDeviceId,
+                "reason": notice.reason ?? "none",
+                "leftAt": notice.leftAt ?? "none",
+            ]
+        )
+        controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
+        if selectedContactId == contactID {
+            backendStatusMessage = "Peer disconnected"
+            updateStatusForSelectedContact()
+            captureDiagnosticsState("backend-status:peer-left")
+        }
+
+        let localSessionTouchesContact =
+            systemSessionMatches(contactID)
+            || (isJoined && activeChannelId == contactID)
+            || mediaSessionContactID == contactID
+        let shouldStartReconciledTeardown =
+            localSessionTouchesContact
+            && !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
+        if shouldStartReconciledTeardown {
+            prepareReconciledTeardownState(for: contactID)
+            diagnostics.record(
+                .state,
+                message: "Marked reconciled teardown from peer left websocket notice",
+                metadata: ["contactId": contactID.uuidString, "channelId": channelId]
+            )
+            captureDiagnosticsState("backend-status:peer-left-reconciled")
+            performReconciledTeardown(for: contactID)
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.refreshContactSummaries()
+            await self.refreshChannelState(for: contactID)
+        }
+    }
+
     func shouldRecoverBackendSignalingJoinDrift(from message: String) -> Bool {
         guard backendRuntime.isReady else { return false }
         guard currentApplicationState() == .active else { return false }
@@ -494,7 +596,14 @@ extension PTTViewModel {
     }
 
     func backendConfigurationKey(for config: TurboBackendConfig) -> String {
-        "\(config.baseURL.absoluteString)|\(config.devUserHandle)|\(config.deviceID)"
+        [
+            config.baseURL.absoluteString,
+            config.devUserHandle,
+            config.deviceID,
+            String(config.httpTransport.waitsForConnectivity),
+            String(config.httpTransport.requestTimeoutSeconds),
+            String(config.httpTransport.resourceTimeoutSeconds),
+        ].joined(separator: "|")
     }
 
     func configureBackendIfNeeded() async {
@@ -557,6 +666,9 @@ extension PTTViewModel {
         }
         client.onServerNotice = { [weak self] message in
             self?.handleBackendServerNotice(message)
+        }
+        client.onWebSocketStatusNotice = { [weak self] notice in
+            self?.handleBackendWebSocketStatusNotice(notice)
         }
         client.onControlCommandTrace = { [weak self] event in
             self?.handleBackendControlCommandTrace(event)

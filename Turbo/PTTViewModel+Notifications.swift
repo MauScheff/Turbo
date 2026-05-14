@@ -676,7 +676,24 @@ extension PTTViewModel {
               let contact = contactMatchingNormalizedHandle(handle) else {
             return
         }
+        let inviteID = (userInfo["inviteId"] as? String)
+            ?? incomingInviteByContactID[contact.id]?.inviteId
         guard relationshipState(for: contact.id).isIncomingRequest else { return }
+        if let inviteID,
+           foregroundTalkRequestNotificationPrewarmedInviteIDs.contains(inviteID) {
+            diagnostics.record(
+                .media,
+                message: "Foreground talk request notification prewarm skipped",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "handle": contact.handle,
+                    "inviteId": inviteID,
+                    "reason": reason,
+                    "blockReason": "duplicate-invite",
+                ]
+            )
+            return
+        }
         guard foregroundTalkRequestNotificationPrewarmBlockReason(for: contact.id) == nil else {
             diagnostics.record(
                 .media,
@@ -684,6 +701,7 @@ extension PTTViewModel {
                 metadata: [
                     "contactId": contact.id.uuidString,
                     "handle": contact.handle,
+                    "inviteId": inviteID ?? "none",
                     "reason": reason,
                     "blockReason": foregroundTalkRequestNotificationPrewarmBlockReason(for: contact.id) ?? "unknown",
                 ]
@@ -697,6 +715,7 @@ extension PTTViewModel {
             metadata: [
                 "contactId": contact.id.uuidString,
                 "handle": contact.handle,
+                "inviteId": inviteID ?? "none",
                 "reason": reason,
             ]
         )
@@ -720,9 +739,13 @@ extension PTTViewModel {
             metadata: [
                 "contactId": contact.id.uuidString,
                 "handle": contact.handle,
+                "inviteId": inviteID ?? "none",
                 "reason": reason,
             ]
         )
+        if let inviteID {
+            foregroundTalkRequestNotificationPrewarmedInviteIDs.insert(inviteID)
+        }
     }
 
     private func foregroundTalkRequestNotificationPrewarmBlockReason(for contactID: UUID) -> String? {

@@ -1,5 +1,9 @@
 # Simulator Scenario Suite
 
+Status: active reference.
+Canonical home for: checked-in scenario catalog, scenario DSL, scenario commands, generated scenario inputs, local/hosted scenario lanes, and scenario diagnostics behavior.
+Related docs: [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md) owns the report-to-regression workflow and scenario-worthiness rules; [`SIMULATOR_FUZZING.md`](/Users/mau/Development/Turbo/SIMULATOR_FUZZING.md) owns fuzz generator mechanics.
+
 The simulator scenario runner owns distributed control-plane journeys that span:
 
 - app reducer and coordinator logic
@@ -327,8 +331,8 @@ just postdeploy-check
 
 It runs the synthetic conversation probe, generates the SLO dashboard, and
 writes a timestamped `postdeploy-check.json` artifact that points to both lower
-level reports. Use `just deploy-verified` when you also want the deploy step in
-the same command.
+level reports. Use `just deploy-staging-verified` when you also want the deploy
+step in the same command.
 
 Turn a synthetic probe summary into a static product-facing SLO dashboard:
 

@@ -999,11 +999,15 @@ extension PTTViewModel {
     }
 
     func selectContact(_ contact: Contact, reason: String = "selected-contact") {
+        let selectionChanged = selectedContactId != contact.id
         trackContact(contact.id)
         markTalkRequestSurfaceOpened(
             for: contact.id,
             inviteID: incomingInviteByContactID[contact.id]?.inviteId
         )
+        if selectionChanged {
+            selectedContactPrewarmedSelectionContactID = nil
+        }
         selectedContactId = contact.id
         sessionCoordinator.select(contactID: contact.id)
         diagnostics.record(
@@ -1015,6 +1019,19 @@ extension PTTViewModel {
             ]
         )
         updateStatusForSelectedContact()
+        guard selectionChanged || selectedContactPrewarmedSelectionContactID != contact.id else {
+            diagnostics.record(
+                .media,
+                message: "Skipped selected contact prewarm pipeline",
+                metadata: [
+                    "contactId": contact.id.uuidString,
+                    "handle": contact.handle,
+                    "reason": reason,
+                    "blockReason": "already-prewarmed-for-selected-contact",
+                ]
+            )
+            return
+        }
         Task {
             await runSelectedContactPrewarmPipeline(
                 for: contact.id,
@@ -1134,6 +1151,9 @@ extension PTTViewModel {
                 startedAt: startedAt
             )
         )
+        if selectedContactId == contactID {
+            selectedContactPrewarmedSelectionContactID = contactID
+        }
     }
 
     private func runSelectedContactPrewarmStage(
@@ -1272,6 +1292,7 @@ extension PTTViewModel {
 
     func resetSelection() {
         selectedContactId = nil
+        selectedContactPrewarmedSelectionContactID = nil
         captureDiagnosticsState("selection-reset")
     }
 
@@ -1392,6 +1413,11 @@ extension PTTViewModel {
         _ selectedPeerState: SelectedPeerState,
         contactID: UUID? = nil
     ) -> Bool {
+        if let contactID,
+           localSessionEvidenceExists(for: contactID) {
+            return false
+        }
+
         if let contactID,
            case .connect(.requestingBackend(let pendingContactID)) = sessionCoordinator.pendingAction,
            pendingContactID == contactID {

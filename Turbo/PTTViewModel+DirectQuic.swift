@@ -479,6 +479,15 @@ extension PTTViewModel {
                 peerDeviceID: peerDeviceID,
                 operation: "receiver-prewarm-request"
             )
+            if isMediaRelayPeerUnavailable(error) {
+                clearStaleMediaRelayClient(
+                    localDeviceID: backend.deviceID,
+                    channelID: channelID,
+                    peerDeviceID: peerDeviceID,
+                    client: relayClient,
+                    reason: "receiver-prewarm-request"
+                )
+            }
             diagnostics.record(
                 .media,
                 level: .error,
@@ -538,6 +547,17 @@ extension PTTViewModel {
                 peerDeviceID: peerDeviceID,
                 operation: "receiver-prewarm-ack"
             )
+            if isMediaRelayPeerUnavailable(error),
+               let localDeviceID = backendServices?.deviceID ?? backendConfig?.deviceID,
+               !localDeviceID.isEmpty {
+                clearStaleMediaRelayClient(
+                    localDeviceID: localDeviceID,
+                    channelID: payload.channelId,
+                    peerDeviceID: peerDeviceID,
+                    client: relayClient,
+                    reason: "receiver-prewarm-ack"
+                )
+            }
             diagnostics.record(
                 .media,
                 level: .error,

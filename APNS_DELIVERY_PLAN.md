@@ -1,6 +1,10 @@
 # APNs Delivery Plan
 
-## Status
+Status: active plan.
+Canonical home for: current APNs wake delivery architecture, hosted Unison runtime blocker, Cloudflare interim sender, and direct APNs-from-Unison return path.
+Related docs: [`BACKEND.md`](/Users/mau/Development/Turbo/BACKEND.md) owns backend operational rules; [`APNS_ES256_PLAN.md`](/Users/mau/Development/Turbo/APNS_ES256_PLAN.md) owns ES256 signing library work; [`H2CLIENT_PLAN.md`](/Users/mau/Development/Turbo/H2CLIENT_PLAN.md) owns standalone HTTP/2 client work.
+
+## Direct Path Status
 
 Turbo's ideal long-term wake path is still:
 
@@ -20,6 +24,48 @@ We should treat direct APNs-from-Unison as waiting on two things:
 2. deployment of that updated runtime to Unison Cloud
 
 Until both happen, the production-compatible plan is an external APNs sender.
+
+## Hosted Runtime Repro
+
+The hosted blocker is transport/runtime, not APNs request semantics.
+
+Minimal Unison repro:
+
+```unison
+httpEgressProbe : '{Exception, Http} {Text, Text}
+httpEgressProbe =
+  let
+    fetch url =
+      let req = HttpRequest.get (URI.parse url)
+      match catch do Http.request req with
+        Left _ -> "crashed"
+        Right response ->
+          "status:" ++ Nat.toText (HttpResponse.status response |> code)
+  in
+    { fetch "https://www.unison.cloud/"
+    , fetch "https://api.sandbox.push.apple.com/3/device/probe"
+    }
+```
+
+The second request is intentionally invalid at the application level, but it should still return an HTTP status if transport succeeds. Any of these would be acceptable transport proof:
+
+- `status:400`
+- `status:403`
+- `status:404`
+
+Actual hosted result:
+
+```json
+{"unisonCloud":"status:200","apnsSandbox":"crashed"}
+```
+
+This isolates the failure because:
+
+- the same deployed runtime can do ordinary outbound HTTPS
+- the APNs-host request crashes before any HTTP status is returned
+- the APNs request has no JWT, no custom headers, and no Turbo-specific logic
+
+The current deployed proof route is implemented in [`turbo_http_egress_probe.u`](/Users/mau/Development/Turbo/turbo_http_egress_probe.u), but the function above is the essential repro.
 
 ## Interim Direction
 

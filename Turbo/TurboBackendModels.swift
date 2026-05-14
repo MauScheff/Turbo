@@ -809,10 +809,41 @@ private extension TurboWakeCapabilityStatus {
     }
 }
 
+struct TurboBackendHTTPTransportConfig: Sendable, Equatable {
+    let waitsForConnectivity: Bool
+    let requestTimeoutSeconds: TimeInterval
+    let resourceTimeoutSeconds: TimeInterval
+
+    static let failFastControlPlane = TurboBackendHTTPTransportConfig(
+        waitsForConnectivity: false,
+        requestTimeoutSeconds: 10,
+        resourceTimeoutSeconds: 10
+    )
+
+    static let hostedSimulatorScenario = TurboBackendHTTPTransportConfig(
+        waitsForConnectivity: true,
+        requestTimeoutSeconds: 30,
+        resourceTimeoutSeconds: 30
+    )
+}
+
 struct TurboBackendConfig: Sendable {
     let baseURL: URL
     let devUserHandle: String
     let deviceID: String
+    let httpTransport: TurboBackendHTTPTransportConfig
+
+    init(
+        baseURL: URL,
+        devUserHandle: String,
+        deviceID: String,
+        httpTransport: TurboBackendHTTPTransportConfig = .failFastControlPlane
+    ) {
+        self.baseURL = baseURL
+        self.devUserHandle = devUserHandle
+        self.deviceID = deviceID
+        self.httpTransport = httpTransport
+    }
 
     static func load() -> TurboBackendConfig? {
         guard let rawBaseURL = Bundle.main.object(forInfoDictionaryKey: "TurboBackendBaseURL") as? String,
@@ -1949,6 +1980,7 @@ nonisolated struct TurboSignalEnvelope: Codable, Equatable {
         return json
     }
 
+
     private func decodeDirectQuicPayload<Payload: TurboDirectQuicSignalingPayload>(
         _ payloadType: Payload.Type,
         expectedKind: TurboSignalKind
@@ -2210,6 +2242,11 @@ struct TurboWebSocketStatusNotice: Decodable {
     let status: String
     let deviceId: String?
     let sessionId: String?
+    let channelId: String?
+    let fromUserId: String?
+    let fromDeviceId: String?
+    let reason: String?
+    let leftAt: String?
 }
 
 struct TurboDiagnosticsUploadRequest: Encodable {

@@ -609,7 +609,13 @@ def build_replay_payload(
 
 def invariant_ids_from(payload: dict[str, Any]) -> set[str]:
     ids: set[str] = set()
-    for key in ("violations", "explicitInvariantViolations", "backendInvariantViolations"):
+    for key in (
+        "violations",
+        "currentViolations",
+        "historicalViolations",
+        "explicitInvariantViolations",
+        "backendInvariantViolations",
+    ):
         collect_invariant_ids(payload.get(key), ids)
     reports = payload.get("reports")
     if isinstance(reports, list):

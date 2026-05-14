@@ -1,0 +1,298 @@
+turbo.service.ws.internal.receiverAudioReadinessStatusFromSignal :
+  SignalKind -> Text -> Optional AudioReadinessStatus
+turbo.service.ws.internal.receiverAudioReadinessStatusFromSignal kind payload =
+  match kind with
+    ReceiverReady ->
+      Some AudioReadinessReady
+    ReceiverNotReady ->
+      if textEqual payload "app-background-media-closed"
+      then Some AudioReadinessWakeCapable
+      else Some AudioReadinessWaiting
+    _ ->
+      None
+
+turbo.service.ws.internal.receiverAudioReadinessStatusFromSignal.tests.examples :
+  [Result]
+turbo.service.ws.internal.receiverAudioReadinessStatusFromSignal.tests.examples =
+  test.verify do
+    ensureEqual
+      (Some AudioReadinessReady)
+      (turbo.service.ws.internal.receiverAudioReadinessStatusFromSignal
+        ReceiverReady
+        "")
+    ensureEqual
+      (Some AudioReadinessWakeCapable)
+      (turbo.service.ws.internal.receiverAudioReadinessStatusFromSignal
+        ReceiverNotReady
+        "app-background-media-closed")
+    ensureEqual
+      (Some AudioReadinessWaiting)
+      (turbo.service.ws.internal.receiverAudioReadinessStatusFromSignal
+        ReceiverNotReady
+        "channel-refresh")
+    ensureEqual
+      None
+      (turbo.service.ws.internal.receiverAudioReadinessStatusFromSignal
+        AudioChunk
+        "")
+
+turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization :
+  SignalKind -> Boolean
+turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization = cases
+  ReceiverNotReady -> true
+  _                -> false
+
+turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization.tests.examples :
+  [Result]
+turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization.tests.examples =
+  test.verify do
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization
+        ReceiverNotReady)
+    ensureEqual
+      false
+      (turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization
+        ReceiverReady)
+    ensureEqual
+      false
+      (turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization
+        Offer)
+
+turbo.service.ws.internal.signalForwardingIsBestEffort :
+  SignalKind -> Boolean
+turbo.service.ws.internal.signalForwardingIsBestEffort = cases
+  ReceiverReady    -> true
+  ReceiverNotReady -> true
+  _                -> false
+
+turbo.service.ws.internal.signalForwardingIsBestEffort.tests.examples :
+  [Result]
+turbo.service.ws.internal.signalForwardingIsBestEffort.tests.examples =
+  test.verify do
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalForwardingIsBestEffort ReceiverReady)
+    ensureEqual
+      true
+      (turbo.service.ws.internal.signalForwardingIsBestEffort
+        ReceiverNotReady)
+    ensureEqual
+      false
+      (turbo.service.ws.internal.signalForwardingIsBestEffort AudioChunk)
+
+turbo.service.ws.internal.isMissingSignalTargetError :
+  Text -> Boolean
+turbo.service.ws.internal.isMissingSignalTargetError err =
+  textEqual err "target user has no connected receiving device"
+    || textEqual err "target user has no connected receiving device in this channel"
+    || textEqual err "target device has no routable inbox"
+
+turbo.service.ws.internal.isMissingSignalTargetError.tests.examples :
+  [Result]
+turbo.service.ws.internal.isMissingSignalTargetError.tests.examples =
+  test.verify do
+    ensureEqual
+      true
+      (turbo.service.ws.internal.isMissingSignalTargetError
+        "target user has no connected receiving device")
+    ensureEqual
+      true
+      (turbo.service.ws.internal.isMissingSignalTargetError
+        "target user has no connected receiving device in this channel")
+    ensureEqual
+      true
+      (turbo.service.ws.internal.isMissingSignalTargetError
+        "target device has no routable inbox")
+    ensureEqual
+      false
+      (turbo.service.ws.internal.isMissingSignalTargetError
+        "signaling sender device is not joined to this channel")
+
+turbo.service.ws.internal.upsertReceiverAudioReadinessFromSignal :
+  Database
+  -> ChannelId
+  -> UserId
+  -> DeviceId
+  -> SignalKind
+  -> Text
+  -> '{Exception, Storage, Remote, Random} ()
+turbo.service.ws.internal.upsertReceiverAudioReadinessFromSignal
+  db
+  channelId
+  currentUserId
+  currentDeviceId
+  kind
+  payload =
+  do
+    receiverStatusOpt =
+      turbo.service.ws.internal.receiverAudioReadinessStatusFromSignal
+        kind
+        payload
+    match receiverStatusOpt with
+      Some receiverStatus ->
+        match sessions.get db currentDeviceId () with
+          Some session ->
+            _ =
+              receiverAudioReadiness.upsert
+                db
+                channelId
+                currentUserId
+                currentDeviceId
+                (sessionId session)
+                receiverStatus
+                ()
+            ()
+          None ->
+            ()
+      None ->
+        ()
+
+turbo.service.ws.internal.resolveEnvelopeTarget :
+  Database
+  -> UserId
+  -> DeviceId
+  -> SignalEnvelope
+  -> '{Exception, Storage, Remote, Random} Either Text SignalEnvelope
+turbo.service.ws.internal.resolveEnvelopeTarget
+  db currentUserId currentDeviceId = cases
+  SignalEnvelope kind channelId fromUserId fromDeviceId toUserId _ payload ->
+    do
+      use Boolean not
+      sameUser =
+        textEqual (UserId.toText currentUserId) (UserId.toText fromUserId)
+      sameDevice =
+        textEqual
+          (DeviceId.toText currentDeviceId) (DeviceId.toText fromDeviceId)
+      activeTransmit = currentTransmit db channelId ()
+      senderIsJoined =
+        isDeviceJoinedInChannel db fromUserId fromDeviceId channelId ()
+      senderCanReadChannel =
+        userCanReadDirectChannel db channelId fromUserId ()
+      signalUsesSetupTarget = signalUsesPreJoinDirectQuicSetupTarget kind
+      senderMatchesActiveTransmit =
+        activeTransmitMatchesSender fromUserId fromDeviceId activeTransmit
+      transmitOwnedSignal = signalUsesActiveTransmitTarget kind
+      membershipOwnedSignal =
+        turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization kind
+      senderAuthorizedByActiveTransmit =
+        transmitOwnedSignal && senderMatchesActiveTransmit
+      senderAuthorizedByReadableMembership =
+        senderCanReadChannel && (signalUsesSetupTarget || membershipOwnedSignal)
+      senderIsAuthorized =
+        senderIsJoined || senderAuthorizedByActiveTransmit
+          || senderAuthorizedByReadableMembership
+      if not sameUser
+        || not sameDevice then
+        Left "signaling sender does not match authenticated socket"
+      else
+        _ =
+          if senderAuthorizedByActiveTransmit && not senderIsJoined then
+            appendActiveTransmitSenderPresenceDriftInvariant
+              db currentUserId channelId fromDeviceId kind ()
+          else ()
+        if not senderIsAuthorized then
+          Left "signaling sender device is not joined to this channel"
+        else
+          targetPlan =
+            signalTargetResolutionPlanFromActiveTransmit
+              kind fromUserId fromDeviceId toUserId activeTransmit
+          match targetPlan with
+            SignalTargetResolutionUseActiveTransmitTarget targetDeviceId ->
+              Right
+                (SignalEnvelope
+                  kind
+                  channelId
+                  fromUserId
+                  fromDeviceId
+                  toUserId
+                  targetDeviceId
+                  payload)
+            SignalTargetResolutionUseConnectedPresence ->
+              if signalUsesSetupTarget then
+                match peerSetupTargetDeviceId db toUserId channelId () with
+                  None ->
+                    Left "target user has no connected receiving device"
+                  Some targetDeviceId ->
+                    Right
+                      (SignalEnvelope
+                        kind
+                        channelId
+                        fromUserId
+                        fromDeviceId
+                        toUserId
+                        targetDeviceId
+                        payload)
+              else
+                match activeCallLeases.getForUserInChannel db channelId toUserId () with
+                  None ->
+                    Left
+                      "target user has no connected receiving device in this channel"
+                  Some lease ->
+                    Right
+                      (SignalEnvelope
+                        kind
+                        channelId
+                        fromUserId
+                        fromDeviceId
+                        toUserId
+                        (activeCallParticipantLeaseDeviceId lease)
+                        payload)
+
+turbo.service.ws.internal.forwardEnvelope :
+  Database
+  -> UserId
+  -> DeviceId
+  -> WebSocket
+  -> SignalEnvelope
+  -> '{Exception, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.forwardEnvelope
+  db currentUserId currentDeviceId currentSocket envelope =
+  do
+    use Json toText
+    use WebSockets send
+    use object empty
+    (SignalEnvelope kind channelId _ _ _ _ payload) = envelope
+    bestEffortForwarding =
+      turbo.service.ws.internal.signalForwardingIsBestEffort kind
+    resolved =
+      resolveEnvelopeTargetWithRetry db currentUserId currentDeviceId envelope 6 ()
+    match resolved with
+      Left err ->
+        if bestEffortForwarding
+          && turbo.service.ws.internal.isMissingSignalTargetError err then
+          turbo.service.ws.internal.upsertReceiverAudioReadinessFromSignal
+            db
+            channelId
+            currentUserId
+            currentDeviceId
+            kind
+            payload
+            ()
+        else
+          send
+            currentSocket (TextMessage (toText (empty |> addText "error" err)))
+      Right resolvedEnvelope ->
+        _ =
+          turbo.service.ws.internal.upsertReceiverAudioReadinessFromSignal
+            db
+            channelId
+            currentUserId
+            currentDeviceId
+            kind
+            payload
+            ()
+        (SignalEnvelope _ _ _ _ _ targetDeviceId _) = resolvedEnvelope
+        match lookupTargetInboxWithRetry db targetDeviceId 6 () with
+          None ->
+            if bestEffortForwarding then
+              ()
+            else
+              send
+                currentSocket
+                (TextMessage
+                  (toText
+                    (empty
+                      |> addText "error" "target device has no routable inbox")))
+          Some inbox ->
+            SignalInbox.enqueue inbox resolvedEnvelope ()

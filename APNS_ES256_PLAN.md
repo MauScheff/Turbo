@@ -1,5 +1,9 @@
 # Unison ES256 Library Plan
 
+Status: active/paused implementation plan.
+Canonical home for: standalone Unison ES256 signing library design, namespace shape, implementation phases, and verification plan.
+Related docs: [`APNS_DELIVERY_PLAN.md`](/Users/mau/Development/Turbo/APNS_DELIVERY_PLAN.md) owns Turbo APNs delivery architecture; [`H2CLIENT_PLAN.md`](/Users/mau/Development/Turbo/H2CLIENT_PLAN.md) owns outbound HTTP/2 transport work.
+
 ## Goal
 
 Build a standalone Unison library for:

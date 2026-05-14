@@ -4,11 +4,15 @@ struct TurboBackendCriticalHTTPClient: Sendable {
     let baseURL: URL
     let devUserHandle: String
     let deviceID: String
+    let transportConfig: TurboBackendHTTPTransportConfig
+    let session: URLSession
 
     init(config: TurboBackendConfig) {
         baseURL = config.baseURL
         devUserHandle = config.devUserHandle
         deviceID = config.deviceID
+        transportConfig = config.httpTransport
+        session = URLSession(configuration: configuredSessionConfiguration(using: config.httpTransport))
     }
 
     func beginTransmit(channelId: String) async throws -> TurboBeginTransmitResponse {
@@ -32,7 +36,7 @@ struct TurboBackendCriticalHTTPClient: Sendable {
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw TurboBackendError.invalidResponse
         }
@@ -54,6 +58,16 @@ struct TurboBackendCriticalHTTPClient: Sendable {
 
         throw TurboBackendError.server(HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
     }
+}
+
+private func configuredSessionConfiguration(
+    using transportConfig: TurboBackendHTTPTransportConfig
+) -> URLSessionConfiguration {
+    let configuration = URLSessionConfiguration.default
+    configuration.waitsForConnectivity = transportConfig.waitsForConnectivity
+    configuration.timeoutIntervalForRequest = transportConfig.requestTimeoutSeconds
+    configuration.timeoutIntervalForResource = transportConfig.resourceTimeoutSeconds
+    return configuration
 }
 
 @MainActor
@@ -90,11 +104,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
 
     private let config: TurboBackendConfig
     private lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.default
-        // Control-plane requests should fail fast; reconnection is handled explicitly.
-        configuration.waitsForConnectivity = false
-        configuration.timeoutIntervalForRequest = 10
-        configuration.timeoutIntervalForResource = 10
+        let configuration = configuredSessionConfiguration(using: config.httpTransport)
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
     private lazy var webSocketSession: URLSession = {
@@ -126,6 +136,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
 
     var onSignal: (@MainActor (TurboSignalEnvelope) -> Void)?
     var onServerNotice: (@MainActor (String) -> Void)?
+    var onWebSocketStatusNotice: (@MainActor (TurboWebSocketStatusNotice) -> Void)?
     var onWebSocketStateChange: (@MainActor (WebSocketConnectionState) -> Void)?
     var onControlCommandTrace: (@MainActor (ControlCommandTraceEvent) -> Void)?
 
@@ -615,9 +626,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
                         if notice.status == "connected" {
                             currentWebSocketSessionID = notice.sessionId
                         }
-                        if notice.status != "connected" {
-                            onServerNotice?("WebSocket \(notice.status)")
-                        }
+                        onWebSocketStatusNotice?(notice)
                     } else if let data = text.data(using: .utf8),
                               let error = try? JSONDecoder().decode(TurboErrorResponse.self, from: data) {
                         onServerNotice?(error.error)

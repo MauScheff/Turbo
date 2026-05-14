@@ -685,6 +685,8 @@ extension PTTViewModel {
             : nil
         let applicationState = currentApplicationState()
         let systemLeaveWasUserInitiated = reason.isUserInitiated
+        let explicitLeaveWasPending =
+            contactID.map { sessionCoordinator.pendingAction.isExplicitLeaveInFlight(for: $0) } ?? false
         let shouldTreatLocalSystemLeaveAsExplicitTeardown: Bool = {
             guard applicationState == .active || systemLeaveWasUserInitiated else {
                 return false
@@ -702,6 +704,10 @@ extension PTTViewModel {
                 return false
             }
         }()
+        let shouldPropagateBackendLeave =
+            (autoRejoinContactID != nil && autoRejoinContactID != contactID)
+            || explicitLeaveWasPending
+            || shouldTreatLocalSystemLeaveAsExplicitTeardown
         Task {
             if shouldTreatLocalSystemLeaveAsExplicitTeardown {
                 sessionCoordinator.markExplicitLeave(contactID: contactID)
@@ -711,18 +717,25 @@ extension PTTViewModel {
                     channelUUID: channelUUID,
                     contactID: contactID,
                     reason: reasonDescription,
-                    autoRejoinContactID: autoRejoinContactID
-                )
+                    autoRejoinContactID: autoRejoinContactID,
+                    shouldPropagateBackendLeave: shouldPropagateBackendLeave
+                ),
+                afterStateUpdate: { [weak self] in
+                    guard let self else { return }
+                    if shouldTreatLocalSystemLeaveAsExplicitTeardown || explicitLeaveWasPending {
+                        self.sessionCoordinator.clearExplicitLeave(for: contactID)
+                    }
+                    if let contactID,
+                       self.sessionCoordinator.pendingAction.pendingTeardownContactID == contactID {
+                        self.sessionCoordinator.clearLeaveAction(for: contactID)
+                    }
+                    if let contactID,
+                       !self.sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
+                        self.replaceDisconnectRecoveryTask(with: nil)
+                    }
+                    self.syncPTTState()
+                }
             )
-            if let contactID,
-               sessionCoordinator.pendingAction.pendingTeardownContactID == contactID {
-                sessionCoordinator.clearLeaveAction(for: contactID)
-            }
-            if let contactID,
-               !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
-                replaceDisconnectRecoveryTask(with: nil)
-            }
-            syncPTTState()
             lastReportedPTTServiceStatus = nil
             lastReportedPTTServiceStatusChannelUUID = nil
             lastReportedPTTTransmissionMode = nil

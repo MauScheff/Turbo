@@ -17,7 +17,7 @@ Use the thinnest tool that answers the question or performs the change.
 
 For app-side distributed behavior, the preferred proof loop is not ad hoc manual simulator use. It is the automated simulator scenario infrastructure: checked-in scenario JSON, Swift test execution via `xcodebuild`, and merged diagnostics inspection.
 
-Treat [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md) as the higher-level workflow contract for how that infrastructure should be used.
+Use [`WORKFLOW.md`](/Users/mau/Development/Turbo/WORKFLOW.md) for the higher-level thinking model and [`STATE_MACHINE_TESTING.md`](/Users/mau/Development/Turbo/STATE_MACHINE_TESTING.md) for scenario mechanics.
 
 ## Source of truth by area
 
@@ -147,6 +147,8 @@ For deploys, the distinction is:
 
 `just deploy` first runs `just backend-schema-drift-test`, which executes `turbo.schemaDrift.check`. This is the lightweight guard against accidentally changing the shape of values stored in Unison Cloud tables without an explicit migration/reset decision. If the guard fails, do not bypass it with an environment rotation as a normal workflow; follow [`MIGRATIONS.md`](/Users/mau/Development/Turbo/MIGRATIONS.md), then either revert the persisted type change, write and prove the migration/repair path, or deliberately approve the new baseline in `turbo.schemaDrift.expectedHashes` in the same change.
 
+If hosted simulator scenarios start timing out after a deploy, do not assume schema drift immediately. First confirm the raw hosted surface with `just route-probe` or `just backend-stability-probe`. A passing raw hosted probe plus flaky simulator-hosted scenarios usually points to transport/test-lane instability, not a reason to rotate the environment. Environment rotation stays a manual operator recovery for disposable environments, not an automatic production step.
+
 In either case, if you changed backend behavior in the local Unison codebase, that change is not live on `https://beepbeep.to` until `turbo.deploy` has actually run.
 
 `just deploy-staging-verified` keeps raw deployment and live verification
@@ -241,7 +243,8 @@ Use this command map to keep the reliability workflow small:
 | Full hosted/local gates | `just reliability-gate-full`, `just reliability-gate-local` | Primary but expensive | Broad confidence after shared state-machine or backend contract changes. |
 | Synthetic probe and SLO dashboard | `just synthetic-conversation-probe`, `just slo-dashboard` | Building blocks | Running only one half of `postdeploy-check` or combining extra SLO sources. |
 | Route probe | `just route-probe`, `just route-probe-local` | Diagnostic/building block | Debugging route contract details or local websocket behavior. The synthetic conversation probe wraps this for the release canary. |
-| Backend stability probe | `just backend-stability-probe` | Diagnostic | Separating hosted route availability from app/device behavior, especially for Unison Cloud escalation. |
+| Backend stability probe | `just backend-stability-probe` | Diagnostic | Separating hosted route availability from app/device behavior, especially for Unison Cloud escalation. It covers bootstrap plus lightweight authenticated writes (`auth`, `device-register`, `presence-heartbeat`, `telemetry-events`). |
+| WebSocket stability probe | `just websocket-stability-probe` | Diagnostic | Measuring long-lived hosted websocket continuity separately from the full simulator scenario lane. Opens two authenticated sockets, keeps app-like websocket pings enabled, and can layer periodic heartbeats / telemetry writes while recording unexpected closes. |
 | Retired production probes | older overlapping hosted probe recipes | Removed | Replaced by `postdeploy-check`; use `route-probe` for lower-level route-contract debugging. |
 | Legacy APNs bridge helpers | `just ptt-apns-bridge`, `just ptt-apns-worker` | Diagnostic/legacy | Debugging old interim wake paths. Prefer the current deployed wake path and diagnostics surface when available. |
 
@@ -369,7 +372,7 @@ Useful `merged_diagnostics.py` flags:
 | --- | --- |
 | `--base-url <url>` | Reading diagnostics from a non-default backend, such as a local or staging service. |
 | `--backend-timeout <seconds>` | Bounding each backend latest/invariant/wake diagnostics request so telemetry can still return when the backend is slow. Use `8` or `15` for normal development. |
-| `--device <handle=device-id>` | Fetching an exact device snapshot instead of the latest snapshot for a handle. This is common for simulator identities and scenario artifacts. Repeat once per handle when needed. |
+| `--device <handle=device-id>` | Fetching an exact device snapshot instead of the latest snapshot for a handle. This is common for simulator identities and scenario artifacts. Repeat once per handle when needed. When you use only exact `--device` mappings, the telemetry merge stays scoped to those device IDs instead of widening back out to the full handle history. |
 | `--json` | Feeding merged diagnostics into a script, counting events, comparing transport digests, or attaching a machine-readable artifact. |
 | `--fail-on-violations` | CI/scenario/debug gates where typed invariant violations should make the command fail. |
 | `--full-metadata` | Inspecting complete Cloudflare telemetry metadata in the human timeline instead of the compact truncated view. |
@@ -434,7 +437,17 @@ python3 scripts/backend_stability_probe.py --iterations 30 --timeout 8 --handle 
 just backend-stability-probe https://beepbeep.to @mau 30 8
 ```
 
-The probe repeatedly checks `/v1/health`, `/v1/config`, and `/v1/auth/session`, reports per-request latency/timeouts, and exits non-zero if any request fails. This is the preferred artifact for Unison Cloud escalation because it separates route availability from app/device behavior.
+The probe repeatedly checks `/v1/health`, `/v1/config`, `/v1/auth/session`, `/v1/devices/register`, `/v1/presence/heartbeat`, and `/v1/telemetry/events`, reports per-request latency/timeouts, and exits non-zero if any request fails. This is the preferred artifact for Unison Cloud escalation because it separates route availability from app/device behavior while still exercising the lightweight authenticated writes that simulator-hosted runs depend on.
+
+When the suspected problem is websocket continuity rather than plain route availability, use:
+
+```bash
+just websocket-stability-probe https://beepbeep.to @quinn @sasha 90 20 0
+```
+
+That probe opens two authenticated websocket sessions with unique simulator-style device IDs, holds them open for the requested duration, uses the same 20s websocket ping cadence as the app by default, and optionally layers periodic `presence/heartbeat` and `telemetry/events` writes. It should be the first lower-level proof when the app reports websocket `idle` / reconnect churn but `route-probe` and `backend-stability-probe` are green.
+
+When hosted simulator scenarios report `NSURLErrorDomain -1001` or `-1005`, use `just backend-stability-probe` or `just route-probe` before blaming schema drift or rotating the environment. If the raw probes pass, keep debugging the simulator/app transport lane instead of treating the backend environment as corrupt.
 
 `just route-probe` should be treated as a semantic probe, not just a route-existence check. In particular, diagnostics upload/latest routes should round-trip the exact `deviceId` and `appVersion` that were just written.
 
@@ -459,6 +472,7 @@ Local-only transport-fault scenarios belong in the local websocket lane. The sce
 ## Related docs
 
 - [`AGENTS.md`](/Users/mau/Development/Turbo/AGENTS.md)
+- [`WORKFLOW.md`](/Users/mau/Development/Turbo/WORKFLOW.md)
 - [`handoffs/README.md`](/Users/mau/Development/Turbo/handoffs/README.md)
 - [`handoffs/TEMPLATE.md`](/Users/mau/Development/Turbo/handoffs/TEMPLATE.md)
 - [`UNISON.md`](/Users/mau/Development/Turbo/UNISON.md)

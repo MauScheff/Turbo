@@ -24,6 +24,27 @@ private enum TurboContactActionPrototype {
     static let showsListBottomAction = false
 }
 
+enum ContactListSelectionDisposition: Equatable {
+    case openCall(selectReason: String)
+    case focusDetail(selectReason: String)
+}
+
+struct RequestedExpandedCallPresentationState: Equatable {
+    let focusedContactID: UUID?
+    let minimizedCallContactID: UUID?
+}
+
+enum CallScreenDismissalAction: Equatable {
+    case minimize
+    case leave
+}
+
+struct CallScreenDismissalPresentationState: Equatable {
+    let focusedContactID: UUID?
+    let requestedExpandedCallContactID: UUID?
+    let minimizedCallContactID: UUID?
+}
+
 struct ContentView: View {
     @State private var viewModel: PTTViewModel
     @State private var route: ContentRoute = .launchSplash
@@ -144,9 +165,13 @@ struct ContentView: View {
             }
         }
         .onChange(of: viewModel.requestedExpandedCallSequence) { _, _ in
-            guard let requestedContactID = viewModel.requestedExpandedCallContactID else { return }
-            focusedContactID = nil
-            minimizedCallContactID = minimizedCallContactID == requestedContactID ? nil : minimizedCallContactID
+            guard let state = requestedExpandedCallPresentationState(
+                requestedContactID: viewModel.requestedExpandedCallContactID,
+                focusedContactID: focusedContactID,
+                minimizedCallContactID: minimizedCallContactID
+            ) else { return }
+            focusedContactID = state.focusedContactID
+            minimizedCallContactID = state.minimizedCallContactID
         }
         .onChange(of: viewModel.currentProfileName) { _, newValue in
             if !isSavingProfileName && !isShowingProfileSheet {
@@ -751,17 +776,29 @@ struct ContentView: View {
     }
 
     private func minimizeCallScreen(for contact: Contact) {
-        focusedContactID = nil
-        viewModel.requestedExpandedCallContactID = nil
-        minimizedCallContactID = contact.id
+        let state = callScreenDismissalPresentationState(
+            for: contact.id,
+            action: .minimize,
+            focusedContactID: focusedContactID,
+            requestedExpandedCallContactID: viewModel.requestedExpandedCallContactID,
+            minimizedCallContactID: minimizedCallContactID
+        )
+        focusedContactID = state.focusedContactID
+        viewModel.requestedExpandedCallContactID = state.requestedExpandedCallContactID
+        minimizedCallContactID = state.minimizedCallContactID
     }
 
     private func leaveCallScreen(for contact: Contact) {
-        focusedContactID = nil
-        viewModel.requestedExpandedCallContactID = nil
-        if minimizedCallContactID == contact.id {
-            minimizedCallContactID = nil
-        }
+        let state = callScreenDismissalPresentationState(
+            for: contact.id,
+            action: .leave,
+            focusedContactID: focusedContactID,
+            requestedExpandedCallContactID: viewModel.requestedExpandedCallContactID,
+            minimizedCallContactID: minimizedCallContactID
+        )
+        focusedContactID = state.focusedContactID
+        viewModel.requestedExpandedCallContactID = state.requestedExpandedCallContactID
+        minimizedCallContactID = state.minimizedCallContactID
     }
 
     private var addContactStatusMessage: String? {
@@ -786,12 +823,13 @@ struct ContentView: View {
 
     private func selectContactFromList(_ contact: Contact) {
         if TurboContactActionPrototype.isEnabled {
-            if shouldShowCallScreen(for: contact) {
-                viewModel.selectContact(contact, reason: "contact-list-active-call")
+            switch contactListSelectionDisposition(for: contact) {
+            case .openCall(let selectReason):
+                viewModel.selectContact(contact, reason: selectReason)
                 minimizedCallContactID = nil
                 focusedContactID = nil
-            } else {
-                viewModel.selectContact(contact, reason: "contact-list-focused-detail")
+            case .focusDetail(let selectReason):
+                viewModel.selectContact(contact, reason: selectReason)
                 focusedContactID = contact.id
             }
             return
@@ -801,6 +839,48 @@ struct ContentView: View {
         if shouldShowCallScreen(for: contact) {
             minimizedCallContactID = nil
         }
+    }
+
+    func contactListSelectionDisposition(for contact: Contact) -> ContactListSelectionDisposition {
+        if shouldShowCallScreen(for: contact) {
+            return .openCall(selectReason: "contact-list-active-call")
+        }
+        return .focusDetail(selectReason: "contact-list-focused-detail")
+    }
+
+    func requestedExpandedCallPresentationState(
+        requestedContactID: UUID?,
+        focusedContactID: UUID?,
+        minimizedCallContactID: UUID?
+    ) -> RequestedExpandedCallPresentationState? {
+        guard let requestedContactID else { return nil }
+        return RequestedExpandedCallPresentationState(
+            focusedContactID: nil,
+            minimizedCallContactID: minimizedCallContactID == requestedContactID
+                ? nil
+                : minimizedCallContactID
+        )
+    }
+
+    func callScreenDismissalPresentationState(
+        for contactID: UUID,
+        action: CallScreenDismissalAction,
+        focusedContactID: UUID?,
+        requestedExpandedCallContactID: UUID?,
+        minimizedCallContactID: UUID?
+    ) -> CallScreenDismissalPresentationState {
+        let minimizedCallContactID: UUID? = switch action {
+        case .minimize:
+            contactID
+        case .leave:
+            minimizedCallContactID == contactID ? nil : minimizedCallContactID
+        }
+
+        return CallScreenDismissalPresentationState(
+            focusedContactID: nil,
+            requestedExpandedCallContactID: nil,
+            minimizedCallContactID: minimizedCallContactID
+        )
     }
 
     private func handleContactRowLongPress(_ contact: Contact) {

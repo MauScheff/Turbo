@@ -1,0 +1,747 @@
+turbo.service.channels.internal.sendPeerLeftNoticeIfPossible :
+  Database
+  -> ChannelId
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> Text
+  -> '{Exception, Storage, Remote, WebSockets, Random} ()
+turbo.service.channels.internal.sendPeerLeftNoticeIfPossible
+  db channelId currentUserId currentDeviceId peerUserId leftAt =
+  do
+    peerDeviceIdOpt = peerSetupTargetDeviceId db peerUserId channelId ()
+    match peerDeviceIdOpt with
+      None -> ()
+      Some peerDeviceId ->
+        match sockets.lookup db peerDeviceId () with
+          None -> ()
+          Some peerSocket ->
+            noticeJson =
+              object.empty
+                |> addText "status" "peer-left"
+                |> addText "channelId" (ChannelId.toText channelId)
+                |> addText "fromUserId" (UserId.toText currentUserId)
+                |> addText "fromDeviceId" (DeviceId.toText currentDeviceId)
+                |> addText "reason" "leave"
+                |> addText "leftAt" leftAt
+            _ = 
+              catch do
+                WebSockets.send
+                  peerSocket (TextMessage (Json.toText noticeJson))
+            ()
+
+turbo.service.channels.internal.leaveControlCommand :
+  Database
+  -> User
+  -> Text
+  -> Map Text Text
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ControlCommandRouteResult
+turbo.service.channels.internal.leaveControlCommand
+  db currentUser channelIdText fields =
+  do
+    use Map get
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    currentHandle =
+      (User _ handleText _ _ _) = currentUser
+      handleText
+    currentDisplayName =
+      (User _ _ displayName _ _) = currentUser
+      displayName
+    operationId = get "operationId" fields
+    channelId = ChannelId.fromText channelIdText
+    match get "deviceId" fields with
+      None -> ControlCommandRouteBadRequest "missing deviceId"
+      Some deviceIdText ->
+        devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+        deviceId = DeviceId.fromText deviceIdText
+        targetKey = channelTargetKey channelId
+        replayPlan =
+          controlCommands.replayPlan
+            db currentUserId deviceId operationId LeaveChannel targetKey ()
+        leftJson =
+          object.empty
+            |> addText "channelId" channelIdText
+            |> addText "deviceId" deviceIdText
+            |> addText "status" "left"
+            |> addOptionalText "operationId" operationId
+        match replayPlan with
+          RejectControlCommand err -> ControlCommandRouteBadRequest err
+          ReplayControlCommand -> ControlCommandRouteOk leftJson
+          RunControlCommand ->
+            leftAt = Instant.toText now!
+            _ = runtime.endTransmit db channelId currentUserId deviceId ()
+            _ = clearActiveChannel db deviceId currentUserId ()
+            _ = memberships.remove db channelId currentUserId ()
+            peerUserIdOpt =
+              match OrderedTable.tryRead (channels.tables.byId db) channelId with
+                Some channel@(DirectChannel _ _ _ _) ->
+                  otherUserIdForDirectChannel currentUserId channel
+                None -> None
+            _ =
+              match peerUserIdOpt with
+                Some peerUserId ->
+                  turbo.service.channels.internal.sendPeerLeftNoticeIfPossible
+                    db channelId currentUserId deviceId peerUserId leftAt ()
+                None -> ()
+            _ =
+              match peerUserIdOpt with
+                Some peerUserId ->
+                  sendLeavePushIfPossible
+                    db
+                    channelId
+                    currentHandle
+                    currentDisplayName
+                    currentUserId
+                    deviceId
+                    peerUserId
+                    leftAt
+                    ()
+                None -> ()
+            _ =
+              recordSucceeded
+                db currentUserId deviceId operationId LeaveChannel targetKey ()
+            _ =
+              internal.send
+                "backend.channel.left"
+                "backend"
+                "notice"
+                currentUserId
+                (Some currentHandle)
+                (Some deviceId)
+                (Some channelId)
+                peerUserIdOpt
+                None
+                None
+                None
+                None
+                (Some "leave")
+                None
+                (Some "channel left")
+                operationId
+                devTraffic
+                false
+                ()
+            ControlCommandRouteOk leftJson
+
+turbo.service.ws.internal.executeControlCommand :
+  Database
+  -> User
+  -> Optional DeviceId
+  -> ControlCommandRequest
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ControlCommandRouteResult
+turbo.service.ws.internal.executeControlCommand
+  db currentUser websocketDeviceIdOpt = cases
+  ControlCommandRequest _ kind fields ->
+    do
+      match kind with
+        ConnectRequest -> createControlCommand db currentUser fields ()
+        JoinChannel ->
+          match Map.get "channelId" fields with
+            None -> ControlCommandRouteBadRequest "missing channelId"
+            Some channelIdText ->
+              joinControlCommandWithConnectedDevice
+                db currentUser websocketDeviceIdOpt channelIdText fields ()
+        LeaveChannel ->
+          match Map.get "channelId" fields with
+            None -> ControlCommandRouteBadRequest "missing channelId"
+            Some channelIdText ->
+              turbo.service.channels.internal.leaveControlCommand
+                db currentUser channelIdText fields ()
+
+turbo.service.ws.internal.sendControlCommandResponse :
+  Database
+  -> User
+  -> DeviceId
+  -> WebSocket
+  -> ControlCommandRequest
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.sendControlCommandResponse
+  db currentUser currentDeviceId currentSocket request =
+  do
+    (ControlCommandRequest requestId kind _) = request
+    result =
+      turbo.service.ws.internal.executeControlCommand
+        db currentUser (Some currentDeviceId) request ()
+    body = websocketResponseJson requestId kind result
+    WebSockets.send currentSocket (TextMessage (Json.toText body))
+
+-- The definitions below no longer typecheck with the changes above.
+-- Please fix the errors and try `update` again.
+
+turbo.deploy : '{IO, Exception} URI
+turbo.deploy = 
+  Cloud.main do
+    env = Environment.named "turbo-production-v6"
+    database = Database.named "turbo-control-plane-v5"
+    _ = seedCurrentOsEnv env ()
+    Database.assign database env
+    serviceHash = Route.deployWebSocket env (web database)
+    serviceName = ServiceName.named "turbo-v6"
+    _ = catch do ServiceName.unassign serviceName
+    uri = ServiceName.assign serviceName serviceHash
+    _ = catch do deleteDomainMapping (HostName "beepbeep.to")
+    _ =
+      createDomainMapping
+        (HostName "beepbeep.to") (ServiceName.name serviceName)
+    uri
+
+turbo.serveHttpLocal : '{IO, Exception} ()
+turbo.serveHttpLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8081)
+    Random.run do
+      Threads.run do
+        _ = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localHttpService = httpWithConfig "local-http" false database
+            hash = deployHttp env (Route.run localHttpService)
+            serviceName = ServiceName.named "turbo"
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8081/h/" ++ hashText ++ "/")
+            ()
+        printLine
+          "Local HTTP computation starting on port 8081. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        ()
+
+turbo.serveLocal :
+  '{IO, Exception} ServiceHash
+    HttpRequest (Either HttpResponse (WebSocket ->{Remote, WebSockets} ()))
+turbo.serveLocal =
+  do
+    use Text ++
+    setBuffering stdOut LineBuffering
+    config =
+      LocalCloudConfig.default()
+        |> printBanners.set true
+        |> LocalCloudConfig.httpPort.set (Port.number 8090)
+    Random.run do
+      Threads.run do
+        hash = 
+          local.impl config do
+            env = Environment.default()
+            database = Database.named "turbo-local-control-plane"
+            Database.assign database env
+            localWebService = web database
+            hash = Route.deployWebSocket env localWebService
+            serviceName = ServiceName.named "turbo"
+            namedUri = ServiceName.assign serviceName hash
+            namedTxt0 = URI.toText namedUri
+            namedTxt =
+              if endsWith "/" namedTxt0 then namedTxt0 else namedTxt0 ++ "/"
+            hashText = ServiceHash.toText hash
+            printLine ("Named: " ++ namedTxt)
+            printLine ("Hash:  http://localhost:8090/h/" ++ hashText ++ "/")
+            hash
+        printLine
+          "Local Cloud computation starting on port 8090. Press Enter to stop it.\n"
+        _ = match catch do readLine() with
+          Right _ -> ()
+          Left _  -> ()
+        hash
+
+turbo.service.api :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, WebSockets, Random, Log} ()
+turbo.service.api db = apiWithConfig "cloud" true db
+
+turbo.service.apiWithConfig :
+  Text
+  -> Boolean
+  -> Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, WebSockets, Random, Log} ()
+turbo.service.apiWithConfig mode supportsWebSocket db =
+  use Route or
+  or
+    health
+    (or
+      (service.config mode supportsWebSocket)
+      (or
+        (iceServers db)
+        (or
+          (uploadEvent db)
+          (or
+            (internal.routes db)
+            (or
+              (dev db)
+              (or
+                (service.presence.heartbeat db)
+                (or
+                  (background db)
+                  (or
+                    (offline db)
+                    (or
+                      (auth db) (or (users db) (or (invites db) (channels db))))))))))))
+
+turbo.service.channels.leave :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.channels.leave db =
+  do
+    use Parser /
+    channelIdText =
+      route POST (s "v1" / s "channels" / Parser.text / s "leave")
+    match requireUser db () with
+      Left err -> unauthorized.json (object.empty |> addText "error" err)
+      Right currentUser ->
+        fields = decodeJson (Decoder.object Decoder.text)
+        respondHttp
+          (leaveControlCommand db currentUser channelIdText fields ()) ()
+
+turbo.service.channels.leave.doc : Doc
+turbo.service.channels.leave.doc =
+  {{
+  {{ docExample 1 do db -> leave db }} clears the caller's active
+  device-channel binding for `channelId`.
+  
+  This is the control-plane leave operation used when a device exits a
+  conversation. It also sends a best-effort PushToTalk `leave-channel` push to
+  the peer's latest channel token so a background peer can tear down its
+  local/system session without waiting for presence polling.
+  
+  **Also see:** {clearActiveChannel}, {{
+  docLink (docEmbedTermLink do channels.join) }}
+  }}
+
+turbo.service.http :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, WebSockets, Random, Log} ()
+turbo.service.http db = Route.or (api db) (share db)
+
+turbo.service.httpWithConfig :
+  Text
+  -> Boolean
+  -> Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, WebSockets, Random, Log} ()
+turbo.service.httpWithConfig mode supportsWebSocket db =
+  Route.or (apiWithConfig mode supportsWebSocket db) (share db)
+
+turbo.service.presence.heartbeat.doc : Doc
+turbo.service.presence.heartbeat.doc =
+  {{
+  {{ docExample 1 do db -> service.presence.heartbeat db }} records app-level
+  online presence for the caller's device.
+  
+  This endpoint keeps contact online/offline state separate from channel join
+  state.
+  
+  **Also see:** {store.presence.heartbeat}, {{
+  docLink (docEmbedTermLink do leave) }}
+  }}
+
+turbo.service.routes.channels :
+  Database
+  -> '{Route, Config, Exception, Http, Storage, Remote, WebSockets, Random, Log} ()
+turbo.service.routes.channels db =
+  use Route or
+  or
+    (channels.direct db)
+    (or
+      (channels.join db)
+      (or
+        (leave db)
+        (or
+          (channels.state db)
+          (or
+            (revokeEphemeralToken db)
+            (or
+              (channels.ephemeralToken db)
+              (or
+                (pttPushTarget db)
+                (or
+                  (channels.beginTransmit db)
+                  (or
+                    (channels.renewTransmit db)
+                    (or (channels.endTransmit db) (readiness db))))))))))
+
+turbo.service.web :
+  Database
+  -> '{Route,
+  Config,
+  Exception,
+  Http,
+  OpenWebSocket,
+  Storage,
+  Remote,
+  WebSockets,
+  Random,
+  Log} ()
+turbo.service.web db =
+  use Route or
+  or (api db) (or (ws db) (share db))
+
+turbo.service.ws :
+  Database
+  -> '{Route,
+  Config,
+  Exception,
+  Http,
+  OpenWebSocket,
+  Storage,
+  Remote,
+  WebSockets,
+  Random,
+  Log} ()
+turbo.service.ws db =
+  do
+    use Parser & /
+    use Remote cancel
+    use object empty
+    deviceIdOpt = route GET (s "v1" / s "ws" & (do ParseQuery.text "deviceId"))
+    match deviceIdOpt with
+      None -> badRequest.json (empty |> addText "error" "missing deviceId")
+      Some deviceIdText ->
+        match requireUser db () with
+          Left err -> unauthorized.json (empty |> addText "error" err)
+          Right currentUser ->
+            currentUserId =
+              (User userId _ _ _ _) = currentUser
+              userId
+            ws = openWebSocket
+            deviceId = DeviceId.fromText deviceIdText
+            _ =
+              clearStaleActiveChannelOnSessionConnect
+                db currentUserId deviceId ()
+            session = sessions.connect db currentUserId deviceId ()
+            sessionId = internal.sessionId session
+            inbox = internal.inbox session
+            _ = sockets.connect db currentUserId deviceId ws ()
+            outboundTask = 
+              forkAt pool() do
+                toRemote do
+                  sendQueuedEnvelopesForSession
+                    db deviceId sessionId inbox ws ()
+            freshnessTask = 
+              forkAt pool() do
+                toRemote do
+                  keepSessionFreshWhileSocketOpen
+                    db deviceId currentUserId sessionId ()
+            _ =
+              WebSockets.send
+                ws
+                (TextMessage
+                  (Json.toText
+                    (empty
+                      |> addText "status" "connected"
+                      |> addText "deviceId" deviceIdText
+                      |> addText "sessionId" sessionId)))
+            _ = 
+              catch do
+                forever do
+                  _ = sessions.touch db deviceId sessionId ()
+                  message = WebSockets.receive ws
+                  handleMessageSafely
+                    db currentUser deviceId sessionId ws message ()
+            _ = cancel freshnessTask
+            _ = cancel outboundTask
+            _ = disconnectSocketForCurrentSession db deviceId sessionId ()
+            sessions.disconnect db deviceId sessionId ()
+
+turbo.service.ws.internal.handleMessage :
+  Database
+  -> User
+  -> DeviceId
+  -> Text
+  -> WebSocket
+  -> websockets.Message
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.handleMessage
+  db currentUser currentDeviceId currentSessionId currentSocket = cases
+  TextMessage text ->
+    do
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      match controlCommandFrameFromText text with
+        ParsedControlCommandFrame request ->
+          sendControlCommandResponse
+            db currentUser currentDeviceId currentSocket request ()
+        InvalidControlCommandFrame err ->
+          sendInvalidControlCommandResponse currentSocket err ()
+        NotControlCommandFrame ->
+          handleSignalMessage
+            db
+            currentUserId
+            currentDeviceId
+            currentSessionId
+            currentSocket
+            text
+            ()
+  _ ->
+    do
+      WebSockets.send
+        currentSocket
+        (TextMessage
+          (Json.toText
+            (object.empty
+              |> addText "error" "binary websocket messages are not supported")))
+
+turbo.service.ws.internal.handleMessageSafely :
+  Database
+  -> User
+  -> DeviceId
+  -> Text
+  -> WebSocket
+  -> websockets.Message
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.handleMessageSafely
+  db currentUser currentDeviceId currentSessionId currentSocket message =
+  do
+    match catch do
+      handleMessage
+        db
+        currentUser
+        currentDeviceId
+        currentSessionId
+        currentSocket
+        message
+        () with
+      Left _ ->
+        WebSockets.send
+          currentSocket
+          (TextMessage
+            (Json.toText
+              (object.empty
+                |> addText "error" "websocket message handling failed")))
+      Right _ -> ()
+
+
+
+---- Anything below this line is ignored by Unison.
+
+
+turbo.service.channels.internal.sendPeerLeftNoticeIfPossible :
+  Database
+  -> ChannelId
+  -> UserId
+  -> DeviceId
+  -> UserId
+  -> Text
+  -> '{Exception, Storage, Remote, WebSockets, Random} ()
+turbo.service.channels.internal.sendPeerLeftNoticeIfPossible
+  db
+  channelId
+  currentUserId
+  currentDeviceId
+  peerUserId
+  leftAt =
+  do
+    use object empty
+    peerDeviceIdOpt =
+      turbo.service.channels.internal.peerSetupTargetDeviceId
+        db
+        peerUserId
+        channelId
+        ()
+    match peerDeviceIdOpt with
+      None -> ()
+      Some peerDeviceId ->
+        match turbo.store.sockets.lookup db peerDeviceId () with
+          None -> ()
+          Some peerSocket ->
+            noticeJson =
+              empty
+                |> addText "status" "peer-left"
+                |> addText "channelId" (ChannelId.toText channelId)
+                |> addText "fromUserId" (UserId.toText currentUserId)
+                |> addText "fromDeviceId" (DeviceId.toText currentDeviceId)
+                |> addText "reason" "leave"
+                |> addText "leftAt" leftAt
+            _ =
+              catch do
+                WebSockets.send
+                  peerSocket
+                  (TextMessage (Json.toText noticeJson))
+            ()
+
+turbo.service.channels.internal.leaveControlCommand :
+  Database
+  -> User
+  -> Text
+  -> Map Text Text
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random}
+       ControlCommandRouteResult
+turbo.service.channels.internal.leaveControlCommand
+  db
+  currentUser
+  channelIdText
+  fields =
+  do
+    use Map get
+    use memberships remove
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    currentHandle =
+      (User _ handleText _ _ _) = currentUser
+      handleText
+    currentDisplayName =
+      (User _ _ displayName _ _) = currentUser
+      displayName
+    operationId = get "operationId" fields
+    channelId = ChannelId.fromText channelIdText
+    match get "deviceId" fields with
+      None -> ControlCommandRouteBadRequest "missing deviceId"
+      Some deviceIdText ->
+        devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+        deviceId = DeviceId.fromText deviceIdText
+        targetKey = channelTargetKey channelId
+        replayPlan =
+          controlCommands.replayPlan
+            db
+            currentUserId
+            deviceId
+            operationId
+            StalePresenceRepairFailed
+            targetKey
+            ()
+        leftJson =
+          object.empty
+            |> addText "channelId" channelIdText
+            |> addText "deviceId" deviceIdText
+            |> addText "status" "left"
+            |> addOptionalText "operationId" operationId
+        match replayPlan with
+          RejectControlCommand err -> ControlCommandRouteBadRequest err
+          ReplayControlCommand -> ControlCommandRouteOk leftJson
+          RunControlCommand ->
+            leftAt = Instant.toText now!
+            _ = runtime.endTransmit db channelId currentUserId deviceId ()
+            _ = clearActiveChannel db deviceId currentUserId ()
+            _ = remove db channelId currentUserId ()
+            peerUserIdOpt =
+              match OrderedTable.tryRead (channels.tables.byId db) channelId with
+                Some channel@(DirectChannel _ _ _ _) ->
+                  turbo.service.presence.internal.otherUserIdForDirectChannel
+                    currentUserId
+                    channel
+                None -> None
+            _ =
+              match peerUserIdOpt with
+                Some peerUserId ->
+                  turbo.service.channels.internal.sendPeerLeftNoticeIfPossible
+                    db
+                    channelId
+                    currentUserId
+                    deviceId
+                    peerUserId
+                    leftAt
+                    ()
+                None -> ()
+            _ =
+              match peerUserIdOpt with
+                Some peerUserId ->
+                  sendLeavePushIfPossible
+                    db
+                    channelId
+                    currentHandle
+                    currentDisplayName
+                    currentUserId
+                    deviceId
+                    peerUserId
+                    leftAt
+                    ()
+                None -> ()
+            _ =
+              recordSucceeded
+                db
+                currentUserId
+                deviceId
+                operationId
+                StalePresenceRepairFailed
+                targetKey
+                ()
+            _ =
+              internal.send
+                "backend.channel.left"
+                "backend"
+                "notice"
+                currentUserId
+                (Some currentHandle)
+                (Some deviceId)
+                (Some channelId)
+                peerUserIdOpt
+                None
+                None
+                None
+                None
+                (Some "leave")
+                None
+                (Some "channel left")
+                operationId
+                devTraffic
+                false
+                ()
+            ControlCommandRouteOk leftJson
+
+turbo.service.ws.internal.executeControlCommand :
+  Database
+  -> User
+  -> Optional DeviceId
+  -> ControlCommandRequest
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random}
+       ControlCommandRouteResult
+turbo.service.ws.internal.executeControlCommand
+  db
+  currentUser
+  websocketDeviceIdOpt = cases
+    ControlCommandRequest _ kind fields ->
+      do match kind with
+        NoConnectedSessionRepairNeeded -> createControlCommand db currentUser fields ()
+        ConnectedSessionRepairSucceeded ->
+          match Map.get "channelId" fields with
+            None -> ControlCommandRouteBadRequest "missing channelId"
+            Some channelIdText ->
+              joinControlCommandWithConnectedDevice
+                db
+                currentUser
+                websocketDeviceIdOpt
+                channelIdText
+                fields
+                ()
+        ConnectedSessionRepairFailed ->
+          match Map.get "channelId" fields with
+            None -> ControlCommandRouteBadRequest "missing channelId"
+            Some channelIdText ->
+              leaveControlCommand db currentUser channelIdText fields ()
+
+turbo.service.ws.internal.sendControlCommandResponse :
+  Database
+  -> User
+  -> DeviceId
+  -> WebSocket
+  -> ControlCommandRequest
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.sendControlCommandResponse
+  db
+  currentUser
+  currentDeviceId
+  currentSocket
+  request =
+  do
+    (ControlCommandRequest requestId kind _) = request
+    result =
+      turbo.service.ws.internal.executeControlCommand
+        db
+        currentUser
+        (Some currentDeviceId)
+        request
+        ()
+    body = websocketResponseJson requestId kind result
+    WebSockets.send currentSocket (TextMessage (Json.toText body))

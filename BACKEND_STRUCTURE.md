@@ -1,5 +1,9 @@
 # Backend Structure
 
+Status: quick index.
+
+Canonical home for the high-level Unison backend namespace map. It is not the source of truth for implementation details; inspect the Unison codebase `turbo/main` through MCP/UCM when exact current definitions matter.
+
 This is a quick map of the Unison backend in `turbo/main`.
 
 It is intentionally high level: the goal is to answer "where does this live?" before digging into definitions.
@@ -11,7 +15,7 @@ Source of truth:
 
 Snapshot note:
 
-- this document reflects the namespace/module shape observed in MCP on `2026-04-20`
+- this document reflects the namespace/module shape observed in MCP on `2026-04-20`; if a namespace looks missing or renamed, trust MCP/UCM over this snapshot
 
 ## Mental model
 
