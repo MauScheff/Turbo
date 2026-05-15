@@ -113,9 +113,38 @@ private extension AVAudioSession.Port {
 @MainActor
 @Observable
 final class PTTViewModel: NSObject, MediaSessionDelegate {
+    enum LifecyclePresenceTransitionKind {
+        case activeSession
+        case background
+        case offline
+    }
+
     static let shared = PTTViewModel(pttSystemPolicyDefaults: .standard)
+    struct HostedBackendClientProbeBootstrapControl: Decodable {
+        let enabledUntilEpochSeconds: TimeInterval
+        let suppressSharedAppBackendBootstrap: Bool?
+    }
+
     private static var isRunningAutomatedTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
+    static let hostedBackendClientProbeRuntimeConfigURL = URL(
+        fileURLWithPath: "/tmp/turbo-debug/hosted_backend_client_probe_runtime.json"
+    )
+
+    static var shouldSuppressSharedAppBackendBootstrapForAutomatedTests: Bool {
+        guard isRunningAutomatedTests,
+              let data = try? Data(contentsOf: hostedBackendClientProbeRuntimeConfigURL),
+              let config = try? JSONDecoder().decode(
+                  HostedBackendClientProbeBootstrapControl.self,
+                  from: data
+              ),
+              Date().timeIntervalSince1970 <= config.enabledUntilEpochSeconds else {
+            return false
+        }
+
+        return config.suppressSharedAppBackendBootstrap == true
     }
 
     var isReady: Bool = false
@@ -161,9 +190,15 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var localAudioLevel: Double = 0
     var backendBootstrapRetryDelayNanoseconds: UInt64 = 2_000_000_000
     var disconnectRecoveryDelayNanoseconds: UInt64 = 5_000_000_000
+    var disconnectRecoveryRetryDelayNanoseconds: UInt64 = 2_000_000_000
+    var disconnectRecoveryMaxWaitNanoseconds: UInt64 = 15_000_000_000
     var remoteAudioInitialChunkTimeoutNanoseconds: UInt64 = 5_000_000_000
     var remoteAudioSilenceTimeoutNanoseconds: UInt64 = 1_500_000_000
     var remoteAudioPendingPlaybackDrainMaxNanoseconds: UInt64 = 5_000_000_000
+    var remoteAudioNonAuthoritativePlaybackDrainMaxNanoseconds: UInt64 = 750_000_000
+    var remoteAudioNonAuthoritativePlaybackDrainPollNanoseconds: UInt64 = 150_000_000
+    var presenceHeartbeatHTTPFallbackIntervalSeconds: TimeInterval = 4
+    var presenceHeartbeatWebSocketIntervalSeconds: TimeInterval = 1.5
     var foregroundAppManagedInteractiveAudioPrewarmEnabled = true
     var lastReportedPTTServiceStatus: PTServiceStatus?
     var lastReportedPTTServiceStatusChannelUUID: UUID?
@@ -177,6 +212,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var lastReportedPTTDescriptorChannelUUID: UUID?
     var lastReportedPTTDescriptorReason: String?
     var localOnlySystemLeaveSuppressions: [UUID: LocalOnlySystemLeaveSuppression] = [:]
+    var staleSystemRejoinSuppressions: [UUID: StaleSystemRejoinSuppression] = [:]
     var systemTransmitBeginRecoveryAttemptsByChannelUUID: [UUID: Int] = [:]
     var foregroundDirectTransmitDelegationsByContactID: [UUID: ForegroundDirectTransmitDelegation] = [:]
     var recentOutgoingJoinAcceptedTokensByContactID: [UUID: RecentOutgoingJoinAcceptedToken] = [:]
@@ -226,9 +262,18 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     @ObservationIgnored
     var backgroundOfflinePresenceHandler: (@MainActor () async -> Void)?
     @ObservationIgnored
+    var backgroundActiveSessionPresenceHandler: (@MainActor () async -> Void)?
+    @ObservationIgnored
     var backgroundSessionPresenceHandler: (@MainActor () async -> Void)?
     @ObservationIgnored
     var backgroundWebSocketSuspendHandler: (@MainActor () -> Void)?
+    @ObservationIgnored
+    var lastLifecyclePresenceTransitionKind: LifecyclePresenceTransitionKind?
+    @ObservationIgnored
+    var lastLifecyclePresenceTransitionAt: Date?
+    @ObservationIgnored
+    var lifecyclePresenceTransitionInFlightKind: LifecyclePresenceTransitionKind?
+    var lifecyclePresenceTransitionDeduplicationWindowSeconds: TimeInterval = 2
     @ObservationIgnored
     var beginBackgroundActivity: @MainActor (String, @escaping @Sendable () -> Void) -> UIBackgroundTaskIdentifier = { name, expiration in
         UIApplication.shared.beginBackgroundTask(withName: name, expirationHandler: expiration)
@@ -480,6 +525,20 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
         guard let contactID = mediaSessionContactID else { return false }
         return hasActiveBackgroundPTTFlowOwningDirectQuic(for: contactID)
+    }
+
+    func shouldPublishActiveSessionPresenceDuringBackground(
+        applicationState: UIApplication.State? = nil
+    ) -> Bool {
+        let state = applicationState ?? currentApplicationState()
+        guard state != .active else { return false }
+
+        for contactID in [activeChannelId, selectedContactId, mediaSessionContactID].compactMap({ $0 }) {
+            if localSessionEvidenceExists(for: contactID) {
+                return true
+            }
+        }
+        return false
     }
 
     func syncPTTState() {
@@ -1163,6 +1222,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             incomingWakeActivationState: selectedSession.incomingWakeActivationState,
             incomingWakeBufferedChunkCount: selectedSession.incomingWakeBufferedChunkCount,
             remoteReceiveActive: selectedRemoteReceiveActivity?.isPeerTransmitting == true,
+            remoteTransmitStopObserved: selectedContactID.map {
+                receiveExecutionCoordinator.state.remoteTransmitStoppedContactIDs.contains($0)
+            } ?? false,
             remoteReceiveActivityState: selectedRemoteReceiveActivity.map { String(describing: $0) },
             receiverAudioReadinessState: selectedReceiverAudioReadiness.map { String(describing: $0) },
             pendingAction: selectedSession.pendingAction,
@@ -1614,11 +1676,13 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     func canTransmitNow(for contactID: UUID) -> Bool {
         guard selectedContactId == contactID else { return false }
+        guard !remoteReceiveBlocksLocalTransmit(for: contactID) else { return false }
         return selectedPeerState(for: contactID).canTransmitNow
     }
 
     func canBeginTransmit(for contactID: UUID) -> Bool {
         guard selectedContactId == contactID else { return false }
+        guard !remoteReceiveBlocksLocalTransmit(for: contactID) else { return false }
         return selectedPeerState(for: contactID).allowsHoldToTalk
     }
 
@@ -1716,6 +1780,12 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             name: UIApplication.didEnterBackgroundNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleProtectedDataWillBecomeUnavailableNotification(_:)),
+            name: UIApplication.protectedDataWillBecomeUnavailableNotification,
+            object: nil
+        )
     }
 
     @objc private func handleAudioSessionInterruptionNotification(_ notification: Notification) {
@@ -1775,7 +1845,11 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
 
     func handleApplicationDidBecomeActive() async {
+        lastLifecyclePresenceTransitionKind = nil
+        lastLifecyclePresenceTransitionAt = nil
+        lifecyclePresenceTransitionInFlightKind = nil
         backendServices?.resumeWebSocket()
+        await publishForegroundPresenceTransition(reason: "application-did-become-active")
         updateAutomaticAudioRouteMonitoring(reason: "application-became-active")
         clearTalkRequestNotifications()
         reconcileTalkRequestSurface(applicationState: .active)
@@ -1794,6 +1868,225 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             )
         }
         await backendSyncCoordinator.handle(.pollRequested(selectedContactID: selectedContactId))
+    }
+
+    func publishForegroundPresenceTransition(reason: String) async {
+        guard shouldPublishForegroundPresence(applicationState: .active),
+              let backend = backendServices else {
+            return
+        }
+        do {
+            _ = try await backend.foregroundPresence()
+            backendRuntime.markPresenceHeartbeatSent()
+            diagnostics.record(
+                .backend,
+                message: "Foreground presence publish succeeded",
+                metadata: ["reason": reason]
+            )
+        } catch {
+            diagnostics.record(
+                .backend,
+                level: .error,
+                message: "Foreground presence publish failed",
+                metadata: [
+                    "error": error.localizedDescription,
+                    "reason": reason,
+                ]
+            )
+        }
+    }
+
+    private func lifecyclePresenceTransitionKindForBackground() -> LifecyclePresenceTransitionKind {
+        if shouldPublishActiveSessionPresenceDuringBackground(applicationState: .background) {
+            return .activeSession
+        }
+        return shouldMaintainBackgroundControlPlane(applicationState: .background)
+            ? .background
+            : .offline
+    }
+
+    private func shouldSkipLifecyclePresenceTransition(_ kind: LifecyclePresenceTransitionKind) -> Bool {
+        if lifecyclePresenceTransitionInFlightKind == kind {
+            return true
+        }
+        guard lastLifecyclePresenceTransitionKind == kind,
+              let lastLifecyclePresenceTransitionAt else {
+            return false
+        }
+        return Date().timeIntervalSince(lastLifecyclePresenceTransitionAt)
+            < lifecyclePresenceTransitionDeduplicationWindowSeconds
+    }
+
+    private func noteLifecyclePresenceTransition(_ kind: LifecyclePresenceTransitionKind) {
+        lastLifecyclePresenceTransitionKind = kind
+        lastLifecyclePresenceTransitionAt = Date()
+    }
+
+    func publishLifecyclePresenceTransitionIfNeeded(reason: String) async {
+        let transitionKind = lifecyclePresenceTransitionKindForBackground()
+        let transitionKindLabel: String = {
+            switch transitionKind {
+            case .activeSession:
+                return "active-session"
+            case .background:
+                return "background"
+            case .offline:
+                return "offline"
+            }
+        }()
+        guard !shouldSkipLifecyclePresenceTransition(transitionKind) else {
+            diagnostics.record(
+                .backend,
+                message: "Skipped duplicate lifecycle presence transition",
+                metadata: [
+                    "reason": reason,
+                    "kind": transitionKindLabel,
+                ]
+            )
+            return
+        }
+        lifecyclePresenceTransitionInFlightKind = transitionKind
+        diagnostics.record(
+            .backend,
+            message: "Lifecycle presence publish started",
+            metadata: [
+                "reason": reason,
+                "kind": transitionKindLabel,
+            ]
+        )
+        var didPublishTransition = false
+        defer {
+            lifecyclePresenceTransitionInFlightKind = nil
+            if didPublishTransition {
+                noteLifecyclePresenceTransition(transitionKind)
+            }
+        }
+
+        switch transitionKind {
+        case .activeSession:
+            guard backgroundActiveSessionPresenceHandler != nil || backendServices != nil else { return }
+            await performProtectedBackgroundHandoff(named: "active-session-presence") { [weak self] in
+                guard let self else { return }
+                if let backgroundActiveSessionPresenceHandler {
+                    await backgroundActiveSessionPresenceHandler()
+                    didPublishTransition = true
+                    diagnostics.record(
+                        .backend,
+                        message: "Lifecycle presence publish succeeded",
+                        metadata: [
+                            "reason": reason,
+                            "kind": transitionKindLabel,
+                        ]
+                    )
+                    return
+                }
+                guard let backend = backendServices else { return }
+                do {
+                    _ = try await backend.foregroundPresence()
+                    didPublishTransition = true
+                    diagnostics.record(
+                        .backend,
+                        message: "Lifecycle presence publish succeeded",
+                        metadata: [
+                            "reason": reason,
+                            "kind": transitionKindLabel,
+                        ]
+                    )
+                } catch {
+                    diagnostics.record(
+                        .backend,
+                        level: .error,
+                        message: "Active session presence publish failed",
+                        metadata: [
+                            "error": error.localizedDescription,
+                            "reason": reason,
+                        ]
+                    )
+                }
+            }
+        case .background:
+            guard backgroundSessionPresenceHandler != nil || backendServices != nil else { return }
+            await performProtectedBackgroundHandoff(named: "background-presence") { [weak self] in
+                guard let self else { return }
+                if let backgroundSessionPresenceHandler {
+                    await backgroundSessionPresenceHandler()
+                    didPublishTransition = true
+                    diagnostics.record(
+                        .backend,
+                        message: "Lifecycle presence publish succeeded",
+                        metadata: [
+                            "reason": reason,
+                            "kind": transitionKindLabel,
+                        ]
+                    )
+                    return
+                }
+                guard let backend = backendServices else { return }
+                do {
+                    _ = try await backend.backgroundPresence()
+                    didPublishTransition = true
+                    diagnostics.record(
+                        .backend,
+                        message: "Lifecycle presence publish succeeded",
+                        metadata: [
+                            "reason": reason,
+                            "kind": transitionKindLabel,
+                        ]
+                    )
+                } catch {
+                    diagnostics.record(
+                        .backend,
+                        level: .error,
+                        message: "Background presence publish failed",
+                        metadata: [
+                            "error": error.localizedDescription,
+                            "reason": reason,
+                        ]
+                    )
+                }
+            }
+        case .offline:
+            guard backgroundOfflinePresenceHandler != nil || backendServices != nil else { return }
+            await performProtectedBackgroundHandoff(named: "offline-presence") { [weak self] in
+                guard let self else { return }
+                if let backgroundOfflinePresenceHandler {
+                    await backgroundOfflinePresenceHandler()
+                    didPublishTransition = true
+                    diagnostics.record(
+                        .backend,
+                        message: "Lifecycle presence publish succeeded",
+                        metadata: [
+                            "reason": reason,
+                            "kind": transitionKindLabel,
+                        ]
+                    )
+                    return
+                }
+                guard let backend = backendServices else { return }
+                do {
+                    _ = try await backend.offlinePresence()
+                    didPublishTransition = true
+                    diagnostics.record(
+                        .backend,
+                        message: "Lifecycle presence publish succeeded",
+                        metadata: [
+                            "reason": reason,
+                            "kind": transitionKindLabel,
+                        ]
+                    )
+                } catch {
+                    diagnostics.record(
+                        .backend,
+                        level: .error,
+                        message: "Offline presence publish failed",
+                        metadata: [
+                            "error": error.localizedDescription,
+                            "reason": reason,
+                        ]
+                    )
+                }
+            }
+        }
     }
 
     func handleApplicationDidEnterBackground() async {
@@ -1821,48 +2114,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             backendServices?.suspendWebSocket()
         }
 
-        if shouldPreserveJoinedSession {
-            guard backgroundSessionPresenceHandler != nil || backendServices != nil else { return }
-            await performProtectedBackgroundHandoff(named: "background-presence") { [weak self] in
-                guard let self else { return }
-                if let backgroundSessionPresenceHandler {
-                    await backgroundSessionPresenceHandler()
-                    return
-                }
-                guard let backend = backendServices else { return }
-                do {
-                    _ = try await backend.backgroundPresence()
-                } catch {
-                    diagnostics.record(
-                        .backend,
-                        level: .error,
-                        message: "Background presence publish failed",
-                        metadata: ["error": error.localizedDescription]
-                    )
-                }
-            }
-            return
-        }
-
-        guard backgroundOfflinePresenceHandler != nil || backendServices != nil else { return }
-        await performProtectedBackgroundHandoff(named: "offline-presence") { [weak self] in
-            guard let self else { return }
-            if let backgroundOfflinePresenceHandler {
-                await backgroundOfflinePresenceHandler()
-                return
-            }
-            guard let backend = backendServices else { return }
-            do {
-                _ = try await backend.offlinePresence()
-            } catch {
-                diagnostics.record(
-                    .backend,
-                    level: .error,
-                    message: "Offline presence publish failed",
-                    metadata: ["error": error.localizedDescription]
-                )
-            }
-        }
+        let _ = shouldPreserveJoinedSession
+        await publishLifecyclePresenceTransitionIfNeeded(reason: "application-did-enter-background")
     }
 
     func scheduleApplicationWillResignActiveHandling() {
@@ -1870,6 +2123,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         Task { @MainActor [weak self, endLease] in
             defer { endLease() }
             guard let self else { return }
+            await self.publishLifecyclePresenceTransitionIfNeeded(
+                reason: "application-will-resign-active"
+            )
             await self.reconcileIdleTransportForBackgroundTransition(
                 reason: "application-will-resign-active",
                 applicationState: .inactive
@@ -1940,5 +2196,19 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             applicationState: .background
         )
         scheduleApplicationDidEnterBackgroundHandling()
+    }
+
+    @objc private func handleProtectedDataWillBecomeUnavailableNotification(_ notification: Notification) {
+        let _ = notification
+        diagnostics.record(
+            .app,
+            message: "Protected data will become unavailable",
+            metadata: [:]
+        )
+        Task { @MainActor [weak self] in
+            await self?.publishLifecyclePresenceTransitionIfNeeded(
+                reason: "protected-data-will-become-unavailable"
+            )
+        }
     }
 }

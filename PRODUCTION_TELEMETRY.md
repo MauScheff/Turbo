@@ -73,7 +73,6 @@ The current implementation sends these classes of events:
   - `backend.transmit.begin_granted`
   - `backend.transmit.ended`
 - backend presence lifecycle:
-  - `backend.presence.heartbeat`
   - `backend.presence.background`
   - `backend.presence.offline`
 - backend wake path:
@@ -241,6 +240,13 @@ python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 1 @m
 
 `merged_diagnostics.py` pulls Cloudflare telemetry by default when query credentials are present, then combines it with the latest backend diagnostics snapshots. It treats both iOS and backend telemetry as invariant evidence: events with `invariantId` become violations, and complete telemetry state facts can become snapshot facts for the same pair/convergence checks used by local diagnostics.
 
+The repo also keeps checked-in merged-diagnostics replay fixtures for downstream tooling work under [`fixtures/production_replay/`](/Users/mau/Development/Turbo/fixtures/production_replay). Use them when the question is "does replay/dashboard/reporting preserve the merged result shape?" rather than "does the live analyzer still derive the violation?"
+
+Current canonical fixtures:
+
+- [`merged_diagnostics_mixed.json`](/Users/mau/Development/Turbo/fixtures/production_replay/merged_diagnostics_mixed.json): one current pair violation plus one historical local violation
+- [`merged_diagnostics_pair_matrix.json`](/Users/mau/Development/Turbo/fixtures/production_replay/merged_diagnostics_pair_matrix.json): multiple current pair violations plus one historical local violation
+
 The practical split is:
 
 - telemetry answers: "what high-signal facts happened recently?"
@@ -280,6 +286,13 @@ If the alert includes `peerHandle`, include both handles:
 python3 scripts/merged_diagnostics.py --backend-timeout 8 --telemetry-hours 2 --telemetry-limit 500 --full-metadata <user_handle> <peer_handle>
 ```
 
+For replay/dashboard tooling smoke with a checked-in artifact instead of a live incident:
+
+```bash
+python3 scripts/convert_production_replay.py --merged-diagnostics-json fixtures/production_replay/merged_diagnostics_pair_matrix.json --output-dir /tmp/turbo-production-replay-pair-matrix --name fixture_production_replay_pair_matrix
+python3 scripts/slo_dashboard.py --merged-diagnostics-json fixtures/production_replay/merged_diagnostics_pair_matrix.json --output-dir /tmp/turbo-slo-dashboard-pair-matrix --name pair-matrix-smoke
+```
+
 V1 limitation: `diagnosticsLatestURL` is a latest-snapshot pointer, not an immutable report URL. Use `incidentId` and `uploadedAt` to confirm that the transcript you are reading is the shake report. A later incident-backed backend route should make `incidentId` the stable fetch key and allow peer-device reports to attach to the same incident automatically.
 
 ## Alerts
@@ -309,7 +322,7 @@ Delivery behavior:
 - `devTraffic=true` events go only to the dev webhook when `TURBO_TELEMETRY_DISCORD_DEV_WEBHOOK` is configured
 - the dev webhook receives both dev telemetry and dev alerts in one channel, labeled separately as `DEV STREAM` or `DEV ALERT`
 - the stream webhook receives a curated operator feed for non-dev traffic
-- `backend.presence.heartbeat` and explicitly opted-in `ios.diagnostics.state_capture` are intentionally excluded from Discord stream delivery to avoid flooding operator channels
+- explicitly opted-in `ios.diagnostics.state_capture` is intentionally excluded from Discord stream delivery to avoid flooding operator channels
 - the alerts webhook receives only non-dev alert-worthy events
 - the legacy `TURBO_TELEMETRY_DISCORD_WEBHOOK` name is still accepted as an alerts fallback during migration
 

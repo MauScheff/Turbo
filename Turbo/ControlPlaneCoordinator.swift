@@ -145,6 +145,21 @@ enum ReceiverAudioReadinessReason: Equatable, Codable, CustomStringConvertible {
     var isBackgroundMediaClosure: Bool {
         self == .appBackgroundMediaClosed
     }
+
+    var recoveryPublicationBasis: ReceiverAudioReadinessPublicationBasis? {
+        switch self {
+        case .backendReconnect, .websocketConnected:
+            return .webSocketReconnect
+        case .backendSignalingRecovery,
+             .channelRefresh,
+             .incomingPushForeground,
+             .pttWakePostActivationRefresh,
+             .receiverPrewarmRequest:
+            return .channelRefresh
+        default:
+            return nil
+        }
+    }
 }
 
 struct ReceiverAudioReadinessIntent: Equatable {
@@ -159,12 +174,16 @@ struct ReceiverAudioReadinessIntent: Equatable {
     let telemetry: CallPeerTelemetry?
 
     var publicationBasis: ReceiverAudioReadinessPublicationBasis {
-        switch reason {
-        case .channelRefresh:
-            return .channelRefresh
-        case .websocketConnected, .backendReconnect:
-            return .webSocketReconnect
-        default:
+        if let recoveryBasis = reason.recoveryPublicationBasis {
+            switch recoveryBasis {
+            case .channelRefresh:
+                return .channelRefresh
+            case .webSocketReconnect:
+                return .webSocketReconnect
+            case .lifecycle:
+                return .lifecycle
+            }
+        } else {
             return .lifecycle
         }
     }
@@ -282,7 +301,7 @@ enum ControlPlaneReducer {
         case .reset:
             nextState = ControlPlaneSessionState()
 
-        case .receiverAudioReadinessSyncRequested(let intent, let peerIsRoutable, let webSocketConnected):
+        case .receiverAudioReadinessSyncRequested(let intent, let peerIsRoutable, _):
             if !peerIsRoutable {
                 nextState.receiverAudioReadinessStates[intent.contactID] = .suppressed(intent.suppressedState)
                 break
@@ -298,12 +317,6 @@ enum ControlPlaneReducer {
                      && intent.publishedState.basis == .webSocketReconnect) {
                     break
                 }
-            }
-
-            if !webSocketConnected {
-                nextState.receiverAudioReadinessStates[intent.contactID] = .deferred(intent)
-                effects.append(.deferReceiverAudioReadinessUntilReconnect(intent))
-                break
             }
 
             nextState.receiverAudioReadinessStates[intent.contactID] = .published(intent.publishedState)

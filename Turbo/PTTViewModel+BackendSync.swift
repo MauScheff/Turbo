@@ -625,16 +625,26 @@ extension PTTViewModel {
         guard systemSessionMatches(contactID) else { return false }
         guard !isTransmitting else { return false }
         guard !transmitCoordinator.state.isPressingTalk else { return false }
-        guard !isPTTAudioSessionActive else { return false }
         guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
         guard mediaSessionContactID == contactID else { return false }
         guard mediaConnectionState == .connected else { return false }
         guard let channelSnapshot = selectedChannelSnapshot(for: contactID) else { return false }
-        guard channelSnapshot.status == .ready else { return false }
         guard channelSnapshot.membership.hasLocalMembership else { return false }
         guard channelSnapshot.membership.hasPeerMembership else { return false }
-        guard channelSnapshot.canTransmit else { return false }
-        guard channelReadinessByContactID[contactID]?.statusView == .ready else { return false }
+        let readiness = channelReadinessByContactID[contactID]
+        let transientPeerDeviceLoss =
+            channelSnapshot.status == .waitingForPeer
+            && readiness?.statusView == .waitingForPeer
+            && deviceScopedPeerWakeHintIsAvailableForReceiverAudioReadiness(
+                channel: channelSnapshot,
+                readiness: readiness
+            )
+
+        if !transientPeerDeviceLoss {
+            guard channelSnapshot.status == .ready else { return false }
+            guard channelSnapshot.canTransmit else { return false }
+            guard readiness?.statusView == .ready else { return false }
+        }
         return true
     }
 
@@ -661,14 +671,6 @@ extension PTTViewModel {
             || mediaSessionContactID == contactID
             || isPTTAudioSessionActive
         guard existingLookedLikeReceive else { return false }
-        // Once signal-path audio is arriving, the backend channel state can
-        // move back to ready before the final queued chunks drain to the
-        // receiver. In that phase, only an explicit transmit-stop signal or
-        // the remote-audio silence timeout should end receive locally.
-        guard receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.hasReceivedAudioChunk != true else {
-            return false
-        }
-
         return effectiveChannelState.conversationStatus != .receiving
     }
 
@@ -694,7 +696,13 @@ extension PTTViewModel {
         )
 
         let shouldClearRemoteParticipant = shouldClearSystemRemoteParticipantFromSignalPath(for: contactID)
-        clearRemoteAudioActivity(for: contactID)
+        let shouldPreservePlaybackDrain =
+            receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.hasReceivedAudioChunk == true
+        if shouldPreservePlaybackDrain {
+            markRemoteTransmitStoppedPreservingPlaybackDrain(for: contactID)
+        } else {
+            clearRemoteAudioActivity(for: contactID)
+        }
 
         let shouldRestoreInteractivePrewarm =
             isJoined
@@ -702,7 +710,7 @@ extension PTTViewModel {
             && systemSessionMatches(contactID)
             && !isTransmitting
 
-        if mediaSessionContactID == contactID && !isTransmitting {
+        if mediaSessionContactID == contactID && !isTransmitting && !shouldPreservePlaybackDrain {
             closeMediaSession(
                 preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
             )
@@ -811,6 +819,10 @@ extension PTTViewModel {
         if remoteTransmittingContactIDs.contains(contactID) {
             return true
         }
+        return remotePlaybackDrainBlocksLocalTransmit(for: contactID)
+    }
+
+    func remotePlaybackDrainBlocksLocalTransmit(for contactID: UUID) -> Bool {
         guard mediaSessionContactID == contactID else { return false }
         guard
             let activityState = receiveExecutionCoordinator
@@ -822,6 +834,10 @@ extension PTTViewModel {
             return false
         }
         return mediaServices.session()?.hasPendingPlayback() == true
+    }
+
+    func remoteReceiveProjectsPeerTalking(for contactID: UUID) -> Bool {
+        remoteTransmittingContactIDs.contains(contactID)
     }
 
     func isExpectedBackendSyncCancellation(_ error: Error) -> Bool {
@@ -904,45 +920,34 @@ extension PTTViewModel {
         existing: TurboChannelStateResponse?
     ) -> Bool {
         guard selectedContactId == contactID else { return false }
-        guard !shouldPreserveLocalSessionAfterChannelRefreshFailure(contactID: contactID) else {
+        guard shouldPreserveLocalSessionAfterChannelRefreshFailure(contactID: contactID) else {
             return false
         }
         guard sessionCoordinator.pendingAction.pendingTeardownContactID != contactID else {
             return false
         }
+        guard channelStateLooksActive(existing) else { return false }
+        return true
+    }
 
-        let selectedPhase = selectedPeerState(for: contactID).phase
-        let hasSelectedContinuity: Bool
-        switch selectedPhase {
-        case .peerReady, .wakeReady, .waitingForPeer:
-            hasSelectedContinuity = true
-        case .idle,
-             .requested,
-             .incomingRequest,
-             .localJoinFailed,
-             .blockedByOtherSession,
-             .ready,
-             .startingTransmit,
-             .transmitting,
-             .receiving,
-             .systemMismatch:
-            hasSelectedContinuity = false
+    func channelStateLooksActive(_ channelState: TurboChannelStateResponse?) -> Bool {
+        guard let channelState else { return false }
+
+        let membershipLooksActive =
+            channelState.membership.hasLocalMembership
+            || channelState.membership.hasPeerMembership
+            || channelState.membership.peerDeviceConnected
+
+        if membershipLooksActive {
+            return true
         }
 
-        let hasJoinRecoveryContinuity =
-            sessionCoordinator.pendingAction.pendingConnectContactID == contactID
-            || sessionCoordinator.pendingAction.pendingJoinContactID == contactID
-            || backendJoinIsSettling(for: contactID)
-
-        guard hasSelectedContinuity || hasJoinRecoveryContinuity else {
+        switch channelState.conversationStatus {
+        case .waitingForPeer, .ready, .transmitting, .receiving:
+            return true
+        case .idle, .requested, .incomingRequest, nil:
             return false
         }
-
-        guard let existing else { return false }
-        return existing.membership.hasPeerMembership
-            || existing.membership.peerDeviceConnected
-            || existing.conversationStatus == .waitingForPeer
-            || existing.conversationStatus == .ready
     }
 
     func shouldPreserveLiveChannelState(
@@ -1070,6 +1075,22 @@ extension PTTViewModel {
             incoming.membership.hasLocalMembership
             && !incoming.membership.hasPeerMembership
             && !incoming.membership.peerDeviceConnected
+        let incomingDroppedOnlyLocalMembership =
+            !incoming.membership.hasLocalMembership
+            && incoming.membership.hasPeerMembership
+
+        if incomingDroppedOnlyLocalMembership {
+            let incomingLooksLikeTransientSelfMembershipDrift =
+                incoming.status == "connecting"
+                || incoming.status == ConversationState.waitingForPeer.rawValue
+                || (
+                    incoming.status == ConversationState.ready.rawValue
+                    && incoming.membership.peerDeviceConnected
+                )
+            guard incomingLooksLikeTransientSelfMembershipDrift else { return incoming }
+            return incoming.settingMembership(existing.membership)
+        }
+
         guard incomingDroppedOnlyPeerMembership else { return incoming }
 
         let incomingLooksLikeActiveSessionReuse =
@@ -1118,6 +1139,19 @@ extension PTTViewModel {
         return channelUUID(for: contactID) == systemChannelUUID
     }
 
+    func presenceHeartbeatMinimumInterval(
+        backendServices: BackendServices?
+    ) -> TimeInterval? {
+        guard let backendServices else { return nil }
+        if backendServices.shouldSendHTTPPresenceHeartbeat {
+            return presenceHeartbeatHTTPFallbackIntervalSeconds
+        }
+        guard presenceHeartbeatWebSocketIntervalSeconds > 0 else {
+            return nil
+        }
+        return presenceHeartbeatWebSocketIntervalSeconds
+    }
+
     func runBackendSyncEffect(_ effect: BackendSyncEffect) async {
         switch effect {
         case .bootstrapIfNeeded:
@@ -1127,6 +1161,12 @@ extension PTTViewModel {
             backendServices?.ensureWebSocketConnected()
         case .heartbeatPresence:
             guard shouldPublishPresenceHeartbeat() else { return }
+            guard let minimumInterval = presenceHeartbeatMinimumInterval(
+                backendServices: backendServices
+            ) else { return }
+            guard backendRuntime.consumePresenceHeartbeatSlot(
+                minimumInterval: minimumInterval
+            ) else { return }
             _ = try? await backendServices?.heartbeatPresence()
         case .refreshContactSummaries:
             await refreshContactSummaries()

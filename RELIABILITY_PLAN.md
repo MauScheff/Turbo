@@ -1,173 +1,343 @@
 # Reliability Sprint Plan
 
-Status: active sprint plan.
+Status: active Track 6 sprint. Tracks 1-5 are complete; this file now owns the physical-device end-to-end reliability push.
 
-Canonical home for the current reliability push: the concrete work we intend to execute next to move Turbo toward reliable-by-design behavior.
+Canonical goal: use physical devices to validate the Apple/PTT/audio/background boundary after the completed reliability work, find real failures, and convert every shared-logic failure into a local proof artifact before continuing.
 
-This is not the reliability philosophy, not the everyday checklist, and not the command catalog:
+This is the current sprint plan, not a permanent backlog. Replace it again when Track 6 closes.
 
-- [`RELIABILITY_GUIDELINES.md`](/Users/mau/Development/Turbo/RELIABILITY_GUIDELINES.md): core reliability idea, math framing, tool ladder, iteration rule
-- [`RELIABILITY_CHECKLIST.md`](/Users/mau/Development/Turbo/RELIABILITY_CHECKLIST.md): repeatable review checklists
-- [`WORKFLOW.md`](/Users/mau/Development/Turbo/WORKFLOW.md): canonical agent loop
-- [`TOOLING.md`](/Users/mau/Development/Turbo/TOOLING.md): exact commands and gates
+## Baseline
 
-When this sprint is complete, either delete this file or replace it with the next sprint plan. Do not let it become a stale roadmap.
+Tracks 1-3 were closed in [`handoffs/2026-05-14-1520.md`](/Users/mau/Development/Turbo/handoffs/2026-05-14-1520.md).
 
-## Sprint Goal
+Tracks 4-5 were closed in [`handoffs/2026-05-14-1732.md`](/Users/mau/Development/Turbo/handoffs/2026-05-14-1732.md).
 
-Make call-critical app/backend behavior harder to get wrong and easier to prove:
+Known completed proofs:
 
-> stale facts must not project current truth, important claims must have an owner and invariant, and distributed regressions must have a fast lower-level proof beneath any scenario.
+- `python3 scripts/check_invariant_registry.py`
+- `python3 -m unittest scripts.test_merged_diagnostics`
+- `just reliability-gate-regressions`
+- `just swift-test-target absentBackendMembershipClearsStalePendingLocalJoinWithoutForceQuit`
+- `just swift-test-target absentBackendMembershipRecoveryIsIdempotentAfterStalePendingJoinClears`
+- `just swift-test-target absentBackendMembershipDoesNotClearPendingLocalJoinWhileBackendJoinIsSettling`
+- `just swift-test-target selectedSyncPreservesPendingJoinWithUnresolvedLocalJoinAttemptAfterSettlingTTL`
+
+Track 6 starts from that baseline. Do not reopen Tracks 1-5 unless physical-device evidence contradicts their invariants.
+
+## Roles
+
+Human device operator:
+
+- Operates the physical phones exactly according to this plan.
+- Reports the run ID, cell ID, transport mode, app states, visible path labels, whether audio was heard, and any shake incident IDs.
+- Shakes both devices on failures and enters the requested short context string.
+- Does not keep exploring after a serious failure unless the agent asks for a targeted retest.
+
+Agent reliability owner:
+
+- Runs reliability intake, merged diagnostics, probes, replay conversion, and gates.
+- Classifies failures before editing: app/client projection, backend/control-plane truth, app/backend contract, simulator/tooling, or Apple/PTT/audio boundary.
+- Converts shared-logic failures into the narrowest durable proof: reducer/property test, backend probe/test, simulator scenario, fuzz replay, merged-diagnostics fixture, production replay, or TLA+ model.
+- Fixes the owning subsystem and asks for a minimal physical retest only after the automated proof is green.
 
 ## Non-Goals
 
-- Do not rewrite the whole state model.
-- Do not add broad scenario coverage without a lower-level invariant or reducer/backend proof underneath it.
-- Do not treat Apple/PTT/audio physical-device checks as substitutes for proving shared app/backend logic.
-- Do not turn this file into a permanent backlog.
+- Do not use physical testing as a substitute for automated proof of shared app/backend behavior.
+- Do not continue the whole matrix after a serious failure. Stop, capture evidence, classify, prove, fix, and retest the smallest failed cell.
+- Do not ask for manual in-app diagnostics upload during the normal loop. Current debug builds should auto-publish latest full diagnostics after high-signal activity; missing latest snapshots are themselves a diagnostics/autopublish issue.
+- Do not treat screenshots as authoritative when merged diagnostics can answer the behavioral question.
+- Do not count a Direct QUIC cell as passing if it silently used relayed audio unless the test explicitly expected fallback.
 
-## Exit Criteria
+## Prerequisites
 
-This sprint is done when:
+Use two physical iPhones:
 
-- call-critical backend facts are classified as durable/monotonic or leased/epoched runtime truth
-- at least the highest-risk backend projection path has typed current-state predicates instead of raw-row truth
-- every serious bug touched during the sprint has a registered invariant or explicit reason it does not need one
-- at least one distributed scenario has a lower-level Swift, Unison, TLA+, or fuzz/property proof for the core invariant underneath it
-- reliability intake, strict merged diagnostics, and the relevant gate still pass
-- the final handoff says whether this plan should be deleted or rolled into the next sprint
+- Device A handle: `<A_HANDLE>`
+- Device B handle: `<B_HANDLE>`
+- Backend: `https://beepbeep.to` unless the agent explicitly changes it.
+- Build: latest debug, TestFlight, or production-like build that includes Tracks 4-5.
+- Permissions on both phones: microphone allowed, notifications allowed, Local Network allowed.
+- Low Power Mode off and Focus/Do Not Disturb off for the first pass.
+- Both devices on the same Wi-Fi for Direct QUIC cells unless the agent asks for cellular/NAT coverage later.
 
-## Track 1: Backend Stale-Truth Audit
+Before the matrix, open the app on both phones:
 
-Purpose: stale rows may exist, but stale rows must never be sufficient to project current truth.
+- Confirm both phones are signed in with the expected handles.
+- Add/open each other as contacts.
+- Open `Profile -> Diagnostics`.
+- Note these fields from each phone if visible: app/build version, `Local device`, `WebSocket`, `Path state`, `Relay-only override`, `Auto-upgrade`, `Media relay enabled`, `Media relay forced`, `Backend advertised`, `Effective upgrade`.
+- If `Local device` is unknown, run the first intake by handle only; the intake summary should list exact device IDs for later exact-device reads.
 
-Work:
+Recommended operator report template:
 
-- [ ] List call-critical backend facts: presence, readiness, signaling authorization, wake target, active transmit, relay/session facts.
-- [ ] For each fact, classify it as `durable/monotonic` or `leased/epoched runtime`.
-- [ ] Identify which route/store/projection currently reads raw rows where it should call a typed current-state predicate.
-- [ ] Pick the highest-risk projection path first, likely readiness/wake/transmit target selection.
-- [ ] Add or strengthen the typed predicate that answers "is this fact current for this user/device/channel/session/epoch?"
-- [ ] Replace direct raw-row projection in that path with the typed predicate.
-- [ ] Add a backend invariant or route/projection proof that stale rows are insufficient to authorize or project current truth.
+```text
+T6 run:
+- run ID:
+- A handle / device:
+- B handle / device:
+- build:
+- backend:
+- network:
+- cell:
+- transport mode:
+- starting app states:
+- visible path labels:
+- A->B heard first press?:
+- B->A heard first press?:
+- final states:
+- shake incident IDs, if any:
+- notes:
+```
 
-Proof:
+## Transport Modes
 
-- [ ] Unison/backend test, route probe, or focused MCP/UCM proof for the changed predicate.
-- [ ] Strict diagnostics or scenario proof only if the change affects app/backend journey behavior.
+Set the transport mode on both phones from `Profile -> Diagnostics -> Direct QUIC` before running a cell.
 
-## Track 2: Invariant-First Bug Conversion
+### T1 WebSocket-Only Fallback Relay
 
-Purpose: serious reliability bugs should become named, owned rules.
+Purpose: prove the plain hosted websocket relay path without Direct QUIC or media relay masking bugs.
 
-Work:
+Set on both phones:
 
-- [ ] Review recent handoffs and current active bugs for reliability failures that are still only described as symptoms.
-- [ ] For each candidate, restate the symptom as a broken fact.
-- [ ] Identify the owner: backend, client reducer, pair/convergence, or Apple boundary.
-- [ ] Add or update an entry in [`invariants/registry.json`](/Users/mau/Development/Turbo/invariants/registry.json).
-- [ ] Put the detector at the authoritative seam, not where the symptom is merely visible.
-- [ ] Add expected/observed machine-readable evidence to diagnostics where needed.
-- [ ] Add the narrowest useful regression.
+- `Relay-only override`: on
+- `Disable auto-upgrade`: on, shown as `Auto-upgrade: off`
+- `Enable media relay`: off
+- `Force media relay`: off
 
-Proof:
+Expected:
 
-- [ ] `python3 scripts/check_invariant_registry.py`
-- [ ] one focused Swift, Unison, merged-diagnostics, TLA+, fuzz, or scenario proof per new invariant
+- Top path badge or diagnostics path state shows `Relayed`.
+- Direct QUIC fields show `Relay-only override: on`, `Effective upgrade: no`, and no active Direct QUIC attempt.
+- Audio still works both directions in foreground. If foreground audio fails here, stop immediately; this is the baseline relay path.
 
-## Track 3: Lower-Level Proof Beneath Scenarios
+### T2 Fast Relay
 
-Purpose: scenarios are valuable but expensive; the pure invariant underneath should usually have a fast proof.
+Purpose: prove low-latency media relay without Direct QUIC.
 
-Work:
+Set on both phones:
 
-- [ ] Pick one or two high-value simulator scenarios that currently carry too much proof burden.
-- [ ] Identify the invariant each scenario is really proving.
-- [ ] Add a focused Swift reducer/property test, Unison backend test/probe, TLA+ check, or fuzz oracle for that invariant.
-- [ ] Keep the scenario only for the cross-boundary journey evidence it uniquely provides.
-- [ ] Document in the invariant registry or handoff why the lower-level proof is sufficient.
+- `Relay-only override`: off
+- `Disable auto-upgrade`: on, shown as `Auto-upgrade: off`
+- `Enable media relay`: on
+- `Force media relay`: on
+- Relay host/ports: default `relay.beepbeep.to`, QUIC `9443`, TCP `9444`, unless the agent gives a different config.
 
-Proof:
+Expected:
 
-- [ ] focused lower-level proof passes
-- [ ] existing scenario still passes
-- [ ] strict merged diagnostics agrees with scenario invariant outcome
+- Diagnostics show `Media relay enabled: yes`, `Media relay forced: yes`, `Media relay configured: yes`.
+- Path state should become `Fast Relay` during prewarm/transmit.
+- Direct QUIC should not activate.
+- If media relay cannot connect, capture diagnostics and stop this transport mode; do not call it a websocket pass.
 
-## Track 4: Typed Reducer And Projection Hardening
+### T3 Direct QUIC
 
-Purpose: UI should render derived state, not own truth.
+Purpose: prove device-to-device Direct QUIC promotion and first-talk behavior.
 
-Work:
+Set on both phones:
 
-- [ ] Identify one remaining boolean, nullable, or stringly seam that affects selected-session, transmit, wake, receive, or backend projection behavior.
-- [ ] Replace behavior-driving strings/flags with a typed state, typed reason, or typed transition input.
-- [ ] Keep raw strings only at decode or compatibility boundaries.
-- [ ] Add preconditions and postconditions around the transition that owns the behavior.
-- [ ] Emit diagnostics in terms of the typed state/reason.
+- `Relay-only override`: off
+- `Auto-upgrade`: on
+- `Enable media relay`: on
+- `Force media relay`: off
+- `Transmit startup`: default unless the agent asks to compare `Apple-gated` versus `Speculative foreground`.
+- Local Network permission allowed on both devices.
 
-Proof:
+Expected:
 
-- [ ] focused Swift reducer/property test for the illegal-state boundary
-- [ ] scenario only if the typed change affects a distributed journey
+- Diagnostics show `Backend advertised: yes`, `Effective upgrade: yes`, production identity `ready`, peer device known, and eventually `Path state: Direct`.
+- If path stays `Promoting`, `Recovering`, or `Relayed`, use `Force probe` once only if the agent asks. Otherwise capture diagnostics and stop the Direct QUIC cell.
+- Audio must be heard on first press after the path is direct or direct-warming. A later retry-only success is a failure.
 
-## Track 5: Self-Healing As Formal Repair
+## App-State Matrix
 
-Purpose: repair invalid state without hiding bugs.
+Run the cells in this order. Stop on the first serious failure.
 
-Work:
+| Cell | App states | Sender action | Required coverage |
+| --- | --- | --- | --- |
+| S1 | A foreground, B foreground | A sends, then B sends | Baseline ready, first press audio, release convergence |
+| S2 | A foreground, B backgrounded or locked | A sends to B | Wake-capable receiver, incoming PTT push, activation, playback |
+| S3 | B foreground, A backgrounded or locked | B sends to A | Same as S2 with device roles swapped |
+| S4 | A backgrounded or locked, B backgrounded or locked | Start from system PTT UI if available | Lock-screen/background sender plus locked receiver |
 
-- [ ] Pick one recoverable invariant that already exists or emerges from Tracks 1-4.
-- [ ] Classify ownership: backend stale, app stale, Apple-held session stale, or ambiguous in-flight state.
-- [ ] Define one bounded idempotent repair action.
-- [ ] Define suppression rules for nearby valid in-flight states.
-- [ ] Emit repair diagnostics: requested, executed, suppressed, failed, converged.
-- [ ] Connect the repair policy back to the invariant registry.
+Run transport modes in this sequence:
 
-Proof:
+1. T1 x S1
+2. T2 x S1
+3. T3 x S1
+4. T1 x S2 and S3
+5. T2 x S2 and S3
+6. T3 x S2 and S3
+7. S4 for each transport mode that passed S1-S3
 
-- [ ] invalid state repairs
-- [ ] nearby valid in-flight state does not repair incorrectly
-- [ ] merged diagnostics makes the repair decision reconstructable
+S4 is allowed to be `blocked` instead of `failed` if the current build or iOS surface exposes no system sender affordance while the sender app is backgrounded or locked. Capture that as a product/platform limitation with diagnostics; do not invent taps to force it.
 
-## Track 6: Production Replay And SLO Feedback
+## Per-Cell Operator Script
 
-Purpose: field failures should become local proof artifacts.
+Use a fresh run ID:
 
-Work:
+```text
+T6-YYYYMMDD-HHMM-<transport>-<cell>
+```
 
-- [ ] Run reliability intake on the next suitable field/TestFlight/debug-device issue.
-- [ ] Confirm the diagnostics JSON contains enough correlation IDs to reconstruct the session.
-- [ ] Convert the evidence into one artifact: scenario JSON, reducer replay fixture, route probe fixture, invariant report fixture, or fuzz/model seed.
-- [ ] Check whether the issue maps to an existing SLO or needs a new product-facing reliability metric.
-- [ ] Add the artifact or document why the boundary is Apple/PTT/audio-only and cannot be replayed locally.
+For each cell:
 
-Proof:
+1. Set the transport toggles on both phones.
+2. Fully foreground both apps.
+3. Open/select the peer on both phones.
+4. Wait until the intended state appears:
+   - Foreground receiver: `Connected` / `ready`; hold-to-talk enabled only after `Preparing audio...` clears.
+   - Background receiver: sender shows wake-capable or transmit-capable state; receiver is backgrounded or locked.
+   - Direct QUIC: diagnostics path is `Direct`, or a Direct QUIC attempt is clearly active if the test is first-talk promotion.
+5. Speak a unique phrase for each direction: `A to B <run ID>` and `B to A <run ID>`.
+6. Press and hold for 3 seconds. Release. Wait 5 seconds.
+7. Record whether the receiver heard the first press, whether the receiver UI showed `receiving`, whether the sender showed `transmitting`, and whether both sides returned to `ready`/`Connected` or the expected wake-ready state.
+8. If anything violates expectations, stop and follow the failure capture script.
 
-- [ ] replay/probe/scenario/model artifact runs locally, or physical-device-only boundary is explicitly documented
-- [ ] relevant SLO/probe output is attached to the handoff
+## Expected Healthy Behavior
 
-## Suggested Order
+Foreground sender and foreground receiver:
 
-1. Start with Track 1 because stale backend truth can invalidate every higher-level proof.
-2. Run Track 2 in parallel with any bug work encountered during the sprint.
-3. Use Track 3 to reduce scenario burden once the first backend predicate or invariant is in place.
-4. Use Track 4 for the highest-risk app-side seam discovered by Tracks 1-3.
-5. Only do Track 5 after a recoverable invariant is clearly owned.
-6. Use Track 6 when real field evidence arrives; do not manufacture production replay work without a useful report.
+- Both devices converge to `ready`.
+- Hold-to-talk stays disabled while the local device is still `Preparing audio...`.
+- First press plays the Apple start beep on the sender.
+- Sender reaches `transmitting` quickly.
+- Receiver reaches `receiving` and hears audio on the first press.
+- Release plays the Apple end beep and both devices converge back to `ready`.
+- Merged diagnostics show no current invariant violations.
 
-## Sprint Gate
+Background or locked receiver:
 
-Before closing the sprint, run the narrow proofs for changed areas plus the smallest broad gate that matches the blast radius:
+- Sender does not rely on foreground receiver prewarm; it uses backend wake readiness.
+- Receiver gets an incoming PushToTalk push.
+- Receiver logs `Incoming PTT push received`.
+- Receiver logs `PTT audio session activated`.
+- Buffered wake audio drains and playback starts during the same transmit window.
+- If diagnostics show `Incoming PTT push received` but no `PTT audio session activated`, classify as Apple/PTT activation boundary until proven otherwise.
 
-- backend-only route/store/projection work: backend proof plus `just reliability-gate-regressions`
-- Swift reducer/projection work: focused Swift test plus `just reliability-gate-regressions`
-- distributed app/backend behavior: focused proof, scenario, strict merged diagnostics, then `just reliability-gate-smoke`
-- release-bound backend behavior: `just deploy-staging-verified` or `just deploy-production` as appropriate
+Transport evidence:
+
+- T1 must show `Relayed`; no media relay forced, no Direct QUIC activation.
+- T2 must show `Fast Relay`; media relay enabled/forced/configured, no Direct QUIC activation.
+- T3 must show `Direct`; Direct QUIC attempt active/activated, peer device known, no forced relay.
+
+Merged diagnostics should show, when relevant:
+
+- Sender: `System transmit began`, `PTT audio session activated`, `Configured outgoing audio transport`, `Captured local audio buffer`, `Converted local audio buffer`, `Enqueued outbound audio chunk`.
+- Receiver: `Signal received ... type=transmit-start`, `PTT audio session activated`, `Audio chunk received`, `Playback buffer scheduled`, `Playback node started`.
+- Source warnings: ideally zero.
+- Current invariant violations: zero for passing cells.
+
+## Failure Capture Script
+
+On the first serious failure:
+
+1. Stop the matrix.
+2. Shake both phones.
+3. In the shake text field, enter:
+
+```text
+T6 <run ID> <cell> <transport> <short observed failure>
+```
+
+4. Wait 20-30 seconds for auto-publish.
+5. Send the agent:
+   - run ID
+   - cell ID
+   - transport mode
+   - exact handles
+   - visible path labels
+   - whether audio was heard
+   - final visible state on each phone
+   - both shake incident IDs, if shown
+   - whether either device was locked, home-screen backgrounded, or app-switcher backgrounded
+
+The agent then runs intake. Use exact device IDs when known:
+
+```bash
+python3 scripts/reliability_intake.py \
+  --base-url https://beepbeep.to \
+  --surface debug \
+  --backend-timeout 8 \
+  --telemetry-hours 2 \
+  --telemetry-limit 500 \
+  --output-dir /tmp/turbo-track6/<run-id> \
+  --device <A_HANDLE>=<A_DEVICE_ID> \
+  --device <B_HANDLE>=<B_DEVICE_ID> \
+  --insecure
+```
+
+If exact device IDs are not known yet:
+
+```bash
+just reliability-intake <A_HANDLE> <B_HANDLE>
+```
+
+For a shake-specific report:
+
+```bash
+just reliability-intake-shake <REPORTING_HANDLE> <INCIDENT_ID> <PEER_HANDLE>
+```
+
+The agent should inspect:
+
+```bash
+jq '.telemetryEventCount, .sourceWarnings, .currentViolations, .historicalViolations' /tmp/turbo-track6/<run-id>/merged-diagnostics.json
+rg -n "VIOLATION|invariant|error|failed|timeout|transmit|receive|wake|audio|route|Direct QUIC|Media relay|PTT audio session|Incoming PTT push|Captured local audio buffer|Audio chunk received|Playback buffer scheduled" /tmp/turbo-track6/<run-id>/merged-diagnostics.txt
+```
+
+## Agent Debug Loop After Failure
+
+For each failure:
+
+1. Confirm source quality: backend latest snapshots, telemetry count, source warnings, shake marker, and exact devices.
+2. Classify ownership:
+   - app/client projection or reducer
+   - backend/control-plane truth
+   - app/backend contract
+   - media relay or Direct QUIC transport
+   - Apple/PTT/audio hardware boundary
+   - diagnostics/autopublish
+3. Name the violated invariant or create one if the contradiction is durable.
+4. Choose the narrowest proof lane:
+   - Swift reducer/property test for app state/projection/repair rules.
+   - Backend probe/test for route, readiness, wake target, membership, or storage truth.
+   - Simulator scenario for distributed app/backend ordering.
+   - Merged-diagnostics fixture for pair/convergence detector regressions.
+   - Production replay when intake produced a useful event story.
+   - TLA+ when the issue is stale truth, ordering, retry, duplicate/drop/reconnect, or protocol convergence.
+   - Physical retest only for PushToTalk UI, microphone permission, backgrounding, lock-screen wake, audio-session activation, or actual audio capture/playback.
+5. Make the proof fail when feasible, then fix the owning subsystem.
+6. Run the focused proof and the smallest broad gate matching blast radius.
+7. Ask the operator to retest only the failed cell first.
+
+## Optional Hosted Preflight
+
+Use these when the hosted surface itself is suspect before blaming devices:
+
+```bash
+just backend-stability-probe https://beepbeep.to <A_HANDLE> 10 8
+just websocket-stability-probe https://beepbeep.to <A_HANDLE> <B_HANDLE> 90 20 0
+just hosted-backend-client-probe
+just direct-quic-provisioning-probe
+just turn-policy-probe
+```
+
+Run `just turn-policy-probe "--require-enabled"` only when the Direct QUIC test explicitly requires TURN to be enabled.
 
 ## Closeout
 
-At closeout:
+Track 6 closes when:
 
-- [ ] Update the latest handoff with completed tracks, proofs, and remaining risk.
-- [ ] Delete this sprint plan if the work is complete.
-- [ ] If work remains, replace this file with the next concrete sprint plan rather than appending an old roadmap.
+- All unblocked matrix cells either pass or have a tracked issue with artifact paths.
+- Every shared-logic failure found by physical testing has a durable local proof artifact.
+- Every Apple/PTT/audio-only failure has exact physical evidence and a clear unreplayable boundary explanation.
+- Strict merged diagnostics for the final passing run has no current invariant violations.
+- The final handoff lists run IDs, artifact paths, changed files, proof commands, remaining risks, and any skipped/blocked cells.
+
+Final gate selection:
+
+- App-only fix: focused Swift proof plus `just reliability-gate-regressions`.
+- Distributed app/backend fix: focused proof, scenario when journey evidence matters, strict merged diagnostics, then `just reliability-gate-smoke`.
+- Backend/control-plane fix: backend proof/probe, invariant registry check if touched, then `just reliability-gate-regressions` or stronger.
+- Diagnostics/merged analyzer fix: `python3 scripts/test_merged_diagnostics.py`, replay fixture smoke, and `just reliability-gate-regressions`.
+- Device-only Apple/PTT/audio fix: local shared-logic proof first, then targeted physical retest of the failed cell.

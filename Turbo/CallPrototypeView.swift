@@ -12,16 +12,16 @@ private struct HatTextureTuning: Equatable {
 
 private struct TurboCallCloudTuning: Equatable {
     var patchCount: Double = 27
-    var opacity: Double = 1.35
-    var depthContrast: Double = 0.76
-    var colorAmount: Double = 1.00
-    var hueSpread: Double = 1.00
+    var opacity: Double = 1.52
+    var depthContrast: Double = 0.84
+    var colorAmount: Double = 1.16
+    var hueSpread: Double = 1.10
     var blur: Double = 0.063
     var minWidth: Double = 0.40
     var maxWidth: Double = 1.42
     var minHeight: Double = 0.14
     var maxHeight: Double = 0.30
-    var overallDim: Double = 0.26
+    var overallDim: Double = 0.28
     var motionAmount: Double = 0.135
     var motionSpeed: Double = 2.62
     var idleMotionAmount: Double = 0.22
@@ -78,7 +78,7 @@ private struct TurboCallCloudMotion: Equatable {
     enum Phase: String {
         case connecting
         case idleReady
-        case localTalking
+        case conversationActive
     }
 
     let phase: Phase
@@ -90,8 +90,8 @@ private struct TurboCallCloudMotion: Equatable {
             return "connecting"
         case .idleReady:
             return "idle"
-        case .localTalking:
-            return "talking"
+        case .conversationActive:
+            return "active"
         }
     }
 
@@ -104,9 +104,9 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting:
             return 1.0
         case .idleReady:
-            return 0.62
-        case .localTalking:
-            return 0.70
+            return 1.0
+        case .conversationActive:
+            return 0.0
         }
     }
 
@@ -115,9 +115,9 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting:
             return 0
         case .idleReady:
-            return 0.08
-        case .localTalking:
-            return 0.08
+            return 0
+        case .conversationActive:
+            return 0.80
         }
     }
 
@@ -126,9 +126,9 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting:
             return 1.0
         case .idleReady:
-            return tuning.idleMotionAmount
-        case .localTalking:
-            return min(0.46, 0.32 + talkEnergy * 0.10)
+            return 1.0
+        case .conversationActive:
+            return 0.0
         }
     }
 
@@ -137,9 +137,9 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting:
             return 1.0
         case .idleReady:
-            return max(0.12, tuning.idleMotionAmount * 0.72)
-        case .localTalking:
-            return min(0.46, 0.26 + talkEnergy * 0.12)
+            return 1.0
+        case .conversationActive:
+            return 0.0
         }
     }
 
@@ -148,9 +148,9 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting:
             return tuning.breathAmount * 0.55
         case .idleReady:
-            return tuning.breathAmount
-        case .localTalking:
-            return tuning.breathAmount + tuning.talkBreathBoost * 0.32 * pow(talkEnergy, 0.72)
+            return tuning.breathAmount * 0.55
+        case .conversationActive:
+            return 0
         }
     }
 
@@ -159,9 +159,9 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting:
             return tuning.motionSpeed * 0.30
         case .idleReady:
-            return tuning.motionSpeed * 0.18
-        case .localTalking:
-            return tuning.motionSpeed * (0.42 + talkEnergy * 0.24)
+            return tuning.motionSpeed * 0.25
+        case .conversationActive:
+            return 0
         }
     }
 
@@ -170,9 +170,9 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting:
             return 1.0
         case .idleReady:
-            return 1.0
-        case .localTalking:
-            return min(0.54, 0.36 + talkEnergy * 0.10)
+            return 0.82
+        case .conversationActive:
+            return 0.0
         }
     }
 
@@ -180,8 +180,8 @@ private struct TurboCallCloudMotion: Equatable {
         switch phase {
         case .connecting, .idleReady:
             return 1.0
-        case .localTalking:
-            return 1.0
+        case .conversationActive:
+            return 0.0
         }
     }
 
@@ -189,16 +189,14 @@ private struct TurboCallCloudMotion: Equatable {
         switch phase {
         case .connecting, .idleReady:
             return 1.0
-        case .localTalking:
-            return 1.0
+        case .conversationActive:
+            return 0.0
         }
     }
 
     var animationMode: TurboCallCloudAnimationMode {
         switch phase {
-        case .idleReady:
-            return .drift
-        case .connecting, .localTalking:
+        case .connecting, .idleReady, .conversationActive:
             return .reaction
         }
     }
@@ -530,8 +528,15 @@ struct TurboCallPrototypeView: View {
         }
         #endif
         let talkEnergy = displayedTalkEnergy
-        if talkEnergy > 0 {
-            return TurboCallCloudMotion(phase: .localTalking, talkEnergy: talkEnergy)
+        switch selectedPeerState.phase {
+        case .startingTransmit, .transmitting, .receiving:
+            return TurboCallCloudMotion(phase: .conversationActive, talkEnergy: talkEnergy)
+        case .idle, .requested, .incomingRequest, .peerReady, .waitingForPeer, .wakeReady,
+             .localJoinFailed, .ready, .blockedByOtherSession, .systemMismatch:
+            break
+        }
+        if talkEnergy > 0 || isTransmitPressActive {
+            return TurboCallCloudMotion(phase: .conversationActive, talkEnergy: talkEnergy)
         }
         if cloudShouldAnimate {
             return TurboCallCloudMotion(phase: .connecting, talkEnergy: 0)
@@ -1354,7 +1359,7 @@ private struct TurboCallCloudBackground: View {
     @State private var displayedDimOpacity: Double?
     @State private var motionTransition: TurboCallCloudMotionTransition?
 
-    private let baseColor = Color(red: 37.0 / 255.0, green: 39.0 / 255.0, blue: 38.0 / 255.0)
+    private let baseColor = Color(red: 26.0 / 255.0, green: 27.0 / 255.0, blue: 28.0 / 255.0)
     static let animationEpoch: TimeInterval = 780_000_000
 
     var body: some View {
@@ -1406,7 +1411,8 @@ private struct TurboCallCloudBackground: View {
 
     private func cloudCanvas(animationTime: TimeInterval) -> some View {
         let resolvedMotion = resolvedMotion(animationTime: animationTime)
-        let targetDimOpacity = min(0.36, tuning.overallDim + resolvedMotion.dimBoost)
+        let surfaceStyle = backgroundSurfaceStyle(animationTime: animationTime)
+        let targetDimOpacity = min(maxDimOpacity(for: resolvedMotion.phase), tuning.overallDim + resolvedMotion.dimBoost)
         let cloudLayerOpacity = displayedCloudLayerOpacity ?? resolvedMotion.cloudLayerOpacity
         let dimOpacity = displayedDimOpacity ?? targetDimOpacity
 
@@ -1443,13 +1449,41 @@ private struct TurboCallCloudBackground: View {
                 .fill(.black.opacity(dimOpacity))
                 .blendMode(.multiply)
         }
+        .overlay {
+            TurboCallBackgroundSurfaceOverlay(style: surfaceStyle)
+        }
     }
 
     private var targetVisualState: (cloudLayerOpacity: Double, dimOpacity: Double) {
         let resolvedMotion = motion.resolved(tuning: tuning)
         return (
             cloudLayerOpacity: resolvedMotion.cloudLayerOpacity,
-            dimOpacity: min(0.36, tuning.overallDim + resolvedMotion.dimBoost)
+            dimOpacity: min(maxDimOpacity(for: resolvedMotion.phase), tuning.overallDim + resolvedMotion.dimBoost)
+        )
+    }
+
+    private func maxDimOpacity(for phase: TurboCallCloudMotion.Phase) -> Double {
+        switch phase {
+        case .connecting, .idleReady:
+            return 0.36
+        case .conversationActive:
+            return 1.0
+        }
+    }
+
+    private func backgroundSurfaceStyle(animationTime: TimeInterval) -> TurboCallBackgroundSurfaceStyle {
+        guard !reduceMotion,
+              let transition = motionTransition,
+              transition.to == motion else {
+            return .forPhase(motion.phase)
+        }
+
+        let progress = Self.easeInOut(transition.progress(at: animationTime))
+        guard progress < 1 else { return .forPhase(motion.phase) }
+        return .interpolated(
+            from: .forPhase(transition.from.phase),
+            to: .forPhase(transition.to.phase),
+            progress: progress
         )
     }
 
@@ -1536,13 +1570,13 @@ private struct TurboCallCloudBackground: View {
     ) -> TimeInterval {
         switch (start, end) {
         case (.connecting, .idleReady):
-            return 1.55
-        case (.idleReady, .connecting):
-            return 1.05
-        case (_, .localTalking):
-            return 0.20
-        case (.localTalking, _):
             return 0.55
+        case (.idleReady, .connecting):
+            return 0.45
+        case (_, .conversationActive):
+            return 0.45
+        case (.conversationActive, _):
+            return 0.65
         default:
             return 0.35
         }
@@ -1582,6 +1616,125 @@ private struct TurboCallCloudMotionTransition: Equatable {
     func progress(at time: TimeInterval) -> Double {
         guard duration > 0 else { return 1 }
         return max(0, min(1, (time - startedAt) / duration))
+    }
+}
+
+private struct TurboCallBackgroundSurfaceStyle: Equatable {
+    let materialOpacity: Double
+    let tintOpacity: Double
+    let centerHighlightOpacity: Double
+    let topSheenOpacity: Double
+    let edgeShadeOpacity: Double
+    let borderOpacity: Double
+
+    static func forPhase(_ phase: TurboCallCloudMotion.Phase) -> Self {
+        switch phase {
+        case .connecting, .idleReady:
+            return Self(
+                materialOpacity: 0.14,
+                tintOpacity: 0.10,
+                centerHighlightOpacity: 0.055,
+                topSheenOpacity: 0.070,
+                edgeShadeOpacity: 0.24,
+                borderOpacity: 0.8
+            )
+        case .conversationActive:
+            return Self(
+                materialOpacity: 0.0,
+                tintOpacity: 0.0,
+                centerHighlightOpacity: 0.0,
+                topSheenOpacity: 0.0,
+                edgeShadeOpacity: 0.0,
+                borderOpacity: 0.0
+            )
+        }
+    }
+
+    static func interpolated(from start: Self, to end: Self, progress: Double) -> Self {
+        let progress = max(0, min(1, progress))
+        return Self(
+            materialOpacity: interpolate(start.materialOpacity, end.materialOpacity, progress),
+            tintOpacity: interpolate(start.tintOpacity, end.tintOpacity, progress),
+            centerHighlightOpacity: interpolate(start.centerHighlightOpacity, end.centerHighlightOpacity, progress),
+            topSheenOpacity: interpolate(start.topSheenOpacity, end.topSheenOpacity, progress),
+            edgeShadeOpacity: interpolate(start.edgeShadeOpacity, end.edgeShadeOpacity, progress),
+            borderOpacity: interpolate(start.borderOpacity, end.borderOpacity, progress)
+        )
+    }
+
+    private static func interpolate(_ start: Double, _ end: Double, _ progress: Double) -> Double {
+        start + (end - start) * progress
+    }
+}
+
+private struct TurboCallBackgroundSurfaceOverlay: View {
+    let style: TurboCallBackgroundSurfaceStyle
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            let longestEdge = max(size.width, size.height)
+            let shortestEdge = min(size.width, size.height)
+
+            ZStack {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .opacity(style.materialOpacity)
+
+                Rectangle()
+                    .fill(.black.opacity(style.tintOpacity))
+
+                LinearGradient(
+                    colors: [
+                        .white.opacity(style.topSheenOpacity),
+                        .white.opacity(style.topSheenOpacity * 0.25),
+                        .clear
+                    ],
+                    startPoint: .top,
+                    endPoint: .center
+                )
+                .blendMode(.screen)
+
+                RadialGradient(
+                    colors: [
+                        .white.opacity(style.centerHighlightOpacity),
+                        .clear
+                    ],
+                    center: .topLeading,
+                    startRadius: 0,
+                    endRadius: longestEdge * 0.92
+                )
+                .blendMode(.screen)
+
+                RadialGradient(
+                    colors: [
+                        .clear,
+                        .black.opacity(style.edgeShadeOpacity)
+                    ],
+                    center: .center,
+                    startRadius: shortestEdge * 0.18,
+                    endRadius: longestEdge * 0.88
+                )
+
+                Rectangle()
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                .white.opacity(0.12),
+                                .white.opacity(0.03),
+                                .white.opacity(0.08)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+                    .blendMode(.screen)
+                    .opacity(style.borderOpacity)
+            }
+            .compositingGroup()
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -1659,7 +1812,7 @@ private struct TurboCallCloudPatch {
                 speed: motionSpeed,
                 radius: min(size.width, size.height) * motionAmount
             )
-            if motion.phase == .localTalking, motion.talkEnergy > 0 {
+            if motion.phase == .conversationActive, motion.talkEnergy > 0 {
                 let wave = Self.talkWaveOffset(
                     point: baseCenter,
                     size: size,
@@ -1702,7 +1855,7 @@ private struct TurboCallCloudPatch {
             random: &random
         )
 
-        let opacityRange: ClosedRange<CGFloat> = 0.045...0.105
+        let opacityRange: ClosedRange<CGFloat> = 0.055...0.130
         let depthRoll = random.next(in: 0.0...1.0)
         let depthMultiplier: Double
         if depthRoll > 0.95 {
@@ -1721,32 +1874,32 @@ private struct TurboCallCloudPatch {
                 speed: motionSpeed
             )
             : 0
-        let breathOpacityResponse = motion.phase == .localTalking ? 0.42 : 1.35
+        let breathOpacityResponse = motion.phase == .conversationActive ? 0.42 : 1.35
         let breathOpacity = 0.94 + (breath - 1.0) * breathOpacityResponse
         let animationOpacityMultiplier: Double = animationMode == .reaction ? 0.86 + reactionAmount * 0.28 : 1.0
         let opacity = Double(random.next(in: opacityRange)) * tuning.opacity * depthMultiplier * animationOpacityMultiplier
             * breathOpacity
-        let colorAmount = min(1.45, tuning.colorAmount * motion.colorAmountMultiplier)
-        let hueSpread = min(1.35, tuning.hueSpread * motion.hueSpreadMultiplier)
+        let colorAmount = min(1.60, tuning.colorAmount * motion.colorAmountMultiplier)
+        let hueSpread = min(1.45, tuning.hueSpread * motion.hueSpreadMultiplier)
         let reactionHueShift = animationMode.usesFlowColorShift ? (reactionAmount - 0.5) * 0.22 * hueSpread : 0
-        let auroraShift = Double(random.next(in: -0.5...0.5)) * 0.30 * hueSpread + reactionHueShift
+        let auroraShift = Double(random.next(in: -0.5...0.5)) * 0.36 * hueSpread + reactionHueShift
         let coolHue = Self.wrapHue(0.54 + auroraShift)
-        let warmHue = Self.wrapHue(0.13 + auroraShift * 0.45)
-        let neutralHue = Self.wrapHue(0.58 + auroraShift * 0.65)
+        let warmHue = Self.wrapHue(0.12 + auroraShift * 0.40)
+        let neutralHue = Self.wrapHue(0.58 + auroraShift * 0.72)
         let cool = Color(
             hue: coolHue,
-            saturation: 0.045 + 0.28 * colorAmount,
-            brightness: 0.69 + 0.07 * colorAmount
+            saturation: 0.060 + 0.34 * colorAmount,
+            brightness: 0.70 + 0.08 * colorAmount
         )
         let warm = Color(
             hue: warmHue,
-            saturation: 0.026 + 0.20 * colorAmount,
-            brightness: 0.59 + 0.06 * colorAmount
+            saturation: 0.040 + 0.26 * colorAmount,
+            brightness: 0.60 + 0.07 * colorAmount
         )
         let neutral = Color(
             hue: neutralHue,
-            saturation: 0.022 + 0.07 * colorAmount,
-            brightness: 0.71
+            saturation: 0.030 + 0.10 * colorAmount,
+            brightness: 0.72
         )
         let warmOpacity = opacity * (0.34 + 0.42 * colorAmount)
         let neutralOpacity = opacity * (0.38 - 0.14 * colorAmount)
@@ -1917,7 +2070,7 @@ private struct TurboCallCloudPatch {
         let t = time * motion.breathSpeed
         let depth = 0.72 + 0.28 * sin(Double(index) * 1.13 + phase)
 
-        if motion.phase == .localTalking {
+        if motion.phase == .conversationActive {
             let sharedPulse = sin(t)
             let localDrift = sin(t * 0.43 + secondaryPhase) * 0.18
             return max(0.86, min(1.18, 1.0 + (sharedPulse + localDrift) * breathAmount * depth))

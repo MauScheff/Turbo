@@ -934,7 +934,23 @@ extension PTTViewModel {
                     }
                 }
             }
-            if let existing = channelReadinessByContactID[contactID] {
+            let suppressReceiverReadinessRegressionDuringPlaybackDrain =
+                remoteReceiveBlocksLocalTransmit(for: contactID)
+                && (envelope.type == .receiverReady || readiness != .ready)
+            if suppressReceiverReadinessRegressionDuringPlaybackDrain {
+                diagnostics.record(
+                    .websocket,
+                    message: "Ignored receiver audio readiness regression during playback drain",
+                    metadata: [
+                        "type": envelope.type.rawValue,
+                        "channelId": envelope.channelId,
+                        "contactId": contactID.uuidString,
+                        "payload": envelope.payload,
+                        "reason": readinessReason.wireValue,
+                        "readiness": String(describing: readiness),
+                    ]
+                )
+            } else if let existing = channelReadinessByContactID[contactID] {
                 let updatedReadiness: TurboChannelReadinessResponse = {
                     var next = existing.settingRemoteAudioReadiness(readiness)
                     if envelope.type == .receiverNotReady,
@@ -969,6 +985,9 @@ extension PTTViewModel {
             if selectedContactId == contactID {
                 updateStatusForSelectedContact()
                 captureDiagnosticsState("backend-signal:\(envelope.type.rawValue)")
+            }
+            if suppressReceiverReadinessRegressionDuringPlaybackDrain {
+                return
             }
             let shouldEchoReadyAfterPeerReconnect =
                 readiness == .ready
@@ -1435,43 +1454,32 @@ extension PTTViewModel {
                 effectiveChannelReadiness: effectiveChannelReadiness,
                 localSessionEstablished: localSessionEstablished
             ) {
-                diagnostics.recordInvariantViolation(
+                startBackendJoinRecoveryForActiveLocalSession(
+                    contactID: contactID,
+                    backendChannelID: backendChannelId,
+                    contact: contact,
                     invariantID: "selected.local_session_without_backend_presence",
-                    scope: .convergence,
-                    message: "local/system session is active, but backend readiness says selfHasActiveDevice=false",
-                    metadata: [
-                        "contactId": contactID.uuidString,
-                        "channelId": backendChannelId,
-                        "backendStatus": effectiveChannelState.status,
-                        "backendReadiness": effectiveChannelReadiness?.statusKind ?? "none",
-                    ]
+                    invariantMessage: "local/system session is active, but backend readiness says selfHasActiveDevice=false",
+                    backendStatus: effectiveChannelState.status,
+                    backendReadiness: effectiveChannelReadiness?.statusKind ?? "none",
+                    recoveryMessage: "Repairing missing backend device presence for active local session",
+                    captureReason: "backend-presence:self-healed"
                 )
-                replaceBackendSignalingJoinRecoveryTask(
-                    with: Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        defer {
-                            self.backendRuntime.signalingJoinRecoveryTask = nil
-                            self.updateStatusForSelectedContact()
-                        }
-                        self.diagnostics.record(
-                            .backend,
-                            message: "Repairing missing backend device presence for active local session",
-                            metadata: [
-                                "contactId": contactID.uuidString,
-                                "channelId": backendChannelId,
-                                "handle": contact.handle,
-                            ]
-                        )
-                        self.backendServices?.ensureWebSocketConnected()
-                        await self.reassertBackendJoin(for: contact)
-                        await self.refreshChannelState(for: contactID)
-                        await self.refreshContactSummaries()
-                        await self.syncLocalReceiverAudioReadinessSignal(
-                            for: contactID,
-                            reason: .backendSignalingRecovery
-                        )
-                        self.captureDiagnosticsState("backend-presence:self-healed")
-                    }
+            } else if shouldRecoverMissingBackendMembershipForActiveLocalSession(
+                contactID: contactID,
+                effectiveChannelState: effectiveChannelState,
+                localSessionEstablished: localSessionEstablished
+            ) {
+                startBackendJoinRecoveryForActiveLocalSession(
+                    contactID: contactID,
+                    backendChannelID: backendChannelId,
+                    contact: contact,
+                    invariantID: "selected.local_session_without_backend_membership",
+                    invariantMessage: "local/system session is active, but backend membership dropped self while the peer remained joined",
+                    backendStatus: effectiveChannelState.status,
+                    backendReadiness: effectiveChannelReadiness?.statusKind ?? "none",
+                    recoveryMessage: "Repairing missing backend membership for active local session",
+                    captureReason: "backend-membership:self-healed"
                 )
             }
             let leaveWasInFlight = sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
@@ -1544,6 +1552,7 @@ extension PTTViewModel {
                 let transmitSnapshot = transmitDomainSnapshot
                 let shouldAcceptBackendLocalTransmit = shouldAcceptBackendLocalTransmitProjection(
                     backendShowsLocalTransmit: backendShowsLocalTransmit,
+                    refreshedContactID: contactID,
                     transmitSnapshot: transmitSnapshot
                 )
                 let shouldPreserveTransmitState = shouldPreserveLocalTransmitState(
@@ -1801,10 +1810,79 @@ extension PTTViewModel {
         guard effectiveChannelState.membership.hasLocalMembership else { return false }
         guard localSessionEstablished else { return false }
         guard effectiveChannelReadiness?.selfHasActiveDevice == false else { return false }
+        if currentApplicationState() != .active,
+           case .wakeCapable = effectiveChannelReadiness?.localWakeCapability {
+            return false
+        }
         guard backendRuntime.signalingJoinRecoveryTask == nil else { return false }
         guard !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) else { return false }
         guard !shouldUseLiveCallControlPlaneReconnectGrace(for: contactID) else { return false }
         return !backendRuntime.isBackendJoinSettling(for: contactID)
+    }
+
+    func shouldRecoverMissingBackendMembershipForActiveLocalSession(
+        contactID: UUID,
+        effectiveChannelState: TurboChannelStateResponse,
+        localSessionEstablished: Bool
+    ) -> Bool {
+        guard !effectiveChannelState.membership.hasLocalMembership else { return false }
+        guard effectiveChannelState.membership.hasPeerMembership else { return false }
+        guard localSessionEstablished else { return false }
+        guard backendRuntime.signalingJoinRecoveryTask == nil else { return false }
+        guard !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) else { return false }
+        guard !shouldUseLiveCallControlPlaneReconnectGrace(for: contactID) else { return false }
+        return !backendRuntime.isBackendJoinSettling(for: contactID)
+    }
+
+    func startBackendJoinRecoveryForActiveLocalSession(
+        contactID: UUID,
+        backendChannelID: String,
+        contact: Contact,
+        invariantID: String,
+        invariantMessage: String,
+        backendStatus: String,
+        backendReadiness: String,
+        recoveryMessage: String,
+        captureReason: String
+    ) {
+        diagnostics.recordInvariantViolation(
+            invariantID: invariantID,
+            scope: .convergence,
+            message: invariantMessage,
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": backendChannelID,
+                "backendStatus": backendStatus,
+                "backendReadiness": backendReadiness,
+            ]
+        )
+        replaceBackendSignalingJoinRecoveryTask(
+            with: Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer {
+                    self.backendRuntime.signalingJoinRecoveryTask = nil
+                    self.updateStatusForSelectedContact()
+                }
+                self.diagnostics.record(
+                    .backend,
+                    message: recoveryMessage,
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": backendChannelID,
+                        "handle": contact.handle,
+                    ]
+                )
+                self.backendServices?.ensureWebSocketConnected()
+                await self.reassertBackendJoin(for: contact)
+                await self.refreshChannelState(for: contactID)
+                await self.refreshContactSummaries()
+                await self.syncLocalReceiverAudioReadinessSignal(
+                    for: contactID,
+                    reason: .backendSignalingRecovery
+                )
+                self.captureDiagnosticsState(captureReason)
+            }
+        )
     }
 
     func shouldClearBackendJoinSettlingAfterSelfPresenceVisible(
@@ -1815,7 +1893,11 @@ extension PTTViewModel {
         guard effectiveChannelState.membership.hasLocalMembership else { return false }
         guard localSessionEstablished else { return false }
         guard effectiveChannelReadiness?.selfHasActiveDevice == true else { return false }
-        return effectiveChannelState.membership.hasPeerMembership || effectiveChannelState.canTransmit
+        guard effectiveChannelState.membership.hasPeerMembership || effectiveChannelState.canTransmit else {
+            return false
+        }
+        return effectiveChannelState.canTransmit
+            || effectiveChannelReadiness?.statusKind == ConversationState.ready.rawValue
     }
 }
 

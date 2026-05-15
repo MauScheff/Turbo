@@ -8,6 +8,23 @@ enum PlaybackBufferReceivePlan: Equatable {
     case scheduleOnly
 }
 
+struct ReceivePlaybackFailureRecoveryPlan: Equatable {
+    let failedChunkIndex: Int
+    let recoveryRange: Range<Int>
+
+    static func make(
+        decodedChunkCount: Int,
+        failedChunkIndex: Int
+    ) -> ReceivePlaybackFailureRecoveryPlan? {
+        guard decodedChunkCount > 0 else { return nil }
+        guard failedChunkIndex >= 0, failedChunkIndex < decodedChunkCount else { return nil }
+        return ReceivePlaybackFailureRecoveryPlan(
+            failedChunkIndex: failedChunkIndex,
+            recoveryRange: failedChunkIndex..<decodedChunkCount
+        )
+    }
+}
+
 private struct PendingRemoteAudioChunk {
     let data: Data
     let playbackProfile: MediaSessionPlaybackProfile
@@ -503,6 +520,7 @@ final class PCMWebSocketMediaSession: MediaSession {
     private var playbackStartTask: Task<Void, Never>?
     private var playbackCushionTask: Task<Void, Never>?
     private var playbackNodeStartupReassertionTask: Task<Void, Never>?
+    private var playbackRecoveryTask: Task<Void, Never>?
     private var startTask: Task<Void, Error>?
     private let maximumPendingPlaybackBuffers = 24
     private let maximumPendingRemoteAudioChunks = 24
@@ -715,6 +733,8 @@ final class PCMWebSocketMediaSession: MediaSession {
         guard !decodedChunks.isEmpty else { return }
         var queuedPendingChunkCount: Int?
         var playbackFailure: String?
+        var recoveryQueuedChunkCount: Int?
+        var shouldAttemptPlaybackRecovery = false
         do {
             try withReceivePlaybackLock {
                 if !isPlaybackReady {
@@ -723,27 +743,63 @@ final class PCMWebSocketMediaSession: MediaSession {
                     }
                     queuedPendingChunkCount = pendingRemoteAudioChunkCount()
                 } else {
-                    for chunk in decodedChunks {
-                        try schedulePlayback(for: chunk, playbackProfile: playbackProfile)
+                    for (index, chunk) in decodedChunks.enumerated() {
+                        do {
+                            try schedulePlayback(for: chunk, playbackProfile: playbackProfile)
+                        } catch {
+                            if let recoveryPlan = ReceivePlaybackFailureRecoveryPlan.make(
+                                decodedChunkCount: decodedChunks.count,
+                                failedChunkIndex: index
+                            ) {
+                                for recoveryChunk in decodedChunks[recoveryPlan.recoveryRange] {
+                                    enqueuePendingRemoteAudioChunk(
+                                        recoveryChunk,
+                                        playbackProfile: playbackProfile
+                                    )
+                                }
+                                queuedPendingChunkCount = pendingRemoteAudioChunkCount()
+                                recoveryQueuedChunkCount = recoveryPlan.recoveryRange.count
+                            }
+                            resetPlaybackPathForReceiveRecovery()
+                            shouldAttemptPlaybackRecovery = true
+                            throw error
+                        }
                     }
                 }
             }
         } catch {
             playbackFailure = error.localizedDescription
-            state = .failed("playback failed: \(error.localizedDescription)")
         }
 
-        if let queuedPendingChunkCount {
+        if let recoveryQueuedChunkCount,
+           let queuedPendingChunkCount {
+            await report(
+                "Queued remote audio chunk for playback recovery",
+                metadata: [
+                    "recoveryChunkCount": String(recoveryQueuedChunkCount),
+                    "pendingChunkCount": String(queuedPendingChunkCount),
+                ]
+            )
+        } else if let queuedPendingChunkCount {
             await report(
                 "Queued remote audio chunk until playback ready",
                 metadata: ["pendingChunkCount": String(queuedPendingChunkCount)]
             )
         }
         if let playbackFailure {
-            await report(
-                "Receive playback failed",
-                metadata: ["error": playbackFailure]
-            )
+            if shouldAttemptPlaybackRecovery {
+                await report(
+                    "Recovering receive playback after failure",
+                    metadata: ["error": playbackFailure]
+                )
+                startReceivePlaybackRecoveryIfNeeded()
+            } else {
+                state = .failed("playback failed: \(playbackFailure)")
+                await report(
+                    "Receive playback failed",
+                    metadata: ["error": playbackFailure]
+                )
+            }
         }
     }
 
@@ -795,6 +851,8 @@ final class PCMWebSocketMediaSession: MediaSession {
         playbackCushionTask = nil
         playbackNodeStartupReassertionTask?.cancel()
         playbackNodeStartupReassertionTask = nil
+        playbackRecoveryTask?.cancel()
+        playbackRecoveryTask = nil
         pendingPlaybackBuffers.removeAll(keepingCapacity: false)
         pendingRemoteAudioChunks.removeAll(keepingCapacity: false)
         scheduledPlaybackBufferCount = 0
@@ -1389,6 +1447,23 @@ final class PCMWebSocketMediaSession: MediaSession {
         playerNode.reset()
     }
 
+    private func resetPlaybackPathForReceiveRecovery() {
+        playbackStartTask?.cancel()
+        playbackStartTask = nil
+        playbackCushionTask?.cancel()
+        playbackCushionTask = nil
+        playbackNodeStartupReassertionTask?.cancel()
+        playbackNodeStartupReassertionTask = nil
+        pendingPlaybackBuffers.removeAll(keepingCapacity: false)
+        scheduledPlaybackBufferCount = 0
+        playerNode.stop()
+        playerNode.reset()
+        playbackEngine.stop()
+        playbackEngine.reset()
+        playbackConverter = nil
+        isPlaybackReady = false
+    }
+
     private func startCaptureEngineIfNeeded() throws {
         if !captureEngine.isRunning {
             try captureEngine.start()
@@ -1406,6 +1481,55 @@ final class PCMWebSocketMediaSession: MediaSession {
                 await report("Playback engine started", metadata: [:])
             }
         }
+    }
+
+    private func startReceivePlaybackRecoveryIfNeeded() {
+        guard playbackRecoveryTask == nil else { return }
+        let activationMode: MediaSessionActivationMode =
+            activeAudioSessionOwnership == .appManaged ? .appManaged : .systemActivated
+        let pendingChunkCount = pendingRemoteAudioChunkCount()
+        state = .preparing
+        playbackRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.playbackRecoveryTask = nil }
+            do {
+                await self.report(
+                    "Receive playback recovery started",
+                    metadata: [
+                        "activationMode": String(describing: activationMode),
+                        "pendingChunkCount": String(pendingChunkCount),
+                    ]
+                )
+                try await self.performReceivePlaybackRecovery(activationMode: activationMode)
+                await self.report(
+                    "Receive playback recovery completed",
+                    metadata: ["pendingChunkCount": String(self.pendingRemoteAudioChunkCount())]
+                )
+            } catch {
+                let errorDescription = error.localizedDescription
+                self.state = .failed("playback failed: \(errorDescription)")
+                await self.report(
+                    "Receive playback recovery failed",
+                    metadata: ["error": errorDescription]
+                )
+            }
+        }
+    }
+
+    private func performReceivePlaybackRecovery(
+        activationMode: MediaSessionActivationMode
+    ) async throws {
+        try configureAudioSession(
+            activationMode: activationMode,
+            startupMode: .playbackOnly
+        )
+        try preparePlaybackPathIfNeeded()
+        try startPlaybackEngineIfNeeded()
+        try withReceivePlaybackLock {
+            isPlaybackReady = true
+            try drainPendingRemoteAudioChunksIfReady()
+        }
+        state = .connected
     }
 
     private var playbackIOCycleAvailable: Bool {
@@ -1516,7 +1640,7 @@ final class PCMWebSocketMediaSession: MediaSession {
         }
         switch playbackProfile {
         case .lowLatency:
-            return isPlayerNodePlaying && receivePlan == .scheduleOnly
+            return false
         case .relayJitterBuffered:
             return receivePlan == .scheduleAndStartNode
                 || (isPlayerNodePlaying && receivePlan == .scheduleOnly)

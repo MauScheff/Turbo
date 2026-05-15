@@ -16,6 +16,12 @@ extension PTTViewModel {
         let reason: String
     }
 
+    struct StaleSystemRejoinSuppression {
+        let contactID: UUID
+        let createdAt: Date
+        let reason: String
+    }
+
     func markLocalOnlySystemLeave(
         channelUUID: UUID,
         contactID: UUID,
@@ -44,6 +50,48 @@ extension PTTViewModel {
 
     private func pruneExpiredLocalOnlySystemLeaveSuppressions(now: Date) {
         localOnlySystemLeaveSuppressions = localOnlySystemLeaveSuppressions.filter { _, suppression in
+            now.timeIntervalSince(suppression.createdAt) < 10
+        }
+    }
+
+    func markStaleSystemRejoinSuppression(
+        channelUUID: UUID,
+        contactID: UUID,
+        reason: String,
+        now: Date = Date()
+    ) {
+        pruneExpiredStaleSystemRejoinSuppressions(now: now)
+        staleSystemRejoinSuppressions[channelUUID] = StaleSystemRejoinSuppression(
+            contactID: contactID,
+            createdAt: now,
+            reason: reason
+        )
+    }
+
+    func consumeStaleSystemRejoinSuppression(
+        channelUUID: UUID,
+        contactID: UUID?,
+        now: Date = Date()
+    ) -> StaleSystemRejoinSuppression? {
+        pruneExpiredStaleSystemRejoinSuppressions(now: now)
+        guard let suppression = staleSystemRejoinSuppressions[channelUUID] else { return nil }
+        guard contactID == nil || contactID == suppression.contactID else { return nil }
+        staleSystemRejoinSuppressions[channelUUID] = nil
+        return suppression
+    }
+
+    func hasStaleSystemRejoinSuppression(
+        channelUUID: UUID,
+        contactID: UUID?,
+        now: Date = Date()
+    ) -> Bool {
+        pruneExpiredStaleSystemRejoinSuppressions(now: now)
+        guard let suppression = staleSystemRejoinSuppressions[channelUUID] else { return false }
+        return contactID == nil || contactID == suppression.contactID
+    }
+
+    private func pruneExpiredStaleSystemRejoinSuppressions(now: Date) {
+        staleSystemRejoinSuppressions = staleSystemRejoinSuppressions.filter { _, suppression in
             now.timeIntervalSince(suppression.createdAt) < 10
         }
     }
@@ -472,6 +520,16 @@ extension PTTViewModel {
             return
         }
 
+        if Self.shouldSuppressSharedAppBackendBootstrapForAutomatedTests {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Suppressed shared app backend bootstrap for automated hosted probe"
+            )
+            captureDiagnosticsState("backend-config:suppressed-for-hosted-probe")
+            return
+        }
+
         await configureBackendIfNeeded()
         if backendRuntime.isReady, selectedContact == nil {
             statusMessage = "Ready to connect"
@@ -629,14 +687,39 @@ extension PTTViewModel {
     private func scheduleDisconnectRecovery(
         contactID: UUID?,
         channelUUID: UUID?,
-        backendChannelID: String?
+        backendChannelID: String?,
+        delayNanoseconds: UInt64? = nil,
+        startedAtNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
     ) {
         guard let contactID else { return }
-        let delayNanoseconds = disconnectRecoveryDelayNanoseconds
+        let delayNanoseconds = delayNanoseconds ?? disconnectRecoveryDelayNanoseconds
         replaceDisconnectRecoveryTask(with: Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: delayNanoseconds)
             guard let self, !Task.isCancelled else { return }
             guard self.sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) else { return }
+
+            let elapsedNanoseconds = DispatchTime.now().uptimeNanoseconds - startedAtNanoseconds
+            if self.isBackendLeaveCommandActive(for: contactID),
+               elapsedNanoseconds < self.disconnectRecoveryMaxWaitNanoseconds {
+                self.diagnostics.record(
+                    .state,
+                    message: "Deferred disconnect recovery while backend leave command is still active",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "backendChannelId": backendChannelID ?? "none",
+                        "elapsedMs": String(elapsedNanoseconds / 1_000_000),
+                        "maxWaitMs": String(self.disconnectRecoveryMaxWaitNanoseconds / 1_000_000),
+                    ]
+                )
+                self.scheduleDisconnectRecovery(
+                    contactID: contactID,
+                    channelUUID: channelUUID,
+                    backendChannelID: backendChannelID,
+                    delayNanoseconds: self.disconnectRecoveryRetryDelayNanoseconds,
+                    startedAtNanoseconds: startedAtNanoseconds
+                )
+                return
+            }
 
             let selectedState = self.selectedPeerState(for: contactID)
             self.diagnostics.recordInvariantViolation(
@@ -686,6 +769,13 @@ extension PTTViewModel {
                 await self.refreshContactSummaries()
             }
         })
+    }
+
+    func isBackendLeaveCommandActive(for contactID: UUID) -> Bool {
+        guard case .leave(let activeContactID) = backendCommandCoordinator.state.activeOperation else {
+            return false
+        }
+        return activeContactID == contactID
     }
 
     func performConnect(to contact: Contact, intent: BackendJoinIntent) {
@@ -843,6 +933,33 @@ extension PTTViewModel {
             performDisconnect()
         case .restoreLocalSession(let contactID):
             guard let contact = contacts.first(where: { $0.id == contactID }) else { return }
+            guard !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) else {
+                diagnostics.record(
+                    .state,
+                    message: "Ignored automatic local session restore while leave is in flight",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "pendingAction": String(describing: sessionCoordinator.pendingAction),
+                    ]
+                )
+                captureDiagnosticsState("selected-peer-effect:restore-local-blocked-by-leave")
+                return
+            }
+            if hasStaleSystemRejoinSuppression(
+                channelUUID: contact.channelId,
+                contactID: contactID
+            ) {
+                diagnostics.record(
+                    .state,
+                    message: "Ignored automatic local session restore after recent system leave",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": contact.channelId.uuidString,
+                    ]
+                )
+                captureDiagnosticsState("selected-peer-effect:restore-local-blocked-by-recent-leave")
+                return
+            }
             diagnostics.record(
                 .state,
                 message: "Restoring local session to match backend-ready channel",

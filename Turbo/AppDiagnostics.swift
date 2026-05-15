@@ -173,6 +173,7 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
     let incomingWakeActivationState: String?
     let incomingWakeBufferedChunkCount: Int?
     let remoteReceiveActive: Bool
+    let remoteTransmitStopObserved: Bool
     let remoteReceiveActivityState: String?
     let receiverAudioReadinessState: String?
     let pendingAction: String
@@ -322,9 +323,16 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
         let backendIsSelfTransmitting =
             backendChannelStatusValue == "self-transmitting"
             || backendReadinessValue == "self-transmitting"
+        let backendIsStoppedPeerTransmit =
+            remoteTransmitStopObserved
+            && (
+                backendChannelStatusValue == "peer-transmitting"
+                || backendReadinessValue == "peer-transmitting"
+            )
         if phase == "ready",
            backendCanTransmit == false,
            !backendIsSelfTransmitting,
+           !backendIsStoppedPeerTransmit,
            transmitPhase != "stopping" {
             violations.append(
                 DiagnosticsInvariantViolationCandidate(
@@ -594,6 +602,37 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
                     )
                 )
             }
+        }
+
+        if phase == "localJoinFailed",
+           selectedPeerRelationship == "none",
+           pendingAction == "none",
+           hadConnectedSessionContinuity == true,
+           systemSessionValue == "none",
+           backendSelfJoined == true,
+           connectableWakeStatuses.contains(backendChannelStatusValue),
+           remoteWakeCapabilityKindValue == "wake-capable" {
+            violations.append(
+                DiagnosticsInvariantViolationCandidate(
+                    invariantID: "selected.local_join_failed_despite_wake_capable_recovery",
+                    scope: .backend,
+                    message: "selected peer regressed to localJoinFailed while backend still retained wake-capable recovery evidence",
+                    metadata: [
+                        "selectedPeerPhase": phase,
+                        "selectedPeerPhaseDetail": phaseDetail,
+                        "selectedPeerRelationship": selectedPeerRelationship,
+                        "pendingAction": pendingAction,
+                        "hadConnectedSessionContinuity": boolMetadata(hadConnectedSessionContinuity),
+                        "systemSession": systemSessionValue,
+                        "backendChannelStatus": backendChannelStatusValue,
+                        "backendReadiness": backendReadinessValue,
+                        "backendSelfJoined": boolMetadata(backendSelfJoined),
+                        "backendPeerJoined": boolMetadata(backendPeerJoined),
+                        "backendPeerDeviceConnected": boolMetadata(backendPeerDeviceConnected),
+                        "remoteWakeCapabilityKind": remoteWakeCapabilityKindValue,
+                    ]
+                )
+            )
         }
 
         if phase == "waitingForPeer",

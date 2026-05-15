@@ -148,7 +148,7 @@ def validate_response(
     return None
 
 
-def summarize(results: list[RequestResult]) -> dict[str, Any]:
+def summarize(results: list[RequestResult], slow_ms: int) -> dict[str, Any]:
     by_endpoint: dict[str, list[RequestResult]] = {}
     for result in results:
         by_endpoint.setdefault(result.endpoint, []).append(result)
@@ -156,11 +156,13 @@ def summarize(results: list[RequestResult]) -> dict[str, Any]:
     for endpoint, endpoint_results in by_endpoint.items():
         durations = [result.durationMs for result in endpoint_results]
         failures = [result for result in endpoint_results if not result.ok]
+        slow = [result for result in endpoint_results if result.durationMs >= slow_ms]
         summary[endpoint] = {
             "total": len(endpoint_results),
             "ok": len(endpoint_results) - len(failures),
             "failed": len(failures),
             "failureRate": len(failures) / len(endpoint_results),
+            "slow": len(slow),
             "minMs": min(durations),
             "medianMs": int(statistics.median(durations)),
             "maxMs": max(durations),
@@ -177,6 +179,8 @@ def main() -> int:
     parser.add_argument("--sleep", type=float, default=0.0)
     parser.add_argument("--fail-on-any-error", action="store_true", default=True)
     parser.add_argument("--allow-failures", type=int, default=0)
+    parser.add_argument("--slow-ms", type=int, default=2000)
+    parser.add_argument("--allow-slow", type=int, default=999999)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--insecure", action="store_true")
     args = parser.parse_args()
@@ -202,6 +206,22 @@ def main() -> int:
                 {"deviceId": device_id, "deviceLabel": "backend-stability-probe"},
                 True,
                 device_id,
+            ),
+            (
+                "invites-incoming",
+                "GET",
+                "v1/invites/incoming",
+                None,
+                True,
+                None,
+            ),
+            (
+                "invites-outgoing",
+                "GET",
+                "v1/invites/outgoing",
+                None,
+                True,
+                None,
             ),
             (
                 "heartbeat",
@@ -250,22 +270,27 @@ def main() -> int:
             results.append(result)
             if not args.json:
                 status = "ok" if result.ok else "FAIL"
+                slow = " SLOW" if result.durationMs >= args.slow_ms else ""
                 print(
                     f"{iteration:02d} {endpoint:6s} {status:4s} "
                     f"http={result.httpCode:03d} timeMs={result.durationMs}"
+                    f"{slow}"
                     + (f" error={result.error}" if result.error else "")
                 )
         if args.sleep > 0 and iteration != args.iterations:
             time.sleep(args.sleep)
 
-    summary = summarize(results)
+    summary = summarize(results, args.slow_ms)
     failed_count = sum(1 for result in results if not result.ok)
+    slow_count = sum(1 for result in results if result.durationMs >= args.slow_ms)
     payload = {
         "baseUrl": args.base_url,
         "handle": args.handle,
         "iterations": args.iterations,
         "timeoutSeconds": args.timeout,
+        "slowThresholdMs": args.slow_ms,
         "failedCount": failed_count,
+        "slowCount": slow_count,
         "summary": summary,
         "results": [asdict(result) for result in results],
     }
@@ -274,7 +299,9 @@ def main() -> int:
     else:
         print("\nsummary")
         print(json.dumps({k: v for k, v in payload.items() if k != "results"}, indent=2, sort_keys=True))
-    return 1 if failed_count > args.allow_failures else 0
+    if failed_count > args.allow_failures:
+        return 1
+    return 1 if slow_count > args.allow_slow else 0
 
 
 if __name__ == "__main__":

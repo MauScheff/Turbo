@@ -2265,6 +2265,13 @@ def classify_violations(
     return violations, current_violations, historical_violations
 
 
+def strict_merge_should_fail(
+    current_violations: list[InvariantViolation],
+    historical_violations: list[InvariantViolation],
+) -> bool:
+    return bool(current_violations or historical_violations)
+
+
 def render_violation(violation: InvariantViolation) -> str:
     prefix = f"[{violation.scope}] [{violation.invariant_id}] subject={violation.subject} source={violation.source}"
     if violation.message:
@@ -2495,7 +2502,7 @@ def main() -> int:
         for timestamp, line in timeline:
             print(f"{timestamp.isoformat()} {line}")
 
-    if args.fail_on_violations and violations:
+    if args.fail_on_violations and strict_merge_should_fail(current_violations, historical_violations):
         return 2
 
     return 0

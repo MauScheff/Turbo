@@ -161,6 +161,13 @@ extension PTTViewModel {
                 )
                 return
             }
+            guard !hasLocalTransmitStartupOrActiveIntent(for: contactID) else {
+                cancelDeferredInteractivePrewarmForLocalTransmitIfNeeded(
+                    contactID: contactID,
+                    reason: "ptt-audio-deactivated-during-local-transmit"
+                )
+                return
+            }
             _ = mediaRuntime.takePendingInteractivePrewarmAfterAudioDeactivationContactID()
             diagnostics.record(
                 .media,

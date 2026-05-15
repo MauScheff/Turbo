@@ -71,6 +71,10 @@ def total_test_count(result_bundle_path: str) -> int:
         check=True,
     )
     payload = json.loads(summary.stdout)
+    top_level_total = payload.get("totalTestCount")
+    if top_level_total is not None:
+        return int(top_level_total)
+
     return int(payload.get("devicesAndConfigurations", [{}])[0].get("totalTestCount", 0))
 
 

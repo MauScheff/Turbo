@@ -354,6 +354,12 @@ extension PTTViewModel {
         guard channelReadinessByContactID[contactID]?.localAudioReadiness != .ready else {
             return
         }
+        guard let recoveryBasis = reason.recoveryPublicationBasis else {
+            return
+        }
+        guard published.basis != recoveryBasis else {
+            return
+        }
 
         controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
         diagnostics.record(
@@ -362,6 +368,8 @@ extension PTTViewModel {
             metadata: [
                 "contactId": contactID.uuidString,
                 "reason": reason.wireValue,
+                "recoveryBasis": String(describing: recoveryBasis),
+                "previousBasis": String(describing: published.basis),
                 "backendLocalAudioReadiness": String(
                     describing: channelReadinessByContactID[contactID]?.localAudioReadiness ?? .unknown
                 ),
@@ -830,6 +838,13 @@ extension PTTViewModel {
         guard mediaRuntime.pendingInteractivePrewarmAfterAudioDeactivationContactID == contactID else { return }
         guard !isPTTAudioSessionActive else { return }
         guard pttWakeRuntime.pendingIncomingPush == nil else { return }
+        guard !hasLocalTransmitStartupOrActiveIntent(for: contactID) else {
+            cancelDeferredInteractivePrewarmForLocalTransmitIfNeeded(
+                contactID: contactID,
+                reason: "local-transmit-active-during-recovery"
+            )
+            return
+        }
         guard isJoined, activeChannelId == contactID else { return }
         guard systemSessionMatches(contactID) else { return }
         guard !isTransmitting else { return }
@@ -927,7 +942,11 @@ extension PTTViewModel {
             if transmitSnapshot.isStopping(for: refreshedContactID) {
                 return true
             }
-            return !transmitSnapshot.explicitStopRequested
+            return transmitSnapshot.hasTransmitIntent(for: refreshedContactID)
+                || (
+                    transmitSnapshot.isSystemTransmitting
+                    && !transmitSnapshot.explicitStopRequested
+                )
         }
 
         switch transmitSnapshot.phase {
@@ -940,14 +959,47 @@ extension PTTViewModel {
 
     func shouldAcceptBackendLocalTransmitProjection(
         backendShowsLocalTransmit: Bool,
+        refreshedContactID: UUID,
         transmitSnapshot: TransmitDomainSnapshot
     ) -> Bool {
-        backendShowsLocalTransmit && !transmitSnapshot.explicitStopRequested
+        backendShowsLocalTransmit
+            && !transmitSnapshot.explicitStopRequested
+            && (
+                transmitSnapshot.hasTransmitIntent(for: refreshedContactID)
+                || transmitSnapshot.isSystemTransmitting
+            )
     }
 
     func hasActiveTransmitPressIntent() -> Bool {
         !transmitRuntime.explicitStopRequested
             && (transmitRuntime.isPressingTalk || transmitCoordinator.state.isPressingTalk)
+    }
+
+    func hasLocalTransmitStartupOrActiveIntent(for contactID: UUID) -> Bool {
+        if hasActiveTransmitPressIntent() { return true }
+        if isTransmitting || pttCoordinator.state.isTransmitting { return true }
+        if transmitCoordinator.state.pendingRequest?.contactID == contactID { return true }
+        if transmitCoordinator.state.activeTarget?.contactID == contactID { return true }
+        return false
+    }
+
+    func cancelDeferredInteractivePrewarmForLocalTransmitIfNeeded(
+        contactID: UUID,
+        reason: String
+    ) {
+        guard mediaRuntime.pendingInteractivePrewarmAfterAudioDeactivationContactID == contactID else {
+            return
+        }
+        _ = mediaRuntime.takePendingInteractivePrewarmAfterAudioDeactivationContactID()
+        mediaRuntime.replaceInteractivePrewarmRecoveryTask(with: nil)
+        diagnostics.record(
+            .media,
+            message: "Cancelled deferred interactive audio prewarm for local transmit",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "reason": reason,
+            ]
+        )
     }
 
     func beginTransmit() {
@@ -1072,6 +1124,10 @@ extension PTTViewModel {
         startTransmitStartupTiming(for: request, source: "hold-to-talk")
         // Latch the press locally before the async reducer runs so a single
         // hold gesture cannot enqueue multiple begin-transmit attempts.
+        cancelDeferredInteractivePrewarmForLocalTransmitIfNeeded(
+            contactID: contact.id,
+            reason: "begin-transmit"
+        )
         transmitRuntime.markPressBegan()
         transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
         updateStatusForSelectedContact()
@@ -1617,7 +1673,7 @@ extension PTTViewModel {
                 channelId: target.channelID
             )
             guard shouldActivateBackendTransmitLease(request: request, workID: workID) else {
-                await cleanupBackendTransmitLeaseGrantedAfterRelease(
+                scheduleBackendTransmitLeaseGrantedAfterReleaseCleanup(
                     target: target,
                     backend: backend,
                     source: "begin-transmit"
@@ -1632,7 +1688,7 @@ extension PTTViewModel {
                 source: "begin-transmit"
             )
             guard shouldActivateBackendTransmitLease(request: request, workID: workID) else {
-                await cleanupBackendTransmitLeaseGrantedAfterRelease(
+                scheduleBackendTransmitLeaseGrantedAfterReleaseCleanup(
                     target: usableTarget,
                     backend: backend,
                     source: "begin-transmit-post-renew"
@@ -1728,7 +1784,7 @@ extension PTTViewModel {
                 ]
             )
             guard shouldActivateBackendTransmitLease(request: request, workID: workID) else {
-                await cleanupBackendTransmitLeaseGrantedAfterRelease(
+                scheduleBackendTransmitLeaseGrantedAfterReleaseCleanup(
                     target: target,
                     backend: backend,
                     source: "membership-recovery"
@@ -1743,7 +1799,7 @@ extension PTTViewModel {
                 source: "membership-recovery"
             )
             guard shouldActivateBackendTransmitLease(request: request, workID: workID) else {
-                await cleanupBackendTransmitLeaseGrantedAfterRelease(
+                scheduleBackendTransmitLeaseGrantedAfterReleaseCleanup(
                     target: usableTarget,
                     backend: backend,
                     source: "membership-recovery-post-renew"
@@ -1962,7 +2018,21 @@ extension PTTViewModel {
         }
     }
 
-    private func cleanupBackendTransmitLeaseGrantedAfterRelease(
+    func scheduleBackendTransmitLeaseGrantedAfterReleaseCleanup(
+        target: TransmitTarget,
+        backend: BackendServices,
+        source: String
+    ) {
+        Task { @MainActor [weak self, backend] in
+            await self?.cleanupBackendTransmitLeaseGrantedAfterRelease(
+                target: target,
+                backend: backend,
+                source: source
+            )
+        }
+    }
+
+    func cleanupBackendTransmitLeaseGrantedAfterRelease(
         target: TransmitTarget,
         backend: BackendServices,
         source: String
@@ -1991,7 +2061,7 @@ extension PTTViewModel {
         )
         transmitTaskCoordinator.send(.renewalCancelled)
         transmitTaskRuntime.cancelCaptureReassertionTask()
-        try? await mediaServices.session()?.stopSendingAudio()
+        await mediaServices.session()?.abortSendingAudio()
         if backend.supportsWebSocket && backend.isWebSocketConnected {
             try? await backend.sendSignal(
                 TurboSignalEnvelope(
@@ -2005,7 +2075,30 @@ extension PTTViewModel {
                 )
             )
         }
-        _ = try? await backend.endTransmit(channelId: target.channelID, transmitId: target.transmitID)
+        do {
+            _ = try await backend.endTransmit(channelId: target.channelID, transmitId: target.transmitID)
+            diagnostics.record(
+                .media,
+                message: "Ended late backend transmit lease after release",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "source": source,
+                ]
+            )
+        } catch {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Failed to end late backend transmit lease after release",
+                metadata: [
+                    "contactId": target.contactID.uuidString,
+                    "channelId": target.channelID,
+                    "source": source,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
         await refreshChannelState(for: target.contactID)
         updateStatusForSelectedContact()
     }
@@ -3431,7 +3524,7 @@ extension PTTViewModel {
             return
         }
 
-        configureProvisionalDirectQuicOutgoingAudioRouteIfPossible(
+        _ = configureProvisionalOutgoingAudioRouteIfPossible(
             for: request,
             reason: "early-system-audio-capture-\(trigger)"
         )
@@ -3455,6 +3548,27 @@ extension PTTViewModel {
             "early-media-session-start-completed",
             metadata: ["trigger": trigger]
         )
+        guard await waitForPendingSystemTransmitOutgoingAudioRouteIfNeeded(
+            request: request,
+            channelUUID: channelUUID,
+            trigger: trigger
+        ) else {
+            diagnostics.record(
+                .media,
+                message: "Deferred early transmit audio capture until outgoing audio transport is configured",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "channelId": request.backendChannelID,
+                    "trigger": trigger,
+                ]
+            )
+            recordFirstTransmitStartupTimingStageIfAbsent(
+                "early-audio-capture-deferred-until-outgoing-transport",
+                metadata: ["trigger": trigger]
+            )
+            return
+        }
         do {
             guard transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") == nil else {
                 if trigger == "audio-session-activated",
@@ -3537,6 +3651,150 @@ extension PTTViewModel {
                 ]
             )
         }
+    }
+
+    func waitForPendingSystemTransmitOutgoingAudioRouteIfNeeded(
+        request: TransmitRequestContext,
+        channelUUID: UUID,
+        trigger: String,
+        timeoutNanoseconds: UInt64 = 200_000_000,
+        pollNanoseconds: UInt64 = 20_000_000
+    ) async -> Bool {
+        if mediaServices.sendAudioChunk() != nil {
+            return true
+        }
+        if let activeTarget = pendingSystemTransmitOutgoingAudioTarget(for: request) {
+            configureOutgoingAudioRoute(target: activeTarget)
+            if mediaServices.sendAudioChunk() != nil {
+                diagnostics.record(
+                    .media,
+                    message: "Configured outgoing audio route from active transmit target during pending system audio capture",
+                    metadata: [
+                        "contactId": request.contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                        "channelId": request.backendChannelID,
+                        "targetDeviceId": activeTarget.deviceID,
+                        "trigger": trigger,
+                    ]
+                )
+                return true
+            }
+        }
+
+        var waitedNanoseconds: UInt64 = 0
+        while waitedNanoseconds < timeoutNanoseconds {
+            guard shouldContinuePendingSystemTransmitAudioCapture(
+                request: request,
+                stage: "outgoing-transport-wait"
+            ) else {
+                return false
+            }
+
+            let sleepNanoseconds = min(pollNanoseconds, timeoutNanoseconds - waitedNanoseconds)
+            try? await Task.sleep(nanoseconds: sleepNanoseconds)
+            waitedNanoseconds += sleepNanoseconds
+
+            if mediaServices.sendAudioChunk() != nil {
+                return true
+            }
+            if let activeTarget = pendingSystemTransmitOutgoingAudioTarget(for: request) {
+                configureOutgoingAudioRoute(target: activeTarget)
+                if mediaServices.sendAudioChunk() != nil {
+                    diagnostics.record(
+                        .media,
+                        message: "Configured outgoing audio route from active transmit target during pending system audio capture",
+                        metadata: [
+                            "contactId": request.contactID.uuidString,
+                            "channelUUID": channelUUID.uuidString,
+                            "channelId": request.backendChannelID,
+                            "targetDeviceId": activeTarget.deviceID,
+                            "trigger": trigger,
+                            "waitedMilliseconds": String(waitedNanoseconds / 1_000_000),
+                        ]
+                    )
+                    return true
+                }
+            }
+        }
+
+        return mediaServices.sendAudioChunk() != nil
+            || configureProvisionalOutgoingAudioRouteIfPossible(
+                for: request,
+                reason: "post-media-session-start-\(trigger)"
+            )
+    }
+
+    func pendingSystemTransmitOutgoingAudioTarget(
+        for request: TransmitRequestContext
+    ) -> TransmitTarget? {
+        guard let activeTarget = transmitCoordinator.state.activeTarget else {
+            return nil
+        }
+        guard activeTarget.contactID == request.contactID else { return nil }
+        guard activeTarget.channelID == request.backendChannelID else { return nil }
+        return activeTarget
+    }
+
+    @discardableResult
+    func configureProvisionalOutgoingAudioRouteIfPossible(
+        for request: TransmitRequestContext,
+        reason: String
+    ) -> Bool {
+        if configureProvisionalDirectQuicOutgoingAudioRouteIfPossible(
+            for: request,
+            reason: reason
+        ) {
+            return true
+        }
+
+        guard let peerDeviceID = directQuicPeerDeviceID(for: request.contactID),
+              !peerDeviceID.isEmpty else {
+            diagnostics.record(
+                .media,
+                message: "Skipped provisional outgoing audio route because peer device is unknown",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "channelId": request.backendChannelID,
+                    "reason": reason,
+                ]
+            )
+            return false
+        }
+
+        let provisionalTarget = TransmitTarget(
+            contactID: request.contactID,
+            userID: request.remoteUserID,
+            deviceID: peerDeviceID,
+            channelID: request.backendChannelID
+        )
+        configureOutgoingAudioRoute(target: provisionalTarget)
+        guard mediaServices.sendAudioChunk() != nil else {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Failed to configure provisional outgoing audio route",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "channelId": request.backendChannelID,
+                    "peerDeviceId": peerDeviceID,
+                    "reason": reason,
+                ]
+            )
+            return false
+        }
+
+        diagnostics.record(
+            .media,
+            message: "Configured provisional outgoing audio route",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "channelId": request.backendChannelID,
+                "peerDeviceId": peerDeviceID,
+                "reason": reason,
+                "transport": configuredOutgoingAudioTransportLabel(for: request.contactID),
+            ]
+        )
+        return true
     }
 
     @discardableResult

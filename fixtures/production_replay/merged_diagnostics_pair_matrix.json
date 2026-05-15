@@ -1,0 +1,214 @@
+{
+  "diagnosticGroups": [
+    {
+      "contexts": {
+        "channel": [
+          "channel-pair-matrix-1"
+        ],
+        "contact": [
+          "@pairblake"
+        ]
+      },
+      "subjects": [
+        "@pairavery",
+        "@pairblake"
+      ],
+      "summary": "current merged diagnostics reports multiple pair-convergence contradictions in the same run"
+    }
+  ],
+  "currentViolations": [
+    {
+      "invariantId": "pair.one_sided_connectable_session",
+      "message": "one device advanced into a connectable or joining session while the peer remained on a request-only projection left=@pairavery:waitingForPeer right=@pairblake:incomingRequest",
+      "metadata": {
+        "left": "@pairavery",
+        "right": "@pairblake"
+      },
+      "scope": "pair",
+      "source": "merged",
+      "subject": "pair",
+      "timestamp": "2026-05-14T10:00:06Z"
+    },
+    {
+      "invariantId": "pair.backend_ready_ui_not_live",
+      "message": "backend is ready on both devices, but one UI is still not in a live session state left=@pairavery:ready right=@pairblake:idle",
+      "metadata": {
+        "left": "@pairavery",
+        "right": "@pairblake"
+      },
+      "scope": "pair",
+      "source": "merged",
+      "subject": "pair",
+      "timestamp": "2026-05-14T10:00:08Z"
+    },
+    {
+      "invariantId": "pair.pending_request_receiver_not_observed",
+      "message": "one device observes a pending outgoing request while the peer's latest diagnostics does not observe the matching incoming request requester=@pairavery:requested receiver=@pairblake:idle requesterObservedAt=2026-05-14T10:00:10Z receiverObservedAt=2026-05-14T10:00:00Z ageDeltaMs=10000",
+      "metadata": {
+        "requester": "@pairavery",
+        "receiver": "@pairblake",
+        "requesterRelationship": "outgoingRequest(1)",
+        "receiverRelationship": "none",
+        "requesterObservedAt": "2026-05-14T10:00:10Z",
+        "receiverObservedAt": "2026-05-14T10:00:00Z",
+        "ageDeltaMs": "10000"
+      },
+      "scope": "pair",
+      "source": "merged",
+      "subject": "pair",
+      "timestamp": "2026-05-14T10:00:10Z"
+    }
+  ],
+  "historicalViolations": [
+    {
+      "invariantId": "selected.request_call_flap",
+      "message": "selected route flapped between requested and call-visible without a phase change",
+      "metadata": {
+        "selectedContact": "@pairblake"
+      },
+      "scope": "local",
+      "source": "ios",
+      "subject": "@pairavery",
+      "timestamp": "2026-05-14T10:00:03Z"
+    }
+  ],
+  "reports": [
+    {
+      "appVersion": "1.0",
+      "backendInvariantViolations": [],
+      "deviceId": "pair-device-avery",
+      "explicitInvariantViolations": [],
+      "handle": "@pairavery",
+      "scenarioName": null,
+      "scenarioRunId": null,
+      "snapshot": {
+        "backendCanTransmit": "true",
+        "backendChannelStatus": "ready",
+        "backendPeerDeviceConnected": "true",
+        "backendPeerJoined": "true",
+        "backendReadiness": "ready",
+        "backendRequestRelationship": "outgoingRequest(1)",
+        "backendSelfJoined": "true",
+        "isJoined": "true",
+        "isTransmitting": "false",
+        "selectedContact": "@pairblake",
+        "selectedPeerCanTransmit": "true",
+        "selectedPeerPhase": "ready",
+        "selectedPeerRelationship": "outgoingRequest(1)",
+        "selectedPeerStatus": "Ready",
+        "systemSession": "active(contactID: 111, channelUUID: 222)"
+      },
+      "uploadedAt": "2026-05-14T10:00:10Z"
+    },
+    {
+      "appVersion": "1.0",
+      "backendInvariantViolations": [],
+      "deviceId": "pair-device-blake",
+      "explicitInvariantViolations": [],
+      "handle": "@pairblake",
+      "scenarioName": null,
+      "scenarioRunId": null,
+      "snapshot": {
+        "backendCanTransmit": "true",
+        "backendChannelStatus": "ready",
+        "backendPeerDeviceConnected": "true",
+        "backendPeerJoined": "true",
+        "backendReadiness": "ready",
+        "backendRequestRelationship": "none",
+        "backendSelfJoined": "true",
+        "isJoined": "false",
+        "isTransmitting": "false",
+        "selectedContact": "@pairavery",
+        "selectedPeerCanTransmit": "false",
+        "selectedPeerPhase": "idle",
+        "selectedPeerRelationship": "none",
+        "selectedPeerStatus": "Avery is online",
+        "systemSession": "none"
+      },
+      "uploadedAt": "2026-05-14T10:00:00Z"
+    }
+  ],
+  "sourceWarnings": [],
+  "telemetryEventCount": 0,
+  "telemetryEvents": [],
+  "timeline": [
+    {
+      "line": "[@pairavery] [diag:selection] selectedHandle=@pairblake opened contact pair-device-avery",
+      "timestamp": "2026-05-14T10:00:00Z"
+    },
+    {
+      "line": "[@pairavery] [diag:session] request sent channelID=channel-pair-matrix-1 selectedHandle=@pairblake",
+      "timestamp": "2026-05-14T10:00:01Z"
+    },
+    {
+      "line": "[@pairavery] [telemetry] severity=error source=ios event=invariant invariant_id=selected.request_call_flap message=selected route flapped between requested and call-visible without a phase change peer_handle=@pairblake device_id=pair-device-avery",
+      "timestamp": "2026-05-14T10:00:03Z"
+    },
+    {
+      "line": "[@pairavery] [diag:session] waiting for peer after local join selectedHandle=@pairblake",
+      "timestamp": "2026-05-14T10:00:06Z"
+    },
+    {
+      "line": "[@pairavery] [diag:session] backend reports ready on both devices selectedHandle=@pairblake",
+      "timestamp": "2026-05-14T10:00:08Z"
+    },
+    {
+      "line": "[@pairblake] [diag:session] latest diagnostics still show idle without matching incoming request selectedHandle=@pairavery",
+      "timestamp": "2026-05-14T10:00:10Z"
+    }
+  ],
+  "violations": [
+    {
+      "invariantId": "pair.one_sided_connectable_session",
+      "message": "one device advanced into a connectable or joining session while the peer remained on a request-only projection left=@pairavery:waitingForPeer right=@pairblake:incomingRequest",
+      "metadata": {
+        "left": "@pairavery",
+        "right": "@pairblake"
+      },
+      "scope": "pair",
+      "source": "merged",
+      "subject": "pair",
+      "timestamp": "2026-05-14T10:00:06Z"
+    },
+    {
+      "invariantId": "pair.backend_ready_ui_not_live",
+      "message": "backend is ready on both devices, but one UI is still not in a live session state left=@pairavery:ready right=@pairblake:idle",
+      "metadata": {
+        "left": "@pairavery",
+        "right": "@pairblake"
+      },
+      "scope": "pair",
+      "source": "merged",
+      "subject": "pair",
+      "timestamp": "2026-05-14T10:00:08Z"
+    },
+    {
+      "invariantId": "pair.pending_request_receiver_not_observed",
+      "message": "one device observes a pending outgoing request while the peer's latest diagnostics does not observe the matching incoming request requester=@pairavery:requested receiver=@pairblake:idle requesterObservedAt=2026-05-14T10:00:10Z receiverObservedAt=2026-05-14T10:00:00Z ageDeltaMs=10000",
+      "metadata": {
+        "requester": "@pairavery",
+        "receiver": "@pairblake",
+        "requesterRelationship": "outgoingRequest(1)",
+        "receiverRelationship": "none",
+        "requesterObservedAt": "2026-05-14T10:00:10Z",
+        "receiverObservedAt": "2026-05-14T10:00:00Z",
+        "ageDeltaMs": "10000"
+      },
+      "scope": "pair",
+      "source": "merged",
+      "subject": "pair",
+      "timestamp": "2026-05-14T10:00:10Z"
+    },
+    {
+      "invariantId": "selected.request_call_flap",
+      "message": "selected route flapped between requested and call-visible without a phase change",
+      "metadata": {
+        "selectedContact": "@pairblake"
+      },
+      "scope": "local",
+      "source": "ios",
+      "subject": "@pairavery",
+      "timestamp": "2026-05-14T10:00:03Z"
+    }
+  ]
+}

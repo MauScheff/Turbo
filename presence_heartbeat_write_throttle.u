@@ -1,0 +1,89 @@
+turbo.store.presence.internal.heartbeatWriteInterval : time.Duration
+turbo.store.presence.internal.heartbeatWriteInterval =
+  time.Duration.seconds +4
+
+turbo.store.presence.internal.shouldWriteHeartbeat :
+  Instant -> UserId -> DevicePresence -> Boolean
+turbo.store.presence.internal.shouldWriteHeartbeat now userId = cases
+  DevicePresence _ existingUserId status _ observedAt ->
+    sameUser = textEqual (UserId.toText existingUserId) (UserId.toText userId)
+    isOnline = match status with
+      DevicePresenceStatus.Online  -> true
+      DevicePresenceStatus.Offline -> false
+    freshEnough = observedAt Instant.+ heartbeatWriteInterval Instant.>= now
+    Boolean.not (sameUser && isOnline && freshEnough)
+
+test> turbo.store.presence.internal.shouldWriteHeartbeat.tests.examples =
+  test.verify do
+    use Instant +
+    use time.Duration seconds
+    userId = UserId.fromText "user-1"
+    otherUserId = UserId.fromText "user-2"
+    deviceId = DeviceId.fromText "device-1"
+    observedAt = Instant.epoch
+    online = DevicePresence deviceId userId DevicePresenceStatus.Online None observedAt
+    offline = DevicePresence deviceId userId DevicePresenceStatus.Offline None observedAt
+    otherUser = DevicePresence deviceId otherUserId DevicePresenceStatus.Online None observedAt
+    labeled "skips same-user online heartbeat inside write interval" do
+      ensure (Boolean.not (shouldWriteHeartbeat (Instant.epoch + seconds +4) userId online))
+    labeled "writes same-user online heartbeat after write interval" do
+      ensure (shouldWriteHeartbeat (Instant.epoch + seconds +5) userId online)
+    labeled "writes offline presence immediately" do
+      ensure (shouldWriteHeartbeat (Instant.epoch + seconds +1) userId offline)
+    labeled "writes device ownership changes immediately" do
+      ensure (shouldWriteHeartbeat (Instant.epoch + seconds +1) userId otherUser)
+
+turbo.store.presence.heartbeat :
+  Database
+  -> DeviceId
+  -> UserId
+  -> '{Exception, Storage, Remote, Random} DevicePresence
+turbo.store.presence.heartbeat db deviceId userId = do
+  now = now!
+  match presence.get db deviceId () with
+    Some existing@(DevicePresence _ _ _ currentChannelId _) ->
+      if presence.internal.shouldWriteHeartbeat now userId existing then
+        presence.upsert db deviceId userId DevicePresenceStatus.Online currentChannelId ()
+      else existing
+    None ->
+      presence.upsert db deviceId userId DevicePresenceStatus.Online None ()
+
+turbo.store.sessions.internal.touchWriteInterval : time.Duration
+turbo.store.sessions.internal.touchWriteInterval =
+  time.Duration.seconds +4
+
+turbo.store.sessions.internal.shouldWriteTouchFromLastSeen :
+  Instant -> Instant -> Boolean
+turbo.store.sessions.internal.shouldWriteTouchFromLastSeen now observedAt =
+  Boolean.not (observedAt Instant.+ touchWriteInterval Instant.>= now)
+
+turbo.store.sessions.internal.shouldWriteTouch :
+  Instant -> DeviceSession -> Boolean
+turbo.store.sessions.internal.shouldWriteTouch now = cases
+  DeviceSession _ _ _ _ _ observedAt ->
+    shouldWriteTouchFromLastSeen now observedAt
+
+test> turbo.store.sessions.internal.shouldWriteTouchFromLastSeen.tests.examples =
+  test.verify do
+    use Instant +
+    use time.Duration seconds
+    labeled "skips session touch inside write interval" do
+      ensure (Boolean.not (shouldWriteTouchFromLastSeen (Instant.epoch + seconds +4) Instant.epoch))
+    labeled "writes session touch after write interval" do
+      ensure (shouldWriteTouchFromLastSeen (Instant.epoch + seconds +5) Instant.epoch)
+
+turbo.store.sessions.touchCurrent :
+  Database
+  -> DeviceId
+  -> '{Exception, Storage, Remote, Random} Optional DeviceSession
+turbo.store.sessions.touchCurrent db deviceId = do
+  table = sessions.tables.byDevice db
+  match OrderedTable.tryRead table deviceId with
+    Some existing@(DeviceSession sessionId _ userId inbox connectedAt _) ->
+      now = now!
+      if sessions.internal.shouldWriteTouch now existing then
+        session = DeviceSession sessionId deviceId userId inbox connectedAt now
+        _ = OrderedTable.write table deviceId session
+        Some session
+      else Some existing
+    None -> None

@@ -175,6 +175,14 @@ Use `scripts/merged_diagnostics.py` for pair and convergence rules. It:
 - derives pair/convergence violations
 - supports `--json` and `--fail-on-violations`
 
+For focused proof on that lane, use [`scripts/test_merged_diagnostics.py`](/Users/mau/Development/Turbo/scripts/test_merged_diagnostics.py). It is the repo's unit-style regression surface for:
+
+- pair detector predicates
+- `currentViolations` versus `historicalViolations` classification
+- replay/dashboard consumers of merged diagnostics payloads
+
+When the proof target is downstream artifact preservation rather than live derivation, prefer the checked-in replay fixtures under [`fixtures/production_replay/`](/Users/mau/Development/Turbo/fixtures/production_replay), especially [`merged_diagnostics_pair_matrix.json`](/Users/mau/Development/Turbo/fixtures/production_replay/merged_diagnostics_pair_matrix.json) for multiple current pair violations in one payload.
+
 If app/backend runtime already emits an invariant for the same broken truth, keep the merged rule aligned to the same `invariantId`. Use a new `pair.*` or `convergence.*` ID only when the merged view proves a broader contradiction.
 
 ## Proof Lanes

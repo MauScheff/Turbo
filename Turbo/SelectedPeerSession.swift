@@ -26,6 +26,8 @@ struct SelectedPeerSessionState: Equatable {
     var isJoined: Bool = false
     var localTransmit: LocalTransmitProjection = .idle
     var peerSignalIsTransmitting: Bool = false
+    var remotePlaybackDrainBlocksTransmit = false
+    var remoteTransmitStopObserved = false
     var activeChannelID: UUID?
     var systemSessionMatchesContact: Bool = false
     var systemSessionState: SystemPTTSessionState = .none
@@ -69,6 +71,8 @@ struct SelectedPeerSyncSnapshot: Equatable {
     let requesterAutoJoinOnPeerAcceptanceEnabled: Bool
     let localTransmit: LocalTransmitProjection
     let peerSignalIsTransmitting: Bool
+    let remotePlaybackDrainBlocksTransmit: Bool
+    let remoteTransmitStopObserved: Bool
     let systemSessionState: SystemPTTSessionState
     let systemSessionMatchesContact: Bool
     let mediaState: MediaConnectionState
@@ -93,6 +97,8 @@ struct SelectedPeerSyncSnapshot: Equatable {
         requesterAutoJoinOnPeerAcceptanceEnabled: Bool,
         localTransmit: LocalTransmitProjection,
         peerSignalIsTransmitting: Bool,
+        remotePlaybackDrainBlocksTransmit: Bool = false,
+        remoteTransmitStopObserved: Bool = false,
         systemSessionState: SystemPTTSessionState,
         systemSessionMatchesContact: Bool,
         mediaState: MediaConnectionState,
@@ -116,6 +122,8 @@ struct SelectedPeerSyncSnapshot: Equatable {
         self.requesterAutoJoinOnPeerAcceptanceEnabled = requesterAutoJoinOnPeerAcceptanceEnabled
         self.localTransmit = localTransmit
         self.peerSignalIsTransmitting = peerSignalIsTransmitting
+        self.remotePlaybackDrainBlocksTransmit = remotePlaybackDrainBlocksTransmit
+        self.remoteTransmitStopObserved = remoteTransmitStopObserved
         self.systemSessionState = systemSessionState
         self.systemSessionMatchesContact = systemSessionMatchesContact
         self.mediaState = mediaState
@@ -204,6 +212,8 @@ enum SelectedPeerReducer {
             )
             nextState.localTransmit = snapshot.localTransmit
             nextState.peerSignalIsTransmitting = snapshot.peerSignalIsTransmitting
+            nextState.remotePlaybackDrainBlocksTransmit = snapshot.remotePlaybackDrainBlocksTransmit
+            nextState.remoteTransmitStopObserved = snapshot.remoteTransmitStopObserved
             nextState.systemSessionState = snapshot.systemSessionState
             nextState.systemSessionMatchesContact = snapshot.systemSessionMatchesContact
             nextState.mediaState = snapshot.mediaState
@@ -383,6 +393,8 @@ enum SelectedPeerReducer {
             isJoined: state.isJoined,
             localTransmit: state.localTransmit,
             peerSignalIsTransmitting: state.peerSignalIsTransmitting,
+            remotePlaybackDrainBlocksTransmit: state.remotePlaybackDrainBlocksTransmit,
+            remoteTransmitStopObserved: state.remoteTransmitStopObserved,
             activeChannelID: state.activeChannelID,
             systemSessionMatchesContact: state.systemSessionMatchesContact,
             systemSessionState: state.systemSessionState,
@@ -686,6 +698,9 @@ enum SelectedPeerReducer {
         if state.localRestoreDispatchInFlightContactID == contactID {
             return false
         }
+        if shouldPreserveWakeCapableRecoveryAfterInterruptedConnectionAttempt(state) {
+            return false
+        }
         if state.pendingAction.pendingJoinContactID == contactID,
            state.channel?.membership.hasPeerMembership == true,
            state.localJoinFailure?.contactID != contactID {
@@ -702,6 +717,24 @@ enum SelectedPeerReducer {
         case .idle, .requested, .incomingRequest, .peerReady, .wakeReady,
              .waitingForPeer, .ready, .startingTransmit, .transmitting,
              .receiving, .blockedByOtherSession, .systemMismatch:
+            return false
+        }
+    }
+
+    private static func shouldPreserveWakeCapableRecoveryAfterInterruptedConnectionAttempt(
+        _ state: SelectedPeerSessionState
+    ) -> Bool {
+        guard state.hadConnectedSessionContinuity else { return false }
+        guard state.relationship == .none else { return false }
+        guard state.pendingAction == .none else { return false }
+        guard state.channel?.membership.hasLocalMembership == true else { return false }
+        guard case .wakeCapable = state.channel?.remoteWakeCapability else { return false }
+        guard let channelStatus = state.channel?.status else { return false }
+
+        switch channelStatus {
+        case .waitingForPeer, .ready, .transmitting, .receiving:
+            return true
+        case .idle, .requested, .incomingRequest:
             return false
         }
     }

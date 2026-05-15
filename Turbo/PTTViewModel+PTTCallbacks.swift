@@ -377,6 +377,24 @@ extension PTTViewModel {
                 selectedContactId = contactID
             }
         case .leaveChannel:
+            let localSessionTouchesContact =
+                systemSessionMatches(contactID)
+                || (isJoined && activeChannelId == contactID)
+                || mediaSessionContactID == contactID
+            if localSessionTouchesContact,
+               !sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
+                sessionCoordinator.markExplicitLeave(contactID: contactID)
+                backendRuntime.clearBackendJoinSettling(for: contactID)
+                diagnostics.record(
+                    .pushToTalk,
+                    message: "Armed explicit leave barrier for incoming PTT leave push",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                        "event": payload.event.rawValue,
+                    ]
+                )
+            }
             pttWakeRuntime.suppressProvisionalWakeCandidate(for: contactID)
             clearRemoteAudioActivity(for: contactID)
             pttWakeRuntime.clear(for: contactID)
@@ -496,6 +514,30 @@ extension PTTViewModel {
 
     func handleDidJoinChannel(_ channelUUID: UUID, reason: String) {
         let contactID = contactId(for: channelUUID)
+        if let staleSystemRejoinSuppression = consumeStaleSystemRejoinSuppression(
+            channelUUID: channelUUID,
+            contactID: contactID
+        ) {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Ignoring stale PTT join after recent system leave",
+                metadata: [
+                    "contactId": staleSystemRejoinSuppression.contactID.uuidString,
+                    "channelUUID": channelUUID.uuidString,
+                    "reason": reason,
+                    "suppressionReason": staleSystemRejoinSuppression.reason,
+                ]
+            )
+            markLocalOnlySystemLeave(
+                channelUUID: channelUUID,
+                contactID: staleSystemRejoinSuppression.contactID,
+                reason: "stale-join-after-recent-system-leave"
+            )
+            try? pttSystemClient.leaveChannel(channelUUID: channelUUID)
+            statusMessage = "Disconnecting..."
+            captureDiagnosticsState("ptt-callback:joined-blocked-by-recent-system-leave")
+            return
+        }
         if let contactID,
            sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID) {
             diagnostics.record(
@@ -708,6 +750,15 @@ extension PTTViewModel {
             (autoRejoinContactID != nil && autoRejoinContactID != contactID)
             || explicitLeaveWasPending
             || shouldTreatLocalSystemLeaveAsExplicitTeardown
+        if let contactID,
+           autoRejoinContactID == nil,
+           (shouldPropagateBackendLeave || sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)) {
+            markStaleSystemRejoinSuppression(
+                channelUUID: channelUUID,
+                contactID: contactID,
+                reason: "recent-system-leave"
+            )
+        }
         Task {
             if shouldTreatLocalSystemLeaveAsExplicitTeardown {
                 sessionCoordinator.markExplicitLeave(contactID: contactID)
@@ -722,11 +773,13 @@ extension PTTViewModel {
                 ),
                 afterStateUpdate: { [weak self] in
                     guard let self else { return }
-                    if shouldTreatLocalSystemLeaveAsExplicitTeardown || explicitLeaveWasPending {
+                    if (shouldTreatLocalSystemLeaveAsExplicitTeardown || explicitLeaveWasPending)
+                        && !shouldPropagateBackendLeave {
                         self.sessionCoordinator.clearExplicitLeave(for: contactID)
                     }
                     if let contactID,
-                       self.sessionCoordinator.pendingAction.pendingTeardownContactID == contactID {
+                       self.sessionCoordinator.pendingAction.pendingTeardownContactID == contactID,
+                       !shouldPropagateBackendLeave {
                         self.sessionCoordinator.clearLeaveAction(for: contactID)
                     }
                     if let contactID,

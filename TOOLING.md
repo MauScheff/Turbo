@@ -213,6 +213,8 @@ For distributed app/backend flows that do not require a physical device, prefer 
 
 The simulator scenario commands are backed by `scripts/run_simulator_scenarios.py`, which owns the temporary runtime config, serializes scenario runs with a repo-local lock, shares the `/tmp/turbo-simulator-test.lock` simulator lane with targeted Swift tests, and retries transient XCTest bootstrap failures. Full catalog runs also allow one catalog-level retry per scenario to absorb hosted timing noise; focused single-scenario runs stay strict. Prefer the `just` recipes over direct `xcodebuild` for the scenario loop.
 
+When you need to debug control-plane correctness without the websocket command path or HTTP hedge, use `just simulator-scenario-http-control ...` or pass `--control-command-transport-policy http-only` directly to `scripts/run_simulator_scenarios.py`. That forces join/leave control commands onto plain HTTP while leaving the rest of the scenario lane unchanged. For ad hoc app-side debugging outside the scenario runner, the same override can be forced with `-TurboDebugControlCommandTransportPolicy http-only` or `TURBO_DEBUG_CONTROL_COMMAND_TRANSPORT_POLICY=http-only`. Keep the default `automatic` policy for normal runs; `http-only` is a debugging/bisection tool, not the shipping default.
+
 `just swift-test-suite` is the supported full `TurboTests` bundle loop. It runs the app-side Swift test bundle with the same serialized simulator lane used by targeted tests and scenario runs, writes an `.xcresult`, and fails if the result bundle reports zero executed tests.
 
 `just swift-test-target <name>` is the supported targeted Swift Testing loop. It resolves the Swift Testing suite, invokes `xcodebuild` with the exact selector, and fails if the requested test name never appears in the output, which prevents the false-green zero-test cases that can happen with direct `-only-testing` invocations against Swift Testing tests in this repo.
@@ -243,8 +245,9 @@ Use this command map to keep the reliability workflow small:
 | Full hosted/local gates | `just reliability-gate-full`, `just reliability-gate-local` | Primary but expensive | Broad confidence after shared state-machine or backend contract changes. |
 | Synthetic probe and SLO dashboard | `just synthetic-conversation-probe`, `just slo-dashboard` | Building blocks | Running only one half of `postdeploy-check` or combining extra SLO sources. |
 | Route probe | `just route-probe`, `just route-probe-local` | Diagnostic/building block | Debugging route contract details or local websocket behavior. The synthetic conversation probe wraps this for the release canary. |
-| Backend stability probe | `just backend-stability-probe` | Diagnostic | Separating hosted route availability from app/device behavior, especially for Unison Cloud escalation. It covers bootstrap plus lightweight authenticated writes (`auth`, `device-register`, `presence-heartbeat`, `telemetry-events`). |
+| Backend stability probe | `just backend-stability-probe` | Diagnostic | Separating hosted route availability from app/device behavior, especially for Unison Cloud escalation. It covers bootstrap, invite list reads, and lightweight authenticated writes (`auth`, `device-register`, `invites-incoming`, `invites-outgoing`, `presence-heartbeat`, `telemetry-events`). |
 | WebSocket stability probe | `just websocket-stability-probe` | Diagnostic | Measuring long-lived hosted websocket continuity separately from the full simulator scenario lane. Opens two authenticated sockets, keeps app-like websocket pings enabled, and can layer periodic heartbeats / telemetry writes while recording unexpected closes. |
+| Hosted backend client probe | `just hosted-backend-client-probe` | Diagnostic | Exercising the real iOS `TurboBackendClient` / `URLSessionWebSocketTask` path against hosted backend infrastructure, with periodic heartbeats and telemetry writes plus a JSON artifact. |
 | Retired production probes | older overlapping hosted probe recipes | Removed | Replaced by `postdeploy-check`; use `route-probe` for lower-level route-contract debugging. |
 | Legacy APNs bridge helpers | `just ptt-apns-bridge`, `just ptt-apns-worker` | Diagnostic/legacy | Debugging old interim wake paths. Prefer the current deployed wake path and diagnostics surface when available. |
 
@@ -327,6 +330,23 @@ production replay draft when there are enough participants. Use the lower-level
 `merged_diagnostics.py` command directly when you need custom flags or a quick
 terminal read.
 
+For script-level regression work on the merged pair/convergence lane, use:
+
+```bash
+python3 scripts/test_merged_diagnostics.py
+```
+
+That test file is the focused proof surface for:
+
+- `currentViolations` versus `historicalViolations` classification
+- merged pair detectors such as `pair.one_sided_connectable_session` and `pair.pending_request_receiver_not_observed`
+- fixture-backed downstream consumers such as production replay conversion and SLO dashboard summaries
+
+Checked-in replay fixtures under [`fixtures/production_replay/`](/Users/mau/Development/Turbo/fixtures/production_replay) are the canonical downstream artifacts for this lane. In particular:
+
+- [`merged_diagnostics_mixed.json`](/Users/mau/Development/Turbo/fixtures/production_replay/merged_diagnostics_mixed.json) covers one current pair violation plus one historical local violation
+- [`merged_diagnostics_pair_matrix.json`](/Users/mau/Development/Turbo/fixtures/production_replay/merged_diagnostics_pair_matrix.json) covers multiple current pair violations in one merged report
+
 For an agent investigation where the result will be saved and searched repeatedly, prefer this default:
 
 ```bash
@@ -355,6 +375,13 @@ Use `--json` when you need to script over the result:
 python3 scripts/merged_diagnostics.py --json --backend-timeout 8 --telemetry-hours 1 @mau @bau > /tmp/turbo-merged.json
 ```
 
+For downstream replay and dashboard smoke against a checked-in merged artifact:
+
+```bash
+python3 scripts/convert_production_replay.py --merged-diagnostics-json fixtures/production_replay/merged_diagnostics_pair_matrix.json --output-dir /tmp/turbo-production-replay-pair-matrix --name fixture_production_replay_pair_matrix
+python3 scripts/slo_dashboard.py --merged-diagnostics-json fixtures/production_replay/merged_diagnostics_pair_matrix.json --output-dir /tmp/turbo-slo-dashboard-pair-matrix --name pair-matrix-smoke
+```
+
 Default flag guidance:
 
 - Use `--backend-timeout 8` by default for physical-device debugging. Raise it to `15` if the backend is healthy but slow; lower it only when you explicitly want telemetry-first behavior.
@@ -374,7 +401,7 @@ Useful `merged_diagnostics.py` flags:
 | `--backend-timeout <seconds>` | Bounding each backend latest/invariant/wake diagnostics request so telemetry can still return when the backend is slow. Use `8` or `15` for normal development. |
 | `--device <handle=device-id>` | Fetching an exact device snapshot instead of the latest snapshot for a handle. This is common for simulator identities and scenario artifacts. Repeat once per handle when needed. When you use only exact `--device` mappings, the telemetry merge stays scoped to those device IDs instead of widening back out to the full handle history. |
 | `--json` | Feeding merged diagnostics into a script, counting events, comparing transport digests, or attaching a machine-readable artifact. |
-| `--fail-on-violations` | CI/scenario/debug gates where typed invariant violations should make the command fail. |
+| `--fail-on-violations` | CI/scenario/debug gates where current typed invariant violations should make the command fail. Historical-only violations stay visible in output/JSON but do not fail the command. |
 | `--full-metadata` | Inspecting complete Cloudflare telemetry metadata in the human timeline instead of the compact truncated view. |
 | `--include-telemetry` | Explicitly enabling Cloudflare telemetry merge. This is already the default. |
 | `--no-telemetry` | Reading only backend latest diagnostics snapshots/transcripts, useful when Cloudflare credentials are absent, slow, or irrelevant. |
@@ -437,7 +464,7 @@ python3 scripts/backend_stability_probe.py --iterations 30 --timeout 8 --handle 
 just backend-stability-probe https://beepbeep.to @mau 30 8
 ```
 
-The probe repeatedly checks `/v1/health`, `/v1/config`, `/v1/auth/session`, `/v1/devices/register`, `/v1/presence/heartbeat`, and `/v1/telemetry/events`, reports per-request latency/timeouts, and exits non-zero if any request fails. This is the preferred artifact for Unison Cloud escalation because it separates route availability from app/device behavior while still exercising the lightweight authenticated writes that simulator-hosted runs depend on.
+The probe repeatedly checks `/v1/health`, `/v1/config`, `/v1/auth/session`, `/v1/devices/register`, `/v1/invites/incoming`, `/v1/invites/outgoing`, `/v1/presence/heartbeat`, and `/v1/telemetry/events`, reports per-request latency/timeouts, and exits non-zero if any request fails. Use it when simulator-hosted scenarios are timing out on invite refreshes, not just bootstrap or write paths. This is the preferred artifact for Unison Cloud escalation because it separates route availability from app/device behavior while still exercising the lightweight authenticated reads/writes that simulator-hosted runs depend on.
 
 When the suspected problem is websocket continuity rather than plain route availability, use:
 
@@ -446,6 +473,14 @@ just websocket-stability-probe https://beepbeep.to @quinn @sasha 90 20 0
 ```
 
 That probe opens two authenticated websocket sessions with unique simulator-style device IDs, holds them open for the requested duration, uses the same 20s websocket ping cadence as the app by default, and optionally layers periodic `presence/heartbeat` and `telemetry/events` writes. It should be the first lower-level proof when the app reports websocket `idle` / reconnect churn but `route-probe` and `backend-stability-probe` are green.
+
+When the lower-level Python websocket probe is green but the app still looks suspicious, use the client-native probe:
+
+```bash
+just hosted-backend-client-probe https://beepbeep.to 60 20 20
+```
+
+That runs a single opt-in Swift `@Test` through the actual `TurboBackendClient` / `URLSessionWebSocketTask` path, bootstraps auth + device registration + initial presence heartbeat, keeps the socket open for the requested duration, layers periodic `presence/heartbeat` and `telemetry/events` writes, and writes a JSON artifact to `/tmp/turbo-debug/hosted_backend_client_probe_latest.json` by default. The wrapper uses a dedicated `iPhone 17 Pro` simulator and removes its temporary runtime-control file on exit so other automated tests do not inherit the probe-only backend-bootstrap suppression. Use it when you need to distinguish Python-lower-level websocket stability from app-client websocket stability.
 
 When hosted simulator scenarios report `NSURLErrorDomain -1001` or `-1005`, use `just backend-stability-probe` or `just route-probe` before blaming schema drift or rotating the environment. If the raw probes pass, keep debugging the simulator/app transport lane instead of treating the backend environment as corrupt.
 

@@ -62,6 +62,16 @@ extension PTTViewModel {
         guard hasBackendConfig else { return }
         guard !backendRuntime.isReady else { return }
         guard shouldMaintainBackgroundControlPlane() else { return }
+        if Self.shouldSuppressSharedAppBackendBootstrapForAutomatedTests {
+            diagnostics.record(
+                .backend,
+                level: .notice,
+                message: "Suppressed shared app backend bootstrap recovery for automated hosted probe",
+                metadata: ["trigger": trigger]
+            )
+            captureDiagnosticsState("backend-bootstrap:recovery-suppressed-for-hosted-probe")
+            return
+        }
 
         diagnostics.record(.backend, message: "Retrying backend bootstrap", metadata: ["trigger": trigger])
         captureDiagnosticsState("backend-bootstrap:retry")
@@ -603,6 +613,7 @@ extension PTTViewModel {
             String(config.httpTransport.waitsForConnectivity),
             String(config.httpTransport.requestTimeoutSeconds),
             String(config.httpTransport.resourceTimeoutSeconds),
+            config.controlCommandTransportPolicy.rawValue,
         ].joined(separator: "|")
     }
 
@@ -712,6 +723,7 @@ extension PTTViewModel {
                 directQuicRegisteredFingerprint = directQuicIdentity.fingerprint
             }
             _ = try await client.heartbeatPresence()
+            backendRuntime.markPresenceHeartbeatSent()
             guard backendConfigurationIsCurrent(key: key) else {
                 diagnostics.record(
                     .backend,
@@ -748,6 +760,7 @@ extension PTTViewModel {
                 message: "Backend connected",
                 metadata: [
                     "mode": runtimeConfig.mode,
+                    "controlCommandTransportPolicy": client.controlCommandTransportPolicy.rawValue,
                     "handle": session.handle,
                     "deviceId": client.deviceID,
                     "supportsDirectQuicUpgrade": String(runtimeConfig.supportsDirectQuicUpgrade),
@@ -771,6 +784,7 @@ extension PTTViewModel {
                 metadata: [
                     "deviceId": client.deviceID,
                     "handle": session.handle,
+                    "controlCommandTransportPolicy": client.controlCommandTransportPolicy.rawValue,
                     "telemetryEnabled": String(runtimeConfig.telemetryEnabled ?? false),
                     "supportsDirectQuicUpgrade": String(runtimeConfig.supportsDirectQuicUpgrade),
                     "supportsMediaEndToEndEncryption": String(runtimeConfig.supportsMediaEndToEndEncryption),

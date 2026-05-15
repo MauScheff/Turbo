@@ -827,22 +827,30 @@ struct TurboBackendHTTPTransportConfig: Sendable, Equatable {
     )
 }
 
+enum TurboControlCommandTransportPolicy: String, Sendable, Equatable, Codable {
+    case automatic = "automatic"
+    case httpOnly = "http-only"
+}
+
 struct TurboBackendConfig: Sendable {
     let baseURL: URL
     let devUserHandle: String
     let deviceID: String
     let httpTransport: TurboBackendHTTPTransportConfig
+    let controlCommandTransportPolicy: TurboControlCommandTransportPolicy
 
     init(
         baseURL: URL,
         devUserHandle: String,
         deviceID: String,
-        httpTransport: TurboBackendHTTPTransportConfig = .failFastControlPlane
+        httpTransport: TurboBackendHTTPTransportConfig = .failFastControlPlane,
+        controlCommandTransportPolicy: TurboControlCommandTransportPolicy = .automatic
     ) {
         self.baseURL = baseURL
         self.devUserHandle = devUserHandle
         self.deviceID = deviceID
         self.httpTransport = httpTransport
+        self.controlCommandTransportPolicy = controlCommandTransportPolicy
     }
 
     static func load() -> TurboBackendConfig? {
@@ -854,7 +862,8 @@ struct TurboBackendConfig: Sendable {
         return TurboBackendConfig(
             baseURL: baseURL,
             devUserHandle: persistedDevUserHandle(defaultValue: generatedLocalPublicID()),
-            deviceID: persistedDeviceID()
+            deviceID: persistedDeviceID(),
+            controlCommandTransportPolicy: TurboControlCommandTransportDebugOverride.policy() ?? .automatic
         )
     }
 
@@ -906,6 +915,70 @@ struct TurboBackendConfig: Sendable {
         let newValue = UUID().uuidString.lowercased()
         defaults.set(newValue, forKey: key)
         return newValue
+    }
+}
+
+enum TurboControlCommandTransportDebugOverride {
+    static let storageKey = "TurboDebugControlCommandTransportPolicy"
+    static let launchArgument = "-TurboDebugControlCommandTransportPolicy"
+    static let environmentKey = "TURBO_DEBUG_CONTROL_COMMAND_TRANSPORT_POLICY"
+
+    static func policy(
+        processInfo: ProcessInfo = .processInfo,
+        defaults: UserDefaults = .standard
+    ) -> TurboControlCommandTransportPolicy? {
+        policy(
+            arguments: processInfo.arguments,
+            environment: processInfo.environment,
+            defaults: defaults
+        )
+    }
+
+    static func policy(
+        arguments: [String],
+        environment: [String: String],
+        defaults: UserDefaults = .standard
+    ) -> TurboControlCommandTransportPolicy? {
+        if let launchValue = launchArgumentValue(launchArgument, in: arguments),
+           let parsed = parsePolicy(launchValue) {
+            return parsed
+        }
+        if let environmentValue = environment[environmentKey],
+           let parsed = parsePolicy(environmentValue) {
+            return parsed
+        }
+        if let storedValue = defaults.string(forKey: storageKey),
+           let parsed = parsePolicy(storedValue) {
+            return parsed
+        }
+        return nil
+    }
+
+    static func setPolicy(_ policy: TurboControlCommandTransportPolicy?, defaults: UserDefaults = .standard) {
+        if let policy {
+            defaults.set(policy.rawValue, forKey: storageKey)
+        } else {
+            defaults.removeObject(forKey: storageKey)
+        }
+    }
+
+    private static func parsePolicy(_ rawValue: String) -> TurboControlCommandTransportPolicy? {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case TurboControlCommandTransportPolicy.automatic.rawValue:
+            return .automatic
+        case TurboControlCommandTransportPolicy.httpOnly.rawValue, "http", "http_only":
+            return .httpOnly
+        default:
+            return nil
+        }
+    }
+
+    private static func launchArgumentValue(_ launchArgument: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: launchArgument),
+              arguments.indices.contains(index + 1) else {
+            return nil
+        }
+        return arguments[index + 1]
     }
 }
 
@@ -3138,6 +3211,14 @@ struct TurboTokenResponse: Decodable {
 struct TurboRevokeTokenResponse: Decodable {
     let channelId: String
     let deviceId: String
+    let status: String
+}
+
+struct TurboReceiverAudioReadinessResponse: Decodable {
+    let channelId: String
+    let deviceId: String
+    let type: String
+    let audioReadiness: String
     let status: String
 }
 

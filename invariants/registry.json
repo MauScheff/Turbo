@@ -189,7 +189,7 @@
       "scope": "backend",
       "owner": "backend",
       "authoritativeSeam": "turbo.service.presence.offline and turbo.service.presence.background",
-      "predicate": "Presence was marked offline/background while connected session or socket truth still remained for the device.",
+      "predicate": "Presence was marked offline/background while socket truth still remained for the device. Session-only continuity after the socket is cleared is allowed for background/offline grace.",
       "evidenceFields": ["deviceId", "sessionConnected", "socketConnected"],
       "detectors": ["turbo.service.presence.offline", "turbo.service.presence.background", "contracts/backend_invariant_events_manifest.json"],
       "regressions": [],
@@ -449,6 +449,20 @@
       "status": "active"
     },
     {
+      "id": "selected.local_session_without_backend_membership",
+      "scope": "convergence",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/PTTViewModel+BackendSync.swift",
+      "predicate": "The local/system session is active, but backend membership dropped self while the peer remained joined.",
+      "evidenceFields": ["contactId", "channelId", "backendStatus", "backendReadiness"],
+      "detectors": ["Turbo/PTTViewModel+BackendSync.swift"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "The app reconnects the WebSocket if needed, reasserts backend join, refreshes channel/contact projections, and republishes receiver readiness.",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
       "id": "relay.send_without_live_peer",
       "scope": "backend",
       "owner": "app",
@@ -486,7 +500,7 @@
       "detectors": ["Turbo/AppDiagnostics.swift"],
       "regressions": ["TurboTests/TurboTests.swift"],
       "repairPolicy": "app repair",
-      "repairAction": "completeAbsentBackendMembershipRecoveryIfLocalSessionEnded clears stale pending join/leave state when backend membership is already absent.",
+      "repairAction": "completeAbsentBackendMembershipRecoveryIfLocalSessionEnded chooses a typed repair or suppression decision; stale pending join/leave state is cleared only when backend membership is already absent and no valid in-flight join is preserving the local action.",
       "alertPolicy": "diagnostics",
       "status": "active"
     },
@@ -681,6 +695,20 @@
       "detectors": ["Turbo/AppDiagnostics.swift", "scripts/merged_diagnostics.py"],
       "regressions": ["TurboTests/TurboTests.swift"],
       "repairPolicy": "none",
+      "alertPolicy": "strict diagnostics",
+      "status": "active"
+    },
+    {
+      "id": "selected.local_join_failed_despite_wake_capable_recovery",
+      "scope": "backend",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/SelectedPeerSession.swift",
+      "predicate": "Selected peer regressed to localJoinFailed even though backend still retained self membership and wake-capable peer recovery evidence.",
+      "evidenceFields": ["selectedPeerPhase", "selectedPeerPhaseDetail", "hadConnectedSessionContinuity", "backendChannelStatus", "backendReadiness", "backendSelfJoined", "remoteWakeCapabilityKind"],
+      "detectors": ["Turbo/AppDiagnostics.swift"],
+      "regressions": ["TurboTests/TurboTests.swift", "scenarios/request_accept_ready_refresh_stability.json"],
+      "repairPolicy": "app repair",
+      "repairAction": "SelectedPeerReducer suppresses interrupted retry copy while wake-capable backend recovery remains authoritative.",
       "alertPolicy": "strict diagnostics",
       "status": "active"
     },

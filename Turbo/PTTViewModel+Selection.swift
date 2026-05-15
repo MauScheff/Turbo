@@ -8,6 +8,44 @@
 import Foundation
 import UIKit
 
+private enum AbsentBackendMembershipRecovery {
+    static let invariantID = "selected.backend_absent_pending_local_action_without_session"
+}
+
+private enum AbsentBackendMembershipRepairAction: String {
+    case stalePendingJoin = "stale-pending-join"
+    case completedPendingLeave = "completed-pending-leave"
+    case stalePendingJoinDuringOutgoingRequest = "stale-pending-join-during-outgoing-request"
+
+    var message: String {
+        switch self {
+        case .stalePendingJoinDuringOutgoingRequest:
+            return "Recovered stale local join during outgoing request"
+        case .stalePendingJoin, .completedPendingLeave:
+            return "Recovered local session state after backend membership became absent"
+        }
+    }
+}
+
+private enum AbsentBackendMembershipSuppressionReason: String {
+    case backendJoinSettling = "backend-join-settling"
+    case unresolvedLocalJoinAttempt = "unresolved-local-join-attempt"
+
+    var message: String {
+        switch self {
+        case .backendJoinSettling:
+            return "Deferred absent backend membership recovery while backend join is settling"
+        case .unresolvedLocalJoinAttempt:
+            return "Deferred absent backend membership recovery while local join is unresolved"
+        }
+    }
+}
+
+private enum AbsentBackendMembershipRecoveryDecision {
+    case repair(AbsentBackendMembershipRepairAction)
+    case suppressed(AbsentBackendMembershipSuppressionReason)
+}
+
 enum ContactPresencePresentation: Equatable {
     case connected
     case reachable
@@ -228,7 +266,7 @@ extension PTTViewModel {
             contactPresence: contactPresencePresentation(for: contact.id),
             isJoined: isJoined,
             localTransmit: localTransmitProjection(for: contact.id),
-            peerSignalIsTransmitting: remoteReceiveBlocksLocalTransmit(for: contact.id),
+            peerSignalIsTransmitting: remoteReceiveProjectsPeerTalking(for: contact.id),
             activeChannelID: activeChannelId,
             systemSessionMatchesContact: systemSessionMatches(contact.id),
             systemSessionState: systemSessionState,
@@ -411,7 +449,13 @@ extension PTTViewModel {
                     requesterAutoJoinOnPeerAcceptanceEnabled:
                         conversationShortcutPolicy.requesterAutoJoinOnPeerAcceptance,
                     localTransmit: localTransmit,
-                    peerSignalIsTransmitting: remoteReceiveBlocksLocalTransmit(for: contact.id),
+                    peerSignalIsTransmitting: remoteReceiveProjectsPeerTalking(for: contact.id),
+                    remotePlaybackDrainBlocksTransmit: remotePlaybackDrainBlocksLocalTransmit(for: contact.id),
+                    remoteTransmitStopObserved:
+                        receiveExecutionCoordinator
+                            .state
+                            .remoteTransmitStoppedContactIDs
+                            .contains(contact.id),
                     systemSessionState: systemSessionState,
                     systemSessionMatchesContact: systemSessionMatches(contact.id),
                     mediaState: mediaConnectionState,
@@ -493,9 +537,11 @@ extension PTTViewModel {
         let contactBackendChannelID = contacts.first(where: { $0.id == contactID })?.backendChannelId
         let summaryBackendChannelID = contactSummaryByContactID[contactID]?.channelId
         let backendChannelReferenceAbsent =
-            selectedChannel != nil
-            || ((contactBackendChannelID?.isEmpty ?? true)
+            selectedChannel == nil
+            && ((contactBackendChannelID?.isEmpty ?? true)
                 && (summaryBackendChannelID?.isEmpty ?? true))
+        let backendShowsLocalMembershipAbsent =
+            selectedChannel?.membership.hasLocalMembership == false
 
         let localSessionTouchesContact =
             systemSessionMatches(contactID)
@@ -517,19 +563,22 @@ extension PTTViewModel {
         let pendingLeaveIsComplete =
             sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
             && !backendLeaveCommandInFlight
-            && (selectedChannel == nil || backendChannelReferenceAbsent)
+            && (backendShowsLocalMembershipAbsent || backendChannelReferenceAbsent)
         guard requestRelationshipIsNone || pendingJoinContradictsOutgoingRequest else { return }
         guard pendingJoinIsStale || pendingLeaveIsComplete else { return }
 
+        let recoveryDecision: AbsentBackendMembershipRecoveryDecision
         if pendingJoinIsStale,
            !pendingJoinContradictsOutgoingRequest,
            shouldPreservePendingLocalJoinDuringBackendJoinSettling(for: contactID) {
-            let preserveReason = backendJoinIsSettling(for: contactID)
-                ? "backend-join-settling"
-                : "unresolved-local-join-attempt"
+            let suppressionReason: AbsentBackendMembershipSuppressionReason =
+                backendJoinIsSettling(for: contactID)
+                ? .backendJoinSettling
+                : .unresolvedLocalJoinAttempt
+            recoveryDecision = .suppressed(suppressionReason)
             let noticeKey = [
                 contactID.uuidString,
-                preserveReason,
+                suppressionReason.rawValue,
                 selectedChannel.map { String(describing: $0.membership) } ?? "none",
                 selectedChannel?.status?.rawValue ?? "none",
                 String(sessionCoordinator.localJoinAttempt?.issuedCount ?? 0),
@@ -538,14 +587,15 @@ extension PTTViewModel {
                 deferredAbsentMembershipRecoveryNoticeKeys.insert(noticeKey)
                 diagnostics.record(
                     .state,
-                    message: preserveReason == "backend-join-settling"
-                        ? "Deferred absent backend membership recovery while backend join is settling"
-                        : "Deferred absent backend membership recovery while local join is unresolved",
+                    message: suppressionReason.message,
                     metadata: [
                         "contactId": contactID.uuidString,
+                        "invariantID": AbsentBackendMembershipRecovery.invariantID,
+                        "repairDecision": "suppressed",
+                        "repairSuppressionReason": suppressionReason.rawValue,
                         "backendMembership": selectedChannel.map { String(describing: $0.membership) } ?? "none",
                         "backendStatus": selectedChannel?.status?.rawValue ?? "none",
-                        "preserveReason": preserveReason,
+                        "preserveReason": suppressionReason.rawValue,
                         "localJoinAttemptIssuedCount": String(sessionCoordinator.localJoinAttempt?.issuedCount ?? 0),
                     ]
                 )
@@ -553,6 +603,30 @@ extension PTTViewModel {
             return
         }
 
+        if pendingJoinContradictsOutgoingRequest {
+            recoveryDecision = .repair(.stalePendingJoinDuringOutgoingRequest)
+        } else if pendingJoinIsStale {
+            recoveryDecision = .repair(.stalePendingJoin)
+        } else {
+            recoveryDecision = .repair(.completedPendingLeave)
+        }
+
+        guard case .repair(let repairAction) = recoveryDecision else { return }
+        let recoveryMetadata = absentBackendMembershipRecoveryMetadata(
+            contactID: contactID,
+            selectedChannel: selectedChannel,
+            pairRelationship: pairRelationship,
+            pendingJoinIsStale: pendingJoinIsStale,
+            pendingLeaveIsComplete: pendingLeaveIsComplete,
+            repairAction: repairAction
+        )
+        diagnostics.record(
+            .state,
+            message: "Requested absent backend membership recovery",
+            metadata: recoveryMetadata.merging([
+                "repairDecision": "requested"
+            ]) { _, new in new }
+        )
         sessionCoordinator.clearPendingJoin(for: contactID)
         sessionCoordinator.clearLeaveAction(for: contactID)
         deferredAbsentMembershipRecoveryNoticeKeys = deferredAbsentMembershipRecoveryNoticeKeys.filter {
@@ -561,21 +635,42 @@ extension PTTViewModel {
         replaceDisconnectRecoveryTask(with: nil)
         diagnostics.record(
             .state,
-            message: pendingJoinContradictsOutgoingRequest
-                ? "Recovered stale local join during outgoing request"
-                : "Recovered local session state after backend membership became absent",
-            metadata: [
-                "contactId": contactID.uuidString,
-                "pendingJoinWasStale": String(pendingJoinIsStale),
-                "pendingLeaveWasComplete": String(pendingLeaveIsComplete),
-                "backendMembership": selectedChannel.map { String(describing: $0.membership) } ?? "none",
-                "requestRelationship": selectedChannel
-                    .map { String(describing: $0.requestRelationship) }
-                    ?? String(describing: pairRelationship),
-            ]
+            message: repairAction.message,
+            metadata: recoveryMetadata.merging([
+                "repairDecision": "executed"
+            ]) { _, new in new }
         )
         updateStatusForSelectedContact()
+        diagnostics.record(
+            .state,
+            message: "Converged absent backend membership recovery",
+            metadata: recoveryMetadata.merging([
+                "repairDecision": "converged",
+                "pendingActionAfterRepair": String(describing: sessionCoordinator.pendingAction),
+            ]) { _, new in new }
+        )
         captureDiagnosticsState("session-recovery:backend-membership-absent")
+    }
+
+    private func absentBackendMembershipRecoveryMetadata(
+        contactID: UUID,
+        selectedChannel: ChannelReadinessSnapshot?,
+        pairRelationship: PairRelationshipState,
+        pendingJoinIsStale: Bool,
+        pendingLeaveIsComplete: Bool,
+        repairAction: AbsentBackendMembershipRepairAction
+    ) -> [String: String] {
+        [
+            "contactId": contactID.uuidString,
+            "invariantID": AbsentBackendMembershipRecovery.invariantID,
+            "repairAction": repairAction.rawValue,
+            "pendingJoinWasStale": String(pendingJoinIsStale),
+            "pendingLeaveWasComplete": String(pendingLeaveIsComplete),
+            "backendMembership": selectedChannel.map { String(describing: $0.membership) } ?? "none",
+            "requestRelationship": selectedChannel
+                .map { String(describing: $0.requestRelationship) }
+                ?? String(describing: pairRelationship),
+        ]
     }
 
     func selectedPeerState(for contactID: UUID) -> SelectedPeerState {
@@ -1369,6 +1464,26 @@ extension PTTViewModel {
                    attempt.contactID == contactID,
                    attempt.channelUUID == contact.channelId,
                    !self.localSessionEvidenceExists(for: contactID, expectedChannelUUID: contact.channelId) {
+                    if self.hasStaleSystemRejoinSuppression(
+                        channelUUID: contact.channelId,
+                        contactID: contactID
+                    ) {
+                        self.sessionCoordinator.clearPendingJoin(for: contactID)
+                        self.updateStatusForSelectedContact()
+                        self.diagnostics.record(
+                            .pushToTalk,
+                            message: "Suppressed stale local PTT join retry after recent system leave",
+                            metadata: [
+                                "contactId": contactID.uuidString,
+                                "channelUUID": contact.channelId.uuidString,
+                                "issuedCount": String(attempt.issuedCount),
+                                "selectedPeerPhase": String(describing: self.selectedPeerCoordinator.state.selectedPeerState.phase),
+                            ]
+                        )
+                        self.captureDiagnosticsState("selected-connection-attempt:retry-blocked-by-recent-leave")
+                        self.cancelSelectedConnectionAttemptTimeout()
+                        return
+                    }
                     self.diagnostics.record(
                         .pushToTalk,
                         level: .notice,

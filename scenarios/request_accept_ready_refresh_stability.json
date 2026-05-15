@@ -103,6 +103,42 @@
         "a": { "selectedHandle": "@blake", "isJoined": false, "isTransmitting": false, "noInvariantViolations": true },
         "b": { "selectedHandle": "@avery", "isJoined": false, "isTransmitting": false, "noInvariantViolations": true }
       }
+    },
+    {
+      "description": "post-disconnect explicit refresh converges both sides back to idle",
+      "actions": [
+        { "actor": "a", "type": "wait", "milliseconds": 2500 },
+        { "actor": "a", "type": "refreshContactSummaries" },
+        { "actor": "a", "type": "refreshInvites" },
+        { "actor": "a", "type": "refreshChannelState" },
+        { "actor": "a", "type": "reconcileSelectedSession" },
+        { "actor": "b", "type": "refreshContactSummaries" },
+        { "actor": "b", "type": "refreshInvites" },
+        { "actor": "b", "type": "refreshChannelState" },
+        { "actor": "b", "type": "reconcileSelectedSession" }
+      ],
+      "expectEventually": {
+        "a": {
+          "selectedHandle": "@blake",
+          "phase": "idle",
+          "isJoined": false,
+          "isTransmitting": false,
+          "noInvariantViolations": true,
+          "contacts": [
+            { "handle": "@blake", "listState": "idle", "isOnline": true }
+          ]
+        },
+        "b": {
+          "selectedHandle": "@avery",
+          "phase": "idle",
+          "isJoined": false,
+          "isTransmitting": false,
+          "noInvariantViolations": true,
+          "contacts": [
+            { "handle": "@avery", "listState": "idle", "isOnline": true }
+          ]
+        }
+      }
     }
   ]
 }

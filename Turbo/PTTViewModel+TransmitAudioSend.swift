@@ -64,6 +64,55 @@ extension PTTViewModel {
         )
     }
 
+    func suppressMediaRelayAudioSendUntilNextIdlePrewarm(
+        localDeviceID: String,
+        contactID: UUID,
+        channelID: String,
+        peerDeviceID: String,
+        reason: String
+    ) {
+        let key = MediaRelayConnectionKey(
+            sessionID: channelID,
+            localDeviceID: localDeviceID,
+            peerDeviceID: peerDeviceID
+        )
+        mediaRuntime.suppressMediaRelayAudioSend(for: key)
+        diagnostics.record(
+            .media,
+            message: "Holding WebSocket relay for active transmit after media relay peer unavailable",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": channelID,
+                "peerDeviceId": peerDeviceID,
+                "reason": reason,
+            ]
+        )
+    }
+
+    func clearMediaRelayAudioSendSuppressionIfPresent(
+        target: TransmitTarget,
+        reason: String
+    ) {
+        let localDeviceID = backendServices?.deviceID ?? backendConfig?.deviceID ?? ""
+        guard !localDeviceID.isEmpty else { return }
+        let key = MediaRelayConnectionKey(
+            sessionID: target.channelID,
+            localDeviceID: localDeviceID,
+            peerDeviceID: target.deviceID
+        )
+        guard mediaRuntime.clearMediaRelayAudioSendSuppression(for: key) else { return }
+        diagnostics.record(
+            .media,
+            message: "Cleared media relay send suppression",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "peerDeviceId": target.deviceID,
+                "reason": reason,
+            ]
+        )
+    }
+
     func shouldTreatTransmitLeaseLossAsStop(_ error: Error) -> Bool {
         guard case let TurboBackendError.server(message) = error else { return false }
         return message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "no active transmit state for sender"
@@ -177,6 +226,13 @@ extension PTTViewModel {
                                 ]
                             )
                             if self.isMediaRelayPeerUnavailable(error) {
+                                self.suppressMediaRelayAudioSendUntilNextIdlePrewarm(
+                                    localDeviceID: fromDeviceID,
+                                    contactID: target.contactID,
+                                    channelID: target.channelID,
+                                    peerDeviceID: target.deviceID,
+                                    reason: "audio-payload"
+                                )
                                 self.clearStaleMediaRelayClient(
                                     localDeviceID: fromDeviceID,
                                     channelID: target.channelID,
@@ -213,6 +269,17 @@ extension PTTViewModel {
     }
 
     func preconnectMediaRelayForAudioSendIfNeeded(target: TransmitTarget) {
+        let isIdlePrewarm =
+            !transmitCoordinator.state.isPressingTalk
+            && !transmitRuntime.isPressingTalk
+            && transmitCoordinator.state.activeTarget != target
+            && transmitRuntime.activeTarget != target
+        if isIdlePrewarm {
+            clearMediaRelayAudioSendSuppressionIfPresent(
+                target: target,
+                reason: "idle-prewarm"
+            )
+        }
         let shouldAttempt =
             !isDirectPathRelayOnlyForced
             && (TurboMediaRelayDebugOverride.isEnabled()
@@ -253,7 +320,23 @@ extension PTTViewModel {
     }
 
     func mediaRelayClientForAudioSend(target: TransmitTarget) async -> TurboMediaRelayClient? {
-        await mediaRelayClientIfEnabled(
+        let localDeviceID = await MainActor.run {
+            backendServices?.deviceID ?? backendConfig?.deviceID ?? ""
+        }
+        if !localDeviceID.isEmpty {
+            let key = MediaRelayConnectionKey(
+                sessionID: target.channelID,
+                localDeviceID: localDeviceID,
+                peerDeviceID: target.deviceID
+            )
+            let isSuppressed = await MainActor.run {
+                mediaRuntime.isMediaRelayAudioSendSuppressed(for: key)
+            }
+            if isSuppressed {
+                return nil
+            }
+        }
+        return await mediaRelayClientIfEnabled(
             contactID: target.contactID,
             channelID: target.channelID,
             peerDeviceID: target.deviceID,
@@ -816,6 +899,10 @@ extension PTTViewModel {
         )
         await transmitCoordinator.handle(.stopCompleted(target))
         syncTransmitState()
+        clearMediaRelayAudioSendSuppressionIfPresent(
+            target: target,
+            reason: "\(source)-completed-locally"
+        )
         clearForegroundDirectTransmitDelegation(
             for: target.contactID,
             reason: "\(source)-completed-locally"
@@ -1198,6 +1285,20 @@ extension PTTViewModel {
         }
         updateStatusForSelectedContact()
         if let contactID = media.contactID() {
+            if shouldSuppressReceiverAudioReadinessSyncForMediaState(
+                state,
+                contactID: contactID
+            ) {
+                diagnostics.record(
+                    .websocket,
+                    message: "Suppressed receiver audio readiness sync during active receive playback recovery",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "state": String(describing: state),
+                    ]
+                )
+                return
+            }
             Task {
                 await syncLocalReceiverAudioReadinessSignal(
                     for: contactID,
@@ -1219,6 +1320,16 @@ extension PTTViewModel {
 
     private func viewModelWakeStateNeedsClearingAfterRecovery(contactID: UUID) -> Bool {
         pttWakeRuntime.incomingWakeActivationState(for: contactID) == .systemActivationInterruptedByTransmitEnd
+    }
+
+    private func shouldSuppressReceiverAudioReadinessSyncForMediaState(
+        _ state: MediaConnectionState,
+        contactID: UUID
+    ) -> Bool {
+        guard case .preparing = state else { return false }
+        guard mediaSessionContactID == contactID else { return false }
+        guard !isTransmitting else { return false }
+        return remoteTransmittingContactIDs.contains(contactID)
     }
 
     private func shouldPreserveAudioSessionDuringMediaClose() -> Bool {

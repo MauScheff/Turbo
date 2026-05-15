@@ -25,6 +25,7 @@ final class BackendRuntimeState {
     var mode: String = "unknown"
     var telemetryEnabled: Bool = false
     var trackedContactIDs: Set<UUID> = []
+    private var lastPresenceHeartbeatSentAt: Date?
     private var backendJoinSettlingStartedAtByContactID: [UUID: Date] = [:]
     var transportFaults = TransportFaultRuntimeState()
 
@@ -74,6 +75,7 @@ final class BackendRuntimeState {
         signalingJoinRecoveryTask = nil
         pollTask?.cancel()
         pollTask = nil
+        lastPresenceHeartbeatSentAt = nil
         backendJoinSettlingStartedAtByContactID.removeAll()
     }
 
@@ -114,6 +116,22 @@ final class BackendRuntimeState {
 
     func clearTrackedContacts() {
         trackedContactIDs = []
+    }
+
+    func consumePresenceHeartbeatSlot(
+        now: Date = Date(),
+        minimumInterval: TimeInterval
+    ) -> Bool {
+        if let lastPresenceHeartbeatSentAt,
+           now.timeIntervalSince(lastPresenceHeartbeatSentAt) < minimumInterval {
+            return false
+        }
+        lastPresenceHeartbeatSentAt = now
+        return true
+    }
+
+    func markPresenceHeartbeatSent(at date: Date = Date()) {
+        lastPresenceHeartbeatSentAt = date
     }
 
     func markBackendJoinSettling(for contactID: UUID, now: Date = Date()) {
@@ -688,7 +706,7 @@ struct MediaEncryptionSession {
     }
 }
 
-struct MediaRelayConnectionKey: Equatable {
+struct MediaRelayConnectionKey: Hashable {
     let sessionID: String
     let localDeviceID: String
     let peerDeviceID: String
@@ -749,6 +767,7 @@ final class MediaRuntimeState {
     var mediaRelayClient: TurboMediaRelayClient?
     private var mediaRelayConnectionKey: MediaRelayConnectionKey?
     private var mediaRelayConnectionAttempt: MediaRelayConnectionAttempt?
+    private var suppressedMediaRelayAudioSendKeys: Set<MediaRelayConnectionKey> = []
     var directQuicPromotionTimeoutTask: Task<Void, Never>?
     var directQuicAutoProbeTask: Task<Void, Never>?
     private var firstTalkDirectQuicGraceEntries: [(contactID: UUID, grace: FirstTalkDirectQuicGrace)] = []
@@ -875,6 +894,7 @@ final class MediaRuntimeState {
             mediaRelayClient?.close()
             mediaRelayClient = nil
         }
+        suppressedMediaRelayAudioSendKeys = []
         firstTalkDirectQuicGraceExpiryTasks.forEach { $0.task.cancel() }
         firstTalkDirectQuicGraceExpiryTasks = []
         session?.close(deactivateAudioSession: deactivateAudioSession)
@@ -1137,6 +1157,18 @@ final class MediaRuntimeState {
         if transportPathState == .fastRelay {
             transportPathState = .relay
         }
+    }
+
+    func suppressMediaRelayAudioSend(for key: MediaRelayConnectionKey) {
+        suppressedMediaRelayAudioSendKeys.insert(key)
+    }
+
+    func clearMediaRelayAudioSendSuppression(for key: MediaRelayConnectionKey) -> Bool {
+        suppressedMediaRelayAudioSendKeys.remove(key) != nil
+    }
+
+    func isMediaRelayAudioSendSuppressed(for key: MediaRelayConnectionKey) -> Bool {
+        suppressedMediaRelayAudioSendKeys.contains(key)
     }
 
     func receiverPrewarmRequestID(for contactID: UUID) -> String {
@@ -1419,6 +1451,20 @@ struct BackendServices {
     var supportsTransmitIds: Bool { client.supportsTransmitIds }
     var supportsProjectionEpochs: Bool { client.supportsProjectionEpochs }
     var isWebSocketConnected: Bool { client.isWebSocketConnected }
+    var webSocketSessionID: String? { client.webSocketSessionID }
+    var controlCommandTransportPolicy: TurboControlCommandTransportPolicy { client.controlCommandTransportPolicy }
+    var shouldSendHTTPPresenceHeartbeat: Bool {
+        if controlCommandTransportPolicy == .httpOnly {
+            return true
+        }
+        guard supportsWebSocket else {
+            return true
+        }
+        guard client.canSendPresenceCommandsOverWebSocket else {
+            return true
+        }
+        return !isWebSocketConnected || webSocketSessionID == nil
+    }
     var deviceID: String { client.deviceID }
     var usesLocalHTTPBackend: Bool { mode == "local-http" }
     var directQuicPolicy: TurboDirectQuicPolicy? { client.directQuicPolicy }
@@ -1473,6 +1519,10 @@ struct BackendServices {
 
     func heartbeatPresence() async throws -> TurboPresenceHeartbeatResponse {
         try await client.heartbeatPresence()
+    }
+
+    func foregroundPresence() async throws -> TurboPresenceHeartbeatResponse {
+        try await client.foregroundPresence()
     }
 
     func offlinePresence() async throws -> TurboPresenceHeartbeatResponse {
@@ -1534,6 +1584,18 @@ struct BackendServices {
 
     func channelReadiness(channelId: String) async throws -> TurboChannelReadinessResponse {
         try await client.channelReadiness(channelId: channelId)
+    }
+
+    func publishReceiverAudioReadiness(
+        channelId: String,
+        type: TurboSignalKind,
+        payload: String
+    ) async throws -> TurboReceiverAudioReadinessResponse {
+        try await client.publishReceiverAudioReadiness(
+            channelId: channelId,
+            type: type,
+            payload: payload
+        )
     }
 
     func createInvite(

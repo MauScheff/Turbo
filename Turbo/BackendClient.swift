@@ -130,7 +130,11 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     private let webSocketPingIntervalNanoseconds: UInt64 = 20_000_000_000
     private var capturesSentSignalsForTesting = false
     private var capturedSentSignalsForTesting: [TurboSignalEnvelope] = []
+    private var capturesReceiverAudioReadinessForTesting = false
+    private var capturedReceiverAudioReadinessForTesting: [TurboReceiverAudioReadinessRequest] = []
     private var pendingControlCommandResponses: [String: CheckedContinuation<Data, Error>] = [:]
+    private var pendingControlCommandKinds: [String: String] = [:]
+    private var webSocketPresenceCommandsRejected = false
     var controlCommandHTTPResponseForTesting: (@MainActor (String, TurboControlCommandEnvelope) async throws -> Data)?
     var controlCommandWebSocketResponseForTesting: (@MainActor (TurboControlCommandEnvelope) async throws -> Data)?
 
@@ -147,7 +151,11 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     var deviceID: String { config.deviceID }
     var devUserHandle: String { config.devUserHandle }
     var criticalHTTPClient: TurboBackendCriticalHTTPClient { TurboBackendCriticalHTTPClient(config: config) }
+    var controlCommandTransportPolicy: TurboControlCommandTransportPolicy { config.controlCommandTransportPolicy }
     var supportsWebSocket: Bool { runtimeConfig?.supportsWebSocket ?? false }
+    var canSendPresenceCommandsOverWebSocket: Bool {
+        canAttemptWebSocketControlCommand && !webSocketPresenceCommandsRejected
+    }
     var supportsDirectQuicUpgrade: Bool { runtimeConfig?.supportsDirectQuicUpgrade ?? false }
     var supportsMediaEndToEndEncryption: Bool { runtimeConfig?.supportsMediaEndToEndEncryption ?? false }
     var supportsSignalSessionIds: Bool { runtimeConfig?.supportsSignalSessionIds ?? false }
@@ -175,6 +183,10 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     func setWebSocketConnectedForControlCommandTesting(sessionID: String = "test-session") {
         currentWebSocketSessionID = sessionID
         setWebSocketConnectionState(.connected)
+    }
+
+    func rejectWebSocketPresenceCommandsForTesting() {
+        webSocketPresenceCommandsRejected = true
     }
 
     func directQuicIceServers() async throws -> TurboDirectQuicIceServerPolicy {
@@ -279,26 +291,34 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     }
 
     func heartbeatPresence() async throws -> TurboPresenceHeartbeatResponse {
-        try await request(
+        try await hedgedPresenceCommandRequest(
             path: "/v1/presence/heartbeat",
-            method: "POST",
-            body: TurboChannelDeviceRequest(deviceId: config.deviceID)
+            commandKind: "presence-heartbeat",
+            httpFallbackDelayNanoseconds: controlCommandHedgeDelayNanoseconds
+        )
+    }
+
+    func foregroundPresence() async throws -> TurboPresenceHeartbeatResponse {
+        try await hedgedPresenceCommandRequest(
+            path: "/v1/presence/heartbeat",
+            commandKind: "presence-heartbeat",
+            httpFallbackDelayNanoseconds: 0
         )
     }
 
     func offlinePresence() async throws -> TurboPresenceHeartbeatResponse {
-        try await request(
+        try await hedgedPresenceCommandRequest(
             path: "/v1/presence/offline",
-            method: "POST",
-            body: TurboChannelDeviceRequest(deviceId: config.deviceID)
+            commandKind: "presence-offline",
+            httpFallbackDelayNanoseconds: 0
         )
     }
 
     func backgroundPresence() async throws -> TurboPresenceHeartbeatResponse {
-        try await request(
+        try await hedgedPresenceCommandRequest(
             path: "/v1/presence/background",
-            method: "POST",
-            body: TurboChannelDeviceRequest(deviceId: config.deviceID)
+            commandKind: "presence-background",
+            httpFallbackDelayNanoseconds: 0
         )
     }
 
@@ -336,7 +356,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             operationId: operationId,
             channelId: channelId
         )
-        return try await controlCommandRequest(
+        return try await hedgedControlCommandRequest(
             path: "/v1/channels/\(channelId)/leave",
             body: envelope
         )
@@ -351,6 +371,33 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     func channelReadiness(channelId: String) async throws -> TurboChannelReadinessResponse {
         try await request(
             path: "/v1/channels/\(channelId)/readiness/\(config.deviceID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? config.deviceID)"
+        )
+    }
+
+    func publishReceiverAudioReadiness(
+        channelId: String,
+        type: TurboSignalKind,
+        payload: String
+    ) async throws -> TurboReceiverAudioReadinessResponse {
+        let body = TurboReceiverAudioReadinessRequest(
+            deviceId: config.deviceID,
+            type: type.rawValue,
+            payload: payload
+        )
+        if capturesReceiverAudioReadinessForTesting {
+            capturedReceiverAudioReadinessForTesting.append(body)
+            return TurboReceiverAudioReadinessResponse(
+                channelId: channelId,
+                deviceId: config.deviceID,
+                type: type.rawValue,
+                audioReadiness: type == .receiverReady ? "ready" : "waiting",
+                status: "stored"
+            )
+        }
+        return try await request(
+            path: "/v1/channels/\(channelId)/receiver-audio-readiness",
+            method: "POST",
+            body: body
         )
     }
 
@@ -607,6 +654,15 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         capturedSentSignalsForTesting
     }
 
+    func enableReceiverAudioReadinessCaptureForTesting() {
+        capturesReceiverAudioReadinessForTesting = true
+        capturedReceiverAudioReadinessForTesting = []
+    }
+
+    func receiverAudioReadinessPublishesForTesting() -> [TurboReceiverAudioReadinessRequest] {
+        capturedReceiverAudioReadinessForTesting
+    }
+
     private func listenForMessages() async {
         guard let webSocketTask else { return }
 
@@ -616,7 +672,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
                 switch message {
                 case let .string(text):
                     if let data = text.data(using: .utf8),
-                       handleControlCommandResponseData(data) {
+                       handleWebSocketCommandResponseData(data) {
                         continue
                     } else if let data = text.data(using: .utf8),
                               let envelope = try? JSONDecoder().decode(TurboSignalEnvelope.self, from: data) {
@@ -629,6 +685,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
                         onWebSocketStatusNotice?(notice)
                     } else if let data = text.data(using: .utf8),
                               let error = try? JSONDecoder().decode(TurboErrorResponse.self, from: data) {
+                        handleWebSocketErrorNotice(error.error)
                         onServerNotice?(error.error)
                     } else {
                         onServerNotice?(text)
@@ -670,6 +727,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
             self.connectTimeoutTask = nil
             self.reconnectTask?.cancel()
             self.reconnectTask = nil
+            self.webSocketPresenceCommandsRejected = false
             self.setWebSocketConnectionState(.connected)
             self.onServerNotice?("WebSocket connected")
             self.receiveTask?.cancel()
@@ -800,9 +858,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         path: String,
         body: TurboControlCommandEnvelope
     ) async throws -> Response {
-        if supportsWebSocket,
-           webSocketConnectionState == .connected,
-           webSocketTask != nil {
+        if canAttemptWebSocketControlCommand {
             do {
                 return try await webSocketControlCommand(body)
             } catch {
@@ -906,7 +962,91 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
+    private func hedgedPresenceCommandRequest<Response: Decodable>(
+        path: String,
+        commandKind: String,
+        httpFallbackDelayNanoseconds: UInt64
+    ) async throws -> Response {
+        let envelope = TurboControlCommandEnvelope(
+            commandKind: commandKind,
+            deviceId: config.deviceID
+        )
+        let requestStartedAt = DispatchTime.now().uptimeNanoseconds
+        guard canSendPresenceCommandsOverWebSocket else {
+            return try decodeControlCommandResponse(
+                try await controlCommandData(
+                    path: path,
+                    body: envelope,
+                    transport: .http,
+                    requestStartedAt: requestStartedAt
+                ),
+                body: envelope,
+                transport: .http
+            )
+        }
+
+        return try await withThrowingTaskGroup(of: Response.self) { group in
+            group.addTask { @MainActor in
+                try self.decodeControlCommandResponse(
+                    try await self.webSocketPresenceCommandData(
+                        envelope,
+                        requestStartedAt: requestStartedAt
+                    ),
+                    body: envelope,
+                    transport: .webSocket
+                )
+            }
+            group.addTask { @MainActor in
+                if httpFallbackDelayNanoseconds > 0 {
+                    try await Task.sleep(nanoseconds: httpFallbackDelayNanoseconds)
+                }
+                let fallbackDetail = httpFallbackDelayNanoseconds == 0
+                    ? "immediate-http-fallback"
+                    : "websocket-slow"
+                self.emitControlCommandTrace(
+                    commandKind: envelope.commandKind,
+                    transport: .http,
+                    phase: .hedgeStarted,
+                    operationId: envelope.operationId,
+                    channelId: envelope.channelId,
+                    requestId: nil,
+                    startedAtNanoseconds: requestStartedAt,
+                    detail: fallbackDetail
+                )
+                if httpFallbackDelayNanoseconds == 0 {
+                    self.onServerNotice?("WebSocket \(envelope.commandKind) using immediate HTTP fallback")
+                } else {
+                    self.onServerNotice?("WebSocket \(envelope.commandKind) slow; hedging over HTTP")
+                }
+                return try self.decodeControlCommandResponse(
+                    try await self.controlCommandData(
+                        path: path,
+                        body: envelope,
+                        transport: .http,
+                        requestStartedAt: requestStartedAt
+                    ),
+                    body: envelope,
+                    transport: .http
+                )
+            }
+
+            var lastError: Error?
+            while true {
+                do {
+                    guard let response = try await group.next() else { break }
+                    group.cancelAll()
+                    return response
+                } catch {
+                    lastError = error
+                }
+            }
+
+            throw lastError ?? TurboBackendError.invalidResponse
+        }
+    }
+
     private var canAttemptWebSocketControlCommand: Bool {
+        guard controlCommandTransportPolicy != .httpOnly else { return false }
         guard supportsWebSocket, webSocketConnectionState == .connected else { return false }
         return webSocketTask != nil || controlCommandWebSocketResponseForTesting != nil
     }
@@ -1022,6 +1162,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         let responseData = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 pendingControlCommandResponses[requestID] = continuation
+                pendingControlCommandKinds[requestID] = envelope.commandKind
                 Task { @MainActor [weak self] in
                     do {
                         try await webSocketTask.send(.string(text))
@@ -1053,6 +1194,73 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         return responseData
     }
 
+    private func webSocketPresenceCommandData(
+        _ envelope: TurboControlCommandEnvelope,
+        requestStartedAt: UInt64
+    ) async throws -> Data {
+        if let controlCommandWebSocketResponseForTesting {
+            return try await controlCommandWebSocketResponseForTesting(envelope)
+        }
+
+        guard supportsWebSocket,
+              webSocketConnectionState == .connected,
+              !webSocketPresenceCommandsRejected,
+              let webSocketTask else {
+            throw TurboBackendError.webSocketUnavailable
+        }
+
+        let requestID = UUID().uuidString.lowercased()
+        let frame = TurboPresenceCommandWebSocketRequest(
+            requestId: requestID,
+            sessionId: currentWebSocketSessionID,
+            envelope: envelope
+        )
+        let data = try JSONEncoder().encode(frame)
+        let text = String(decoding: data, as: UTF8.self)
+
+        let responseData = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingControlCommandResponses[requestID] = continuation
+                pendingControlCommandKinds[requestID] = envelope.commandKind
+                Task { @MainActor [weak self] in
+                    do {
+                        try await webSocketTask.send(.string(text))
+                        self?.emitControlCommandTrace(
+                            commandKind: envelope.commandKind,
+                            transport: .webSocket,
+                            phase: .sendCompleted,
+                            operationId: envelope.operationId,
+                            channelId: envelope.channelId,
+                            requestId: requestID,
+                            startedAtNanoseconds: requestStartedAt,
+                            detail: nil
+                        )
+                    } catch {
+                        self?.finishPendingControlCommand(requestID, result: .failure(error))
+                    }
+                }
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(
+                        nanoseconds: self?.webSocketControlCommandTimeoutNanoseconds ?? 3_000_000_000
+                    )
+                    self?.finishPendingControlCommand(
+                        requestID,
+                        result: .failure(TurboBackendError.webSocketUnavailable)
+                    )
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.finishPendingControlCommand(
+                    requestID,
+                    result: .failure(CancellationError())
+                )
+            }
+        }
+
+        return responseData
+    }
+
     private func decodeControlCommandResponse<Response: Decodable>(
         _ data: Data,
         body: TurboControlCommandEnvelope,
@@ -1078,9 +1286,10 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         return try decodeControlCommandResponse(responseData, body: envelope, transport: .webSocket)
     }
 
-    private func handleControlCommandResponseData(_ data: Data) -> Bool {
+    private func handleWebSocketCommandResponseData(_ data: Data) -> Bool {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              object["type"] as? String == "control-command-response" else {
+              let type = object["type"] as? String,
+              type == "control-command-response" || type == "presence-command-response" else {
             return false
         }
         guard let requestID = object["requestId"] as? String else {
@@ -1104,6 +1313,7 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
 
     private func finishPendingControlCommand(_ requestID: String, result: Result<Data, Error>) {
         guard let continuation = pendingControlCommandResponses.removeValue(forKey: requestID) else { return }
+        pendingControlCommandKinds.removeValue(forKey: requestID)
         switch result {
         case .success(let data):
             continuation.resume(returning: data)
@@ -1112,9 +1322,22 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
+    private func handleWebSocketErrorNotice(_ message: String) {
+        guard message == "invalid signaling payload" else { return }
+        let rejectedPresenceRequests = pendingControlCommandKinds.compactMap { requestID, commandKind in
+            commandKind.hasPrefix("presence-") ? requestID : nil
+        }
+        guard !rejectedPresenceRequests.isEmpty else { return }
+        webSocketPresenceCommandsRejected = true
+        for requestID in rejectedPresenceRequests {
+            finishPendingControlCommand(requestID, result: .failure(TurboBackendError.webSocketUnavailable))
+        }
+    }
+
     private func failPendingControlCommands(_ error: Error) {
         let pending = pendingControlCommandResponses
         pendingControlCommandResponses = [:]
+        pendingControlCommandKinds = [:]
         for continuation in pending.values {
             continuation.resume(throwing: error)
         }
@@ -1254,6 +1477,25 @@ private struct TurboControlCommandWebSocketRequest: Encodable {
     }
 }
 
+private struct TurboPresenceCommandWebSocketRequest: Encodable {
+    let type = "presence-command"
+    let requestId: String
+    let sessionId: String?
+    let commandKind: String
+    let deviceId: String
+
+    init(
+        requestId: String,
+        sessionId: String?,
+        envelope: TurboControlCommandEnvelope
+    ) {
+        self.requestId = requestId
+        self.sessionId = sessionId
+        commandKind = envelope.commandKind
+        deviceId = envelope.deviceId
+    }
+}
+
 private struct TurboResolveIdentityRequest: Encodable {
     let reference: String
 }
@@ -1280,6 +1522,12 @@ private struct TurboChannelDeviceRequest: Encodable {
 
 private struct TurboDeviceOnlyRequest: Encodable {
     let deviceId: String
+}
+
+struct TurboReceiverAudioReadinessRequest: Encodable, Equatable {
+    let deviceId: String
+    let type: String
+    let payload: String
 }
 
 private struct TurboEphemeralTokenRequest: Encodable {

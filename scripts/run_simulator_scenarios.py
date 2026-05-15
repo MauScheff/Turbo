@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runtime-config", default=".scenario-runtime-config.json")
     parser.add_argument("--scenario-file", default="")
     parser.add_argument("--scenario-directory", default="")
+    parser.add_argument("--control-command-transport-policy", default="")
     parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument("--catalog-scenario-attempts", type=int, default=2)
     parser.add_argument("--retry-delay-seconds", type=float, default=3.0)
@@ -56,6 +57,7 @@ def write_runtime_config(path: Path, args: argparse.Namespace, scenario_filter: 
         "handleB": args.handle_b,
         "deviceIDA": args.device_id_a,
         "deviceIDB": args.device_id_b,
+        "controlCommandTransportPolicy": args.control_command_transport_policy or None,
         "scenarioFile": args.scenario_file,
         "scenarioDirectory": args.scenario_directory,
     }

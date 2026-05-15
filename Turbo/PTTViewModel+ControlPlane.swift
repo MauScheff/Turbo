@@ -15,7 +15,6 @@ extension PTTViewModel {
     ) -> ReceiverAudioReadinessIntent? {
         guard let contact = contacts.first(where: { $0.id == contactID }),
               let backend = backendServices,
-              backend.supportsWebSocket,
               let backendChannelId = contact.backendChannelId,
               let remoteUserId = contact.remoteUserId else {
             return nil
@@ -99,24 +98,46 @@ extension PTTViewModel {
             )
         }
 
+        let signalType: TurboSignalKind = intent.isReady ? .receiverReady : .receiverNotReady
+        let payload = ReceiverAudioReadinessSignalPayload(
+            reason: intent.reason,
+            telemetry: intent.telemetry
+        ).wirePayload()
+
         do {
-            try await backend.waitForWebSocketConnection()
-            try await backend.sendSignal(
-                TurboSignalEnvelope(
-                    type: intent.isReady ? .receiverReady : .receiverNotReady,
+            var publishedTransport = "http"
+            if backend.supportsWebSocket, backend.isWebSocketConnected {
+                do {
+                    try await backend.sendSignal(
+                        TurboSignalEnvelope(
+                            type: signalType,
+                            channelId: intent.backendChannelID,
+                            fromUserId: intent.currentUserID,
+                            fromDeviceId: intent.deviceID,
+                            toUserId: intent.remoteUserID,
+                            toDeviceId: targetDeviceID,
+                            payload: payload
+                        )
+                    )
+                    publishedTransport = "websocket"
+                } catch TurboBackendError.webSocketUnavailable {
+                    _ = try await backend.publishReceiverAudioReadiness(
+                        channelId: intent.backendChannelID,
+                        type: signalType,
+                        payload: payload
+                    )
+                    publishedTransport = "http"
+                }
+            } else {
+                _ = try await backend.publishReceiverAudioReadiness(
                     channelId: intent.backendChannelID,
-                    fromUserId: intent.currentUserID,
-                    fromDeviceId: intent.deviceID,
-                    toUserId: intent.remoteUserID,
-                    toDeviceId: targetDeviceID,
-                    payload: ReceiverAudioReadinessSignalPayload(
-                        reason: intent.reason,
-                        telemetry: intent.telemetry
-                    ).wirePayload()
+                    type: signalType,
+                    payload: payload
                 )
-            )
+                publishedTransport = "http"
+            }
             diagnostics.record(
-                .websocket,
+                publishedTransport == "websocket" ? .websocket : .backend,
                 message: "Published receiver audio readiness",
                 metadata: [
                     "contactId": intent.contactID.uuidString,
@@ -124,6 +145,7 @@ extension PTTViewModel {
                     "state": intent.isReady ? "ready" : "not-ready",
                     "reason": intent.reason.wireValue,
                     "targetDeviceId": targetDeviceID.isEmpty ? "server-selected" : targetDeviceID,
+                    "transport": publishedTransport,
                 ]
             )
             controlPlaneCoordinator.send(.receiverAudioReadinessPublished(intent))

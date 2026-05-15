@@ -20,6 +20,7 @@ def sample_report(
     *,
     handle: str = "@avery",
     device_id: str = "device-avery",
+    uploaded_at: str = "2026-05-14T10:00:00Z",
     snapshot: dict[str, str] | None = None,
     invariant_violations: list[merged_diagnostics.InvariantViolation] | None = None,
 ) -> merged_diagnostics.Report:
@@ -29,7 +30,7 @@ def sample_report(
         app_version="1.0",
         scenario_name=None,
         scenario_run_id=None,
-        uploaded_at="2026-05-14T10:00:00Z",
+        uploaded_at=uploaded_at,
         structured_diagnostics=None,
         snapshot=snapshot
         or {
@@ -114,6 +115,34 @@ class MergedDiagnosticsClassificationTests(unittest.TestCase):
         self.assertEqual(
             [violation.invariant_id for violation in violations],
             ["selected.request_call_flap"],
+        )
+
+    def test_strict_merge_fails_on_current_or_historical_violations(self) -> None:
+        current_violation = merged_diagnostics.InvariantViolation(
+            subject="@avery",
+            invariant_id="pair.one_sided_ready_session",
+            scope="pair",
+            message="pair mismatch remains active",
+            source="merged",
+            timestamp=datetime(2026, 5, 14, 10, 0, 8, tzinfo=timezone.utc),
+        )
+        historical_violation = merged_diagnostics.InvariantViolation(
+            subject="@avery",
+            invariant_id="selected.request_call_flap",
+            scope="local",
+            message="request/call flap recovered",
+            source="ios",
+            timestamp=datetime(2026, 5, 14, 10, 0, 4, tzinfo=timezone.utc),
+        )
+
+        self.assertTrue(
+            merged_diagnostics.strict_merge_should_fail([], [historical_violation])
+        )
+        self.assertTrue(
+            merged_diagnostics.strict_merge_should_fail(
+                [current_violation],
+                [historical_violation],
+            )
         )
 
     def test_mixed_current_pair_and_historical_local_violations_stay_split(self) -> None:
@@ -213,6 +242,177 @@ class MergedDiagnosticsClassificationTests(unittest.TestCase):
             ["pair.one_sided_connectable_session"],
         )
 
+    def test_pair_backend_ready_ui_not_live_catches_idle_projection(self) -> None:
+        left_report = sample_report()
+        right_report = sample_report(
+            handle="@blake",
+            device_id="device-blake",
+            snapshot={
+                "selectedPeerPhase": "idle",
+                "selectedPeerStatus": "Blake is online",
+                "selectedContact": "@avery",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "true",
+                "backendChannelStatus": "ready",
+                "backendReadiness": "ready",
+                "isJoined": "false",
+                "systemSession": "none",
+            },
+        )
+
+        violations = merged_diagnostics.analyze_reports(
+            [left_report, right_report],
+            include_recorded_violations=False,
+        )
+
+        self.assertIn(
+            "pair.backend_ready_ui_not_live",
+            [violation.invariant_id for violation in violations],
+        )
+
+    def test_pair_symmetric_peer_ready_without_session_catches_durable_membership_split(self) -> None:
+        left_report = sample_report(
+            snapshot={
+                "selectedPeerPhase": "peerReady",
+                "selectedPeerStatus": "Blake is ready",
+                "selectedContact": "@blake",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "false",
+                "backendChannelStatus": "none",
+                "backendReadiness": "inactive",
+                "isJoined": "false",
+                "systemSession": "none",
+            },
+        )
+        right_report = sample_report(
+            handle="@blake",
+            device_id="device-blake",
+            snapshot={
+                "selectedPeerPhase": "peerReady",
+                "selectedPeerStatus": "Avery is ready",
+                "selectedContact": "@avery",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "false",
+                "backendChannelStatus": "none",
+                "backendReadiness": "inactive",
+                "isJoined": "false",
+                "systemSession": "none",
+            },
+        )
+
+        violations = merged_diagnostics.analyze_reports(
+            [left_report, right_report],
+            include_recorded_violations=False,
+        )
+
+        self.assertIn(
+            "pair.symmetric_peer_ready_without_session",
+            [violation.invariant_id for violation in violations],
+        )
+
+    def test_pair_pending_request_receiver_not_observed_requires_stale_receiver_evidence(self) -> None:
+        requester_report = sample_report(
+            uploaded_at="2026-05-14T10:00:10Z",
+            snapshot={
+                "selectedPeerPhase": "requested",
+                "selectedPeerStatus": "Request sent",
+                "selectedContact": "@blake",
+                "selectedPeerRelationship": "outgoingRequest(1)",
+                "backendSelfJoined": "false",
+                "backendPeerJoined": "false",
+                "backendPeerDeviceConnected": "false",
+                "backendChannelStatus": "none",
+                "backendReadiness": "inactive",
+                "isJoined": "false",
+                "systemSession": "none",
+            },
+        )
+        receiver_report = sample_report(
+            handle="@blake",
+            device_id="device-blake",
+            uploaded_at="2026-05-14T10:00:00Z",
+            snapshot={
+                "selectedPeerPhase": "idle",
+                "selectedPeerStatus": "Avery is online",
+                "selectedContact": "@avery",
+                "selectedPeerRelationship": "none",
+                "backendSelfJoined": "false",
+                "backendPeerJoined": "false",
+                "backendPeerDeviceConnected": "false",
+                "backendChannelStatus": "none",
+                "backendReadiness": "inactive",
+                "isJoined": "false",
+                "systemSession": "none",
+            },
+        )
+
+        violations = merged_diagnostics.analyze_reports(
+            [requester_report, receiver_report],
+            include_recorded_violations=False,
+        )
+
+        self.assertEqual(
+            [violation.invariant_id for violation in violations],
+            ["pair.pending_request_receiver_not_observed"],
+        )
+        self.assertEqual(
+            violations[0].metadata["ageDeltaMs"],
+            "10000",
+        )
+
+    def test_pair_pending_request_receiver_not_observed_skips_fresh_receiver_gap(self) -> None:
+        requester_report = sample_report(
+            uploaded_at="2026-05-14T10:00:04Z",
+            snapshot={
+                "selectedPeerPhase": "requested",
+                "selectedPeerStatus": "Request sent",
+                "selectedContact": "@blake",
+                "selectedPeerRelationship": "outgoingRequest(1)",
+                "backendSelfJoined": "false",
+                "backendPeerJoined": "false",
+                "backendPeerDeviceConnected": "false",
+                "backendChannelStatus": "none",
+                "backendReadiness": "inactive",
+                "isJoined": "false",
+                "systemSession": "none",
+            },
+        )
+        receiver_report = sample_report(
+            handle="@blake",
+            device_id="device-blake",
+            uploaded_at="2026-05-14T10:00:00Z",
+            snapshot={
+                "selectedPeerPhase": "idle",
+                "selectedPeerStatus": "Avery is online",
+                "selectedContact": "@avery",
+                "selectedPeerRelationship": "none",
+                "backendSelfJoined": "false",
+                "backendPeerJoined": "false",
+                "backendPeerDeviceConnected": "false",
+                "backendChannelStatus": "none",
+                "backendReadiness": "inactive",
+                "isJoined": "false",
+                "systemSession": "none",
+            },
+        )
+
+        violations = merged_diagnostics.analyze_reports(
+            [requester_report, receiver_report],
+            include_recorded_violations=False,
+        )
+
+        self.assertNotIn(
+            "pair.pending_request_receiver_not_observed",
+            [violation.invariant_id for violation in violations],
+        )
+
 
 class ProductionReplayInvariantIDTests(unittest.TestCase):
     def test_invariant_ids_include_current_and_historical_violation_lists(self) -> None:
@@ -248,11 +448,38 @@ class ProductionReplayInvariantIDTests(unittest.TestCase):
             {"pair.one_sided_ready_session", "selected.request_call_flap"},
         )
 
+    def test_pair_matrix_fixture_preserves_multiple_current_pair_violations(self) -> None:
+        fixture_path = Path(__file__).resolve().parent.parent / "fixtures" / "production_replay" / "merged_diagnostics_pair_matrix.json"
+        with fixture_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+
+        self.assertEqual(
+            [violation["invariantId"] for violation in payload["currentViolations"]],
+            [
+                "pair.one_sided_connectable_session",
+                "pair.backend_ready_ui_not_live",
+                "pair.pending_request_receiver_not_observed",
+            ],
+        )
+        self.assertEqual(
+            [violation["invariantId"] for violation in payload["historicalViolations"]],
+            ["selected.request_call_flap"],
+        )
+        self.assertEqual(
+            convert_production_replay.invariant_ids_from(payload),
+            {
+                "pair.one_sided_connectable_session",
+                "pair.backend_ready_ui_not_live",
+                "pair.pending_request_receiver_not_observed",
+                "selected.request_call_flap",
+            },
+        )
+
 
 class DownstreamSplitConsumerTests(unittest.TestCase):
     def test_reliability_intake_split_violations_prefers_split_keys(self) -> None:
         payload = {
-            "violations": [{"invariantId": "legacy.flattened"}],
+            "violations": [{"invariantId": "selected.call_visible_peer_online"}],
             "currentViolations": [{"invariantId": "pair.one_sided_ready_session"}],
             "historicalViolations": [{"invariantId": "selected.request_call_flap"}],
         }
@@ -320,6 +547,28 @@ class DownstreamSplitConsumerTests(unittest.TestCase):
         self.assertEqual(objective.observed, "0")
         self.assertEqual(objective.details["currentCount"], 0)
         self.assertEqual(objective.details["historicalCount"], 1)
+
+    def test_slo_dashboard_counts_multiple_current_pair_violations_from_fixture(self) -> None:
+        fixture_path = Path(__file__).resolve().parent.parent / "fixtures" / "production_replay" / "merged_diagnostics_pair_matrix.json"
+        with fixture_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+
+        objective = slo_dashboard.diagnostics_objectives(
+            [{**payload, "_sourcePath": str(fixture_path)}]
+        )[0]
+
+        self.assertEqual(objective.status, "breach")
+        self.assertEqual(objective.observed, "3")
+        self.assertEqual(objective.details["currentCount"], 3)
+        self.assertEqual(objective.details["historicalCount"], 1)
+        self.assertEqual(
+            objective.details["byInvariantId"],
+            {
+                "pair.backend_ready_ui_not_live": 1,
+                "pair.one_sided_connectable_session": 1,
+                "pair.pending_request_receiver_not_observed": 1,
+            },
+        )
 
     def test_reliability_intake_summary_separates_current_and_historical_sections(self) -> None:
         args = argparse.Namespace(

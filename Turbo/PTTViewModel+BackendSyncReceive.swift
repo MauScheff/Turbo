@@ -10,8 +10,8 @@ import UIKit
 
 private enum PendingPlaybackDrainDecision {
     case notPending
-    case deferTimeout(elapsedNanoseconds: UInt64)
-    case exceeded(elapsedNanoseconds: UInt64)
+    case deferTimeout(elapsedNanoseconds: UInt64, maxNanoseconds: UInt64)
+    case exceeded(elapsedNanoseconds: UInt64, maxNanoseconds: UInt64)
 }
 
 extension PTTViewModel {
@@ -19,11 +19,23 @@ extension PTTViewModel {
     var encryptedAudioRecoveryAttempts: Int { 6 }
     var encryptedAudioRecoveryRetryNanoseconds: UInt64 { 250_000_000 }
 
-    private func remoteAudioTimeoutNanoseconds(for phase: RemoteReceiveTimeoutPhase) -> UInt64 {
+    private func remoteAudioTimeoutNanoseconds(
+        for contactID: UUID,
+        phase: RemoteReceiveTimeoutPhase
+    ) -> UInt64 {
         switch phase {
         case .awaitingFirstAudioChunk:
             return remoteAudioInitialChunkTimeoutNanoseconds
         case .drainingAudio:
+            let authoritativePeerTransmit =
+                selectedChannelSnapshot(for: contactID)?.status == .receiving
+                || selectedChannelSnapshot(for: contactID)?.readinessStatus?.isPeerTransmitting == true
+            if !authoritativePeerTransmit {
+                return min(
+                    remoteAudioSilenceTimeoutNanoseconds,
+                    remoteAudioNonAuthoritativePlaybackDrainPollNanoseconds
+                )
+            }
             return remoteAudioSilenceTimeoutNanoseconds
         }
     }
@@ -33,7 +45,7 @@ extension PTTViewModel {
         case .scheduleRemoteSilenceTimeout(let contactID, let phase, let generation):
             let task = Task { [weak self] in
                 try? await Task.sleep(
-                    nanoseconds: self?.remoteAudioTimeoutNanoseconds(for: phase) ?? 0
+                    nanoseconds: self?.remoteAudioTimeoutNanoseconds(for: contactID, phase: phase) ?? 0
                 )
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
@@ -68,7 +80,7 @@ extension PTTViewModel {
             ?? receiveExecutionCoordinator.state.remoteActivityByContactID[contactID]?.timeoutPhase
             ?? .drainingAudio
         switch pendingPlaybackDrainDecision(for: contactID, phase: resolvedPhase) {
-        case .deferTimeout(let elapsedNanoseconds):
+        case .deferTimeout(let elapsedNanoseconds, let maxNanoseconds):
             diagnostics.record(
                 .media,
                 message: "Deferred remote audio silence timeout while playback is still draining",
@@ -76,7 +88,7 @@ extension PTTViewModel {
                     "contactId": contactID.uuidString,
                     "phase": resolvedPhase.rawValue,
                     "elapsedMilliseconds": String(elapsedNanoseconds / 1_000_000),
-                    "maxMilliseconds": String(remoteAudioPendingPlaybackDrainMaxNanoseconds / 1_000_000),
+                    "maxMilliseconds": String(maxNanoseconds / 1_000_000),
                 ]
             )
             runReceiveExecutionEffect(
@@ -90,21 +102,23 @@ extension PTTViewModel {
                 )
             )
             return
-        case .exceeded(let elapsedNanoseconds):
-            diagnostics.recordInvariantViolation(
-                invariantID: "selected.receiving_stale_pending_playback_drain",
-                scope: .local,
-                message: "selectedPeerPhase=receiving while pending playback drain exceeded maximum duration",
-                metadata: [
-                    "contactId": contactID.uuidString,
-                    "phase": resolvedPhase.rawValue,
-                    "elapsedMilliseconds": String(elapsedNanoseconds / 1_000_000),
-                    "maxMilliseconds": String(remoteAudioPendingPlaybackDrainMaxNanoseconds / 1_000_000),
-                    "backendChannelStatus": selectedChannelSnapshot(for: contactID)?.status?.rawValue ?? "none",
-                    "backendReadiness": selectedChannelSnapshot(for: contactID)?.readinessStatus?.kind ?? "none",
-                    "selectedPeerPhase": String(describing: selectedPeerState(for: contactID).phase),
-                ]
-            )
+        case .exceeded(let elapsedNanoseconds, let maxNanoseconds):
+            if selectedPeerState(for: contactID).phase == .receiving {
+                diagnostics.recordInvariantViolation(
+                    invariantID: "selected.receiving_stale_pending_playback_drain",
+                    scope: .local,
+                    message: "selectedPeerPhase=receiving while pending playback drain exceeded maximum duration",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "phase": resolvedPhase.rawValue,
+                        "elapsedMilliseconds": String(elapsedNanoseconds / 1_000_000),
+                        "maxMilliseconds": String(maxNanoseconds / 1_000_000),
+                        "backendChannelStatus": selectedChannelSnapshot(for: contactID)?.status?.rawValue ?? "none",
+                        "backendReadiness": selectedChannelSnapshot(for: contactID)?.readinessStatus?.kind ?? "none",
+                        "selectedPeerPhase": String(describing: selectedPeerState(for: contactID).phase),
+                    ]
+                )
+            }
         case .notPending:
             break
         }
@@ -188,13 +202,29 @@ extension PTTViewModel {
             return .notPending
         }
 
+        let authoritativePeerTransmit =
+            selectedChannelSnapshot(for: contactID)?.status == .receiving
+            || selectedChannelSnapshot(for: contactID)?.readinessStatus?.isPeerTransmitting == true
+        let maximumDrainNanoseconds =
+            authoritativePeerTransmit
+            ? remoteAudioPendingPlaybackDrainMaxNanoseconds
+            : min(
+                remoteAudioPendingPlaybackDrainMaxNanoseconds,
+                remoteAudioNonAuthoritativePlaybackDrainMaxNanoseconds
+            )
         let elapsedNanoseconds = receiveExecutionRuntime
             .pendingPlaybackDrainDeferralElapsedNanoseconds(for: contactID)
-        guard elapsedNanoseconds < remoteAudioPendingPlaybackDrainMaxNanoseconds else {
+        guard elapsedNanoseconds < maximumDrainNanoseconds else {
             receiveExecutionRuntime.clearPendingPlaybackDrainDeferral(for: contactID)
-            return .exceeded(elapsedNanoseconds: elapsedNanoseconds)
+            return .exceeded(
+                elapsedNanoseconds: elapsedNanoseconds,
+                maxNanoseconds: maximumDrainNanoseconds
+            )
         }
-        return .deferTimeout(elapsedNanoseconds: elapsedNanoseconds)
+        return .deferTimeout(
+            elapsedNanoseconds: elapsedNanoseconds,
+            maxNanoseconds: maximumDrainNanoseconds
+        )
     }
 
     private func shouldDeferRemoteAudioSilenceTimeout(

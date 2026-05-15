@@ -1300,6 +1300,15 @@ extension PTTViewModel {
             && isWebSocketConnected)
     }
 
+    func backendJoinVisibilityIsAuthoritative(
+        channelState: TurboChannelStateResponse,
+        readiness: TurboChannelReadinessResponse?
+    ) -> Bool {
+        guard channelState.membership.hasLocalMembership else { return false }
+        guard let readiness else { return false }
+        return readiness.selfHasActiveDevice
+    }
+
     func refreshBackendJoinSessionEvidence(
         _ backend: BackendServices,
         request: BackendJoinRequest
@@ -1597,15 +1606,42 @@ extension PTTViewModel {
             }
 
             do {
-                let channelState = try await backend.channelState(channelId: channelId)
+                async let channelStateTask = backend.channelState(channelId: channelId)
+                async let readinessTask = backend.channelReadiness(channelId: channelId)
+                let channelState = try await channelStateTask
+                let readiness = try? await readinessTask
                 if await discardSupersededBackendJoinIfNeeded(
                     request,
                     stage: "membership-visibility-response"
                 ) {
                     return false
                 }
-                backendSyncCoordinator.send(.channelStateUpdated(contactID: contactID, channelState: channelState))
-                if channelState.membership.hasLocalMembership {
+                let authoritativeVisibility = backendJoinVisibilityIsAuthoritative(
+                    channelState: channelState,
+                    readiness: readiness
+                )
+                if !channelState.membership.hasLocalMembership || authoritativeVisibility {
+                    backendSyncCoordinator.send(.channelStateUpdated(contactID: contactID, channelState: channelState))
+                    if let readiness {
+                        applyChannelReadiness(readiness, for: contactID, reason: "backend-join-visibility")
+                    }
+                } else {
+                    diagnostics.record(
+                        .backend,
+                        level: .notice,
+                        message: "Ignored stale backend join membership while active device readiness is missing",
+                        metadata: [
+                            "contactId": request.contactID.uuidString,
+                            "handle": request.handle,
+                            "channelId": channelId,
+                            "attempt": "\(attempt)",
+                            "channelStatus": channelState.statusKind,
+                            "readinessStatus": readiness?.statusKind ?? "none",
+                            "selfHasActiveDevice": String(readiness?.selfHasActiveDevice ?? false),
+                        ]
+                    )
+                }
+                if authoritativeVisibility {
                     if attempt > 1 {
                         diagnostics.record(
                             .backend,

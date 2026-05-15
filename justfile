@@ -75,6 +75,9 @@ backend-stability-probe base="https://beepbeep.to" handle="@mau" iterations="10"
 websocket-stability-probe base="https://beepbeep.to" caller="@quinn" callee="@sasha" duration="90" heartbeat_interval="20" telemetry_interval="0" insecure="--insecure":
   python3 scripts/websocket_stability_probe.py --base-url "{{base}}" --caller "{{caller}}" --callee "{{callee}}" --duration "{{duration}}" --heartbeat-interval "{{heartbeat_interval}}" --telemetry-interval "{{telemetry_interval}}" {{insecure}}
 
+hosted-backend-client-probe base="https://beepbeep.to" duration="60" heartbeat_interval="20" telemetry_interval="20" output="/tmp/turbo-debug/hosted_backend_client_probe_latest.json":
+  python3 scripts/run_hosted_backend_client_probe.py --base-url "{{base}}" --duration "{{duration}}" --heartbeat-interval "{{heartbeat_interval}}" --telemetry-interval "{{telemetry_interval}}" --output "{{output}}"
+
 direct-quic-provisioning-probe:
   .venv/bin/python scripts/direct_quic_provisioning_probe.py --base-url https://beepbeep.to --caller @quinn --callee @sasha --insecure
 
@@ -228,6 +231,9 @@ simulator-scenario-merge-strict base="https://beepbeep.to" handle_a="@avery" han
 
 simulator-scenario-hosted-strict scenario="" base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" insecure="--insecure":
   sh -c 'device_a="sim-scenario-avery-$(uuidgen | tr "[:upper:]" "[:lower:]")"; device_b="sim-scenario-blake-$(uuidgen | tr "[:upper:]" "[:lower:]")"; python3 scripts/run_simulator_scenarios.py --scenario "{{scenario}}" --base-url "{{base}}" --handle-a "{{handle_a}}" --handle-b "{{handle_b}}" --device-id-a "$device_a" --device-id-b "$device_b" && python3 scripts/merged_diagnostics.py --base-url "{{base}}" {{insecure}} --fail-on-violations --device "{{handle_a}}=$device_a" --device "{{handle_b}}=$device_b"'
+
+simulator-scenario-http-control scenario="" base="https://beepbeep.to" handle_a="@avery" handle_b="@blake" insecure="--insecure":
+  sh -c 'device_a="sim-scenario-avery-$(uuidgen | tr "[:upper:]" "[:lower:]")"; device_b="sim-scenario-blake-$(uuidgen | tr "[:upper:]" "[:lower:]")"; python3 scripts/run_simulator_scenarios.py --scenario "{{scenario}}" --base-url "{{base}}" --handle-a "{{handle_a}}" --handle-b "{{handle_b}}" --device-id-a "$device_a" --device-id-b "$device_b" --control-command-transport-policy "http-only" && python3 scripts/merged_diagnostics.py --base-url "{{base}}" {{insecure}} --fail-on-violations --device "{{handle_a}}=$device_a" --device "{{handle_b}}=$device_b"'
 
 simulator-scenario-local scenario="" base="http://localhost:8090/s/turbo" handle_a="@avery" handle_b="@blake":
   python3 scripts/run_simulator_scenarios.py \

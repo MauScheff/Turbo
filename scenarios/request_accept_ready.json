@@ -104,14 +104,14 @@
       }
     },
     {
-      "description": "disconnect clears both joined states",
+      "description": "recipient disconnects while requester stays live",
       "actions": [
         { "actor": "b", "type": "disconnect" }
       ],
       "expectEventually": {
         "a": {
           "selectedHandle": "@blake",
-          "isJoined": false,
+          "isJoined": true,
           "isTransmitting": false,
           "noInvariantViolations": true
         },

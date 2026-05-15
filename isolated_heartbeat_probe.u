@@ -1,0 +1,65 @@
+turbo.probes.heartbeatLatency.pureRoute : '{Route, Exception} ()
+turbo.probes.heartbeatLatency.pureRoute = do
+  use Parser /
+  use object empty
+  noCapture POST (s "heartbeat")
+  fields = decodeJson (Decoder.object Decoder.text)
+  match Map.get "deviceId" fields with
+    None              -> badRequest.json (empty |> addText "error" "missing deviceId")
+    Some deviceIdText -> ok.json (empty |> addText "deviceId" deviceIdText |> addText "status" "online")
+
+turbo.probes.heartbeatLatency.forkRoute : '{Route, Exception, Remote} ()
+turbo.probes.heartbeatLatency.forkRoute = do
+  use Parser /
+  use object empty
+  noCapture POST (s "heartbeat-fork")
+  fields = decodeJson (Decoder.object Decoder.text)
+  match Map.get "deviceId" fields with
+    None              -> badRequest.json (empty |> addText "error" "missing deviceId")
+    Some deviceIdText ->
+      _ = forkAt pool() do
+        toRemote do ()
+      ok.json (empty |> addText "deviceId" deviceIdText |> addText "status" "online")
+
+turbo.probes.heartbeatLatency.localForkRoute : '{Route, Exception, Remote} ()
+turbo.probes.heartbeatLatency.localForkRoute = do
+  use Parser /
+  use object empty
+  noCapture POST (s "heartbeat-local-fork")
+  fields = decodeJson (Decoder.object Decoder.text)
+  match Map.get "deviceId" fields with
+    None              -> badRequest.json (empty |> addText "error" "missing deviceId")
+    Some deviceIdText ->
+      _ = Remote.fork pool() do
+        toRemote do ()
+      ok.json (empty |> addText "deviceId" deviceIdText |> addText "status" "online")
+
+turbo.probes.heartbeatLatency.table : Database -> OrderedTable Text Text
+turbo.probes.heartbeatLatency.table db =
+  OrderedTable.named db "isolatedHeartbeatLatencyByDevice_v1" Universal.ordering
+
+turbo.probes.heartbeatLatency.storageRoute : Database -> '{Route, Exception, Storage, Remote} ()
+turbo.probes.heartbeatLatency.storageRoute db = do
+  use Parser /
+  use object empty
+  noCapture POST (s "heartbeat-storage")
+  fields = decodeJson (Decoder.object Decoder.text)
+  match Map.get "deviceId" fields with
+    None              -> badRequest.json (empty |> addText "error" "missing deviceId")
+    Some deviceIdText ->
+      _ = OrderedTable.write (heartbeatLatency.table db) deviceIdText deviceIdText
+      ok.json (empty |> addText "deviceId" deviceIdText |> addText "status" "online")
+
+turbo.probes.heartbeatLatency.service : Database -> '{Route, Exception, Storage, Remote} ()
+turbo.probes.heartbeatLatency.service db =
+  Route.or heartbeatLatency.pureRoute (Route.or heartbeatLatency.forkRoute (Route.or heartbeatLatency.localForkRoute (heartbeatLatency.storageRoute db)))
+
+turbo.probes.heartbeatLatency.deploy : '{IO, Exception} URI
+turbo.probes.heartbeatLatency.deploy = Cloud.main do
+  env = Environment.named "turbo-heartbeat-latency-probe-v1"
+  db = Database.named "turbo-heartbeat-latency-probe-v1"
+  Database.assign db env
+  serviceHash = Route.deploy env (heartbeatLatency.service db)
+  serviceName = ServiceName.named "turbo-heartbeat-latency-probe-v1"
+  _ = catch do ServiceName.unassign serviceName
+  ServiceName.assign serviceName serviceHash

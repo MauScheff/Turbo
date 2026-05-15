@@ -24,6 +24,7 @@ struct RemoteReceiveActivityState: Equatable {
 
 struct ReceiveExecutionSessionState: Equatable {
     var remoteActivityByContactID: [UUID: RemoteReceiveActivityState] = [:]
+    var remoteTransmitStoppedContactIDs: Set<UUID> = []
 
     var remoteTransmittingContactIDs: Set<UUID> {
         Set(
@@ -34,6 +35,7 @@ struct ReceiveExecutionSessionState: Equatable {
     }
 
     mutating func replaceRemoteTransmittingContactIDs(_ contactIDs: Set<UUID>) {
+        remoteTransmitStoppedContactIDs.subtract(contactIDs)
         remoteActivityByContactID = contactIDs.reduce(into: [:]) { result, contactID in
             result[contactID] = RemoteReceiveActivityState(
                 lastSource: .transmitStartSignal,
@@ -83,12 +85,23 @@ enum ReceiveExecutionReducer {
 
         case .remoteActivityDetected(let contactID, let source):
             let previousActivity = nextState.remoteActivityByContactID[contactID]
+            let stopAlreadyObserved =
+                nextState.remoteTransmitStoppedContactIDs.contains(contactID)
+            if source != .audioChunk {
+                nextState.remoteTransmitStoppedContactIDs.remove(contactID)
+            }
             let continuesPlaybackDrainAfterStop =
-                previousActivity?.isPeerTransmitting == false
-                && source == .audioChunk
+                source == .audioChunk
+                && (
+                    previousActivity?.isPeerTransmitting == false
+                    || stopAlreadyObserved
+                )
             let startsNewPeerTransmitAfterDrain =
-                previousActivity?.isPeerTransmitting == false
-                && source != .audioChunk
+                source != .audioChunk
+                && (
+                    previousActivity?.isPeerTransmitting == false
+                    || stopAlreadyObserved
+                )
             let hasReceivedAudioChunk =
                 (!startsNewPeerTransmitAfterDrain && (previousActivity?.hasReceivedAudioChunk ?? false))
                 || source == .audioChunk
@@ -108,6 +121,7 @@ enum ReceiveExecutionReducer {
             )
 
         case .remoteTransmitStopped(let contactID, let preservePlaybackDrain):
+            nextState.remoteTransmitStoppedContactIDs.insert(contactID)
             guard var activityState = nextState.remoteActivityByContactID[contactID] else {
                 break
             }

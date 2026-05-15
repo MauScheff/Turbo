@@ -822,7 +822,6 @@ struct SelectedPeerState: Equatable {
 
     var allowsHoldToTalk: Bool {
         canTransmitNow
-            || phase == .ready
             || phase == .wakeReady
             || phase == .transmitting
             || phase == .startingTransmit
@@ -1102,6 +1101,8 @@ struct ConversationDerivationContext: Equatable {
     let isJoined: Bool
     let localTransmit: LocalTransmitProjection
     let peerSignalIsTransmitting: Bool
+    let remotePlaybackDrainBlocksTransmit: Bool
+    let remoteTransmitStopObserved: Bool
     let activeChannelID: UUID?
     let systemSessionMatchesContact: Bool
     let systemSessionState: SystemPTTSessionState
@@ -1137,6 +1138,8 @@ struct ConversationDerivationContext: Equatable {
         localSystemIsTransmitting: Bool = false,
         localPTTAudioSessionActive: Bool = false,
         peerSignalIsTransmitting: Bool = false,
+        remotePlaybackDrainBlocksTransmit: Bool = false,
+        remoteTransmitStopObserved: Bool = false,
         activeChannelID: UUID?,
         systemSessionMatchesContact: Bool,
         systemSessionState: SystemPTTSessionState,
@@ -1173,6 +1176,8 @@ struct ConversationDerivationContext: Equatable {
             mediaState: mediaState
         )
         self.peerSignalIsTransmitting = peerSignalIsTransmitting
+        self.remotePlaybackDrainBlocksTransmit = remotePlaybackDrainBlocksTransmit
+        self.remoteTransmitStopObserved = remoteTransmitStopObserved
         self.activeChannelID = activeChannelID
         self.systemSessionMatchesContact = systemSessionMatchesContact
         self.systemSessionState = systemSessionState
@@ -2160,7 +2165,19 @@ enum ConversationStateMachine {
                 return .teardownSelectedSession(contactID: context.contactID)
             }
             return .none
-        case .peerOnly, .selfOnly, .both:
+        case .peerOnly:
+            if localSessionActive,
+               context.channel != nil,
+               !context.backendJoinSettling,
+               !context.systemMismatchChannelMatchesContact,
+               !context.unattributedJoinedSystemMismatch,
+               !context.channelHasRequestRelationship,
+               !context.peerSignalIsTransmitting,
+               !explicitLeaveRequested {
+                return .teardownSelectedSession(contactID: context.contactID)
+            }
+            return .none
+        case .selfOnly, .both:
             break
         }
 
@@ -2176,6 +2193,7 @@ enum ConversationStateMachine {
            context.localSessionReadiness != .aligned,
            !localRestoreInFlight,
            context.backendReadyAutoRestoreAllowed,
+           !context.pendingAction.isLeaveInFlight(for: context.contactID),
            !explicitLeaveRequested {
             return .restoreLocalSession(contactID: context.contactID)
         }
@@ -2377,6 +2395,9 @@ private extension ConversationDerivationContext {
             || readinessStatus == .ready
 
         let sessionTransmitReady = effectivePeerDeviceConnected
+        if remotePlaybackDrainBlocksTransmit {
+            return .ready
+        }
         if sessionTransmitReady && peerSignalIsTransmitting {
             return .receiving
         }
@@ -2418,6 +2439,10 @@ private extension ConversationDerivationContext {
         }
 
         if sessionTransmitReady && canTransmit {
+            if shouldKeepReadyProjectionDuringLocalWarmup {
+                return .ready
+            }
+
             guard directMediaPathActive || localRelayTransportReady else {
                 return .waiting(reason: .localTransportWarmup, statusMessage: "Connecting...")
             }
@@ -2506,10 +2531,16 @@ private extension ConversationDerivationContext {
             guard sessionTransmitReady else {
                 return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
             }
+            guard !remoteTransmitStopObserved else {
+                return .ready
+            }
             return .receiving
         case .selfTransmitting:
             guard sessionTransmitReady else {
                 return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
+            }
+            guard localTransmit.hasTransmitIntent else {
+                return .ready
             }
             return .transmitting
         case .ready where canTransmit:
@@ -2599,6 +2630,8 @@ private extension ConversationDerivationContext {
         guard selectedContactID == contactID,
               localSessionReadiness == .aligned,
               localTransmit == .idle,
+              !peerSignalIsTransmitting,
+              !remotePlaybackDrainBlocksTransmit,
               (!backendSignalingJoinRecoveryActive || backendReadyAuthoritativelySatisfiesRemoteAudio),
               case .both(_, let canTransmit, _) = backendChannelReadiness,
               effectivePeerDeviceConnectedForTransmit else {
@@ -2659,6 +2692,24 @@ private extension ConversationDerivationContext {
               canTransmit,
               remoteAudioReadinessState == .wakeCapable,
               case .wakeCapable = remoteWakeCapabilityState else {
+            return false
+        }
+
+        return true
+    }
+
+    var shouldKeepReadyProjectionDuringLocalWarmup: Bool {
+        guard hadConnectedSessionContinuity,
+              localSessionReadiness == .aligned,
+              !backendSignalingJoinRecoveryActive,
+              !controlPlaneReconnectGraceActive,
+              localTransmit == .idle,
+              !peerSignalIsTransmitting,
+              !remotePlaybackDrainBlocksTransmit,
+              remoteAudioReadinessState == .ready,
+              case .both(_, let canTransmit, let readinessStatus) = backendChannelReadiness,
+              canTransmit,
+              readinessStatus == .ready else {
             return false
         }
 

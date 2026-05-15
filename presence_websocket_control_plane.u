@@ -1,0 +1,595 @@
+type turbo.service.ws.internal.PresenceCommandKind
+  = PresenceHeartbeat
+  | PresenceBackground
+  | PresenceOffline
+
+turbo.service.ws.internal.PresenceCommandKind.toText :
+  PresenceCommandKind -> Text
+turbo.service.ws.internal.PresenceCommandKind.toText = cases
+  PresenceHeartbeat -> "presence-heartbeat"
+  PresenceBackground -> "presence-background"
+  PresenceOffline -> "presence-offline"
+
+turbo.service.ws.internal.PresenceCommandKind.fromText :
+  Text -> Optional PresenceCommandKind
+turbo.service.ws.internal.PresenceCommandKind.fromText = cases
+  "presence-heartbeat" -> Some PresenceHeartbeat
+  "presence-background" -> Some PresenceBackground
+  "presence-offline" -> Some PresenceOffline
+  _ -> None
+
+test> turbo.service.ws.internal.PresenceCommandKind.tests.fromText = verify do
+  ensureEqual
+    (Some PresenceHeartbeat)
+    (PresenceCommandKind.fromText "presence-heartbeat")
+  ensureEqual
+    (Some PresenceBackground)
+    (PresenceCommandKind.fromText "presence-background")
+  ensureEqual
+    (Some PresenceOffline)
+    (PresenceCommandKind.fromText "presence-offline")
+  ensureEqual None (PresenceCommandKind.fromText "unknown")
+
+type turbo.service.ws.internal.PresenceCommandRequest
+  = PresenceCommandRequest Text PresenceCommandKind (Map Text Text)
+
+type turbo.service.ws.internal.PresenceCommandFrameParseResult
+  = NotPresenceCommandFrame
+  | InvalidPresenceCommandFrame Text
+  | ParsedPresenceCommandFrame PresenceCommandRequest
+
+turbo.service.ws.internal.presenceCommandFrameFromText :
+  Text -> PresenceCommandFrameParseResult
+turbo.service.ws.internal.presenceCommandFrameFromText text =
+  fieldsResult = catch do runAllowTrailing (Decoder.object Decoder.text) text
+  match fieldsResult with
+    Left _ -> NotPresenceCommandFrame
+    Right fields ->
+      use Text ==
+      match Map.get "type" fields with
+        Some "presence-command" ->
+          match Map.get "requestId" fields with
+            None -> InvalidPresenceCommandFrame "missing requestId"
+            Some requestId ->
+              match Map.get "commandKind" fields with
+                None -> InvalidPresenceCommandFrame "missing commandKind"
+                Some kindText ->
+                  match PresenceCommandKind.fromText kindText with
+                    None ->
+                      InvalidPresenceCommandFrame "unknown presence commandKind"
+                    Some kind ->
+                      ParsedPresenceCommandFrame
+                        (PresenceCommandRequest requestId kind fields)
+        _ -> NotPresenceCommandFrame
+
+test> turbo.service.ws.internal.presenceCommandFrameFromText.tests.examples =
+  verify do
+    parsed =
+      turbo.service.ws.internal.presenceCommandFrameFromText
+        "{\"type\":\"presence-command\",\"requestId\":\"req-1\",\"commandKind\":\"presence-heartbeat\",\"deviceId\":\"device-a\"}"
+    match parsed with
+      ParsedPresenceCommandFrame
+        (PresenceCommandRequest requestId kind fields) ->
+          _ = ensureEqual "req-1" requestId
+          _ = ensureEqual PresenceHeartbeat kind
+          ensureEqual (Some "device-a") (Map.get "deviceId" fields)
+      _ -> ensure false
+    ensureEqual
+      NotPresenceCommandFrame
+      (turbo.service.ws.internal.presenceCommandFrameFromText
+        "{\"type\":\"control-command\",\"requestId\":\"req-1\"}")
+    ensureEqual
+      (InvalidPresenceCommandFrame "missing requestId")
+      (turbo.service.ws.internal.presenceCommandFrameFromText
+        "{\"type\":\"presence-command\",\"commandKind\":\"presence-heartbeat\"}")
+
+turbo.service.ws.internal.presenceCommandResponseJson :
+  Text -> PresenceCommandKind -> ControlCommandRouteResult -> Json
+turbo.service.ws.internal.presenceCommandResponseJson requestId kind result =
+  base =
+    object.empty
+      |> addText "type" "presence-command-response"
+      |> addText "requestId" requestId
+      |> addText "commandKind" (PresenceCommandKind.toText kind)
+  match result with
+    ControlCommandRouteOk body ->
+      base
+        |> addText "status" "ok"
+        |> object.add "body" body
+    ControlCommandRouteBadRequest err ->
+      base
+        |> addText "status" "error"
+        |> addText "error" err
+    ControlCommandRouteNotFound err ->
+      base
+        |> addText "status" "error"
+        |> addText "error" err
+
+turbo.service.presence.internal.controlCommandDeviceId :
+  Optional DeviceId
+  -> Map Text Text
+  -> Either Text DeviceId
+turbo.service.presence.internal.controlCommandDeviceId
+  websocketDeviceIdOpt
+  fields =
+    match Map.get "deviceId" fields with
+      None -> Left "missing deviceId"
+      Some deviceIdText ->
+        requestedDeviceId = DeviceId.fromText deviceIdText
+        match websocketDeviceIdOpt with
+          Some websocketDeviceId ->
+            if DeviceId.toText websocketDeviceId == deviceIdText then
+              Right requestedDeviceId
+            else
+              Left "deviceId does not match authenticated socket"
+          None -> Right requestedDeviceId
+
+turbo.service.presence.internal.heartbeatControlCommand :
+  Database
+  -> User
+  -> Optional DeviceId
+  -> Map Text Text
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.presence.internal.heartbeatControlCommand
+  db
+  currentUser
+  websocketDeviceIdOpt
+  fields =
+  do
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    match controlCommandDeviceId websocketDeviceIdOpt fields with
+      Left err -> ControlCommandRouteBadRequest err
+      Right deviceId ->
+        _ = store.presence.heartbeat db deviceId currentUserId ()
+        _ = touchCurrent db deviceId ()
+        ControlCommandRouteOk
+          (object.empty
+            |> addText "deviceId" (DeviceId.toText deviceId)
+            |> addText "userId" (UserId.toText currentUserId)
+            |> addText "status" "online")
+
+turbo.service.presence.internal.backgroundControlCommand :
+  Database
+  -> User
+  -> Optional DeviceId
+  -> Map Text Text
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.presence.internal.backgroundControlCommand
+  db
+  currentUser
+  websocketDeviceIdOpt
+  fields =
+  do
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    currentHandle =
+      (User _ handleText _ _ _) = currentUser
+      handleText
+    match controlCommandDeviceId websocketDeviceIdOpt fields with
+      Left err -> ControlCommandRouteBadRequest err
+      Right deviceId ->
+        devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+        currentChannelIdOpt = match presence.get db deviceId () with
+          Some (DevicePresence _ _ _ currentChannelId _) -> currentChannelId
+          None -> None
+        _ = match currentChannelIdOpt with
+          Some channelId ->
+            _ = runtime.endTransmit db channelId currentUserId deviceId ()
+            ()
+          None -> ()
+        _ = sockets.disconnect db deviceId ()
+        _ = disconnectCurrent db deviceId ()
+        _ =
+          presence.upsert
+            db
+            deviceId
+            currentUserId
+            DevicePresenceStatus.Offline
+            currentChannelIdOpt
+            ()
+        sessionConnected = sessions.isConnected db deviceId ()
+        socketConnected = sockets.isConnected db deviceId ()
+        _ =
+          if socketConnected then
+            appendOfflineRetainedConnectedSessionInvariant
+              db
+              currentUserId
+              (Some currentHandle)
+              deviceId
+              sessionConnected
+              socketConnected
+              ()
+          else ()
+        _ =
+          internal.send
+            "backend.presence.background"
+            "backend"
+            "notice"
+            currentUserId
+            (Some currentHandle)
+            (Some deviceId)
+            currentChannelIdOpt
+            None
+            None
+            None
+            None
+            None
+            (Some "presence")
+            (Some "background")
+            (Some "presence transitioned to background")
+            None
+            devTraffic
+            false
+            ()
+        ControlCommandRouteOk
+          (object.empty
+            |> addText "deviceId" (DeviceId.toText deviceId)
+            |> addText "userId" (UserId.toText currentUserId)
+            |> addText "status" "offline")
+
+turbo.service.presence.internal.offlineControlCommand :
+  Database
+  -> User
+  -> Optional DeviceId
+  -> Map Text Text
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.presence.internal.offlineControlCommand
+  db
+  currentUser
+  websocketDeviceIdOpt
+  fields =
+  do
+    use Text ++
+    use internal send
+    use memberships remove
+    use sockets disconnect
+    currentUserId =
+      (User userId _ _ _ _) = currentUser
+      userId
+    currentHandle =
+      (User _ handleText _ _ _) = currentUser
+      handleText
+    match controlCommandDeviceId websocketDeviceIdOpt fields with
+      Left err -> ControlCommandRouteBadRequest err
+      Right deviceId ->
+        devTraffic = isWhitelistedDevHandle (Some currentHandle) ()
+        currentChannelIdOpt = match presence.get db deviceId () with
+          Some (DevicePresence _ _ _ currentChannelId _) -> currentChannelId
+          None -> None
+        _ = match currentChannelIdOpt with
+          Some channelId ->
+            _ = runtime.endTransmit db channelId currentUserId deviceId ()
+            _ = clearActiveChannel db deviceId currentUserId ()
+            _ = remove db channelId currentUserId ()
+            match OrderedTable.tryRead (channels.tables.byId db) channelId with
+              Some (DirectChannel _ lowUserId highUserId _) ->
+                peerUserId =
+                  if userIdEqual lowUserId currentUserId then highUserId
+                  else lowUserId
+                _ = remove db channelId peerUserId ()
+                match getRawForUserInChannel db peerUserId channelId () with
+                  Some (DevicePresence peerDeviceId _ _ _ _) ->
+                    _ = clearActiveChannel db peerDeviceId peerUserId ()
+                    ()
+                  None -> ()
+              None -> ()
+          None -> ()
+        _ = disconnect db deviceId ()
+        _ = disconnectCurrent db deviceId ()
+        initialSessionConnected = sessions.isConnected db deviceId ()
+        initialSocketConnected = sockets.isConnected db deviceId ()
+        initialConnected =
+          summaryPeerPresenceIsOnline
+            initialSessionConnected
+            initialSocketConnected
+        _ =
+          if initialConnected then
+            _ = disconnect db deviceId ()
+            _ = disconnectCurrent db deviceId ()
+            ()
+          else ()
+        sessionConnected = sessions.isConnected db deviceId ()
+        socketConnected = sockets.isConnected db deviceId ()
+        repairPlan =
+          offlineConnectedSessionRepairPlan
+            initialSessionConnected
+            initialSocketConnected
+            sessionConnected
+            socketConnected
+        _ = match repairPlan with
+          ConnectedSessionRepairSucceeded ->
+            metadata =
+              "deviceId="
+                ++ DeviceId.toText deviceId
+                ++ " sessionConnected="
+                ++ (if initialSessionConnected then "true" else "false")
+                ++ " socketConnected="
+                ++ (if initialSocketConnected then "true" else "false")
+            _ =
+              send
+                "backend.presence.offline.repair"
+                "backend"
+                "notice"
+                currentUserId
+                (Some currentHandle)
+                (Some deviceId)
+                currentChannelIdOpt
+                None
+                None
+                None
+                None
+                None
+                (Some "presence")
+                (Some "offline")
+                (Some "presence.offline repaired connected session residue")
+                (Some metadata)
+                devTraffic
+                false
+                ()
+            ()
+          _ -> ()
+        _ = presence.upsert db deviceId currentUserId DevicePresenceStatus.Offline None ()
+        _ = match repairPlan with
+          ConnectedSessionRepairFailed ->
+            _ = disconnect db deviceId ()
+            _ = disconnectCurrent db deviceId ()
+            finalSessionConnected = sessions.isConnected db deviceId ()
+            finalSocketConnected = sockets.isConnected db deviceId ()
+            finalRepairPlan =
+              offlineConnectedSessionRepairPlan
+                sessionConnected
+                socketConnected
+                finalSessionConnected
+                finalSocketConnected
+            _ = match finalRepairPlan with
+              ConnectedSessionRepairSucceeded ->
+                metadata =
+                  "deviceId="
+                    ++ DeviceId.toText deviceId
+                    ++ " sessionConnected="
+                    ++ (if sessionConnected then "true" else "false")
+                    ++ " socketConnected="
+                    ++ (if socketConnected then "true" else "false")
+                    ++ " repairPass=post-offline-write"
+                _ =
+                  send
+                    "backend.presence.offline.repair"
+                    "backend"
+                    "notice"
+                    currentUserId
+                    (Some currentHandle)
+                    (Some deviceId)
+                    currentChannelIdOpt
+                    None
+                    None
+                    None
+                    None
+                    None
+                    (Some "presence")
+                    (Some "offline")
+                    (Some "presence.offline repaired connected session residue after offline write")
+                    (Some metadata)
+                    devTraffic
+                    false
+                    ()
+                ()
+              ConnectedSessionRepairFailed ->
+                appendOfflineRetainedConnectedSessionInvariant
+                  db
+                  currentUserId
+                  (Some currentHandle)
+                  deviceId
+                  finalSessionConnected
+                  finalSocketConnected
+                  ()
+              NoConnectedSessionRepairNeeded -> ()
+            ()
+          _ -> ()
+        _ =
+          send
+            "backend.presence.offline"
+            "backend"
+            "notice"
+            currentUserId
+            (Some currentHandle)
+            (Some deviceId)
+            currentChannelIdOpt
+            None
+            None
+            None
+            None
+            None
+            (Some "presence")
+            (Some "offline")
+            (Some "presence transitioned to offline")
+            None
+            devTraffic
+            false
+            ()
+        ControlCommandRouteOk
+          (object.empty
+            |> addText "deviceId" (DeviceId.toText deviceId)
+            |> addText "userId" (UserId.toText currentUserId)
+            |> addText "status" "offline")
+
+turbo.service.presence.heartbeat :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.presence.heartbeat db = do
+  use Parser /
+  noCapture POST (s "v1" / s "presence" / s "heartbeat")
+  match requireUser db () with
+    Left err -> unauthorized.json (object.empty |> addText "error" err)
+    Right currentUser ->
+      fields = decodeJson (Decoder.object Decoder.text)
+      turbo.service.controlCommands.respondHttp
+        (turbo.service.presence.internal.heartbeatControlCommand
+          db
+          currentUser
+          None
+          fields
+          ())
+        ()
+
+turbo.service.presence.background :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.presence.background db = do
+  use Parser /
+  noCapture POST (s "v1" / s "presence" / s "background")
+  match requireUser db () with
+    Left err -> unauthorized.json (object.empty |> addText "error" err)
+    Right currentUser ->
+      fields = decodeJson (Decoder.object Decoder.text)
+      turbo.service.controlCommands.respondHttp
+        (turbo.service.presence.internal.backgroundControlCommand
+          db
+          currentUser
+          None
+          fields
+          ())
+        ()
+
+turbo.service.presence.offline :
+  Database -> '{Route, Config, Exception, Http, Storage, Remote, Random} ()
+turbo.service.presence.offline db = do
+  use Parser /
+  noCapture POST (s "v1" / s "presence" / s "offline")
+  match requireUser db () with
+    Left err -> unauthorized.json (object.empty |> addText "error" err)
+    Right currentUser ->
+      fields = decodeJson (Decoder.object Decoder.text)
+      turbo.service.controlCommands.respondHttp
+        (turbo.service.presence.internal.offlineControlCommand
+          db
+          currentUser
+          None
+          fields
+          ())
+        ()
+
+turbo.service.ws.internal.executePresenceCommand :
+  Database
+  -> User
+  -> Optional DeviceId
+  -> PresenceCommandRequest
+  -> '{Config, Exception, Http, Storage, Remote, Random} ControlCommandRouteResult
+turbo.service.ws.internal.executePresenceCommand
+  db
+  currentUser
+  websocketDeviceIdOpt = cases
+    PresenceCommandRequest _ kind fields ->
+      do match kind with
+        PresenceHeartbeat ->
+          turbo.service.presence.internal.heartbeatControlCommand
+            db
+            currentUser
+            websocketDeviceIdOpt
+            fields
+            ()
+        PresenceBackground ->
+          turbo.service.presence.internal.backgroundControlCommand
+            db
+            currentUser
+            websocketDeviceIdOpt
+            fields
+            ()
+        PresenceOffline ->
+          turbo.service.presence.internal.offlineControlCommand
+            db
+            currentUser
+            websocketDeviceIdOpt
+            fields
+            ()
+
+turbo.service.ws.internal.sendPresenceCommandResponse :
+  Database
+  -> User
+  -> DeviceId
+  -> WebSocket
+  -> PresenceCommandRequest
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.sendPresenceCommandResponse
+  db
+  currentUser
+  currentDeviceId
+  currentSocket
+  request = do
+    use WebSockets send
+    (PresenceCommandRequest requestId kind _) = request
+    result =
+      turbo.service.ws.internal.executePresenceCommand
+        db
+        currentUser
+        (Some currentDeviceId)
+        request
+        ()
+    body =
+      turbo.service.ws.internal.presenceCommandResponseJson
+        requestId
+        kind
+        result
+    send currentSocket (TextMessage (Json.toText body))
+
+turbo.service.ws.internal.handleMessage :
+  Database
+  -> User
+  -> DeviceId
+  -> Text
+  -> WebSocket
+  -> websockets.Message
+  -> '{Config, Exception, Http, Storage, Remote, WebSockets, Random} ()
+turbo.service.ws.internal.handleMessage
+  db currentUser currentDeviceId currentSessionId currentSocket = cases
+  TextMessage text ->
+    do
+      currentUserId =
+        (User userId _ _ _ _) = currentUser
+        userId
+      match turbo.service.ws.internal.controlCommandFrameFromText text with
+        ParsedControlCommandFrame request ->
+          turbo.service.ws.internal.sendControlCommandResponse
+            db
+            currentUser
+            currentDeviceId
+            currentSocket
+            request
+            ()
+        InvalidControlCommandFrame err ->
+          turbo.service.ws.internal.sendInvalidControlCommandResponse
+            currentSocket
+            err
+            ()
+        NotControlCommandFrame ->
+          match turbo.service.ws.internal.presenceCommandFrameFromText text with
+            ParsedPresenceCommandFrame request ->
+              turbo.service.ws.internal.sendPresenceCommandResponse
+                db
+                currentUser
+                currentDeviceId
+                currentSocket
+                request
+                ()
+            InvalidPresenceCommandFrame err ->
+              turbo.service.ws.internal.sendInvalidControlCommandResponse
+                currentSocket
+                err
+                ()
+            NotPresenceCommandFrame ->
+              turbo.service.ws.internal.handleSignalMessage
+                db
+                currentUserId
+                currentDeviceId
+                currentSessionId
+                currentSocket
+                text
+                ()
+  _ ->
+    do
+      WebSockets.send
+        currentSocket
+        (TextMessage
+          (Json.toText
+            (object.empty
+              |> addText "error" "binary websocket messages are not supported")))
