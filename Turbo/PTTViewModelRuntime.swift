@@ -788,6 +788,7 @@ final class MediaRuntimeState {
     private var mediaEncryptionSessionsByContactID: [UUID: MediaEncryptionSession] = [:]
     private var mediaEncryptionSendSequenceByContactID: [UUID: UInt64] = [:]
     private var mediaEncryptionReceiveSequenceByContactID: [UUID: UInt64] = [:]
+    private var mediaEncryptionRecentReceiveSequencesByContactID: [UUID: Set<UInt64>] = [:]
     private var mediaEncryptionPlaintextFallbackLogKeys: Set<String> = []
     private var pendingEncryptedAudioPayloadsByContactID: [UUID: [PendingEncryptedAudioPayload]] = [:]
     private var encryptedAudioRecoveryTasksByContactID: [UUID: Task<Void, Never>] = [:]
@@ -1105,6 +1106,11 @@ final class MediaRuntimeState {
         mediaRelayClient = client
     }
 
+    func existingMediaRelayClient(for key: MediaRelayConnectionKey) -> TurboMediaRelayClient? {
+        guard mediaRelayConnectionKey == key else { return nil }
+        return mediaRelayClient
+    }
+
     func mediaRelayConnectionStart(for key: MediaRelayConnectionKey) -> MediaRelayConnectionStart {
         if let mediaRelayClient,
            mediaRelayConnectionKey == key {
@@ -1267,6 +1273,7 @@ final class MediaRuntimeState {
         mediaEncryptionSessionsByContactID = [:]
         mediaEncryptionSendSequenceByContactID = [:]
         mediaEncryptionReceiveSequenceByContactID = [:]
+        mediaEncryptionRecentReceiveSequencesByContactID = [:]
         mediaEncryptionPlaintextFallbackLogKeys = []
         pendingEncryptedAudioPayloadsByContactID = [:]
         encryptedAudioRecoveryTasksByContactID.values.forEach { $0.cancel() }
@@ -1288,19 +1295,44 @@ final class MediaRuntimeState {
 
     func resetMediaEncryptionReceiveSequence(for contactID: UUID) {
         mediaEncryptionReceiveSequenceByContactID[contactID] = nil
+        mediaEncryptionRecentReceiveSequencesByContactID[contactID] = nil
+    }
+
+    enum MediaEncryptionReceiveSequenceAcceptance: Equatable {
+        case accepted
+        case duplicate
+        case replayOrReordered
     }
 
     func acceptMediaEncryptionReceiveSequence(
         _ sequenceNumber: UInt64,
         for contactID: UUID
-    ) -> Bool {
+    ) -> MediaEncryptionReceiveSequenceAcceptance {
+        if mediaEncryptionRecentReceiveSequencesByContactID[contactID]?.contains(sequenceNumber) == true {
+            return .duplicate
+        }
         guard let lastSequence = mediaEncryptionReceiveSequenceByContactID[contactID] else {
             mediaEncryptionReceiveSequenceByContactID[contactID] = sequenceNumber
-            return true
+            rememberMediaEncryptionReceiveSequence(sequenceNumber, for: contactID)
+            return .accepted
         }
-        guard sequenceNumber > lastSequence else { return false }
+        guard sequenceNumber > lastSequence else { return .replayOrReordered }
         mediaEncryptionReceiveSequenceByContactID[contactID] = sequenceNumber
-        return true
+        rememberMediaEncryptionReceiveSequence(sequenceNumber, for: contactID)
+        return .accepted
+    }
+
+    private func rememberMediaEncryptionReceiveSequence(
+        _ sequenceNumber: UInt64,
+        for contactID: UUID
+    ) {
+        var recent = mediaEncryptionRecentReceiveSequencesByContactID[contactID] ?? []
+        recent.insert(sequenceNumber)
+        if recent.count > 256,
+           let minimum = recent.min() {
+            recent.remove(minimum)
+        }
+        mediaEncryptionRecentReceiveSequencesByContactID[contactID] = recent
     }
 
     func enqueuePendingEncryptedAudioPayload(

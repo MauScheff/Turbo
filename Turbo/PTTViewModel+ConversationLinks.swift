@@ -1,6 +1,42 @@
 import Foundation
+import Intents
 
 extension PTTViewModel {
+    func handleStartCallUserActivity(_ userActivity: NSUserActivity) async {
+        guard let intent = TurboIncomingLink.conversationOpenIntent(fromStartCallUserActivity: userActivity) else {
+            diagnostics.record(
+                .pushToTalk,
+                level: .notice,
+                message: "Ignored start call user activity without conversation intent",
+                metadata: ["activityType": userActivity.activityType]
+            )
+            return
+        }
+        diagnostics.record(
+            .pushToTalk,
+            message: "Start call user activity accepted",
+            metadata: ["handle": intent.reference]
+        )
+        await handleConversationOpenIntent(intent)
+    }
+
+    func handleStartCallIntent(_ startCallIntent: INStartCallIntent) async {
+        guard let intent = TurboIncomingLink.conversationOpenIntent(fromStartCallIntent: startCallIntent) else {
+            diagnostics.record(
+                .pushToTalk,
+                level: .notice,
+                message: "Ignored start call intent without conversation intent"
+            )
+            return
+        }
+        diagnostics.record(
+            .pushToTalk,
+            message: "Start call intent accepted",
+            metadata: ["handle": intent.reference]
+        )
+        await handleConversationOpenIntent(intent)
+    }
+
     func handleConversationOpenIntent(_ intent: ConversationOpenIntent) async {
         var userInfo: [AnyHashable: Any] = [
             "event": "talk-request",

@@ -60,6 +60,36 @@ extension PTTViewModel {
         backendSyncCoordinator.send(
             .channelReadinessUpdated(contactID: contactID, readiness: readiness)
         )
+        triggerSelectedContactDirectQuicPrewarmAfterReadinessUpdateIfNeeded(
+            readiness,
+            contactID: contactID,
+            reason: reason
+        )
+    }
+
+    func triggerSelectedContactDirectQuicPrewarmAfterReadinessUpdateIfNeeded(
+        _ readiness: TurboChannelReadinessResponse,
+        contactID: UUID,
+        reason: String
+    ) {
+        guard selectedContactId == contactID else { return }
+        let hasPeerWakeDevice: Bool = {
+            if case .wakeCapable(let targetDeviceId) = readiness.remoteWakeCapability {
+                return !targetDeviceId.isEmpty
+            }
+            return false
+        }()
+        guard readiness.peerTargetDeviceId != nil
+            || readiness.peerDirectQuicFingerprint != nil
+            || hasPeerWakeDevice
+        else { return }
+
+        Task { @MainActor [weak self] in
+            await self?.maybeStartSelectedContactDirectQuicPrewarm(
+                for: contactID,
+                reason: "readiness-\(reason)"
+            )
+        }
     }
 
     func recordRecentPeerDeviceEvidenceIfPresent(

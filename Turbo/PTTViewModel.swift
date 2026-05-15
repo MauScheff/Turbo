@@ -239,6 +239,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var foregroundTalkRequestNotificationPrewarmedInviteIDs: Set<String> = []
     var pendingForegroundTalkRequestSurface: IncomingTalkRequestSurface?
     var pendingForegroundTalkRequestReceivedAt: Date?
+    var pendingForegroundTalkRequestAcceptSurface: IncomingTalkRequestSurface?
+    var acceptingIncomingTalkRequestSurfaceIDs: Set<String> = []
     let pendingForegroundTalkRequestLifetime: TimeInterval = 20
     var requestedExpandedCallContactID: UUID?
     var requestedExpandedCallSequence: Int = 0
@@ -289,7 +291,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     }
     @ObservationIgnored
     var clearDeliveredNotifications: @MainActor () -> Void = {
-        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        TurboNotificationCategory.clearDeliveredTalkRequestNotifications()
     }
     @ObservationIgnored
     var callTelemetryNetworkMonitor: NWPathMonitor?
@@ -1852,7 +1854,11 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         await publishForegroundPresenceTransition(reason: "application-did-become-active")
         updateAutomaticAudioRouteMonitoring(reason: "application-became-active")
         clearTalkRequestNotifications()
-        reconcileTalkRequestSurface(applicationState: .active)
+        reconcileTalkRequestSurface(
+            applicationState: .active,
+            allowsSelectedContact: true,
+            allowsAlreadySurfacedInvite: true
+        )
         await resumeBufferedWakePlaybackIfNeeded(
             reason: "application-became-active",
             applicationState: .active

@@ -1267,6 +1267,7 @@ extension PTTViewModel {
                 debugBypass: allowDebugBypassWithoutBackendAdvertisement
                     && !backendAdvertisesDirectQuicUpgrade
             )
+            mediaRuntime.directQuicUpgrade.markLocalOffer(offerPayload, for: contactID)
             try await backend.waitForWebSocketConnection()
             let envelope = try TurboSignalEnvelope.directQuicOffer(
                 channelId: channelID,
@@ -1480,6 +1481,24 @@ extension PTTViewModel {
                     requireSelectedContact: false
                 )
                 : automaticDirectQuicProbeBlockReason(for: contactID)
+            if allowsSelectionPrewarmRequest, blockReason == "attempt-active" {
+                metadata["blockReason"] = blockReason
+                diagnostics.record(
+                    .websocket,
+                    message: "Resending active Direct QUIC offer after selected prewarm request",
+                    metadata: metadata
+                )
+                Task {
+                    await resendActiveDirectQuicOfferIfPossible(
+                        for: contactID,
+                        requestedBy: envelope.fromDeviceId,
+                        requestId: payload.requestId,
+                        reason: payload.reason
+                    )
+                }
+                return
+            }
+
             if let blockReason {
                 metadata["blockReason"] = blockReason
                 let message = allowsSelectionPrewarmRequest
@@ -1514,6 +1533,86 @@ extension PTTViewModel {
                     "type": envelope.type.rawValue,
                     "channelId": envelope.channelId,
                     "contactId": contactID.uuidString,
+                    "error": error.localizedDescription,
+                ]
+            )
+        }
+    }
+
+    func resendActiveDirectQuicOfferIfPossible(
+        for contactID: UUID,
+        requestedBy peerDeviceID: String,
+        requestId: String,
+        reason: String
+    ) async {
+        guard let backend = backendServices else { return }
+        guard let contact = contacts.first(where: { $0.id == contactID }),
+              let remoteUserID = contact.remoteUserId else {
+            diagnostics.record(
+                .websocket,
+                message: "Direct QUIC active offer resend skipped because contact routing is missing",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "requestId": requestId,
+                    "reason": reason,
+                    "peerDeviceId": peerDeviceID,
+                ]
+            )
+            return
+        }
+        guard let attempt = mediaRuntime.directQuicUpgrade.attempt(for: contactID),
+              let offerPayload = attempt.localOffer,
+              attempt.peerDeviceID == peerDeviceID,
+              offerPayload.toDeviceId == peerDeviceID else {
+            diagnostics.record(
+                .websocket,
+                message: "Direct QUIC active offer resend skipped because no matching active offer is available",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "requestId": requestId,
+                    "reason": reason,
+                    "peerDeviceId": peerDeviceID,
+                    "activeAttemptId": mediaRuntime.directQuicUpgrade.attempt(for: contactID)?.attemptId ?? "none",
+                ]
+            )
+            return
+        }
+
+        do {
+            let offerEnvelope = try TurboSignalEnvelope.directQuicOffer(
+                channelId: attempt.channelID,
+                fromUserId: backend.currentUserID ?? "",
+                fromDeviceId: backend.deviceID,
+                toUserId: remoteUserID,
+                toDeviceId: peerDeviceID,
+                payload: offerPayload
+            )
+            try await backend.sendSignal(offerEnvelope)
+            diagnostics.record(
+                .websocket,
+                message: "Direct QUIC active offer resent",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": attempt.channelID,
+                    "attemptId": attempt.attemptId,
+                    "requestId": requestId,
+                    "reason": reason,
+                    "peerDeviceId": peerDeviceID,
+                    "candidateCount": "\(offerPayload.candidates.count)",
+                ]
+            )
+        } catch {
+            diagnostics.record(
+                .websocket,
+                level: .error,
+                message: "Direct QUIC active offer resend failed",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": attempt.channelID,
+                    "attemptId": attempt.attemptId,
+                    "requestId": requestId,
+                    "reason": reason,
+                    "peerDeviceId": peerDeviceID,
                     "error": error.localizedDescription,
                 ]
             )

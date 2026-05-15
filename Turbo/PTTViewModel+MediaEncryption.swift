@@ -249,10 +249,27 @@ extension PTTViewModel {
             using: key,
             context: context
         )
-        guard mediaRuntime.acceptMediaEncryptionReceiveSequence(
+        switch mediaRuntime.acceptMediaEncryptionReceiveSequence(
             packet.sequenceNumber,
             for: contactID
-        ) else {
+        ) {
+        case .accepted:
+            return opened
+
+        case .duplicate:
+            diagnostics.record(
+                .media,
+                message: "Ignored duplicate encrypted audio packet",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "fromDeviceId": fromDeviceID,
+                    "sequenceNumber": String(packet.sequenceNumber),
+                ]
+            )
+            return nil
+
+        case .replayOrReordered:
             diagnostics.recordInvariantViolation(
                 invariantID: "media.e2ee_replayed_audio_packet",
                 scope: .local,
@@ -266,7 +283,6 @@ extension PTTViewModel {
             )
             return nil
         }
-        return opened
     }
 
     func mediaEncryptionIsRequired(for contactID: UUID) -> Bool {

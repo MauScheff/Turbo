@@ -1,4 +1,5 @@
 import Foundation
+import Intents
 
 enum TurboIncomingLink {
     private static let shareHost = "beepbeep.to"
@@ -64,6 +65,20 @@ enum TurboIncomingLink {
             channelID: value("channelId"),
             action: action
         )
+    }
+
+    static func conversationOpenIntent(fromStartCallUserActivity userActivity: NSUserActivity) -> ConversationOpenIntent? {
+        guard userActivity.activityType == "INStartCallIntent",
+              let startCallIntent = userActivity.interaction?.intent as? INStartCallIntent else {
+            return nil
+        }
+        return conversationOpenIntent(fromStartCallIntent: startCallIntent)
+    }
+
+    static func conversationOpenIntent(fromStartCallIntent startCallIntent: INStartCallIntent) -> ConversationOpenIntent? {
+        let reference =
+            startCallIntent.contacts?.first?.personHandle?.value
+        return ConversationOpenIntent(reference: reference, action: .accept)
     }
 
     private static func webReference(from url: URL) -> String? {

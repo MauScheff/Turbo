@@ -37,6 +37,12 @@ enum TurboNotificationCategory {
     static let acceptTalkRequestAction = "TURBO_ACCEPT_TALK_REQUEST"
     static let notNowTalkRequestAction = "TURBO_NOT_NOW_TALK_REQUEST"
 
+    struct DeliveredNotificationSnapshot {
+        let identifier: String
+        let categoryIdentifier: String
+        let userInfo: [AnyHashable: Any]
+    }
+
     static func register(on center: UNUserNotificationCenter = .current()) {
         let accept = UNNotificationAction(
             identifier: acceptTalkRequestAction,
@@ -56,6 +62,70 @@ enum TurboNotificationCategory {
         )
         center.setNotificationCategories([category])
     }
+
+    static func shouldCompleteTalkRequestResponseAfterHandling(actionIdentifier: String) -> Bool {
+        true
+    }
+
+    static func deliveredTalkRequestNotificationIdentifiers(
+        from deliveredNotifications: [DeliveredNotificationSnapshot]
+    ) -> [String] {
+        deliveredNotifications.compactMap { notification in
+            guard isTalkRequestNotification(
+                categoryIdentifier: notification.categoryIdentifier,
+                userInfo: notification.userInfo
+            ) else {
+                return nil
+            }
+            return notification.identifier
+        }
+    }
+
+    static func clearDeliveredTalkRequestNotifications(
+        deliveredNotifications: [DeliveredNotificationSnapshot],
+        additionalIdentifiers: [String] = [],
+        removeDeliveredIdentifiers: ([String]) -> Void,
+        setBadgeCount: (Int) -> Void
+    ) {
+        let identifiers = Array(
+            Set(
+                deliveredTalkRequestNotificationIdentifiers(from: deliveredNotifications)
+                + additionalIdentifiers
+            )
+        )
+        if !identifiers.isEmpty {
+            removeDeliveredIdentifiers(identifiers)
+        }
+        setBadgeCount(0)
+    }
+
+    static func clearDeliveredTalkRequestNotifications(
+        including additionalIdentifiers: [String] = [],
+        on center: UNUserNotificationCenter = .current()
+    ) {
+        center.getDeliveredNotifications { notifications in
+            let deliveredNotifications = notifications.map {
+                DeliveredNotificationSnapshot(
+                    identifier: $0.request.identifier,
+                    categoryIdentifier: $0.request.content.categoryIdentifier,
+                    userInfo: $0.request.content.userInfo
+                )
+            }
+            clearDeliveredTalkRequestNotifications(
+                deliveredNotifications: deliveredNotifications,
+                additionalIdentifiers: additionalIdentifiers,
+                removeDeliveredIdentifiers: { center.removeDeliveredNotifications(withIdentifiers: $0) },
+                setBadgeCount: { center.setBadgeCount($0) }
+            )
+        }
+    }
+
+    static func isTalkRequestNotification(
+        categoryIdentifier: String,
+        userInfo: [AnyHashable: Any]
+    ) -> Bool {
+        categoryIdentifier == talkRequest || (userInfo["event"] as? String) == "talk-request"
+    }
 }
 
 final class TurboAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
@@ -66,6 +136,7 @@ final class TurboAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         AppAudioSessionBootstrapper.configureCategoryForPushToTalk()
         UNUserNotificationCenter.current().delegate = self
         TurboNotificationCategory.register()
+        TurboNotificationCategory.clearDeliveredTalkRequestNotifications()
         Task { @MainActor in
             await PTTViewModel.shared.initializeIfNeeded()
             if !AppRuntimeEnvironment.isRunningAutomatedTests {
@@ -73,6 +144,14 @@ final class TurboAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
             }
         }
         return true
+    }
+
+    func applicationWillEnterForeground(_ application: UIApplication) {
+        TurboNotificationCategory.clearDeliveredTalkRequestNotifications()
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        TurboNotificationCategory.clearDeliveredTalkRequestNotifications()
     }
 
     func application(
@@ -100,8 +179,10 @@ final class TurboAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     ) {
         let userInfo = notification.request.content.userInfo
         if (userInfo["event"] as? String) == "talk-request" {
-            center.removeAllDeliveredNotifications()
-            center.setBadgeCount(0)
+            TurboNotificationCategory.clearDeliveredTalkRequestNotifications(
+                including: [notification.request.identifier],
+                on: center
+            )
             completionHandler([])
             Task { @MainActor in
                 await PTTViewModel.shared.handleForegroundTalkRequestNotification(userInfo: userInfo)
@@ -118,12 +199,14 @@ final class TurboAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     ) {
         let userInfo = response.notification.request.content.userInfo
         if (userInfo["event"] as? String) == "talk-request" {
-            center.removeAllDeliveredNotifications()
-            center.setBadgeCount(0)
-            let completesAfterHandling = response.actionIdentifier == TurboNotificationCategory.notNowTalkRequestAction
-            if !completesAfterHandling {
-                completionHandler()
-            }
+            TurboNotificationCategory.clearDeliveredTalkRequestNotifications(
+                including: [response.notification.request.identifier],
+                on: center
+            )
+            let completesAfterHandling =
+                TurboNotificationCategory.shouldCompleteTalkRequestResponseAfterHandling(
+                    actionIdentifier: response.actionIdentifier
+                )
             Task { @MainActor in
                 await PTTViewModel.shared.handleTalkRequestNotificationResponse(
                     actionIdentifier: response.actionIdentifier,

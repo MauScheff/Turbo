@@ -1093,13 +1093,19 @@ extension PTTViewModel {
         }
     }
 
-    func selectContact(_ contact: Contact, reason: String = "selected-contact") {
+    func selectContact(
+        _ contact: Contact,
+        reason: String = "selected-contact",
+        opensTalkRequestSurface: Bool = true
+    ) {
         let selectionChanged = selectedContactId != contact.id
         trackContact(contact.id)
-        markTalkRequestSurfaceOpened(
-            for: contact.id,
-            inviteID: incomingInviteByContactID[contact.id]?.inviteId
-        )
+        if opensTalkRequestSurface {
+            markTalkRequestSurfaceOpened(
+                for: contact.id,
+                inviteID: incomingInviteByContactID[contact.id]?.inviteId
+            )
+        }
         if selectionChanged {
             selectedContactPrewarmedSelectionContactID = nil
         }
@@ -1340,7 +1346,7 @@ extension PTTViewModel {
             message: "Auto-selected contact",
             metadata: ["handle": contact.handle, "reason": reason]
         )
-        selectContact(contact)
+        selectContact(contact, opensTalkRequestSurface: false)
     }
 
     @discardableResult

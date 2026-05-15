@@ -3,6 +3,8 @@ import Testing
 import PushToTalk
 import AVFAudio
 import UIKit
+import UserNotifications
+import Intents
 import CryptoKit
 @testable import BeepBeep
 
@@ -255,6 +257,77 @@ struct TurboTests {
                 contactID: contactID
             ) == plaintext
         )
+    }
+
+    @MainActor
+    @Test func duplicateEncryptedAudioPacketIsDroppedWithoutReplayViolation() throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let localPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        let peerPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        let localRegistration = MediaEncryptionIdentityRegistrationMetadata(
+            publicKeyBase64: localPrivateKey.publicKey.rawRepresentation.base64EncodedString(),
+            fingerprint: MediaEncryptionIdentityManager.fingerprint(
+                forPublicKey: localPrivateKey.publicKey.rawRepresentation
+            )
+        )
+        let peerRegistration = MediaEncryptionIdentityRegistrationMetadata(
+            publicKeyBase64: peerPrivateKey.publicKey.rawRepresentation.base64EncodedString(),
+            fingerprint: MediaEncryptionIdentityManager.fingerprint(
+                forPublicKey: peerPrivateKey.publicKey.rawRepresentation
+            )
+        )
+        let session = MediaEncryptionSession(
+            channelID: "channel-1",
+            localDeviceID: "device-a",
+            peerDeviceID: "device-b",
+            localFingerprint: localRegistration.fingerprint,
+            peerFingerprint: peerRegistration.fingerprint,
+            localPrivateKey: localPrivateKey,
+            peerIdentity: peerRegistration
+        )
+        viewModel.mediaRuntime.setMediaEncryptionSession(session, for: contactID)
+        let context = session.context(senderDeviceID: "device-b", receiverDeviceID: "device-a")
+        let peerSealKey = try MediaEndToEndEncryption.deriveSymmetricKey(
+            localPrivateKey: peerPrivateKey,
+            peerIdentity: localRegistration,
+            context: context
+        )
+        let encrypted = try MediaEndToEndEncryption.sealTransportPayload(
+            "pcm-audio",
+            using: peerSealKey,
+            keyID: session.keyID,
+            sequenceNumber: 0,
+            context: context
+        )
+
+        #expect(
+            try viewModel.openIncomingMediaPayloadIfPossible(
+                encrypted,
+                channelID: "channel-1",
+                fromDeviceID: "device-b",
+                contactID: contactID
+            ) == "pcm-audio"
+        )
+        #expect(
+            try viewModel.openIncomingMediaPayloadIfPossible(
+                encrypted,
+                channelID: "channel-1",
+                fromDeviceID: "device-b",
+                contactID: contactID
+            ) == nil
+        )
+        #expect(viewModel.diagnosticsTranscript.contains("Ignored duplicate encrypted audio packet"))
+        #expect(!viewModel.diagnosticsTranscript.contains("media.e2ee_replayed_audio_packet"))
+    }
+
+    @Test func mediaEncryptionReceiveSequenceStillRejectsOlderUnseenPacket() {
+        let runtime = MediaRuntimeState()
+        let contactID = UUID()
+
+        #expect(runtime.acceptMediaEncryptionReceiveSequence(2, for: contactID) == .accepted)
+        #expect(runtime.acceptMediaEncryptionReceiveSequence(2, for: contactID) == .duplicate)
+        #expect(runtime.acceptMediaEncryptionReceiveSequence(1, for: contactID) == .replayOrReordered)
     }
 
     @MainActor
@@ -3280,6 +3353,182 @@ struct TurboTests {
         #expect(payload.reason == "selection-direct-quic-prewarm-selected-contact")
         #expect(viewModel.diagnosticsTranscript.contains("Selection Direct QUIC prewarm skipped"))
         #expect(viewModel.diagnosticsTranscript.contains("Direct QUIC upgrade request sent"))
+    }
+
+    @MainActor
+    @Test func selectedContactReadinessMetadataRetriesDirectQuicPrewarmBeforeJoin() async throws {
+        TurboDirectPathDebugOverride.setRelayOnlyForced(false)
+        TurboDirectPathDebugOverride.setAutoUpgradeDisabled(false)
+        defer {
+            TurboDirectPathDebugOverride.setAutoUpgradeDisabled(false)
+            TurboDirectPathDebugOverride.setRelayOnlyForced(false)
+        }
+
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let client = TurboBackendClient(
+            config: TurboBackendConfig(
+                baseURL: URL(string: "http://127.0.0.1:9")!,
+                devUserHandle: "@self",
+                deviceID: "zz-device"
+            )
+        )
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(
+                mode: "cloud",
+                supportsWebSocket: true,
+                supportsDirectQuicUpgrade: true
+            )
+        )
+        client.enableSentSignalCaptureForTesting()
+        let viewModel = PTTViewModel()
+        viewModel.applyAuthenticatedBackendSession(
+            client: client,
+            userID: "user-self",
+            mode: "cloud"
+        )
+        viewModel.applicationStateOverride = .active
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel",
+                remoteUserId: "peer"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(
+                    status: .requested,
+                    canTransmit: false,
+                    selfJoined: false,
+                    peerJoined: false,
+                    peerDeviceConnected: false,
+                    hasOutgoingRequest: true
+                )
+            )
+        )
+
+        viewModel.applyChannelReadiness(
+            makeChannelReadiness(
+                status: .inactive,
+                selfHasActiveDevice: false,
+                peerHasActiveDevice: false,
+                peerDirectQuicIdentity: TurboDirectQuicPeerIdentityPayload(
+                    fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    status: "active",
+                    createdAt: nil,
+                    updatedAt: nil
+                ),
+                peerTargetDeviceId: "peer-device"
+            ),
+            for: contactID,
+            reason: "contact-summaries"
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let envelope = try #require(client.sentSignalsForTesting().first)
+        let payload = try envelope.decodeDirectQuicUpgradeRequestPayload()
+        #expect(envelope.type == .directQuicUpgradeRequest)
+        #expect(envelope.channelId == "channel")
+        #expect(envelope.toDeviceId == "peer-device")
+        #expect(payload.reason == "selection-direct-quic-prewarm-readiness-contact-summaries")
+        #expect(viewModel.diagnosticsTranscript.contains("Selection Direct QUIC prewarm skipped"))
+        #expect(viewModel.diagnosticsTranscript.contains("Direct QUIC upgrade request sent"))
+    }
+
+    @MainActor
+    @Test func selectedPrewarmRequestResendsActiveDirectQuicOffer() async throws {
+        let contactID = UUID()
+        let client = TurboBackendClient(
+            config: TurboBackendConfig(
+                baseURL: URL(string: "http://127.0.0.1:9")!,
+                devUserHandle: "@self",
+                deviceID: "aaa-device"
+            )
+        )
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(
+                mode: "cloud",
+                supportsWebSocket: true,
+                supportsDirectQuicUpgrade: true
+            )
+        )
+        client.enableSentSignalCaptureForTesting()
+
+        let viewModel = PTTViewModel()
+        viewModel.applyAuthenticatedBackendSession(
+            client: client,
+            userID: "user-self",
+            mode: "cloud"
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: "channel",
+                remoteUserId: "peer"
+            )
+        ]
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel",
+            attemptID: "attempt-1",
+            peerDeviceID: "zzz-device"
+        )
+        let offer = TurboDirectQuicOfferPayload(
+            attemptId: "attempt-1",
+            channelId: "channel",
+            fromDeviceId: "aaa-device",
+            toDeviceId: "zzz-device",
+            quicAlpn: "turbo-ptt",
+            certificateFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            candidates: [],
+            roleIntent: .listener
+        )
+        viewModel.mediaRuntime.directQuicUpgrade.markLocalOffer(offer, for: contactID)
+
+        let requestPayload = TurboDirectQuicUpgradeRequestPayload(
+            requestId: "request-1",
+            channelId: "channel",
+            fromDeviceId: "zzz-device",
+            toDeviceId: "aaa-device",
+            reason: "selection-direct-quic-prewarm-channel-refresh",
+            roleIntent: .listener
+        )
+        let requestEnvelope = try TurboSignalEnvelope.directQuicUpgradeRequest(
+            channelId: "channel",
+            fromUserId: "peer",
+            fromDeviceId: "zzz-device",
+            toUserId: "user-self",
+            toDeviceId: "aaa-device",
+            payload: requestPayload
+        )
+
+        viewModel.handleIncomingDirectQuicUpgradeRequest(
+            requestEnvelope,
+            contactID: contactID
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let resent = try #require(client.sentSignalsForTesting().first)
+        guard case .offer(let resentPayload) = try resent.decodeDirectQuicSignalPayload() else {
+            Issue.record("Expected a Direct QUIC offer resend")
+            return
+        }
+        #expect(resent.type == .offer)
+        #expect(resent.channelId == "channel")
+        #expect(resent.toDeviceId == "zzz-device")
+        #expect(resentPayload.attemptId == "attempt-1")
+        #expect(viewModel.diagnosticsTranscript.contains("Direct QUIC active offer resent"))
     }
 
     @MainActor
@@ -8553,6 +8802,58 @@ struct TurboTests {
         )
     }
 
+    @Test func channelLessConnectedContinuityTearsDownGhostLocalSession() {
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .waitingForPeer,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: true,
+            activeChannelID: contactID,
+            systemSessionMatchesContact: true,
+            systemSessionState: .active(contactID: contactID, channelUUID: channelUUID),
+            pendingAction: .none,
+            localJoinFailure: nil,
+            mediaState: .connected,
+            localMediaWarmupState: .ready,
+            hadConnectedSessionContinuity: true,
+            channel: nil
+        )
+
+        #expect(
+            ConversationStateMachine.reconciliationAction(for: context)
+            == .teardownSelectedSession(contactID: contactID)
+        )
+    }
+
+    @Test func channelLessConnectedContinuityWaitsDuringReconnectGrace() {
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .waitingForPeer,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: true,
+            activeChannelID: contactID,
+            systemSessionMatchesContact: true,
+            systemSessionState: .active(contactID: contactID, channelUUID: channelUUID),
+            pendingAction: .none,
+            localJoinFailure: nil,
+            mediaState: .connected,
+            localMediaWarmupState: .ready,
+            controlPlaneReconnectGraceActive: true,
+            hadConnectedSessionContinuity: true,
+            channel: nil
+        )
+
+        #expect(ConversationStateMachine.reconciliationAction(for: context) == .none)
+    }
+
     @Test func peerOnlyBackendStateTearsDownStaleConnectedLocalSession() {
         let contactID = UUID()
         let channelUUID = UUID()
@@ -9621,7 +9922,7 @@ struct TurboTests {
         )
     }
 
-    @Test func selectedPeerIdleStateUsesReadyToConnectStatusForBackgroundReachablePeer() {
+    @Test func selectedPeerIdleStateKeepsOnlineStatusForReachablePeer() {
         let contactID = UUID()
         let context = ConversationDerivationContext(
             contactID: contactID,
@@ -9645,10 +9946,10 @@ struct TurboTests {
         )
 
         #expect(state.phase == .idle)
-        #expect(state.statusMessage == "Ready to connect")
+        #expect(state.statusMessage == "Blake is online")
     }
 
-    @Test func selectedPeerIdleDisplayStatusUsesOfflineForBackgroundReachablePeer() {
+    @Test func selectedPeerIdleDisplayStatusUsesOnlineForReachablePeer() {
         let contactID = UUID()
         let context = ConversationDerivationContext(
             contactID: contactID,
@@ -9671,7 +9972,7 @@ struct TurboTests {
             relationship: .none
         )
 
-        #expect(state.displayStatus == .offline)
+        #expect(state.displayStatus == .online)
     }
 
     @Test func selectedPeerReadyAndLiveStatesMapToProductStatuses() {
@@ -9744,6 +10045,16 @@ struct TurboTests {
         #expect(offline.section == .contacts)
         #expect(offline.availabilityPill == .offline)
         #expect(offline.statusPillText() == "Offline")
+
+        let reachableIdle = ConversationStateMachine.contactListPresentation(
+            for: .idle,
+            requestCount: nil,
+            presence: .reachable
+        )
+        #expect(reachableIdle.section == .contacts)
+        #expect(reachableIdle.displayStatus == .online)
+        #expect(reachableIdle.availabilityPill == .online)
+        #expect(reachableIdle.statusPillText() == "Online")
     }
 
     @Test func selectedPeerStateUsesWaitingDuringPendingJoin() {
@@ -29978,6 +30289,18 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func startCallUserActivityAcceptRouteEstablishesSelectedContactIntentAndPrewarmBeforeJoin() async throws {
+        try await assertIncomingRequestAcceptRouteEstablishesIntentAndPrewarm {
+            viewModel,
+            contact,
+            _
+            in
+            let startCallIntent = makeStartCallIntent(handle: contact.handle, identifier: "invite-1")
+            await viewModel.handleStartCallIntent(startCallIntent)
+        }
+    }
+
+    @MainActor
     @Test func notificationAcceptRouteReplacesExistingDetailFocusAndPreservesIntentAndPrewarm() async throws {
         try await assertIncomingRequestAcceptRouteEstablishesIntentAndPrewarm {
             viewModel,
@@ -30001,6 +30324,51 @@ struct TurboTests {
 
             await viewModel.handleTalkRequestNotificationAcceptResponse(userInfo: userInfo)
         }
+    }
+
+    @Test func talkRequestNotificationAcceptCompletionWaitsForHandler() {
+        #expect(
+            TurboNotificationCategory.shouldCompleteTalkRequestResponseAfterHandling(
+                actionIdentifier: TurboNotificationCategory.acceptTalkRequestAction
+            )
+        )
+        #expect(
+            TurboNotificationCategory.shouldCompleteTalkRequestResponseAfterHandling(
+                actionIdentifier: UNNotificationDefaultActionIdentifier
+            )
+        )
+    }
+
+    @Test func talkRequestNotificationLifecycleClearRemovesOnlyTalkRequestNotificationsAndBadge() {
+        var removedIdentifiers: [[String]] = []
+        var badgeCounts: [Int] = []
+        let deliveredNotifications = [
+            TurboNotificationCategory.DeliveredNotificationSnapshot(
+                identifier: "talk-payload",
+                categoryIdentifier: "OTHER",
+                userInfo: ["event": "talk-request"]
+            ),
+            TurboNotificationCategory.DeliveredNotificationSnapshot(
+                identifier: "talk-category",
+                categoryIdentifier: TurboNotificationCategory.talkRequest,
+                userInfo: [:]
+            ),
+            TurboNotificationCategory.DeliveredNotificationSnapshot(
+                identifier: "other",
+                categoryIdentifier: "OTHER",
+                userInfo: ["event": "other"]
+            ),
+        ]
+
+        TurboNotificationCategory.clearDeliveredTalkRequestNotifications(
+            deliveredNotifications: deliveredNotifications,
+            additionalIdentifiers: ["current-talk"],
+            removeDeliveredIdentifiers: { removedIdentifiers.append($0) },
+            setBadgeCount: { badgeCounts.append($0) }
+        )
+
+        #expect(Set(removedIdentifiers.flatMap { $0 }) == Set(["talk-payload", "talk-category", "current-talk"]))
+        #expect(badgeCounts == [0])
     }
 
     @MainActor
@@ -30283,6 +30651,14 @@ struct TurboTests {
         #expect(intent?.action == .accept)
         #expect(intent?.inviteID == "invite-1")
         #expect(intent?.channelID == "channel-1")
+    }
+
+    @Test func conversationOpenIntentParsesStartCallUserActivityAsAccept() throws {
+        let startCallIntent = makeStartCallIntent(handle: "@avery", identifier: "invite-1")
+        let intent = TurboIncomingLink.conversationOpenIntent(fromStartCallIntent: startCallIntent)
+
+        #expect(intent?.reference == "@avery")
+        #expect(intent?.action == .accept)
     }
 
     @Test func liveActivityProjectionMapsSelectedPeerPhases() {
@@ -37133,6 +37509,91 @@ struct TurboTests {
         #expect(nextState.surfacedInviteIDs == Set(["invite-1"]))
     }
 
+    @MainActor
+    @Test func applicationForegroundResurfacesSelectedIncomingRequestAfterLostNotificationAction() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let invite = makeInvite(
+            direction: "incoming",
+            inviteId: "invite-1",
+            fromHandle: "@avery",
+            toHandle: "@self",
+            createdAt: "2026-04-17T19:00:00Z",
+            updatedAt: "2026-04-17T19:00:00Z"
+        )
+        viewModel.applicationStateOverride = .active
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: invite.channelId,
+                remoteUserId: invite.fromUserId
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [BackendInviteUpdate(contactID: contactID, invite: invite)],
+                outgoing: [],
+                now: .now
+            )
+        )
+        viewModel.markTalkRequestSurfaceOpened(for: contactID, inviteID: invite.inviteId)
+        #expect(viewModel.activeIncomingTalkRequest == nil)
+
+        await viewModel.handleApplicationDidBecomeActive()
+
+        #expect(viewModel.activeIncomingTalkRequest?.contactID == contactID)
+        #expect(viewModel.activeIncomingTalkRequest?.inviteID == invite.inviteId)
+    }
+
+    @MainActor
+    @Test func automaticInviteSelectionDoesNotDismissForegroundTalkRequestSurface() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let invite = makeInvite(
+            direction: "incoming",
+            inviteId: "invite-1",
+            fromHandle: "@avery",
+            toHandle: "@self",
+            createdAt: "2026-04-17T19:00:00Z",
+            updatedAt: "2026-04-17T19:00:00Z"
+        )
+        viewModel.applicationStateOverride = .active
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: invite.channelId,
+                remoteUserId: invite.fromUserId
+            )
+        ]
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [BackendInviteUpdate(contactID: contactID, invite: invite)],
+                outgoing: [],
+                now: .now
+            )
+        )
+        viewModel.reconcileTalkRequestSurface(applicationState: .active)
+        let surface = try #require(viewModel.activeIncomingTalkRequest)
+
+        viewModel.reconcileContactSelectionIfNeeded(
+            reason: "invite-sync",
+            allowSelectingFallbackContact: false
+        )
+
+        #expect(viewModel.selectedContactId == contactID)
+        #expect(viewModel.activeIncomingTalkRequest == surface)
+        #expect(viewModel.diagnosticsTranscript.contains("Auto-selected contact"))
+    }
+
     @Test func talkRequestSurfaceKeepsActiveBannerStableWhenInviteSourceFlipsForSameRequest() {
         let contactID = UUID()
         let contact = Contact(
@@ -37270,6 +37731,193 @@ struct TurboTests {
                     && request.incomingInvite?.inviteId == "invite-1"
             }
         )
+    }
+
+    @MainActor
+    @Test func visibleForegroundTalkRequestAcceptUsesRenderedSurfaceSnapshot() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let invite = makeInvite(
+            direction: "incoming",
+            inviteId: "invite-1",
+            fromHandle: "@avery",
+            toHandle: "@self"
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: invite.channelId,
+                remoteUserId: invite.fromUserId
+            )
+        ]
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [BackendInviteUpdate(contactID: contactID, invite: invite)],
+                outgoing: [],
+                now: .now
+            )
+        )
+        viewModel.reconcileTalkRequestSurface(applicationState: .active)
+        let renderedSurface = try #require(viewModel.activeIncomingTalkRequest)
+        viewModel.talkRequestSurfaceState.activeIncomingRequest = nil
+
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+
+        var capturedEffects: [BackendCommandEffect] = []
+        viewModel.backendCommandCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        viewModel.acceptIncomingTalkRequestSurface(renderedSurface)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let joinEffects = capturedEffects.filter {
+            guard case .join = $0 else { return false }
+            return true
+        }
+        #expect(joinEffects.count == 1)
+        #expect(viewModel.selectedContactId == contactID)
+        #expect(viewModel.activeIncomingTalkRequest == nil)
+        #expect(viewModel.diagnosticsTranscript.contains("Foreground talk request banner accepted"))
+    }
+
+    @MainActor
+    @Test func acceptingActiveIncomingTalkRequestIsOneShotForRacingSurfaces() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let invite = makeInvite(
+            direction: "incoming",
+            inviteId: "invite-1",
+            fromHandle: "@avery",
+            toHandle: "@self"
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: invite.channelId,
+                remoteUserId: invite.fromUserId
+            )
+        ]
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [BackendInviteUpdate(contactID: contactID, invite: invite)],
+                outgoing: [],
+                now: .now
+            )
+        )
+        viewModel.reconcileTalkRequestSurface(applicationState: .active)
+        let firstSurface = try #require(viewModel.activeIncomingTalkRequest)
+        let racingRelationshipSurface = IncomingTalkRequestSurface(
+            contactID: contactID,
+            inviteID: "relationship:\(contactID.uuidString):1",
+            contactName: firstSurface.contactName,
+            contactHandle: firstSurface.contactHandle,
+            contactIsOnline: firstSurface.contactIsOnline,
+            requestCount: firstSurface.requestCount,
+            recencyKey: "relationship:1:\(contactID.uuidString)"
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+
+        var capturedEffects: [BackendCommandEffect] = []
+        viewModel.backendCommandCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        viewModel.acceptActiveIncomingTalkRequest()
+        viewModel.talkRequestSurfaceState.activeIncomingRequest = racingRelationshipSurface
+        viewModel.acceptActiveIncomingTalkRequest()
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let joinEffects = capturedEffects.filter {
+            guard case .join = $0 else { return false }
+            return true
+        }
+        #expect(joinEffects.count == 1)
+        #expect(viewModel.activeIncomingTalkRequest == nil)
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Ignored repeated foreground talk request banner accept"
+            )
+        )
+    }
+
+    @MainActor
+    @Test func foregroundTalkRequestBannerAcceptWaitsForRequestProjection() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let invite = makeInvite(
+            direction: "incoming",
+            inviteId: "invite-1",
+            fromHandle: "@avery",
+            toHandle: "@self"
+        )
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: invite.channelId,
+                remoteUserId: invite.fromUserId
+            )
+        ]
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "user-self", mode: "cloud")
+
+        var capturedEffects: [BackendCommandEffect] = []
+        viewModel.backendCommandCoordinator.effectHandler = { effect in
+            capturedEffects.append(effect)
+        }
+
+        viewModel.queuePendingForegroundTalkRequestSurface(
+            for: try #require(viewModel.contacts.first),
+            inviteID: invite.inviteId,
+            requestCount: 1,
+            reason: "test-notification-before-projection"
+        )
+        viewModel.reconcileTalkRequestSurface(applicationState: .active)
+        let renderedSurface = try #require(viewModel.activeIncomingTalkRequest)
+
+        viewModel.acceptIncomingTalkRequestSurface(renderedSurface)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(viewModel.activeIncomingTalkRequest == nil)
+        #expect(viewModel.pendingForegroundTalkRequestAcceptSurface?.id == renderedSurface.id)
+        #expect(capturedEffects.filter { if case .join = $0 { true } else { false } }.isEmpty)
+
+        viewModel.backendSyncCoordinator.send(
+            .invitesUpdated(
+                incoming: [BackendInviteUpdate(contactID: contactID, invite: invite)],
+                outgoing: [],
+                now: .now
+            )
+        )
+        viewModel.reconcileTalkRequestSurface(applicationState: .active)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let joinEffects = capturedEffects.filter {
+            guard case .join = $0 else { return false }
+            return true
+        }
+        #expect(joinEffects.count == 1)
+        #expect(viewModel.pendingForegroundTalkRequestAcceptSurface == nil)
+        #expect(viewModel.activeIncomingTalkRequest == nil)
+        #expect(viewModel.diagnosticsTranscript.contains("Completing pending foreground talk request banner accept"))
+        #expect(viewModel.diagnosticsTranscript.contains("Foreground talk request banner accepted"))
     }
 
     @Test func backendCommandReducerLeaveFailureClearsOperationAndStoresError() {
@@ -46463,6 +47111,35 @@ private func makeInvite(
         shouldAutoJoinPeer: nil,
         accepted: nil,
         pendingJoin: nil
+    )
+}
+
+private func makeStartCallIntent(handle: String, identifier: String) -> INStartCallIntent {
+    let personHandle = INPersonHandle(value: handle, type: .unknown)
+    let caller = INPerson(
+        personHandle: personHandle,
+        nameComponents: nil,
+        displayName: handle,
+        image: nil,
+        contactIdentifier: nil,
+        customIdentifier: nil
+    )
+    let callRecord = INCallRecord(
+        identifier: identifier,
+        dateCreated: Date(),
+        caller: caller,
+        callRecordType: .ringing,
+        callCapability: .audioCall,
+        callDuration: nil,
+        unseen: true
+    )
+    return INStartCallIntent(
+        callRecordFilter: nil,
+        callRecordToCallBack: callRecord,
+        audioRoute: .unknown,
+        destinationType: .normal,
+        contacts: [caller],
+        callCapability: .audioCall
     )
 }
 

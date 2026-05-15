@@ -49,7 +49,6 @@
           "diagnosticsContains": [
             "Selection Direct QUIC prewarm skipped",
             "reason=selected-contact",
-            "blockReason=channel-metadata-missing",
             "reason=channel-refresh"
           ],
           "diagnosticsNotContains": [

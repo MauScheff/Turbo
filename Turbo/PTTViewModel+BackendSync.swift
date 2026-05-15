@@ -10,6 +10,7 @@ import UIKit
 
 enum IncomingAudioPayloadTransport: Equatable {
     case relayWebSocket
+    case mediaRelay
     case directQuic
 }
 

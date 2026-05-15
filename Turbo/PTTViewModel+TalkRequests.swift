@@ -15,6 +15,7 @@ extension PTTViewModel {
         expirePendingForegroundTalkRequestSurfaceIfNeeded()
         let candidates: [IncomingTalkRequestCandidate] = contacts.compactMap { contact in
             guard contact.handle != currentDevUserHandle else { return nil }
+            guard !talkRequestNotificationAlreadyHandled(for: contact.id) else { return nil }
             if let invite = incomingInviteByContactID[contact.id] {
                 return IncomingTalkRequestCandidate(contact: contact, invite: invite)
             }
@@ -58,6 +59,7 @@ extension PTTViewModel {
                 allowsAlreadySurfacedInvite: allowsAlreadySurfacedInvite
             )
         )
+        completePendingForegroundTalkRequestAcceptIfReady(reason: "surface-reconcile")
     }
 
     func dismissIncomingTalkRequestSurface() {
@@ -79,25 +81,212 @@ extension PTTViewModel {
     }
 
     func acceptActiveIncomingTalkRequest() {
-        guard let activeIncomingTalkRequest,
-              let contact = contacts.first(where: { $0.id == activeIncomingTalkRequest.contactID }) else {
+        guard let activeIncomingTalkRequest else {
             dismissIncomingTalkRequestSurface()
             return
         }
+        acceptIncomingTalkRequestSurface(activeIncomingTalkRequest)
+    }
+
+    func acceptIncomingTalkRequestSurface(_ surface: IncomingTalkRequestSurface) {
+        if acceptingIncomingTalkRequestSurfaceIDs.contains(surface.id) {
+            diagnostics.record(
+                .pushToTalk,
+                message: "Ignored repeated foreground talk request banner accept",
+                metadata: [
+                    "contactId": surface.contactID.uuidString,
+                    "inviteId": surface.inviteID,
+                    "acceptIntentState": "in-flight",
+                ]
+            )
+            return
+        }
+        guard !talkRequestNotificationAlreadyHandled(for: surface.contactID) else {
+            markTalkRequestSurfaceOpened(
+                for: surface.contactID,
+                inviteID: surface.inviteID
+            )
+            diagnostics.record(
+                .pushToTalk,
+                message: "Ignored repeated foreground talk request banner accept",
+                metadata: [
+                    "contactId": surface.contactID.uuidString,
+                    "inviteId": surface.inviteID,
+                    "acceptIntentState": "already-handled",
+                ]
+            )
+            return
+        }
+        acceptingIncomingTalkRequestSurfaceIDs.insert(surface.id)
+        guard let contact = contacts.first(where: { $0.id == surface.contactID }) else {
+            acceptingIncomingTalkRequestSurfaceIDs.remove(surface.id)
+            diagnostics.record(
+                .pushToTalk,
+                level: .notice,
+                message: "Ignored foreground talk request banner accept without local contact",
+                metadata: [
+                    "contactId": surface.contactID.uuidString,
+                    "handle": surface.contactHandle,
+                    "inviteId": surface.inviteID,
+                ]
+            )
+            return
+        }
+        pendingForegroundTalkRequestAcceptSurface = surface
+        markTalkRequestSurfaceOpened(
+            for: surface.contactID,
+            inviteID: surface.inviteID
+        )
+        diagnostics.record(
+            .pushToTalk,
+            message: "Foreground talk request banner accept tapped",
+            metadata: [
+                "contactId": contact.id.uuidString,
+                "handle": contact.handle,
+                "inviteId": surface.inviteID,
+                "requestCount": "\(surface.requestCount)",
+                "acceptIntentState": "pending",
+            ]
+        )
+        guard !completePendingForegroundTalkRequestAcceptIfReady(
+            reason: "foreground-banner-accept"
+        ) else {
+            return
+        }
+        diagnostics.record(
+            .pushToTalk,
+            message: "Queued foreground talk request banner accept until incoming request projects",
+            metadata: [
+                "contactId": contact.id.uuidString,
+                "handle": contact.handle,
+                "inviteId": surface.inviteID,
+                "relationship": String(describing: relationshipState(for: contact.id)),
+            ]
+        )
+        Task { @MainActor [weak self] in
+            await self?.resolvePendingForegroundTalkRequestAccept(surface)
+        }
+    }
+
+    @discardableResult
+    func completePendingForegroundTalkRequestAcceptIfReady(reason: String) -> Bool {
+        guard let surface = pendingForegroundTalkRequestAcceptSurface else { return false }
+        if talkRequestNotificationAlreadyHandled(for: surface.contactID) {
+            pendingForegroundTalkRequestAcceptSurface = nil
+            acceptingIncomingTalkRequestSurfaceIDs.remove(surface.id)
+            markTalkRequestSurfaceOpened(for: surface.contactID, inviteID: surface.inviteID)
+            diagnostics.record(
+                .pushToTalk,
+                message: "Completed pending foreground talk request banner accept from existing join intent",
+                metadata: [
+                    "contactId": surface.contactID.uuidString,
+                    "inviteId": surface.inviteID,
+                    "reason": reason,
+                ]
+            )
+            return true
+        }
+        guard let contact = contacts.first(where: { $0.id == surface.contactID }) else {
+            pendingForegroundTalkRequestAcceptSurface = nil
+            acceptingIncomingTalkRequestSurfaceIDs.remove(surface.id)
+            diagnostics.record(
+                .pushToTalk,
+                level: .notice,
+                message: "Dropped pending foreground talk request banner accept without local contact",
+                metadata: [
+                    "contactId": surface.contactID.uuidString,
+                    "handle": surface.contactHandle,
+                    "inviteId": surface.inviteID,
+                    "reason": reason,
+                ]
+            )
+            return true
+        }
+        guard relationshipState(for: contact.id).isIncomingRequest else {
+            return false
+        }
+        diagnostics.record(
+            .pushToTalk,
+            message: "Completing pending foreground talk request banner accept",
+            metadata: [
+                "contactId": contact.id.uuidString,
+                "handle": contact.handle,
+                "inviteId": surface.inviteID,
+                "requestCount": "\(surface.requestCount)",
+                "reason": reason,
+            ]
+        )
+        let didAccept = acceptIncomingTalkRequest(
+            contact,
+            reason: reason
+        )
+        guard didAccept else { return false }
+        pendingForegroundTalkRequestAcceptSurface = nil
+        acceptingIncomingTalkRequestSurfaceIDs.remove(surface.id)
+        markTalkRequestSurfaceOpened(for: surface.contactID, inviteID: surface.inviteID)
         diagnostics.record(
             .pushToTalk,
             message: "Foreground talk request banner accepted",
             metadata: [
                 "contactId": contact.id.uuidString,
                 "handle": contact.handle,
-                "inviteId": activeIncomingTalkRequest.inviteID,
-                "requestCount": "\(activeIncomingTalkRequest.requestCount)",
+                "inviteId": surface.inviteID,
+                "requestCount": "\(surface.requestCount)",
+                "acceptIntentState": "completed",
             ]
         )
-        acceptIncomingTalkRequest(
-            contact,
+        return true
+    }
+
+    private func resolvePendingForegroundTalkRequestAccept(
+        _ surface: IncomingTalkRequestSurface
+    ) async {
+        let userInfo = foregroundTalkRequestUserInfo(from: surface)
+        await refreshRequestStateAfterTalkRequestNotification(
+            userInfo: userInfo,
             reason: "foreground-banner-accept"
         )
+        guard !completePendingForegroundTalkRequestAcceptIfReady(
+            reason: "foreground-banner-accept-refreshed"
+        ) else {
+            return
+        }
+        try? await Task.sleep(nanoseconds: 750_000_000)
+        await refreshRequestStateAfterTalkRequestNotification(
+            userInfo: userInfo,
+            reason: "foreground-banner-accept-retry"
+        )
+        guard !completePendingForegroundTalkRequestAcceptIfReady(
+            reason: "foreground-banner-accept-retry"
+        ) else {
+            return
+        }
+        if pendingForegroundTalkRequestAcceptSurface?.id == surface.id {
+            pendingForegroundTalkRequestAcceptSurface = nil
+        }
+        acceptingIncomingTalkRequestSurfaceIDs.remove(surface.id)
+        diagnostics.record(
+            .pushToTalk,
+            level: .notice,
+            message: "Pending foreground talk request banner accept is still waiting for incoming request projection",
+            metadata: [
+                "contactId": surface.contactID.uuidString,
+                "handle": surface.contactHandle,
+                "inviteId": surface.inviteID,
+                "relationship": contacts.first(where: { $0.id == surface.contactID })
+                    .map { String(describing: relationshipState(for: $0.id)) } ?? "missing-contact",
+            ]
+        )
+    }
+
+    private func foregroundTalkRequestUserInfo(
+        from surface: IncomingTalkRequestSurface
+    ) -> [AnyHashable: Any] {
+        [
+            "event": "talk-request",
+            "fromHandle": surface.contactHandle,
+            "inviteId": surface.inviteID,
+        ]
     }
 
     func openActiveIncomingTalkRequest() {

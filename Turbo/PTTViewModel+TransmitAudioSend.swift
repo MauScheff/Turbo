@@ -175,9 +175,62 @@ extension PTTViewModel {
             }
 
             if let self {
+                if await MainActor.run(body: { self.isDirectPathRelayOnlyForced }) {
+                    try await relaySend()
+                    return
+                }
+
+                if await MainActor.run(body: { TurboMediaRelayDebugOverride.isForced() }) {
+                    if let relayClient = await self.mediaRelayClientForAudioSend(target: target) {
+                        do {
+                            try await relayClient.sendAudioPayload(transportPayload)
+                            return
+                        } catch {
+                            await MainActor.run {
+                                self.recordMediaRelayPeerUnavailableInvariantIfNeeded(
+                                    error: error,
+                                    contactID: target.contactID,
+                                    channelID: target.channelID,
+                                    peerDeviceID: target.deviceID,
+                                    operation: "audio-payload"
+                                )
+                                self.diagnostics.record(
+                                    .media,
+                                    level: .error,
+                                    message: "Media relay audio send failed; falling back to WebSocket relay",
+                                    metadata: [
+                                        "contactId": target.contactID.uuidString,
+                                        "channelId": target.channelID,
+                                        "error": error.localizedDescription,
+                                    ]
+                                )
+                                if self.isMediaRelayPeerUnavailable(error) {
+                                    self.suppressMediaRelayAudioSendUntilNextIdlePrewarm(
+                                        localDeviceID: fromDeviceID,
+                                        contactID: target.contactID,
+                                        channelID: target.channelID,
+                                        peerDeviceID: target.deviceID,
+                                        reason: "audio-payload"
+                                    )
+                                    self.clearStaleMediaRelayClient(
+                                        localDeviceID: fromDeviceID,
+                                        channelID: target.channelID,
+                                        peerDeviceID: target.deviceID,
+                                        client: relayClient,
+                                        reason: "audio-payload"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    try await relaySend()
+                    return
+                }
+
+                var deliveredTransports: [String] = []
+                var deliveryFailures: [(transport: String, error: Error)] = []
                 let directTransport = await MainActor.run { () -> DirectQuicProbeController? in
-                    guard !TurboMediaRelayDebugOverride.isForced(),
-                          self.shouldUseDirectQuicAudioTransport(for: target.contactID) else {
+                    guard self.shouldUseDirectQuicAudioTransport(for: target.contactID) else {
                         return nil
                     }
                     return self.mediaRuntime.directQuicProbeController
@@ -185,13 +238,14 @@ extension PTTViewModel {
                 if let directTransport {
                     do {
                         try await directTransport.sendAudioPayload(transportPayload)
-                        return
+                        deliveredTransports.append("direct-quic")
                     } catch {
+                        deliveryFailures.append(("direct-quic", error))
                         await MainActor.run {
                             self.diagnostics.record(
                                 .media,
                                 level: .error,
-                                message: "Direct QUIC audio send failed; falling back to relay",
+                                message: "Direct QUIC audio send failed during multipath fanout",
                                 metadata: [
                                     "contactId": target.contactID.uuidString,
                                     "channelId": target.channelID,
@@ -202,11 +256,16 @@ extension PTTViewModel {
                     }
                 }
 
-                if let relayClient = await self.mediaRelayClientForAudioSend(target: target) {
+                let relayClient = await self.existingMediaRelayClientForAudioFanout(
+                    target: target,
+                    localDeviceID: fromDeviceID
+                )
+                if let relayClient {
                     do {
                         try await relayClient.sendAudioPayload(transportPayload)
-                        return
+                        deliveredTransports.append("media-relay")
                     } catch {
+                        deliveryFailures.append(("media-relay", error))
                         await MainActor.run {
                             self.recordMediaRelayPeerUnavailableInvariantIfNeeded(
                                 error: error,
@@ -218,7 +277,7 @@ extension PTTViewModel {
                             self.diagnostics.record(
                                 .media,
                                 level: .error,
-                                message: "Media relay audio send failed; falling back to WebSocket relay",
+                                message: "Media relay audio send failed during multipath fanout",
                                 metadata: [
                                     "contactId": target.contactID.uuidString,
                                     "channelId": target.channelID,
@@ -244,6 +303,48 @@ extension PTTViewModel {
                         }
                     }
                 }
+
+                do {
+                    try await relaySend()
+                    deliveredTransports.append("relay-websocket")
+                } catch {
+                    deliveryFailures.append(("relay-websocket", error))
+                    if deliveredTransports.isEmpty {
+                        throw error
+                    }
+                    await MainActor.run {
+                        self.diagnostics.record(
+                            .media,
+                            level: .error,
+                            message: "WebSocket relay audio send failed after alternate media path delivery",
+                            metadata: [
+                                "contactId": target.contactID.uuidString,
+                                "channelId": target.channelID,
+                                "error": error.localizedDescription,
+                                "deliveredTransports": deliveredTransports.joined(separator: ","),
+                            ]
+                        )
+                    }
+                }
+
+                if deliveredTransports.count > 1 {
+                    await MainActor.run {
+                        self.diagnostics.record(
+                            .media,
+                            message: "Delivered outbound audio over multipath transports",
+                            metadata: [
+                                "contactId": target.contactID.uuidString,
+                                "channelId": target.channelID,
+                                "transports": deliveredTransports.joined(separator: ","),
+                                "failureCount": String(deliveryFailures.count),
+                            ]
+                        )
+                    }
+                }
+                if deliveredTransports.isEmpty, let firstFailure = deliveryFailures.first {
+                    throw firstFailure.error
+                }
+                return
             }
 
             try await relaySend()
@@ -346,6 +447,28 @@ extension PTTViewModel {
             failureMessage: "Media relay connection failed; falling back to WebSocket relay",
             fromUserIDForIncoming: { target.userID }
         )
+    }
+
+    func existingMediaRelayClientForAudioFanout(
+        target: TransmitTarget,
+        localDeviceID: String
+    ) async -> TurboMediaRelayClient? {
+        await MainActor.run {
+            guard TurboMediaRelayDebugOverride.isEnabled(),
+                  !TurboMediaRelayDebugOverride.isForced(),
+                  !localDeviceID.isEmpty else {
+                return nil
+            }
+            let key = MediaRelayConnectionKey(
+                sessionID: target.channelID,
+                localDeviceID: localDeviceID,
+                peerDeviceID: target.deviceID
+            )
+            guard !mediaRuntime.isMediaRelayAudioSendSuppressed(for: key) else {
+                return nil
+            }
+            return mediaRuntime.existingMediaRelayClient(for: key)
+        }
     }
 
     func connectMediaRelayForReceiveIfNeeded(
@@ -484,7 +607,7 @@ extension PTTViewModel {
                     fromUserID: fromUserID,
                     fromDeviceID: peerDeviceID,
                     contactID: contactID,
-                    incomingAudioTransport: .directQuic
+                    incomingAudioTransport: .mediaRelay
                 )
             },
             onIncomingControlFrame: { [weak self] frame in

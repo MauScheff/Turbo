@@ -1199,10 +1199,8 @@ struct ConversationDerivationContext: Equatable {
 
     var idleAvailabilityStatusMessage: String {
         switch contactPresence {
-        case .connected:
+        case .connected, .reachable:
             return "\(contactName) is online"
-        case .reachable:
-            return "Ready to connect"
         case .offline:
             return "Ready to connect"
         }
@@ -1552,10 +1550,11 @@ enum ConversationStateMachine {
         let connectedControlPlane = context.connectedControlPlaneProjection
         let fallbackState: () -> SelectedPeerState = {
             let localSessionActive = durableSession.localSessionPresent
+            let idleIsOnline = context.contactPresence != .offline
 
             if context.backendMembershipIsStaleWithoutLocalSessionEvidence {
                 return makeState(
-                    .idle(isOnline: context.contactIsOnline),
+                    .idle(isOnline: idleIsOnline),
                     context.idleAvailabilityStatusMessage,
                     false
                 )
@@ -1672,7 +1671,7 @@ enum ConversationStateMachine {
                 )
             case .none:
                 return makeState(
-                    .idle(isOnline: context.contactIsOnline),
+                    .idle(isOnline: idleIsOnline),
                     context.idleAvailabilityStatusMessage,
                     false
                 )
@@ -1754,7 +1753,7 @@ enum ConversationStateMachine {
         case .ready, .transmitting, .receiving:
             return .live
         case .idle:
-            return presence == .connected ? .online : .offline
+            return presence == .offline ? .offline : .online
         }
     }
 
@@ -2155,13 +2154,19 @@ enum ConversationStateMachine {
         switch context.backendChannelReadiness {
         case .absent:
             if localSessionActive,
-               context.channel != nil,
                !context.backendJoinSettling,
                !context.systemMismatchChannelMatchesContact,
                !context.unattributedJoinedSystemMismatch,
                !context.channelHasRequestRelationship,
                !context.peerSignalIsTransmitting,
-               !explicitLeaveRequested {
+               !explicitLeaveRequested,
+               (
+                   context.channel != nil
+                       || (
+                           context.hadConnectedSessionContinuity
+                               && !context.controlPlaneReconnectGraceActive
+                       )
+               ) {
                 return .teardownSelectedSession(contactID: context.contactID)
             }
             return .none

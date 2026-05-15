@@ -122,7 +122,9 @@ struct ContentView: View {
                 TurboIncomingTalkRequestBanner(
                     request: activeIncomingTalkRequest,
                     onDismiss: viewModel.dismissIncomingTalkRequestSurface,
-                    onAccept: viewModel.acceptActiveIncomingTalkRequest
+                    onAccept: {
+                        viewModel.acceptIncomingTalkRequestSurface(activeIncomingTalkRequest)
+                    }
                 )
                 .padding(.horizontal)
                 .padding(.top, route == .launchSplash ? 18 : 10)
@@ -354,6 +356,9 @@ struct ContentView: View {
         .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { userActivity in
             guard let url = userActivity.webpageURL else { return }
             handleIncomingURL(url)
+        }
+        .onContinueUserActivity("INStartCallIntent") { userActivity in
+            handleStartCallUserActivity(userActivity)
         }
     }
 
@@ -961,6 +966,15 @@ struct ContentView: View {
         route = .live
         isShowingAddContactSheet = false
         beginOpeningPeer(reference, ensureInitialized: true)
+    }
+
+    private func handleStartCallUserActivity(_ userActivity: NSUserActivity) {
+        route = .live
+        isShowingAddContactSheet = false
+        Task {
+            await viewModel.initializeIfNeeded()
+            await viewModel.handleStartCallUserActivity(userActivity)
+        }
     }
 
     private func contactListItemSubtitle(_ item: ContactListItem) -> String {

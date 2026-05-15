@@ -117,6 +117,7 @@ struct DirectQuicUpgradeAttempt: Equatable {
     var lastUpdatedAt: Date
     var isDirectActive: Bool
     var remoteOffer: TurboDirectQuicOfferPayload?
+    var localOffer: TurboDirectQuicOfferPayload?
     var remoteAnswer: TurboDirectQuicAnswerPayload?
     var remoteCandidates: [TurboDirectQuicCandidate]
     var remoteCandidateCount: Int
@@ -446,6 +447,7 @@ final class DirectQuicUpgradeRuntimeState {
             lastUpdatedAt: now,
             isDirectActive: false,
             remoteOffer: nil,
+            localOffer: nil,
             remoteAnswer: nil,
             remoteCandidates: [],
             remoteCandidateCount: 0,
@@ -453,6 +455,20 @@ final class DirectQuicUpgradeRuntimeState {
             nominatedPath: nil,
             lastHangupReason: nil
         )
+    }
+
+    func markLocalOffer(
+        _ offer: TurboDirectQuicOfferPayload,
+        for contactID: UUID,
+        now: Date = Date()
+    ) {
+        guard var attempt = attemptByContactID[contactID],
+              attempt.attemptId == offer.attemptId else {
+            return
+        }
+        attempt.localOffer = offer
+        attempt.lastUpdatedAt = now
+        attemptByContactID[contactID] = attempt
     }
 
     private func updatedTransition(
