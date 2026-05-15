@@ -49,7 +49,7 @@ enum TurboIdentityProfileStore {
     }
 }
 
-enum TurboSuggestedProfileName {
+nonisolated enum TurboSuggestedProfileName {
     private static let adjectives = [
         "Amber", "Breezy", "Cinder", "Clever", "Cloudy", "Comet", "Copper", "Cozy",
         "Daring", "Drift", "Echo", "Feather", "Fizzy", "Golden", "Harbor", "Jolly",

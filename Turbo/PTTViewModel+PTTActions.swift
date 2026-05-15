@@ -1042,6 +1042,9 @@ extension PTTViewModel {
                     contactID: contactID,
                     channelID: backendChannelId
                 )
+                if currentApplicationState() != .active {
+                    sessionCoordinator.clearExplicitLeave(for: contactID)
+                }
             } else if let contactID {
                 await refreshChannelState(for: contactID)
                 await refreshContactSummaries()

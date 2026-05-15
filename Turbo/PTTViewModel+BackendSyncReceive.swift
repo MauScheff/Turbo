@@ -27,10 +27,15 @@ extension PTTViewModel {
         case .awaitingFirstAudioChunk:
             return remoteAudioInitialChunkTimeoutNanoseconds
         case .drainingAudio:
+            let peerTransmitStillOpen =
+                receiveExecutionCoordinator
+                    .state
+                    .remoteActivityByContactID[contactID]?
+                    .isPeerTransmitting ?? false
             let authoritativePeerTransmit =
                 selectedChannelSnapshot(for: contactID)?.status == .receiving
                 || selectedChannelSnapshot(for: contactID)?.readinessStatus?.isPeerTransmitting == true
-            if !authoritativePeerTransmit {
+            if !peerTransmitStillOpen && !authoritativePeerTransmit {
                 return min(
                     remoteAudioSilenceTimeoutNanoseconds,
                     remoteAudioNonAuthoritativePlaybackDrainPollNanoseconds
@@ -319,8 +324,10 @@ extension PTTViewModel {
                 "reason": readinessSignalReason.wireValue,
             ]
         )
+        let preserveDirectQuic = shouldUseDirectQuicTransport(for: contactID)
         closeMediaSession(
-            preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
+            preserveDirectQuic: preserveDirectQuic,
+            preserveMediaRelay: !preserveDirectQuic && shouldPreserveMediaRelayDuringMediaClose(for: contactID)
         )
         updateStatusForSelectedContact()
     }

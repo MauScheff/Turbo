@@ -314,6 +314,7 @@ extension PTTViewModel {
         // ignored by the control plane. Force a clean republish after rejoin.
         controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
         await reassertBackendJoin(for: contact)
+        controlPlaneCoordinator.send(.receiverAudioReadinessCacheCleared(contactID: contactID))
         return true
     }
 
@@ -983,6 +984,145 @@ extension PTTViewModel {
         return false
     }
 
+    func markLocalTransmitStopProjectionGrace(
+        for contactID: UUID,
+        nowNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) {
+        localTransmitStopProjectionGraceStartedAtNanosecondsByContactID[contactID] = nowNanoseconds
+    }
+
+    func clearLocalTransmitStopProjectionGrace(for contactID: UUID) {
+        localTransmitStopProjectionGraceStartedAtNanosecondsByContactID[contactID] = nil
+    }
+
+    func localTransmitStopProjectionGraceIsActive(
+        for contactID: UUID,
+        nowNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> Bool {
+        guard let startedAt = localTransmitStopProjectionGraceStartedAtNanosecondsByContactID[contactID] else {
+            return false
+        }
+        return nowNanoseconds >= startedAt
+            ? nowNanoseconds - startedAt <= localTransmitStopProjectionGraceNanoseconds
+            : true
+    }
+
+    func shouldDeferBeginTransmitUntilPostLiveSettlingCompletes(for contactID: UUID) -> Bool {
+        guard selectedContactId == contactID,
+              isJoined,
+              activeChannelId == contactID,
+              systemSessionMatches(contactID),
+              selectedPeerCoordinator.state.hadConnectedSessionContinuity,
+              !remoteReceiveProjectsPeerTalking(for: contactID),
+              !remotePlaybackDrainBlocksLocalTransmit(for: contactID) else {
+            return false
+        }
+
+        return localTransmitStopProjectionGraceIsActive(for: contactID)
+            || remoteTransmitStopProjectionGraceIsActive(for: contactID)
+    }
+
+    func deferBeginTransmitUntilPostLiveSettlingCompletes(
+        request: TransmitRequestContext,
+        reason: String
+    ) {
+        pendingBeginTransmitAfterSettlingTask?.cancel()
+        diagnostics.record(
+            .media,
+            message: "Deferring begin transmit until post-live settling completes",
+            metadata: [
+                "contactId": request.contactID.uuidString,
+                "channelId": request.backendChannelID,
+                "reason": reason,
+            ]
+        )
+        startTransmitStartupTiming(for: request, source: "hold-to-talk-\(reason)")
+        cancelDeferredInteractivePrewarmForLocalTransmitIfNeeded(
+            contactID: request.contactID,
+            reason: "begin-transmit-\(reason)"
+        )
+        transmitRuntime.markPressBegan()
+        transmitRuntime.syncActiveTarget(transmitCoordinator.state.activeTarget)
+        updateStatusForSelectedContact()
+        captureDiagnosticsState("transmit-begin:deferred-post-live-settling")
+
+        pendingBeginTransmitAfterSettlingTask = Task { [weak self] in
+            await self?.runDeferredBeginTransmitAfterPostLiveSettling(
+                request: request,
+                reason: reason
+            )
+        }
+    }
+
+    func cancelDeferredBeginTransmitAfterPostLiveSettling(reason: String) {
+        guard pendingBeginTransmitAfterSettlingTask != nil else { return }
+        pendingBeginTransmitAfterSettlingTask?.cancel()
+        pendingBeginTransmitAfterSettlingTask = nil
+        diagnostics.record(
+            .media,
+            message: "Cancelled deferred begin transmit after post-live settling",
+            metadata: ["reason": reason]
+        )
+    }
+
+    func runDeferredBeginTransmitAfterPostLiveSettling(
+        request: TransmitRequestContext,
+        reason: String
+    ) async {
+        let deadline = DispatchTime.now().uptimeNanoseconds + localTransmitStopProjectionGraceNanoseconds
+        while !Task.isCancelled {
+            guard selectedContactId == request.contactID,
+                  transmitRuntime.isPressingTalk,
+                  !transmitRuntime.explicitStopRequested else {
+                pendingBeginTransmitAfterSettlingTask = nil
+                return
+            }
+
+            let channelCanTransmit = selectedChannelState(for: request.contactID)?.canTransmit == true
+            let wakeReady = selectedPeerState(for: request.contactID).phase == .wakeReady
+            if !hasPendingBeginOrActiveTransmit,
+               !remoteReceiveBlocksLocalTransmit(for: request.contactID),
+               channelCanTransmit || wakeReady {
+                pendingBeginTransmitAfterSettlingTask = nil
+                diagnostics.record(
+                    .media,
+                    message: "Starting deferred begin transmit after post-live settling",
+                    metadata: [
+                        "contactId": request.contactID.uuidString,
+                        "channelId": request.backendChannelID,
+                        "reason": reason,
+                    ]
+                )
+                await transmitCoordinator.handle(.pressRequested(request))
+                syncTransmitState()
+                return
+            }
+
+            if DispatchTime.now().uptimeNanoseconds >= deadline {
+                pendingBeginTransmitAfterSettlingTask = nil
+                transmitRuntime.markPressEnded()
+                diagnostics.record(
+                    .media,
+                    level: .notice,
+                    message: "Deferred begin transmit timed out during post-live settling",
+                    metadata: [
+                        "contactId": request.contactID.uuidString,
+                        "channelId": request.backendChannelID,
+                        "reason": reason,
+                        "channelCanTransmit": String(channelCanTransmit),
+                        "hasPendingBeginOrActiveTransmit": String(hasPendingBeginOrActiveTransmit),
+                    ]
+                )
+                updateStatusForSelectedContact()
+                captureDiagnosticsState("transmit-begin:deferred-post-live-settling-timeout")
+                return
+            }
+
+            await refreshChannelState(for: request.contactID)
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
     func cancelDeferredInteractivePrewarmForLocalTransmitIfNeeded(
         contactID: UUID,
         reason: String
@@ -1028,14 +1168,6 @@ extension PTTViewModel {
             )
             return
         }
-        guard !hasPendingBeginOrActiveTransmit else {
-            diagnostics.record(
-                .media,
-                message: "Ignored begin transmit request",
-                metadata: ["reason": "pending-begin-or-active-target", "contact": contact.handle]
-            )
-            return
-        }
         guard activeChannelId == contact.id else {
             diagnostics.record(
                 .media,
@@ -1060,6 +1192,23 @@ extension PTTViewModel {
         let selectedPeer = selectedPeerState(for: contact.id)
         let isWakeReady = selectedPeer.phase == .wakeReady
 
+        guard let backendChannelId = contact.backendChannelId,
+              let remoteUserID = contact.remoteUserId,
+              let backend = backendServices else {
+            statusMessage = "Channel is not ready"
+            return
+        }
+
+        let request = TransmitRequestContext(
+            contactID: contact.id,
+            contactHandle: contact.handle,
+            backendChannelID: backendChannelId,
+            remoteUserID: remoteUserID,
+            channelUUID: channelUUID(for: contact.id),
+            usesLocalHTTPBackend: usesLocalHTTPBackend,
+            backendSupportsWebSocket: backend.supportsWebSocket
+        )
+
         guard canBeginTransmit(for: contact.id) else {
             diagnostics.record(
                 .media,
@@ -1074,28 +1223,53 @@ extension PTTViewModel {
             return
         }
 
-        if !isWakeReady {
-            guard let channelState = selectedChannelState,
-                  channelState.canTransmit else {
+        guard !hasPendingBeginOrActiveTransmit else {
+            guard shouldDeferBeginTransmitUntilPostLiveSettlingCompletes(for: contact.id) else {
                 diagnostics.record(
                     .media,
                     message: "Ignored begin transmit request",
+                    metadata: ["reason": "pending-begin-or-active-target", "contact": contact.handle]
+                )
+                return
+            }
+            deferBeginTransmitUntilPostLiveSettlingCompletes(
+                request: request,
+                reason: "previous-stop-in-flight"
+            )
+            return
+        }
+
+        if !isWakeReady {
+            guard let channelState = selectedChannelState,
+                  channelState.canTransmit else {
+                guard shouldDeferBeginTransmitUntilPostLiveSettlingCompletes(for: contact.id) else {
+                    diagnostics.record(
+                        .media,
+                        message: "Ignored begin transmit request",
+                        metadata: [
+                            "reason": "backend-channel-cannot-transmit",
+                            "contact": contact.handle,
+                            "channelStatus": selectedChannelState?.status ?? "none",
+                        ]
+                    )
+                    updateStatusForSelectedContact()
+                    return
+                }
+                diagnostics.record(
+                    .media,
+                    message: "Accepted begin transmit during post-live backend settling",
                     metadata: [
-                        "reason": "backend-channel-cannot-transmit",
+                        "reason": "backend-channel-cannot-transmit-yet",
                         "contact": contact.handle,
                         "channelStatus": selectedChannelState?.status ?? "none",
                     ]
                 )
-                updateStatusForSelectedContact()
+                deferBeginTransmitUntilPostLiveSettlingCompletes(
+                    request: request,
+                    reason: "backend-channel-settling"
+                )
                 return
             }
-        }
-
-        guard let backendChannelId = contact.backendChannelId,
-              let remoteUserID = contact.remoteUserId,
-              let backend = backendServices else {
-            statusMessage = "Channel is not ready"
-            return
         }
 
         diagnostics.record(.media, message: "Begin transmit requested", metadata: ["contact": contact.handle])
@@ -1111,15 +1285,6 @@ extension PTTViewModel {
             ],
             peerHandle: contact.handle,
             channelId: contact.backendChannelId
-        )
-        let request = TransmitRequestContext(
-            contactID: contact.id,
-            contactHandle: contact.handle,
-            backendChannelID: backendChannelId,
-            remoteUserID: remoteUserID,
-            channelUUID: channelUUID(for: contact.id),
-            usesLocalHTTPBackend: usesLocalHTTPBackend,
-            backendSupportsWebSocket: backend.supportsWebSocket
         )
         startTransmitStartupTiming(for: request, source: "hold-to-talk")
         // Latch the press locally before the async reducer runs so a single
@@ -1248,6 +1413,7 @@ extension PTTViewModel {
 
     func endTransmit(reason: String = "release") {
         transmitRuntime.noteTouchReleased()
+        cancelDeferredBeginTransmitAfterPostLiveSettling(reason: reason)
         guard isJoined else { return }
         let hasPendingOrActiveTransmit =
             transmitCoordinator.state.isPressingTalk
@@ -1271,10 +1437,13 @@ extension PTTViewModel {
             reason: reason
         )
         if let activeTarget = transmitCoordinator.state.activeTarget ?? transmitRuntime.activeTarget {
+            markLocalTransmitStopProjectionGrace(for: activeTarget.contactID)
             sendForegroundWarmDirectTransmitStopIfNeeded(
                 target: activeTarget,
                 reason: "\(reason)-active-target"
             )
+        } else if let activeChannelId {
+            markLocalTransmitStopProjectionGrace(for: activeChannelId)
         }
         transmitRuntime.markExplicitStopRequested()
         transmitRuntime.markPressEnded()

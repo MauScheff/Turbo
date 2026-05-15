@@ -1637,6 +1637,10 @@ def analyze_report(report: Report) -> list[InvariantViolation]:
     backend_can_transmit = snapshot_bool(snapshot, "backendCanTransmit")
     is_joined = snapshot_bool(snapshot, "isJoined")
     had_connected_session_continuity = snapshot_bool(snapshot, "hadConnectedSessionContinuity")
+    remote_transmit_stop_observed = snapshot_bool(snapshot, "remoteTransmitStopObserved")
+    remote_transmit_stop_projection_grace_active = snapshot_bool(
+        snapshot, "remoteTransmitStopProjectionGraceActive"
+    )
     local_join_failure = snapshot.get("localJoinFailure", "none")
     system_session = snapshot.get("systemSession", "none")
     backend_channel_status = snapshot.get("backendChannelStatus", "none")
@@ -1947,7 +1951,25 @@ def analyze_report(report: Report) -> list[InvariantViolation]:
             )
         )
 
-    if phase == "ready" and backend_can_transmit is False:
+    backend_is_stopped_peer_transmit = remote_transmit_stop_observed and (
+        backend_channel_status == "peer-transmitting" or backend_readiness == "peer-transmitting"
+    )
+    backend_is_transient_after_stopped_peer_transmit = (
+        remote_transmit_stop_observed
+        and remote_transmit_stop_projection_grace_active
+        and (
+            backend_channel_status == "waiting-for-peer"
+            or backend_readiness == "waiting-for-peer"
+        )
+    )
+    if (
+        phase == "ready"
+        and backend_can_transmit is False
+        and backend_channel_status != "self-transmitting"
+        and backend_readiness != "self-transmitting"
+        and not backend_is_stopped_peer_transmit
+        and not backend_is_transient_after_stopped_peer_transmit
+    ):
         violations.append(
             build_violation(
                 subject=report.handle,

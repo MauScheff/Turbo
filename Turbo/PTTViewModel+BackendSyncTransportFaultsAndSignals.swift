@@ -732,6 +732,7 @@ extension PTTViewModel {
             pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
             mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
             mediaRuntime.resetMediaEncryptionReceiveSequence(for: contactID)
+            markRemoteAudioActivity(for: contactID, source: .transmitPrepareSignal)
             if shouldTreatIncomingControlSignalAsWakeCandidate(
                 for: contactID,
                 applicationState: applicationState

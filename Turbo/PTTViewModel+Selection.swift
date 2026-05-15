@@ -456,6 +456,8 @@ extension PTTViewModel {
                             .state
                             .remoteTransmitStoppedContactIDs
                             .contains(contact.id),
+                    remoteTransmitStopProjectionGraceActive:
+                        remoteTransmitStopProjectionGraceIsActive(for: contact.id),
                     systemSessionState: systemSessionState,
                     systemSessionMatchesContact: systemSessionMatches(contact.id),
                     mediaState: mediaConnectionState,
@@ -542,6 +544,8 @@ extension PTTViewModel {
                 && (summaryBackendChannelID?.isEmpty ?? true))
         let backendShowsLocalMembershipAbsent =
             selectedChannel?.membership.hasLocalMembership == false
+        let backendHasNoObservedLocalMembership =
+            backendShowsLocalMembershipAbsent || selectedChannel == nil
 
         let localSessionTouchesContact =
             systemSessionMatches(contactID)
@@ -560,10 +564,15 @@ extension PTTViewModel {
             && requestRelationshipIsOutgoing
             && !localSessionTouchesContact
             && !backendJoinIsSettling(for: contactID)
+        let recentSystemLeaveIsAwaitingBackendConvergence =
+            staleSystemRejoinSuppressions.values.contains { suppression in
+                suppression.contactID == contactID
+            }
         let pendingLeaveIsComplete =
             sessionCoordinator.pendingAction.isLeaveInFlight(for: contactID)
             && !backendLeaveCommandInFlight
-            && (backendShowsLocalMembershipAbsent || backendChannelReferenceAbsent)
+            && !recentSystemLeaveIsAwaitingBackendConvergence
+            && (backendHasNoObservedLocalMembership || backendChannelReferenceAbsent)
         guard requestRelationshipIsNone || pendingJoinContradictsOutgoingRequest else { return }
         guard pendingJoinIsStale || pendingLeaveIsComplete else { return }
 

@@ -197,6 +197,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var remoteAudioPendingPlaybackDrainMaxNanoseconds: UInt64 = 5_000_000_000
     var remoteAudioNonAuthoritativePlaybackDrainMaxNanoseconds: UInt64 = 750_000_000
     var remoteAudioNonAuthoritativePlaybackDrainPollNanoseconds: UInt64 = 150_000_000
+    var remoteTransmitStopProjectionGraceNanoseconds: UInt64 = 8_000_000_000
+    var localTransmitStopProjectionGraceNanoseconds: UInt64 = 3_000_000_000
     var presenceHeartbeatHTTPFallbackIntervalSeconds: TimeInterval = 4
     var presenceHeartbeatWebSocketIntervalSeconds: TimeInterval = 1.5
     var foregroundAppManagedInteractiveAudioPrewarmEnabled = true
@@ -222,6 +224,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var selectedContactPrewarmInFlight: Set<UUID> = []
     var selectedContactPrewarmedSelectionContactID: UUID?
     var selectedContactPrewarmPipelineEnabled: Bool = true
+    var localTransmitStopProjectionGraceStartedAtNanosecondsByContactID: [UUID: UInt64] = [:]
+    var pendingBeginTransmitAfterSettlingTask: Task<Void, Never>?
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
     private var diagnosticsAutoPublishPendingTrigger: String?
     private let diagnosticsAutoPublishDelayNanoseconds: UInt64 = 8_000_000_000
@@ -237,10 +241,6 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var pendingTalkRequestNotificationHandle: String?
     var pendingTalkRequestNotificationShouldJoin: Bool = false
     var foregroundTalkRequestNotificationPrewarmedInviteIDs: Set<String> = []
-    var pendingForegroundTalkRequestSurface: IncomingTalkRequestSurface?
-    var pendingForegroundTalkRequestReceivedAt: Date?
-    var pendingForegroundTalkRequestAcceptSurface: IncomingTalkRequestSurface?
-    var acceptingIncomingTalkRequestSurfaceIDs: Set<String> = []
     let pendingForegroundTalkRequestLifetime: TimeInterval = 20
     var requestedExpandedCallContactID: UUID?
     var requestedExpandedCallSequence: Int = 0
@@ -742,6 +742,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     func tearDownTransmitRuntime(resetCoordinator: Bool) {
         transmitTaskCoordinator.send(.reset)
         transmitRuntime.reset()
+        localTransmitStopProjectionGraceStartedAtNanosecondsByContactID.removeAll()
+        pendingBeginTransmitAfterSettlingTask?.cancel()
+        pendingBeginTransmitAfterSettlingTask = nil
         foregroundDirectTransmitDelegationsByContactID.removeAll()
         if resetCoordinator {
             transmitCoordinator.reset()
@@ -1227,6 +1230,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             remoteTransmitStopObserved: selectedContactID.map {
                 receiveExecutionCoordinator.state.remoteTransmitStoppedContactIDs.contains($0)
             } ?? false,
+            remoteTransmitStopProjectionGraceActive: selectedContactID.map {
+                remoteTransmitStopProjectionGraceIsActive(for: $0)
+            } ?? false,
             remoteReceiveActivityState: selectedRemoteReceiveActivity.map { String(describing: $0) },
             receiverAudioReadinessState: selectedReceiverAudioReadiness.map { String(describing: $0) },
             pendingAction: selectedSession.pendingAction,
@@ -1363,6 +1369,21 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
             "isBackendReady": String(backendRuntime.isReady),
             "backendMode": backendRuntime.mode,
             "systemSession": String(describing: systemSessionState),
+            "remoteTransmitStopObserved": String(
+                selectedContactId.map {
+                    receiveExecutionCoordinator.state.remoteTransmitStoppedContactIDs.contains($0)
+                } ?? false
+            ),
+            "remoteTransmitStopProjectionGraceActive": String(
+                selectedContactId.map {
+                    self.remoteTransmitStopProjectionGraceIsActive(for: $0)
+                } ?? false
+            ),
+            "remotePlaybackDrainBlocksTransmit": String(
+                selectedContactId.map {
+                    self.remotePlaybackDrainBlocksLocalTransmit(for: $0)
+                } ?? false
+            ),
             "pttClientMode": pttSystemClient.modeDescription,
             "pttTokenRegistration": pttSystemPolicyCoordinator.state.tokenRegistrationDescription,
             "pttTokenRegistrationKind": pttSystemPolicyCoordinator.state.tokenRegistrationKind,

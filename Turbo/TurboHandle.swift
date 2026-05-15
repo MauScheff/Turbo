@@ -1,6 +1,6 @@
 import Foundation
 
-enum TurboHandle {
+nonisolated enum TurboHandle {
     static let minBodyLength = 3
     static let maxBodyLength = 20
     static let reservedURLBodies: Set<String> = [

@@ -11,6 +11,8 @@ struct TalkRequestNotificationIntent: Equatable {
     let inviteID: String?
     let handle: String
     let channelID: String?
+    let userIntent: String?
+    let sentAt: String?
     let deepLink: URL?
 
     init?(
@@ -26,6 +28,8 @@ struct TalkRequestNotificationIntent: Equatable {
         self.inviteID = userInfo["inviteId"] as? String
         self.handle = handle
         self.channelID = userInfo["channelId"] as? String
+        self.userIntent = userInfo["userIntent"] as? String
+        self.sentAt = (userInfo["sentAt"] as? String) ?? (userInfo["createdAt"] as? String)
         self.deepLink = (userInfo["deepLink"] as? String).flatMap(URL.init(string:))
     }
 
@@ -39,6 +43,12 @@ struct TalkRequestNotificationIntent: Equatable {
         }
         if let channelID {
             info["channelId"] = channelID
+        }
+        if let userIntent {
+            info["userIntent"] = userIntent
+        }
+        if let sentAt {
+            info["sentAt"] = sentAt
         }
         if let deepLink {
             info["deepLink"] = deepLink.absoluteString

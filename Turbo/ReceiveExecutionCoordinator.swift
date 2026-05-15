@@ -2,6 +2,7 @@ import Foundation
 
 enum RemoteReceiveActivitySource: String, Equatable {
     case incomingPush
+    case transmitPrepareSignal
     case transmitStartSignal
     case audioChunk
 }
@@ -103,13 +104,21 @@ enum ReceiveExecutionReducer {
                     || stopAlreadyObserved
                 )
             let hasReceivedAudioChunk =
-                (!startsNewPeerTransmitAfterDrain && (previousActivity?.hasReceivedAudioChunk ?? false))
-                || source == .audioChunk
+                source == .audioChunk
+                || (
+                    source == .transmitStartSignal
+                    && previousActivity?.hasReceivedAudioChunk == true
+                    && !startsNewPeerTransmitAfterDrain
+                )
+            let isPeerTransmitting =
+                source == .transmitPrepareSignal
+                ? false
+                : !continuesPlaybackDrainAfterStop
             let activityState = RemoteReceiveActivityState(
                 lastSource: source,
                 hasReceivedAudioChunk: hasReceivedAudioChunk,
                 activityGeneration: (previousActivity?.activityGeneration ?? 0) + 1,
-                isPeerTransmitting: !continuesPlaybackDrainAfterStop
+                isPeerTransmitting: isPeerTransmitting
             )
             nextState.remoteActivityByContactID[contactID] = activityState
             effects.append(
@@ -152,6 +161,7 @@ enum ReceiveExecutionReducer {
 final class ReceiveExecutionRuntimeState {
     var remoteAudioSilenceTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingPlaybackDrainStartedAtNanosecondsByContactID: [UUID: UInt64] = [:]
+    private var remoteTransmitStopProjectionGraceStartedAtNanosecondsByContactID: [UUID: UInt64] = [:]
 
     func pendingPlaybackDrainDeferralElapsedNanoseconds(
         for contactID: UUID,
@@ -166,6 +176,30 @@ final class ReceiveExecutionRuntimeState {
 
     func clearPendingPlaybackDrainDeferral(for contactID: UUID) {
         pendingPlaybackDrainStartedAtNanosecondsByContactID[contactID] = nil
+    }
+
+    func markRemoteTransmitStopProjectionGrace(
+        for contactID: UUID,
+        nowNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) {
+        remoteTransmitStopProjectionGraceStartedAtNanosecondsByContactID[contactID] = nowNanoseconds
+    }
+
+    func clearRemoteTransmitStopProjectionGrace(for contactID: UUID) {
+        remoteTransmitStopProjectionGraceStartedAtNanosecondsByContactID[contactID] = nil
+    }
+
+    func remoteTransmitStopProjectionGraceIsActive(
+        for contactID: UUID,
+        maximumAgeNanoseconds: UInt64,
+        nowNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> Bool {
+        guard let startedAt = remoteTransmitStopProjectionGraceStartedAtNanosecondsByContactID[contactID] else {
+            return false
+        }
+        return nowNanoseconds >= startedAt
+            ? nowNanoseconds - startedAt <= maximumAgeNanoseconds
+            : true
     }
 
     func replaceRemoteAudioSilenceTask(
@@ -192,6 +226,7 @@ final class ReceiveExecutionRuntimeState {
         }
         remoteAudioSilenceTasks = [:]
         pendingPlaybackDrainStartedAtNanosecondsByContactID = [:]
+        remoteTransmitStopProjectionGraceStartedAtNanosecondsByContactID = [:]
     }
 }
 

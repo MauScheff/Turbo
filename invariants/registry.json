@@ -422,6 +422,20 @@
       "status": "active"
     },
     {
+      "id": "request.canonical_sources_converge",
+      "scope": "local",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/TalkRequestSurface.swift",
+      "predicate": "Multiple local sources that describe the same incoming talk request must converge to one canonical request key, so opening or accepting one source cannot resurface or double-accept the same request through another source.",
+      "evidenceFields": ["contactId", "inviteId", "requestCount", "requestKey", "source"],
+      "detectors": ["Turbo/TalkRequestSurface.swift"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "TalkRequestSurfaceReducer deduplicates visible, opened, and accepting talk-request state by TalkRequestKey(contactID, requestCount) instead of per-surface invite IDs.",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
       "id": "request.foreground_clears_delivered_alerts",
       "scope": "local",
       "owner": "app",
@@ -445,7 +459,7 @@
       "detectors": ["Turbo/PTTViewModel+TalkRequests.swift"],
       "regressions": ["TurboTests/TurboTests.swift"],
       "repairPolicy": "app repair",
-      "repairAction": "acceptActiveIncomingTalkRequest marks the surface opened before backend work and fences repeated accepts for the same invite while the accept intent is in flight.",
+      "repairAction": "acceptActiveIncomingTalkRequest marks the surface opened before backend work and fences repeated accepts for the same canonical request key while the accept intent is in flight.",
       "alertPolicy": "diagnostics",
       "status": "active"
     },

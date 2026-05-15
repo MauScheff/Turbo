@@ -404,14 +404,16 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     func createInvite(
         otherHandle: String? = nil,
         otherUserId: String? = nil,
-        operationId: String? = nil
+        operationId: String? = nil,
+        userIntent: String? = nil
     ) async throws -> TurboInviteResponse {
         let envelope = TurboControlCommandEnvelope(
             commandKind: "connect-request",
             deviceId: config.deviceID,
             operationId: operationId,
             otherHandle: otherHandle,
-            otherUserId: otherUserId
+            otherUserId: otherUserId,
+            userIntent: userIntent
         )
         return try await request(
             path: "/v1/invites",
@@ -1048,7 +1050,9 @@ final class TurboBackendClient: NSObject, URLSessionWebSocketDelegate {
     private var canAttemptWebSocketControlCommand: Bool {
         guard controlCommandTransportPolicy != .httpOnly else { return false }
         guard supportsWebSocket, webSocketConnectionState == .connected else { return false }
-        return webSocketTask != nil || controlCommandWebSocketResponseForTesting != nil
+        return webSocketTask != nil
+            || currentWebSocketSessionID != nil
+            || controlCommandWebSocketResponseForTesting != nil
     }
 
     private func controlCommandData(
@@ -1424,6 +1428,7 @@ struct TurboControlCommandEnvelope: Encodable {
     let otherHandle: String?
     let otherUserId: String?
     let transmitId: String?
+    let userIntent: String?
 
     init(
         commandKind: String,
@@ -1433,7 +1438,8 @@ struct TurboControlCommandEnvelope: Encodable {
         contactId: String? = nil,
         otherHandle: String? = nil,
         otherUserId: String? = nil,
-        transmitId: String? = nil
+        transmitId: String? = nil,
+        userIntent: String? = nil
     ) {
         self.commandKind = commandKind
         self.deviceId = deviceId
@@ -1443,6 +1449,7 @@ struct TurboControlCommandEnvelope: Encodable {
         self.otherHandle = otherHandle
         self.otherUserId = otherUserId
         self.transmitId = transmitId
+        self.userIntent = userIntent
     }
 }
 

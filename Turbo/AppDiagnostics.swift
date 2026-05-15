@@ -174,6 +174,7 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
     let incomingWakeBufferedChunkCount: Int?
     let remoteReceiveActive: Bool
     let remoteTransmitStopObserved: Bool
+    let remoteTransmitStopProjectionGraceActive: Bool
     let remoteReceiveActivityState: String?
     let receiverAudioReadinessState: String?
     let pendingAction: String
@@ -329,10 +330,18 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
                 backendChannelStatusValue == "peer-transmitting"
                 || backendReadinessValue == "peer-transmitting"
             )
+        let backendIsTransientAfterStoppedPeerTransmit =
+            remoteTransmitStopObserved
+            && remoteTransmitStopProjectionGraceActive
+            && (
+                backendChannelStatusValue == "waiting-for-peer"
+                || backendReadinessValue == "waiting-for-peer"
+            )
         if phase == "ready",
            backendCanTransmit == false,
            !backendIsSelfTransmitting,
            !backendIsStoppedPeerTransmit,
+           !backendIsTransientAfterStoppedPeerTransmit,
            transmitPhase != "stopping" {
             violations.append(
                 DiagnosticsInvariantViolationCandidate(

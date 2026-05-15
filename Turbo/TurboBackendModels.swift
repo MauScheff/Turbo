@@ -2700,6 +2700,7 @@ struct TurboInviteResponse: Decodable, Hashable, Identifiable {
     let requestCount: Int
     let createdAt: String
     let updatedAt: String?
+    let userIntent: String?
     let targetAvailability: String?
     let shouldAutoJoinPeer: Bool?
     let accepted: Bool?

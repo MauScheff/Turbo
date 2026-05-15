@@ -6,6 +6,14 @@ extension PTTViewModel {
         talkRequestSurfaceState.activeIncomingRequest
     }
 
+    var pendingForegroundTalkRequestSurface: IncomingTalkRequestSurface? {
+        talkRequestSurfaceState.pendingForegroundRequest
+    }
+
+    var pendingForegroundTalkRequestAcceptSurface: IncomingTalkRequestSurface? {
+        talkRequestSurfaceState.pendingAcceptRequest
+    }
+
     func reconcileTalkRequestSurface(
         applicationState: UIApplication.State? = nil,
         allowsSelectedContact: Bool = false,
@@ -89,7 +97,7 @@ extension PTTViewModel {
     }
 
     func acceptIncomingTalkRequestSurface(_ surface: IncomingTalkRequestSurface) {
-        if acceptingIncomingTalkRequestSurfaceIDs.contains(surface.id) {
+        if talkRequestSurfaceState.isAccepting(surface) {
             diagnostics.record(
                 .pushToTalk,
                 message: "Ignored repeated foreground talk request banner accept",
@@ -117,9 +125,7 @@ extension PTTViewModel {
             )
             return
         }
-        acceptingIncomingTalkRequestSurfaceIDs.insert(surface.id)
         guard let contact = contacts.first(where: { $0.id == surface.contactID }) else {
-            acceptingIncomingTalkRequestSurfaceIDs.remove(surface.id)
             diagnostics.record(
                 .pushToTalk,
                 level: .notice,
@@ -132,7 +138,10 @@ extension PTTViewModel {
             )
             return
         }
-        pendingForegroundTalkRequestAcceptSurface = surface
+        talkRequestSurfaceState = TalkRequestSurfaceReducer.reduce(
+            state: talkRequestSurfaceState,
+            event: .incomingRequestAcceptStarted(surface)
+        )
         markTalkRequestSurfaceOpened(
             for: surface.contactID,
             inviteID: surface.inviteID
@@ -172,8 +181,7 @@ extension PTTViewModel {
     func completePendingForegroundTalkRequestAcceptIfReady(reason: String) -> Bool {
         guard let surface = pendingForegroundTalkRequestAcceptSurface else { return false }
         if talkRequestNotificationAlreadyHandled(for: surface.contactID) {
-            pendingForegroundTalkRequestAcceptSurface = nil
-            acceptingIncomingTalkRequestSurfaceIDs.remove(surface.id)
+            finishPendingForegroundTalkRequestAccept(surface)
             markTalkRequestSurfaceOpened(for: surface.contactID, inviteID: surface.inviteID)
             diagnostics.record(
                 .pushToTalk,
@@ -187,8 +195,7 @@ extension PTTViewModel {
             return true
         }
         guard let contact = contacts.first(where: { $0.id == surface.contactID }) else {
-            pendingForegroundTalkRequestAcceptSurface = nil
-            acceptingIncomingTalkRequestSurfaceIDs.remove(surface.id)
+            finishPendingForegroundTalkRequestAccept(surface)
             diagnostics.record(
                 .pushToTalk,
                 level: .notice,
@@ -221,8 +228,7 @@ extension PTTViewModel {
             reason: reason
         )
         guard didAccept else { return false }
-        pendingForegroundTalkRequestAcceptSurface = nil
-        acceptingIncomingTalkRequestSurfaceIDs.remove(surface.id)
+        finishPendingForegroundTalkRequestAccept(surface)
         markTalkRequestSurfaceOpened(for: surface.contactID, inviteID: surface.inviteID)
         diagnostics.record(
             .pushToTalk,
@@ -236,6 +242,13 @@ extension PTTViewModel {
             ]
         )
         return true
+    }
+
+    private func finishPendingForegroundTalkRequestAccept(_ surface: IncomingTalkRequestSurface) {
+        talkRequestSurfaceState = TalkRequestSurfaceReducer.reduce(
+            state: talkRequestSurfaceState,
+            event: .incomingRequestAcceptFinished(surface)
+        )
     }
 
     private func resolvePendingForegroundTalkRequestAccept(
@@ -261,10 +274,9 @@ extension PTTViewModel {
         ) else {
             return
         }
-        if pendingForegroundTalkRequestAcceptSurface?.id == surface.id {
-            pendingForegroundTalkRequestAcceptSurface = nil
+        if pendingForegroundTalkRequestAcceptSurface?.requestKey == surface.requestKey {
+            finishPendingForegroundTalkRequestAccept(surface)
         }
-        acceptingIncomingTalkRequestSurfaceIDs.remove(surface.id)
         diagnostics.record(
             .pushToTalk,
             level: .notice,
@@ -282,11 +294,21 @@ extension PTTViewModel {
     private func foregroundTalkRequestUserInfo(
         from surface: IncomingTalkRequestSurface
     ) -> [AnyHashable: Any] {
-        [
+        var userInfo: [AnyHashable: Any] = [
             "event": "talk-request",
             "fromHandle": surface.contactHandle,
             "inviteId": surface.inviteID,
         ]
+        if let channelID = surface.channelID {
+            userInfo["channelId"] = channelID
+        }
+        if let userIntent = surface.userIntent {
+            userInfo["userIntent"] = userIntent
+        }
+        if let sentAt = surface.sentAt {
+            userInfo["sentAt"] = sentAt
+        }
+        return userInfo
     }
 
     func openActiveIncomingTalkRequest() {
@@ -297,19 +319,30 @@ extension PTTViewModel {
         for contact: Contact,
         inviteID: String,
         requestCount: Int,
+        userIntent: String? = nil,
+        sentAt: String? = nil,
         reason: String
     ) {
         let normalizedRequestCount = max(requestCount, 1)
-        pendingForegroundTalkRequestSurface = IncomingTalkRequestSurface(
+        let surface = IncomingTalkRequestSurface(
             contactID: contact.id,
             inviteID: inviteID,
             contactName: contact.name,
             contactHandle: contact.handle,
             contactIsOnline: contact.isOnline,
             requestCount: normalizedRequestCount,
-            recencyKey: "notification:\(normalizedRequestCount):\(inviteID)"
+            recencyKey: "notification:\(normalizedRequestCount):\(inviteID)",
+            channelID: contact.backendChannelId,
+            userIntent: userIntent,
+            sentAt: sentAt
         )
-        pendingForegroundTalkRequestReceivedAt = Date()
+        talkRequestSurfaceState = TalkRequestSurfaceReducer.reduce(
+            state: talkRequestSurfaceState,
+            event: .pendingForegroundRequestQueued(
+                surface: surface,
+                receivedAt: Date()
+            )
+        )
         diagnostics.record(
             .pushToTalk,
             message: "Queued pending foreground talk request surface from notification",
@@ -324,19 +357,14 @@ extension PTTViewModel {
     }
 
     func clearPendingForegroundTalkRequestSurface(contactID: UUID? = nil, inviteID: String? = nil) {
-        guard let pendingSurface = pendingForegroundTalkRequestSurface else { return }
-        if let contactID, pendingSurface.contactID != contactID {
-            return
-        }
-        if let inviteID, pendingSurface.inviteID != inviteID {
-            return
-        }
-        pendingForegroundTalkRequestSurface = nil
-        pendingForegroundTalkRequestReceivedAt = nil
+        talkRequestSurfaceState = TalkRequestSurfaceReducer.reduce(
+            state: talkRequestSurfaceState,
+            event: .pendingForegroundRequestCleared(contactID: contactID, inviteID: inviteID)
+        )
     }
 
     func expirePendingForegroundTalkRequestSurfaceIfNeeded(now: Date = Date()) {
-        guard let receivedAt = pendingForegroundTalkRequestReceivedAt,
+        guard let receivedAt = talkRequestSurfaceState.pendingForegroundRequestReceivedAt,
               let pendingSurface = pendingForegroundTalkRequestSurface else {
             return
         }
@@ -352,7 +380,13 @@ extension PTTViewModel {
                 "inviteId": pendingSurface.inviteID,
             ]
         )
-        clearPendingForegroundTalkRequestSurface()
+        talkRequestSurfaceState = TalkRequestSurfaceReducer.reduce(
+            state: talkRequestSurfaceState,
+            event: .pendingForegroundRequestExpired(
+                now: now,
+                lifetime: pendingForegroundTalkRequestLifetime
+            )
+        )
     }
 
     @discardableResult

@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-enum ConversationState: String {
+nonisolated enum ConversationState: String {
     case idle
     case requested
     case incomingRequest = "incoming-request"
@@ -11,7 +11,7 @@ enum ConversationState: String {
     case receiving = "peer-transmitting"
 }
 
-struct Contact: Identifiable, Hashable {
+nonisolated struct Contact: Identifiable, Hashable {
     let id: UUID
     var profileName: String
     var localName: String?
@@ -822,6 +822,7 @@ struct SelectedPeerState: Equatable {
 
     var allowsHoldToTalk: Bool {
         canTransmitNow
+            || phase == .ready
             || phase == .wakeReady
             || phase == .transmitting
             || phase == .startingTransmit
@@ -1103,6 +1104,7 @@ struct ConversationDerivationContext: Equatable {
     let peerSignalIsTransmitting: Bool
     let remotePlaybackDrainBlocksTransmit: Bool
     let remoteTransmitStopObserved: Bool
+    let remoteTransmitStopProjectionGraceActive: Bool
     let activeChannelID: UUID?
     let systemSessionMatchesContact: Bool
     let systemSessionState: SystemPTTSessionState
@@ -1140,6 +1142,7 @@ struct ConversationDerivationContext: Equatable {
         peerSignalIsTransmitting: Bool = false,
         remotePlaybackDrainBlocksTransmit: Bool = false,
         remoteTransmitStopObserved: Bool = false,
+        remoteTransmitStopProjectionGraceActive: Bool = false,
         activeChannelID: UUID?,
         systemSessionMatchesContact: Bool,
         systemSessionState: SystemPTTSessionState,
@@ -1178,6 +1181,7 @@ struct ConversationDerivationContext: Equatable {
         self.peerSignalIsTransmitting = peerSignalIsTransmitting
         self.remotePlaybackDrainBlocksTransmit = remotePlaybackDrainBlocksTransmit
         self.remoteTransmitStopObserved = remoteTransmitStopObserved
+        self.remoteTransmitStopProjectionGraceActive = remoteTransmitStopProjectionGraceActive
         self.activeChannelID = activeChannelID
         self.systemSessionMatchesContact = systemSessionMatchesContact
         self.systemSessionState = systemSessionState
@@ -2042,7 +2046,7 @@ enum ConversationStateMachine {
             return ConversationPrimaryAction(
                 kind: .holdToTalk,
                 label: "Hold To Talk",
-                isEnabled: selectedPeerState.allowsHoldToTalk,
+                isEnabled: selectedPeerState.canTransmitNow,
                 style: .accent
             )
         case .requested:
@@ -2115,6 +2119,10 @@ enum ConversationStateMachine {
         if let localJoinFailure = context.localJoinFailure,
            localJoinFailure.contactID == context.contactID,
            localJoinFailure.reason.blocksAutomaticRestore {
+            return .none
+        }
+
+        if context.shouldTreatSystemMismatchAsRecoverable {
             return .none
         }
 
@@ -2405,6 +2413,9 @@ private extension ConversationDerivationContext {
         }
         if sessionTransmitReady && peerSignalIsTransmitting {
             return .receiving
+        }
+        if shouldPreserveReadyAfterObservedRemoteTransmitStop {
+            return .ready
         }
         if shouldPreferWakeReadyDespiteStalePeerConnectivity {
             guard directMediaPathActive || localRelayTransportReady else {
@@ -2701,6 +2712,28 @@ private extension ConversationDerivationContext {
         }
 
         return true
+    }
+
+    var shouldPreserveReadyAfterObservedRemoteTransmitStop: Bool {
+        guard remoteTransmitStopObserved,
+              remoteTransmitStopProjectionGraceActive,
+              hadConnectedSessionContinuity,
+              localSessionReadiness == .aligned,
+              !localTransmit.hasTransmitIntent,
+              !peerSignalIsTransmitting,
+              !remotePlaybackDrainBlocksTransmit,
+              directMediaPathActive || localRelayTransportReady,
+              case .both(_, _, let readinessStatus) = backendChannelReadiness,
+              let readinessStatus else {
+            return false
+        }
+
+        switch readinessStatus {
+        case .waitingForSelf, .waitingForPeer, .ready, .peerTransmitting:
+            return true
+        case .inactive, .selfTransmitting, .unknown:
+            return false
+        }
     }
 
     var shouldKeepReadyProjectionDuringLocalWarmup: Bool {

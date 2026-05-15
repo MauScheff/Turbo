@@ -649,6 +649,8 @@ extension PTTViewModel {
             for: contact,
             inviteID: inviteID,
             requestCount: requestCount,
+            userIntent: userInfo["userIntent"] as? String,
+            sentAt: (userInfo["sentAt"] as? String) ?? (userInfo["createdAt"] as? String),
             reason: reason
         )
     }
@@ -664,6 +666,8 @@ extension PTTViewModel {
             "fromHandle": talkRequestNotificationHandle(from: userInfo) ?? "none",
             "inviteId": (userInfo["inviteId"] as? String) ?? "none",
             "channelId": (userInfo["channelId"] as? String) ?? "none",
+            "userIntent": (userInfo["userIntent"] as? String) ?? "none",
+            "sentAt": ((userInfo["sentAt"] as? String) ?? (userInfo["createdAt"] as? String)) ?? "none",
             "deepLink": (userInfo["deepLink"] as? String) ?? "none",
         ]
     }

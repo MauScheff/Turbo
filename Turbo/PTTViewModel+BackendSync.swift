@@ -518,6 +518,7 @@ extension PTTViewModel {
         receiveExecutionCoordinator.send(
             .remoteTransmitStopped(contactID: contactID, preservePlaybackDrain: false)
         )
+        receiveExecutionRuntime.markRemoteTransmitStopProjectionGrace(for: contactID)
         mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
         if selectedContactId == contactID {
             updateStatusForSelectedContact()
@@ -529,6 +530,7 @@ extension PTTViewModel {
         receiveExecutionCoordinator.send(
             .remoteTransmitStopped(contactID: contactID, preservePlaybackDrain: true)
         )
+        receiveExecutionRuntime.markRemoteTransmitStopProjectionGrace(for: contactID)
         mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
         if selectedContactId == contactID {
             updateStatusForSelectedContact()
@@ -591,8 +593,10 @@ extension PTTViewModel {
             return
         }
 
+        let preserveDirectQuic = shouldUseDirectQuicTransport(for: contactID)
         closeMediaSession(
-            preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
+            preserveDirectQuic: preserveDirectQuic,
+            preserveMediaRelay: !preserveDirectQuic && shouldPreserveMediaRelayDuringMediaClose(for: contactID)
         )
         if backendStatusMessage.hasPrefix("Media ") {
             backendStatusMessage = "Connected"
@@ -712,8 +716,10 @@ extension PTTViewModel {
             && !isTransmitting
 
         if mediaSessionContactID == contactID && !isTransmitting && !shouldPreservePlaybackDrain {
+            let preserveDirectQuic = shouldUseDirectQuicTransport(for: contactID)
             closeMediaSession(
-                preserveDirectQuic: shouldUseDirectQuicTransport(for: contactID)
+                preserveDirectQuic: preserveDirectQuic,
+                preserveMediaRelay: !preserveDirectQuic && shouldPreserveMediaRelayDuringMediaClose(for: contactID)
             )
             diagnostics.record(
                 .media,
@@ -810,10 +816,20 @@ extension PTTViewModel {
         for contactID: UUID,
         source: RemoteReceiveActivitySource = .audioChunk
     ) {
+        if source != .audioChunk {
+            receiveExecutionRuntime.clearRemoteTransmitStopProjectionGrace(for: contactID)
+        }
         receiveExecutionCoordinator.send(.remoteActivityDetected(contactID: contactID, source: source))
         if selectedContactId == contactID {
             updateStatusForSelectedContact()
         }
+    }
+
+    func remoteTransmitStopProjectionGraceIsActive(for contactID: UUID) -> Bool {
+        receiveExecutionRuntime.remoteTransmitStopProjectionGraceIsActive(
+            for: contactID,
+            maximumAgeNanoseconds: remoteTransmitStopProjectionGraceNanoseconds
+        )
     }
 
     func remoteReceiveBlocksLocalTransmit(for contactID: UUID) -> Bool {
@@ -921,14 +937,18 @@ extension PTTViewModel {
         existing: TurboChannelStateResponse?
     ) -> Bool {
         guard selectedContactId == contactID else { return false }
-        guard shouldPreserveLocalSessionAfterChannelRefreshFailure(contactID: contactID) else {
-            return false
-        }
         guard sessionCoordinator.pendingAction.pendingTeardownContactID != contactID else {
             return false
         }
         guard channelStateLooksActive(existing) else { return false }
-        return true
+        if shouldPreserveLocalSessionAfterChannelRefreshFailure(contactID: contactID) {
+            return true
+        }
+        guard let existing else { return false }
+        guard !existing.membership.hasLocalMembership else { return false }
+        return existing.membership.hasPeerMembership
+            || existing.membership.peerDeviceConnected
+            || existing.conversationStatus == .waitingForPeer
     }
 
     func channelStateLooksActive(_ channelState: TurboChannelStateResponse?) -> Bool {

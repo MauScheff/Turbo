@@ -18577,6 +18577,39 @@ struct TurboTests {
         #expect(runtime.transportPathState == .relay)
     }
 
+    @Test func mediaRuntimeResetPreservingMediaRelayKeepsFastRelayPath() {
+        let runtime = MediaRuntimeState()
+        let key = MediaRelayConnectionKey(
+            sessionID: "channel-1",
+            localDeviceID: "local-device",
+            peerDeviceID: "peer-device"
+        )
+        let client = TurboMediaRelayClient(
+            config: TurboMediaRelayClientConfig(
+                host: "relay.example.test",
+                quicPort: 9443,
+                tcpPort: 9444,
+                token: "token"
+            ),
+            sessionId: key.sessionID,
+            localDeviceId: key.localDeviceID,
+            peerDeviceId: key.peerDeviceID,
+            onIncomingAudioPayload: { _ in }
+        )
+
+        guard case .newAttempt(let attempt) = runtime.mediaRelayConnectionStart(for: key) else {
+            Issue.record("expected new media relay connection attempt")
+            return
+        }
+        #expect(runtime.finishMediaRelayConnectionAttempt(attempt, client: client))
+        runtime.updateTransportPathState(.fastRelay)
+
+        runtime.reset(preserveDirectQuic: false, preserveMediaRelay: true)
+
+        #expect(runtime.mediaRelayClient === client)
+        #expect(runtime.transportPathState == .fastRelay)
+    }
+
     @Test func mediaRelayQuicIdleTimeoutIsMillisecondsScale() {
         #expect(TurboMediaRelayClient.quicIdleTimeoutMilliseconds >= 120_000)
     }
@@ -24663,6 +24696,128 @@ struct TurboTests {
         #expect(selectedPeerState.phase == .ready)
         #expect(selectedPeerState.statusMessage == "Connected")
         #expect(selectedPeerState.canTransmitNow == false)
+    }
+
+    @Test func remoteTransmitStopGraceKeepsReadyDuringBackendWaitingForPeerDrift() {
+        let contactID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .ready,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: true,
+            localTransmit: .idle,
+            peerSignalIsTransmitting: false,
+            remotePlaybackDrainBlocksTransmit: false,
+            remoteTransmitStopObserved: true,
+            remoteTransmitStopProjectionGraceActive: true,
+            activeChannelID: contactID,
+            systemSessionMatchesContact: true,
+            systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+            pendingAction: .none,
+            localJoinFailure: nil,
+            mediaState: .connected,
+            localMediaWarmupState: .ready,
+            localRelayTransportReady: true,
+            directMediaPathActive: false,
+            firstTalkStartupProfile: .relayWarm,
+            incomingWakeActivationState: nil,
+            backendJoinSettling: false,
+            backendSignalingJoinRecoveryActive: false,
+            controlPlaneReconnectGraceActive: false,
+            hadConnectedSessionContinuity: true,
+            channel: ChannelReadinessSnapshot(
+                channelState: makeChannelState(
+                    status: .waitingForPeer,
+                    canTransmit: false,
+                    peerDeviceConnected: false
+                ),
+                readiness: makeChannelReadiness(
+                    status: .waitingForPeer,
+                    peerHasActiveDevice: false,
+                    remoteAudioReadiness: .wakeCapable,
+                    remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+                )
+            )
+        )
+
+        let selectedPeerState = ConversationStateMachine.selectedPeerState(
+            for: context,
+            relationship: .none
+        )
+
+        #expect(selectedPeerState.phase == .ready)
+        #expect(selectedPeerState.statusMessage == "Connected")
+        #expect(selectedPeerState.canTransmitNow == false)
+        #expect(selectedPeerState.allowsHoldToTalk)
+        #expect(
+            ConversationStateMachine.primaryAction(
+                selectedPeerState: selectedPeerState,
+                isSelectedChannelJoined: true,
+                isTransmitting: false,
+                requestCooldownRemaining: nil
+            ).isEnabled
+        )
+    }
+
+    @Test func localTransmitStopProjectsReadyWithEnabledTalkAffordanceDuringBackendSettling() {
+        let contactID = UUID()
+        let context = ConversationDerivationContext(
+            contactID: contactID,
+            selectedContactID: contactID,
+            baseState: .ready,
+            contactName: "Blake",
+            contactIsOnline: true,
+            isJoined: true,
+            localTransmit: .stopping,
+            peerSignalIsTransmitting: false,
+            remotePlaybackDrainBlocksTransmit: false,
+            activeChannelID: contactID,
+            systemSessionMatchesContact: true,
+            systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+            pendingAction: .none,
+            localJoinFailure: nil,
+            mediaState: .connected,
+            localMediaWarmupState: .ready,
+            localRelayTransportReady: true,
+            directMediaPathActive: false,
+            firstTalkStartupProfile: .relayWarm,
+            incomingWakeActivationState: nil,
+            backendJoinSettling: false,
+            backendSignalingJoinRecoveryActive: false,
+            controlPlaneReconnectGraceActive: false,
+            hadConnectedSessionContinuity: true,
+            channel: ChannelReadinessSnapshot(
+                channelState: makeChannelState(
+                    status: .transmitting,
+                    canTransmit: false,
+                    peerDeviceConnected: true
+                ),
+                readiness: makeChannelReadiness(
+                    status: .selfTransmitting(activeTransmitterUserId: nil),
+                    remoteAudioReadiness: .ready,
+                    remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+                )
+            )
+        )
+
+        let selectedPeerState = ConversationStateMachine.selectedPeerState(
+            for: context,
+            relationship: .none
+        )
+        let primaryAction = ConversationStateMachine.primaryAction(
+            selectedPeerState: selectedPeerState,
+            isSelectedChannelJoined: true,
+            isTransmitting: false,
+            requestCooldownRemaining: nil
+        )
+
+        #expect(selectedPeerState.phase == .ready)
+        #expect(selectedPeerState.statusMessage == "Connected")
+        #expect(selectedPeerState.canTransmitNow == false)
+        #expect(selectedPeerState.allowsHoldToTalk)
+        #expect(primaryAction.isEnabled)
     }
 
     @MainActor
@@ -36539,6 +36694,7 @@ struct TurboTests {
             requestCount: 1,
             createdAt: "2026-04-08T00:00:00Z",
             updatedAt: nil,
+            userIntent: nil,
             targetAvailability: nil,
             shouldAutoJoinPeer: nil,
             accepted: nil,
@@ -37274,6 +37430,7 @@ struct TurboTests {
             requestCount: 1,
             createdAt: "2026-04-08T00:00:00Z",
             updatedAt: nil,
+            userIntent: nil,
             targetAvailability: nil,
             shouldAutoJoinPeer: nil,
             accepted: nil,
@@ -37645,12 +37802,126 @@ struct TurboTests {
         )
 
         #expect(initialState.activeIncomingRequest?.inviteID == "invite-1")
+        let requestKey = TalkRequestKey(contactID: contactID, requestCount: 1)
         #expect(relationshipState.activeIncomingRequest?.contactID == contactID)
         #expect(relationshipState.activeIncomingRequest?.requestCount == 1)
-        #expect(relationshipState.activeIncomingRequest?.inviteID == "relationship:\(contactID.uuidString):1")
-        #expect(relationshipState.surfacedInviteIDs == Set(["relationship:\(contactID.uuidString):1"]))
+        #expect(relationshipState.activeIncomingRequest?.inviteID == "invite-1")
+        #expect(relationshipState.surfacedRequestKeys == Set([requestKey]))
         #expect(finalState.activeIncomingRequest?.inviteID == "invite-1")
+        #expect(finalState.surfacedRequestKeys == Set([requestKey]))
         #expect(finalState.surfacedInviteIDs == Set(["invite-1"]))
+    }
+
+    @Test func talkRequestSurfaceDoesNotResurfaceSameCanonicalRequestFromDifferentSource() {
+        let contactID = UUID()
+        let contact = Contact(
+            id: contactID,
+            name: "Avery",
+            handle: "@avery",
+            isOnline: true,
+            channelId: UUID()
+        )
+        let notificationSurface = IncomingTalkRequestSurface(
+            contactID: contactID,
+            inviteID: "invite-1",
+            contactName: "Avery",
+            contactHandle: "@avery",
+            contactIsOnline: true,
+            requestCount: 1,
+            recencyKey: "notification:1:invite-1"
+        )
+        let relationshipCandidate = IncomingTalkRequestCandidate(
+            contact: contact,
+            requestCount: 1,
+            source: "relationship"
+        )
+
+        let visibleState = TalkRequestSurfaceReducer.reduce(
+            state: TalkRequestSurfaceState(),
+            event: .invitesUpdated(
+                candidates: [IncomingTalkRequestCandidate(surface: notificationSurface)],
+                selectedContactID: nil,
+                applicationIsActive: true
+            )
+        )
+        let openedState = TalkRequestSurfaceReducer.reduce(
+            state: visibleState,
+            event: .contactOpened(contactID: contactID, inviteID: notificationSurface.inviteID)
+        )
+        let relationshipState = TalkRequestSurfaceReducer.reduce(
+            state: openedState,
+            event: .invitesUpdated(
+                candidates: [relationshipCandidate],
+                selectedContactID: nil,
+                applicationIsActive: true
+            )
+        )
+
+        #expect(relationshipState.activeIncomingRequest == nil)
+        #expect(
+            relationshipState.surfacedRequestKeys
+                == Set([TalkRequestKey(contactID: contactID, requestCount: 1)])
+        )
+    }
+
+    @Test func talkRequestAcceptStateDeduplicatesRacingSurfacesByCanonicalKey() {
+        let contactID = UUID()
+        let inviteSurface = IncomingTalkRequestSurface(
+            contactID: contactID,
+            inviteID: "invite-1",
+            contactName: "Avery",
+            contactHandle: "@avery",
+            contactIsOnline: true,
+            requestCount: 1,
+            recencyKey: "invite"
+        )
+        let relationshipSurface = IncomingTalkRequestSurface(
+            contactID: contactID,
+            inviteID: "relationship:\(contactID.uuidString):1",
+            contactName: "Avery",
+            contactHandle: "@avery",
+            contactIsOnline: true,
+            requestCount: 1,
+            recencyKey: "relationship"
+        )
+
+        let acceptingState = TalkRequestSurfaceReducer.reduce(
+            state: TalkRequestSurfaceState(),
+            event: .incomingRequestAcceptStarted(inviteSurface)
+        )
+        let duplicateAcceptState = TalkRequestSurfaceReducer.reduce(
+            state: acceptingState,
+            event: .incomingRequestAcceptStarted(relationshipSurface)
+        )
+
+        #expect(acceptingState.pendingAcceptRequest == inviteSurface)
+        #expect(duplicateAcceptState.pendingAcceptRequest == inviteSurface)
+        #expect(duplicateAcceptState.isAccepting(relationshipSurface))
+    }
+
+    @Test func canonicalTalkRequestCarriesUserIntentAndSentTimestampFromInvite() {
+        let contactID = UUID()
+        let candidate = IncomingTalkRequestCandidate(
+            contact: Contact(
+                id: contactID,
+                name: "Avery",
+                handle: "@avery",
+                isOnline: true,
+                channelId: UUID()
+            ),
+            invite: makeInvite(
+                direction: "incoming",
+                inviteId: "invite-1",
+                fromHandle: "@avery",
+                createdAt: "2026-04-17T19:00:00Z",
+                userIntent: "Can we talk?"
+            )
+        )
+
+        #expect(candidate.request.userIntent == "Can we talk?")
+        #expect(candidate.request.sentAt == "2026-04-17T19:00:00Z")
+        #expect(candidate.surface.userIntent == "Can we talk?")
+        #expect(candidate.surface.sentAt == "2026-04-17T19:00:00Z")
     }
 
     @Test func openingRequestContactClearsBannerAndMarksInviteSurfaced() {
@@ -41083,6 +41354,7 @@ struct TurboTests {
             incomingWakeBufferedChunkCount: 0,
             remoteReceiveActive: false,
             remoteTransmitStopObserved: false,
+            remoteTransmitStopProjectionGraceActive: false,
             remoteReceiveActivityState: nil,
             receiverAudioReadinessState: nil,
             pendingAction: "none",
@@ -41404,6 +41676,44 @@ struct TurboTests {
                 "backendPeerJoined": "true",
                 "backendPeerDeviceConnected": "true",
                 "backendCanTransmit": "false",
+                "selectedPeerStatus": "Connected"
+            ]
+        )
+
+        #expect(
+            !store.invariantViolations.contains {
+                $0.invariantID == "selected.ready_while_backend_cannot_transmit"
+            }
+        )
+        #expect(store.latestError == nil)
+    }
+
+    @MainActor
+    @Test func diagnosticsDoNotFlagReadyDuringRemoteTransmitStopProjectionGrace() {
+        let store = DiagnosticsStore()
+        store.clear()
+
+        captureLocalSessionDiagnosticsState(store,
+            reason: "transmit-sync",
+            fields: [
+                "selectedContact": "@blake",
+                "selectedPeerPhase": "ready",
+                "selectedPeerRelationship": "none",
+                "pendingAction": "none",
+                "isJoined": "true",
+                "isTransmitting": "false",
+                "systemSession": "active",
+                "transmitPhase": "idle",
+                "remoteTransmitStopObserved": "true",
+                "remoteTransmitStopProjectionGraceActive": "true",
+                "backendChannelStatus": "waiting-for-peer",
+                "backendReadiness": "waiting-for-peer",
+                "backendSelfJoined": "true",
+                "backendPeerJoined": "true",
+                "backendPeerDeviceConnected": "false",
+                "backendCanTransmit": "false",
+                "remoteAudioReadiness": "wakeCapable",
+                "remoteWakeCapabilityKind": "wake-capable",
                 "selectedPeerStatus": "Connected"
             ]
         )
@@ -46955,6 +47265,8 @@ private func makeLocalSessionDiagnosticsProjection(
         incomingWakeBufferedChunkCount: fields["incomingWakeBufferedChunkCount"].flatMap(Int.init),
         remoteReceiveActive: diagnosticsBool(fields["remoteReceiveActive"]) ?? false,
         remoteTransmitStopObserved: diagnosticsBool(fields["remoteTransmitStopObserved"]) ?? false,
+        remoteTransmitStopProjectionGraceActive:
+            diagnosticsBool(fields["remoteTransmitStopProjectionGraceActive"]) ?? false,
         remoteReceiveActivityState: optionalDiagnosticsString(fields["remoteReceiveActivityState"]),
         receiverAudioReadinessState: optionalDiagnosticsString(fields["receiverAudioReadinessState"]),
         pendingAction: fields["pendingAction"] ?? "none",
@@ -47093,7 +47405,8 @@ private func makeInvite(
     status: String = "pending",
     requestCount: Int = 1,
     createdAt: String = "2026-04-08T00:00:00Z",
-    updatedAt: String? = nil
+    updatedAt: String? = nil,
+    userIntent: String? = nil
 ) -> TurboInviteResponse {
     TurboInviteResponse(
         inviteId: inviteId,
@@ -47107,6 +47420,7 @@ private func makeInvite(
         requestCount: requestCount,
         createdAt: createdAt,
         updatedAt: updatedAt,
+        userIntent: userIntent,
         targetAvailability: nil,
         shouldAutoJoinPeer: nil,
         accepted: nil,

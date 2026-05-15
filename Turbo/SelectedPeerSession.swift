@@ -28,6 +28,7 @@ struct SelectedPeerSessionState: Equatable {
     var peerSignalIsTransmitting: Bool = false
     var remotePlaybackDrainBlocksTransmit = false
     var remoteTransmitStopObserved = false
+    var remoteTransmitStopProjectionGraceActive = false
     var activeChannelID: UUID?
     var systemSessionMatchesContact: Bool = false
     var systemSessionState: SystemPTTSessionState = .none
@@ -73,6 +74,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
     let peerSignalIsTransmitting: Bool
     let remotePlaybackDrainBlocksTransmit: Bool
     let remoteTransmitStopObserved: Bool
+    let remoteTransmitStopProjectionGraceActive: Bool
     let systemSessionState: SystemPTTSessionState
     let systemSessionMatchesContact: Bool
     let mediaState: MediaConnectionState
@@ -99,6 +101,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
         peerSignalIsTransmitting: Bool,
         remotePlaybackDrainBlocksTransmit: Bool = false,
         remoteTransmitStopObserved: Bool = false,
+        remoteTransmitStopProjectionGraceActive: Bool = false,
         systemSessionState: SystemPTTSessionState,
         systemSessionMatchesContact: Bool,
         mediaState: MediaConnectionState,
@@ -124,6 +127,7 @@ struct SelectedPeerSyncSnapshot: Equatable {
         self.peerSignalIsTransmitting = peerSignalIsTransmitting
         self.remotePlaybackDrainBlocksTransmit = remotePlaybackDrainBlocksTransmit
         self.remoteTransmitStopObserved = remoteTransmitStopObserved
+        self.remoteTransmitStopProjectionGraceActive = remoteTransmitStopProjectionGraceActive
         self.systemSessionState = systemSessionState
         self.systemSessionMatchesContact = systemSessionMatchesContact
         self.mediaState = mediaState
@@ -214,6 +218,8 @@ enum SelectedPeerReducer {
             nextState.peerSignalIsTransmitting = snapshot.peerSignalIsTransmitting
             nextState.remotePlaybackDrainBlocksTransmit = snapshot.remotePlaybackDrainBlocksTransmit
             nextState.remoteTransmitStopObserved = snapshot.remoteTransmitStopObserved
+            nextState.remoteTransmitStopProjectionGraceActive =
+                snapshot.remoteTransmitStopProjectionGraceActive
             nextState.systemSessionState = snapshot.systemSessionState
             nextState.systemSessionMatchesContact = snapshot.systemSessionMatchesContact
             nextState.mediaState = snapshot.mediaState
@@ -395,6 +401,7 @@ enum SelectedPeerReducer {
             peerSignalIsTransmitting: state.peerSignalIsTransmitting,
             remotePlaybackDrainBlocksTransmit: state.remotePlaybackDrainBlocksTransmit,
             remoteTransmitStopObserved: state.remoteTransmitStopObserved,
+            remoteTransmitStopProjectionGraceActive: state.remoteTransmitStopProjectionGraceActive,
             activeChannelID: state.activeChannelID,
             systemSessionMatchesContact: state.systemSessionMatchesContact,
             systemSessionState: state.systemSessionState,
