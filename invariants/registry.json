@@ -115,6 +115,20 @@
       "status": "active"
     },
     {
+      "id": "direct_quic.active_path_surfaced_as_relay",
+      "scope": "local",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/PTTViewModel+DirectQuicIdentityAndProbe.swift",
+      "predicate": "A Direct QUIC attempt is active with a live probe controller while the surfaced media transport path is relay, Fast Relay, promoting, or recovering.",
+      "evidenceFields": ["contactId", "channelId", "attemptId", "transportPath", "trigger"],
+      "detectors": ["Turbo/PTTViewModel+DirectQuicIdentityAndProbe.swift"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "local repair",
+      "repairAction": "Restore the surfaced transport path to Direct and suppress redundant prewarm/probe attempts while the active Direct path owns the media route.",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
       "id": "channel.no_membership_projection_while_durable_membership_exists",
       "scope": "backend",
       "owner": "backend",

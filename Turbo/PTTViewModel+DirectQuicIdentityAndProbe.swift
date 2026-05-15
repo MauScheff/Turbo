@@ -664,10 +664,6 @@ extension PTTViewModel {
     }
 
     func automaticDirectQuicProbeBlockReason(for contactID: UUID) -> String? {
-        recoverStaleDirectQuicAttemptBlockingProbeIfNeeded(
-            for: contactID,
-            trigger: "automatic-probe-block-check"
-        )
         if isDirectPathRelayOnlyForced {
             return "relay-only-forced"
         }
@@ -676,6 +672,13 @@ extension PTTViewModel {
         }
         if isDirectQuicAutoUpgradeDisabledForDebug {
             return "auto-upgrade-disabled"
+        }
+        recoverStaleDirectQuicAttemptBlockingProbeIfNeeded(
+            for: contactID,
+            trigger: "automatic-probe-block-check"
+        )
+        if directQuicActiveAttemptAlreadyOwnsPath(for: contactID, trigger: "automatic-probe-block-check") {
+            return "direct-active"
         }
         if backendRuntime.signalingJoinRecoveryTask != nil {
             return "signaling-join-recovery-active"
@@ -757,10 +760,6 @@ extension PTTViewModel {
         for contactID: UUID,
         requireSelectedContact: Bool
     ) -> String? {
-        recoverStaleDirectQuicAttemptBlockingProbeIfNeeded(
-            for: contactID,
-            trigger: "selection-prewarm-block-check"
-        )
         if isDirectPathRelayOnlyForced {
             return "relay-only-forced"
         }
@@ -769,6 +768,13 @@ extension PTTViewModel {
         }
         if isDirectQuicAutoUpgradeDisabledForDebug {
             return "auto-upgrade-disabled"
+        }
+        recoverStaleDirectQuicAttemptBlockingProbeIfNeeded(
+            for: contactID,
+            trigger: "selection-prewarm-block-check"
+        )
+        if directQuicActiveAttemptAlreadyOwnsPath(for: contactID, trigger: "selection-prewarm-block-check") {
+            return "direct-active"
         }
         if backendRuntime.signalingJoinRecoveryTask != nil {
             return "signaling-join-recovery-active"
@@ -869,13 +875,45 @@ extension PTTViewModel {
         applyDirectQuicUpgradeTransition(fallback, for: contactID)
     }
 
+    func directQuicActiveAttemptAlreadyOwnsPath(
+        for contactID: UUID,
+        trigger: String
+    ) -> Bool {
+        guard let attempt = mediaRuntime.directQuicUpgrade.attempt(for: contactID),
+              attempt.isDirectActive,
+              mediaRuntime.directQuicProbeController != nil else {
+            return false
+        }
+
+        switch mediaTransportPathState {
+        case .direct:
+            return true
+        case .relay, .fastRelay, .promoting, .recovering:
+            diagnostics.recordInvariantViolation(
+                invariantID: "direct_quic.active_path_surfaced_as_relay",
+                scope: .local,
+                message: "Active Direct QUIC path was surfaced as a relay path",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": attempt.channelID,
+                    "attemptId": attempt.attemptId,
+                    "transportPath": mediaTransportPathState.rawValue,
+                    "trigger": trigger,
+                ]
+            )
+            mediaRuntime.updateTransportPathState(.direct)
+            captureDiagnosticsState("direct-quic:active-path-surface-repair")
+            return true
+        }
+    }
+
     func maybeStartSelectedContactDirectQuicPrewarm(
         for contactID: UUID,
         reason: String
     ) async {
         let prewarmReason = "selection-direct-quic-prewarm-\(reason)"
         if let blockReason = selectedContactDirectQuicPrewarmBlockReason(for: contactID) {
-            if blockReason == "relay-only-forced" {
+            if blockReason == "relay-only-forced" || blockReason == "direct-active" {
                 return
             }
             diagnostics.record(
@@ -994,6 +1032,9 @@ extension PTTViewModel {
         reason: String
     ) async {
         if let blockReason = automaticDirectQuicProbeBlockReason(for: contactID) {
+            if blockReason == "direct-active" {
+                return
+            }
             diagnostics.record(
                 .media,
                 message: "Automatic Direct QUIC probe skipped",

@@ -667,7 +667,13 @@ extension PTTViewModel {
             }
             guard accepted else { return nil }
             await MainActor.run {
-                mediaRuntime.updateTransportPathState(.fastRelay)
+                if !TurboMediaRelayDebugOverride.isForced(),
+                   !isDirectPathRelayOnlyForced,
+                   shouldUseDirectQuicTransport(for: contactID) {
+                    mediaRuntime.updateTransportPathState(.direct)
+                } else {
+                    mediaRuntime.updateTransportPathState(.fastRelay)
+                }
                 diagnostics.record(
                     .media,
                     message: selectedMessage,

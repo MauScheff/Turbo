@@ -1005,7 +1005,11 @@ struct TurboCallPrototypeView: View {
     }
 
     private func transmitStartupStatusText(now: Date) -> String {
-        return "Wait"
+        guard let transmitPressBeganAt else {
+            return readyStatusText
+        }
+        let elapsed = now.timeIntervalSince(transmitPressBeganAt)
+        return elapsed < 2 ? readyStatusText : "Wait"
     }
 
     private func transmitReadyStatusText(now: Date) -> String {
