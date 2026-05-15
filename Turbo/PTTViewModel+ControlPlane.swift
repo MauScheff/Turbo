@@ -171,7 +171,7 @@ extension PTTViewModel {
         }
     }
 
-    private func receiverAudioReadinessTargetDeviceID(for contactID: UUID) -> String {
+    func receiverAudioReadinessTargetDeviceID(for contactID: UUID) -> String {
         directQuicPeerDeviceID(for: contactID) ?? ""
     }
 

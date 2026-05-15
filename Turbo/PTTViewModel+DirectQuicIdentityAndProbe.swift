@@ -664,6 +664,10 @@ extension PTTViewModel {
     }
 
     func automaticDirectQuicProbeBlockReason(for contactID: UUID) -> String? {
+        recoverStaleDirectQuicAttemptBlockingProbeIfNeeded(
+            for: contactID,
+            trigger: "automatic-probe-block-check"
+        )
         if isDirectPathRelayOnlyForced {
             return "relay-only-forced"
         }
@@ -753,6 +757,10 @@ extension PTTViewModel {
         for contactID: UUID,
         requireSelectedContact: Bool
     ) -> String? {
+        recoverStaleDirectQuicAttemptBlockingProbeIfNeeded(
+            for: contactID,
+            trigger: "selection-prewarm-block-check"
+        )
         if isDirectPathRelayOnlyForced {
             return "relay-only-forced"
         }
@@ -812,6 +820,53 @@ extension PTTViewModel {
             return "peer-identity-missing"
         }
         return nil
+    }
+
+    func recoverStaleDirectQuicAttemptBlockingProbeIfNeeded(
+        for contactID: UUID,
+        trigger: String,
+        now: Date = Date()
+    ) {
+        guard let attempt = mediaRuntime.directQuicUpgrade.attempt(for: contactID) else {
+            return
+        }
+        guard mediaRuntime.directQuicProbeController == nil else {
+            return
+        }
+        guard mediaTransportPathState == .relay || mediaTransportPathState == .fastRelay else {
+            return
+        }
+        if let activeTarget = transmitProjection.activeTarget,
+           activeTarget.contactID == contactID {
+            return
+        }
+
+        let staleAgeMilliseconds = Int(now.timeIntervalSince(attempt.lastUpdatedAt) * 1_000)
+        guard staleAgeMilliseconds >= 5_000 else {
+            return
+        }
+
+        diagnostics.recordInvariantViolation(
+            invariantID: "direct_quic.stale_attempt_blocks_reprobe",
+            scope: .local,
+            message: "Direct QUIC attempt remained active after fallback, blocking reprobe",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": attempt.channelID,
+                "attemptId": attempt.attemptId,
+                "isDirectActive": String(attempt.isDirectActive),
+                "transportPath": mediaTransportPathState.rawValue,
+                "staleAgeMilliseconds": "\(staleAgeMilliseconds)",
+                "trigger": trigger,
+            ]
+        )
+        let fallback = mediaRuntime.directQuicUpgrade.clearAttempt(
+            for: contactID,
+            fallbackReason: "stale-attempt-blocking-reprobe",
+            retryBackoff: nil,
+            now: now
+        )
+        applyDirectQuicUpgradeTransition(fallback, for: contactID)
     }
 
     func maybeStartSelectedContactDirectQuicPrewarm(

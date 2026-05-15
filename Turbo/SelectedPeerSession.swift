@@ -686,8 +686,9 @@ enum SelectedPeerReducer {
              .waitingForPeer(reason: .peerReadyToConnect):
             return true
         case .idle, .requested, .incomingRequest, .peerReady, .wakeReady,
-             .waitingForPeer, .localJoinFailed, .ready, .startingTransmit,
-             .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+             .waitingForPeer, .localJoinFailed, .ready, .readyHoldToTalkDisabled,
+             .startingTransmit, .transmitting, .receiving, .blockedByOtherSession,
+             .systemMismatch:
             return false
         }
     }
@@ -722,8 +723,8 @@ enum SelectedPeerReducer {
         case .localJoinFailed:
             return true
         case .idle, .requested, .incomingRequest, .peerReady, .wakeReady,
-             .waitingForPeer, .ready, .startingTransmit, .transmitting,
-             .receiving, .blockedByOtherSession, .systemMismatch:
+             .waitingForPeer, .ready, .readyHoldToTalkDisabled, .startingTransmit,
+             .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
             return false
         }
     }
@@ -826,7 +827,9 @@ enum SelectedPeerReducer {
         switch state.selectedPeerState.detail {
         case .peerReady, .waitingForPeer(reason: .peerReadyToConnect):
             return true
-        case .requested, .incomingRequest, .waitingForPeer, .wakeReady, .localJoinFailed, .ready, .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+        case .requested, .incomingRequest, .waitingForPeer, .wakeReady, .localJoinFailed,
+             .ready, .readyHoldToTalkDisabled, .startingTransmit, .transmitting,
+             .receiving, .blockedByOtherSession, .systemMismatch:
             return false
         case .idle:
             return false

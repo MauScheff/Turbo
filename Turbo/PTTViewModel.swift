@@ -300,6 +300,8 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     @ObservationIgnored
     var callTelemetryPollTask: Task<Void, Never>?
     @ObservationIgnored
+    var callTelemetryOutputVolumeObservation: NSKeyValueObservation?
+    @ObservationIgnored
     var proximityMonitoringIsActive = false
     @ObservationIgnored
     var isPhoneNearEar = false
@@ -310,6 +312,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
 
     var localCallNetworkInterface: CallNetworkInterface = .unknown
     var localCallTelemetry: CallPeerTelemetry?
+    var lastPublishedCallContextByContactID: [UUID: CallPeerTelemetry] = [:]
     var callPeerTelemetryByContactID: [UUID: CallPeerTelemetry] = [:]
 
 #if DEBUG
@@ -423,6 +426,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         registerProximityObserver()
         if !Self.isRunningAutomatedTests {
             startCallTelemetryNetworkMonitor()
+            startCallTelemetryOutputVolumeObserver()
             startCallTelemetryPolling()
         }
         if let defaults = pttSystemPolicyDefaults {
@@ -437,6 +441,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     deinit {
         NotificationCenter.default.removeObserver(self)
         callTelemetryPollTask?.cancel()
+        callTelemetryOutputVolumeObservation?.invalidate()
         callTelemetryNetworkMonitor?.cancel()
         Task { @MainActor in
             UIDevice.current.isProximityMonitoringEnabled = false

@@ -52,7 +52,7 @@ struct LiveConversationActivityProjection: Equatable {
         switch state.detail {
         case .peerReady, .waitingForPeer, .startingTransmit:
             return .connecting
-        case .wakeReady, .ready:
+        case .wakeReady, .ready, .readyHoldToTalkDisabled:
             return .connected
         case .transmitting:
             return .speaking

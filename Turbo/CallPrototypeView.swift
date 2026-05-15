@@ -11,7 +11,7 @@ private struct HatTextureTuning: Equatable {
 }
 
 private struct TurboCallCloudTuning: Equatable {
-    var patchCount: Double = 27
+    var patchCount: Double = 32
     var opacity: Double = 1.52
     var depthContrast: Double = 0.84
     var colorAmount: Double = 1.16
@@ -106,7 +106,7 @@ private struct TurboCallCloudMotion: Equatable {
         case .idleReady:
             return 1.0
         case .conversationActive:
-            return 0.0
+            return 0.18
         }
     }
 
@@ -115,9 +115,9 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting:
             return 0
         case .idleReady:
-            return 0
+            return 0.07
         case .conversationActive:
-            return 0.80
+            return 0.50
         }
     }
 
@@ -128,7 +128,7 @@ private struct TurboCallCloudMotion: Equatable {
         case .idleReady:
             return 1.0
         case .conversationActive:
-            return 0.0
+            return 0.22
         }
     }
 
@@ -139,7 +139,7 @@ private struct TurboCallCloudMotion: Equatable {
         case .idleReady:
             return 1.0
         case .conversationActive:
-            return 0.0
+            return 0.10
         }
     }
 
@@ -150,7 +150,7 @@ private struct TurboCallCloudMotion: Equatable {
         case .idleReady:
             return tuning.breathAmount * 0.55
         case .conversationActive:
-            return 0
+            return tuning.breathAmount * 0.16
         }
     }
 
@@ -159,9 +159,9 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting:
             return tuning.motionSpeed * 0.30
         case .idleReady:
-            return tuning.motionSpeed * 0.25
+            return tuning.motionSpeed * 0.11
         case .conversationActive:
-            return 0
+            return tuning.motionSpeed * 0.12
         }
     }
 
@@ -170,9 +170,9 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting:
             return 1.0
         case .idleReady:
-            return 0.82
+            return 0.36
         case .conversationActive:
-            return 0.0
+            return 0.20
         }
     }
 
@@ -181,7 +181,7 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting, .idleReady:
             return 1.0
         case .conversationActive:
-            return 0.0
+            return 0.34
         }
     }
 
@@ -190,7 +190,7 @@ private struct TurboCallCloudMotion: Equatable {
         case .connecting, .idleReady:
             return 1.0
         case .conversationActive:
-            return 0.0
+            return 0.42
         }
     }
 
@@ -270,34 +270,6 @@ private struct TurboCallCloudResolvedMotion: Equatable {
     }
 }
 
-private enum TurboCallCloudMotionPreview: String, CaseIterable {
-    case automatic
-    case connecting
-    case idleReady
-
-    var label: String {
-        switch self {
-        case .automatic:
-            return "Auto"
-        case .connecting:
-            return "Connect"
-        case .idleReady:
-            return "Ready"
-        }
-    }
-
-    var forcedMotion: TurboCallCloudMotion? {
-        switch self {
-        case .automatic:
-            return nil
-        case .connecting:
-            return TurboCallCloudMotion(phase: .connecting, talkEnergy: 0)
-        case .idleReady:
-            return TurboCallCloudMotion(phase: .idleReady, talkEnergy: 0)
-        }
-    }
-}
-
 struct TurboCallPrototypeView: View {
     let contact: Contact
     let selectedPeerState: SelectedPeerState
@@ -322,15 +294,10 @@ struct TurboCallPrototypeView: View {
     @State private var transmitPressBeganAt: Date?
     @State private var pendingHoldToTalkTask: Task<Void, Never>?
     @State private var holdToTalkDidBeginTransmit = false
-    @State private var backgroundSeedOverride: UInt64?
-    @State private var cloudTuning = TurboCallCloudTuning()
-    @State private var showsCloudTuning = false
+    private let cloudTuning = TurboCallCloudTuning()
     @State private var cloudFrozenTime: TimeInterval = Date.timeIntervalSinceReferenceDate
     @State private var displayedTalkEnergy: Double = 0
-    @State private var isDebugPreviewingCloudAnimation = false
-    #if DEBUG
-    @State private var cloudMotionPreview: TurboCallCloudMotionPreview = .automatic
-    #endif
+    @State private var hasReachedReadyCloudMotion = false
 
     @MainActor
     static func prewarmDefaultTexture() {
@@ -364,6 +331,16 @@ struct TurboCallPrototypeView: View {
         }
         .onAppear {
             displayedTalkEnergy = rawLocalCloudTalkEnergy
+            updateReadyCloudMotionLatch()
+        }
+        .onChange(of: selectedPeerState.phase) { _, _ in
+            updateReadyCloudMotionLatch()
+        }
+        .onChange(of: selectedPeerState.canTransmitNow) { _, _ in
+            updateReadyCloudMotionLatch()
+        }
+        .onChange(of: mediaConnectionState) { _, _ in
+            updateReadyCloudMotionLatch()
         }
         .onChange(of: rawLocalCloudTalkEnergy) { _, energy in
             updateDisplayedTalkEnergy(energy)
@@ -387,6 +364,8 @@ struct TurboCallPrototypeView: View {
             }
             transmitPressBeganAt = nil
             displayedTalkEnergy = 0
+            hasReachedReadyCloudMotion = false
+            updateReadyCloudMotionLatch()
         }
         .onDisappear {
             let didBeginTransmit = cancelPendingHoldToTalk()
@@ -432,82 +411,9 @@ struct TurboCallPrototypeView: View {
         .padding(.horizontal, usesWideLayout ? 44 : 28)
         .padding(.top, 18)
         .padding(.bottom, 58)
-
-        #if DEBUG
-        cloudMotionPreviewControl
-            .padding(.bottom, 14)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-
-        VStack {
-            Spacer()
-
-            if showsCloudTuning {
-                TurboCallCloudTuningPanel(
-                    tuning: $cloudTuning,
-                    localAudioLevel: localAudioLevel,
-                    onReseed: {
-                        backgroundSeedOverride = UInt64.random(in: 1...UInt64.max)
-                    },
-                    isPreviewingAnimation: isDebugPreviewingCloudAnimation,
-                    onToggleAnimationPreview: {
-                        toggleDebugCloudAnimationPreview()
-                    },
-                    onClose: {
-                        showsCloudTuning = false
-                    }
-                )
-                .frame(width: usesWideLayout ? 360 : 320)
-                .padding(.trailing, usesWideLayout ? 44 : 18)
-                .padding(.bottom, 10)
-            } else {
-                HStack {
-                    Spacer()
-                    Button {
-                        showsCloudTuning = true
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.86))
-                            .frame(width: 42, height: 42)
-                            .background(.black.opacity(0.34), in: Circle())
-                            .overlay(Circle().stroke(.white.opacity(0.10), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Show cloud tuning")
-                    .padding(.trailing, usesWideLayout ? 44 : 18)
-                    .padding(.bottom, 10)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .padding(.bottom, 18)
-        #endif
     }
-
-    #if DEBUG
-    private var cloudMotionPreviewControl: some View {
-        Picker("Cloud state", selection: $cloudMotionPreview) {
-            ForEach(TurboCallCloudMotionPreview.allCases, id: \.self) { state in
-                Text(state.label).tag(state)
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 250)
-        .padding(6)
-        .background(.black.opacity(0.32), in: Capsule(style: .continuous))
-        .overlay(
-            Capsule(style: .continuous)
-                .stroke(.white.opacity(0.10), lineWidth: 1)
-        )
-        .tint(.white.opacity(0.78))
-        .accessibilityLabel("Cloud preview state")
-    }
-
-    #endif
 
     private var cloudShouldAnimate: Bool {
-        if isDebugPreviewingCloudAnimation { return true }
         if mediaConnectionState == .preparing { return true }
         switch selectedPeerState.phase {
         case .requested, .incomingRequest, .waitingForPeer, .systemMismatch:
@@ -519,14 +425,6 @@ struct TurboCallPrototypeView: View {
     }
 
     private var cloudMotion: TurboCallCloudMotion {
-        #if DEBUG
-        if isDebugPreviewingCloudAnimation {
-            return TurboCallCloudMotion(phase: .connecting, talkEnergy: 0)
-        }
-        if let forcedMotion = cloudMotionPreview.forcedMotion {
-            return forcedMotion
-        }
-        #endif
         let talkEnergy = displayedTalkEnergy
         switch selectedPeerState.phase {
         case .startingTransmit, .transmitting, .receiving:
@@ -539,9 +437,29 @@ struct TurboCallPrototypeView: View {
             return TurboCallCloudMotion(phase: .conversationActive, talkEnergy: talkEnergy)
         }
         if cloudShouldAnimate {
+            guard !hasReachedReadyCloudMotion else {
+                return TurboCallCloudMotion(phase: .idleReady, talkEnergy: 0)
+            }
             return TurboCallCloudMotion(phase: .connecting, talkEnergy: 0)
         }
         return TurboCallCloudMotion(phase: .idleReady, talkEnergy: 0)
+    }
+
+    private var isReadyCloudMotionLatchEligible: Bool {
+        if selectedPeerState.canTransmitNow { return true }
+        if mediaConnectionState == .connected { return true }
+        switch selectedPeerState.phase {
+        case .peerReady, .wakeReady, .ready:
+            return true
+        case .idle, .requested, .incomingRequest, .waitingForPeer, .localJoinFailed,
+             .startingTransmit, .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+            return false
+        }
+    }
+
+    private func updateReadyCloudMotionLatch() {
+        guard isReadyCloudMotionLatchEligible else { return }
+        hasReachedReadyCloudMotion = true
     }
 
     private var rawLocalCloudTalkEnergy: Double {
@@ -574,7 +492,7 @@ struct TurboCallPrototypeView: View {
     }
 
     private var backgroundSeed: UInt64 {
-        backgroundSeedOverride ?? Self.cloudSeed(for: contact.id)
+        Self.cloudSeed(for: contact.id)
     }
 
     private static func cloudSeed(for contactID: UUID) -> UInt64 {
@@ -583,28 +501,15 @@ struct TurboCallPrototypeView: View {
         }
     }
 
-    private func toggleDebugCloudAnimationPreview() {
-        if isDebugPreviewingCloudAnimation {
-            cloudFrozenTime = Date.timeIntervalSinceReferenceDate
-            isDebugPreviewingCloudAnimation = false
-        } else {
-            isDebugPreviewingCloudAnimation = true
-        }
-    }
-
     private var topBar: some View {
         HStack {
             Spacer()
 
-            Button(action: onClose) {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.86))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(TurboCallControlButtonStyle())
-            .accessibilityLabel("Minimize")
+            TurboGlassIconButton(
+                systemName: "arrow.down.right.and.arrow.up.left",
+                accessibilityLabel: "Minimize call",
+                action: onClose
+            )
         }
     }
 
@@ -1042,7 +947,7 @@ struct TurboCallPrototypeView: View {
             return readyStatusText
         case .receiving:
             return "Talking"
-        case .ready:
+        case .ready, .readyHoldToTalkDisabled:
             return readyStatusText
         case .startingTransmit:
             return readyStatusText
@@ -1056,6 +961,9 @@ struct TurboCallPrototypeView: View {
                 return "Release to retry"
             case .pendingJoin, .backendSessionTransition, .localSessionTransition,
                  .peerReadyToConnect:
+                guard primaryAction.kind != .holdToTalk else {
+                    return selectedPeerState.statusMessage == "Connecting..." ? "Wait" : selectedPeerState.statusMessage
+                }
                 return selectedPeerState.statusMessage
             case .remoteWakeUnavailable:
                 return "Waiting"
@@ -1087,11 +995,17 @@ struct TurboCallPrototypeView: View {
         guard primaryAction.kind == .holdToTalk else {
             return selectedPeerState.statusMessage
         }
-        return talkButtonIsEnabled ? "Ready" : "Connecting..."
+        if selectedPeerState.statusMessage == "Connected" {
+            return "Ready"
+        }
+        if talkButtonIsEnabled {
+            return "Ready"
+        }
+        return selectedPeerState.statusMessage == "Connecting..." ? "Wait" : selectedPeerState.statusMessage
     }
 
     private func transmitStartupStatusText(now: Date) -> String {
-        return "Starting..."
+        return "Wait"
     }
 
     private func transmitReadyStatusText(now: Date) -> String {
@@ -1100,7 +1014,7 @@ struct TurboCallPrototypeView: View {
 
     private func passiveWarmupStatusText(now: Date) -> String {
         guard isTransmitPressActive else {
-            return "Connecting..."
+            return "Wait"
         }
         return transmitStartupStatusText(now: now)
     }
@@ -1152,190 +1066,6 @@ private struct TurboCallActionButton: View {
         .disabled(!isEnabled)
         .accessibilityLabel(title)
         .animation(.interactiveSpring(response: 0.34, dampingFraction: 0.82, blendDuration: 0.08), value: isActive)
-    }
-}
-
-private struct TurboTuningSliderRow<Value: BinaryFloatingPoint>: View where Value.Stride: BinaryFloatingPoint {
-    let title: String
-    let valueText: String
-    @Binding var value: Value
-    let range: ClosedRange<Value>
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.72))
-                Spacer()
-                Text(valueText)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.48))
-            }
-
-            Slider(value: $value, in: range)
-                .tint(.white.opacity(0.78))
-        }
-    }
-}
-
-private struct TurboCallCloudTuningPanel: View {
-    @Binding var tuning: TurboCallCloudTuning
-    let localAudioLevel: Double
-    let onReseed: () -> Void
-    let isPreviewingAnimation: Bool
-    let onToggleAnimationPreview: () -> Void
-    let onClose: () -> Void
-
-    var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                Text("Cloud tuning")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.86))
-                Text("Mic \(Int((localAudioLevel * 100).rounded()))%")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.56))
-                Spacer()
-                Button("New seed", action: onReseed)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                Button(isPreviewingAnimation ? "Pause" : "Play", action: onToggleAnimationPreview)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 26, height: 26)
-                }
-                .accessibilityLabel("Hide cloud tuning")
-            }
-
-            ScrollView {
-                VStack(spacing: 10) {
-                    Toggle("Button anchors", isOn: $tuning.buttonAnchorsEnabled)
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .tint(.white.opacity(0.78))
-
-                    TurboTuningSliderRow(
-                        title: "Count",
-                        valueText: "\(Int(tuning.patchCount.rounded()))",
-                        value: $tuning.patchCount,
-                        range: 4...32
-                    )
-                    TurboTuningSliderRow(
-                        title: "Opacity",
-                        valueText: String(format: "%.2f", tuning.opacity),
-                        value: $tuning.opacity,
-                        range: 0.35...1.8
-                    )
-                    TurboTuningSliderRow(
-                        title: "Depth",
-                        valueText: String(format: "%.2f", tuning.depthContrast),
-                        value: $tuning.depthContrast,
-                        range: 0.00...1.00
-                    )
-                    TurboTuningSliderRow(
-                        title: "Color",
-                        valueText: String(format: "%.2f", tuning.colorAmount),
-                        value: $tuning.colorAmount,
-                        range: 0.00...1.00
-                    )
-                    TurboTuningSliderRow(
-                        title: "Spread",
-                        valueText: String(format: "%.2f", tuning.hueSpread),
-                        value: $tuning.hueSpread,
-                        range: 0.00...1.00
-                    )
-                    TurboTuningSliderRow(
-                        title: "Blur",
-                        valueText: String(format: "%.3f", tuning.blur),
-                        value: $tuning.blur,
-                        range: 0.015...0.09
-                    )
-                    TurboTuningSliderRow(
-                        title: "Patch width min",
-                        valueText: String(format: "%.2f", tuning.minWidth),
-                        value: $tuning.minWidth,
-                        range: 0.30...1.20
-                    )
-                    TurboTuningSliderRow(
-                        title: "Patch width max",
-                        valueText: String(format: "%.2f", tuning.maxWidth),
-                        value: $tuning.maxWidth,
-                        range: 0.80...2.00
-                    )
-                    TurboTuningSliderRow(
-                        title: "Patch height min",
-                        valueText: String(format: "%.2f", tuning.minHeight),
-                        value: $tuning.minHeight,
-                        range: 0.08...0.32
-                    )
-                    TurboTuningSliderRow(
-                        title: "Patch height max",
-                        valueText: String(format: "%.2f", tuning.maxHeight),
-                        value: $tuning.maxHeight,
-                        range: 0.20...0.55
-                    )
-                    TurboTuningSliderRow(
-                        title: "Dim",
-                        valueText: String(format: "%.2f", tuning.overallDim),
-                        value: $tuning.overallDim,
-                        range: 0.00...0.20
-                    )
-                    TurboTuningSliderRow(
-                        title: "Motion",
-                        valueText: String(format: "%.3f", tuning.motionAmount),
-                        value: $tuning.motionAmount,
-                        range: 0.00...0.26
-                    )
-                    TurboTuningSliderRow(
-                        title: "Idle motion",
-                        valueText: String(format: "%.2f", tuning.idleMotionAmount),
-                        value: $tuning.idleMotionAmount,
-                        range: 0.00...0.70
-                    )
-                    TurboTuningSliderRow(
-                        title: "Breath",
-                        valueText: String(format: "%.3f", tuning.breathAmount),
-                        value: $tuning.breathAmount,
-                        range: 0.00...0.08
-                    )
-                    TurboTuningSliderRow(
-                        title: "Talk breath",
-                        valueText: String(format: "%.3f", tuning.talkBreathBoost),
-                        value: $tuning.talkBreathBoost,
-                        range: 0.00...0.26
-                    )
-                    TurboTuningSliderRow(
-                        title: "Talk baseline",
-                        valueText: String(format: "%.2f", tuning.talkBaseline),
-                        value: $tuning.talkBaseline,
-                        range: 0.00...0.35
-                    )
-                    TurboTuningSliderRow(
-                        title: "Talk sensitivity",
-                        valueText: String(format: "%.2f", tuning.talkSensitivity),
-                        value: $tuning.talkSensitivity,
-                        range: 0.50...2.50
-                    )
-                    TurboTuningSliderRow(
-                        title: "Speed",
-                        valueText: String(format: "%.2f", tuning.motionSpeed),
-                        value: $tuning.motionSpeed,
-                        range: 0.10...4.00
-                    )
-                }
-            }
-            .scrollIndicators(.hidden)
-        }
-        .padding(14)
-        .background(.black.opacity(0.42), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(.white.opacity(0.10), lineWidth: 1)
-        )
-        .buttonStyle(.plain)
-        .frame(maxHeight: 520)
     }
 }
 
@@ -1467,7 +1197,7 @@ private struct TurboCallCloudBackground: View {
         case .connecting, .idleReady:
             return 0.36
         case .conversationActive:
-            return 1.0
+            return 0.78
         }
     }
 
@@ -1586,7 +1316,8 @@ private struct TurboCallCloudBackground: View {
         let referenceArea = 393.0 * 852.0
         let area = max(Double(size.width * size.height), referenceArea)
         let densityScale = sqrt(area / referenceArea)
-        return max(1, Int((baseCount * densityScale).rounded()))
+        let largeCanvasScale = size.width >= 700 ? 1.16 : 1.0
+        return max(1, Int((baseCount * densityScale * largeCanvasScale).rounded()))
     }
 
     private static func buttonAnchors(for size: CGSize, isEnabled: Bool) -> [TurboCallCloudAnchor]? {
@@ -1629,7 +1360,7 @@ private struct TurboCallBackgroundSurfaceStyle: Equatable {
 
     static func forPhase(_ phase: TurboCallCloudMotion.Phase) -> Self {
         switch phase {
-        case .connecting, .idleReady:
+        case .connecting:
             return Self(
                 materialOpacity: 0.14,
                 tintOpacity: 0.10,
@@ -1638,14 +1369,23 @@ private struct TurboCallBackgroundSurfaceStyle: Equatable {
                 edgeShadeOpacity: 0.24,
                 borderOpacity: 0.8
             )
+        case .idleReady:
+            return Self(
+                materialOpacity: 0.14,
+                tintOpacity: 0.13,
+                centerHighlightOpacity: 0.042,
+                topSheenOpacity: 0.056,
+                edgeShadeOpacity: 0.29,
+                borderOpacity: 0.72
+            )
         case .conversationActive:
             return Self(
-                materialOpacity: 0.0,
-                tintOpacity: 0.0,
-                centerHighlightOpacity: 0.0,
-                topSheenOpacity: 0.0,
-                edgeShadeOpacity: 0.0,
-                borderOpacity: 0.0
+                materialOpacity: 0.10,
+                tintOpacity: 0.16,
+                centerHighlightOpacity: 0.018,
+                topSheenOpacity: 0.026,
+                edgeShadeOpacity: 0.34,
+                borderOpacity: 0.34
             )
         }
     }
@@ -1760,7 +1500,8 @@ private struct TurboCallCloudPatch {
         let minHeight = min(tuning.minHeight, tuning.maxHeight)
         let maxHeight = max(tuning.minHeight, tuning.maxHeight)
         let sizeScale = random.next(in: 0.76...1.08)
-        let baseWidth = size.width * random.next(in: minWidth...maxWidth) * sizeScale
+        let wideLayoutWidthScale = size.width >= 700 ? 0.74 : 1.0
+        let baseWidth = size.width * random.next(in: minWidth...maxWidth) * sizeScale * wideLayoutWidthScale
         let baseHeight = size.height * random.next(in: minHeight...maxHeight) * sizeScale
         let baseCenter = CGPoint(
             x: size.width * random.next(in: -0.12...1.12),

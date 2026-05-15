@@ -1359,12 +1359,13 @@ enum TurboSignalKind: String, Codable {
     case receiverNotReady = "receiver-not-ready"
     case directQuicUpgradeRequest = "direct-quic-upgrade-request"
     case selectedPeerPrewarm = "selected-peer-prewarm"
+    case callContext = "call-context"
 
     var isDirectQuicControlSignal: Bool {
         switch self {
         case .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest:
             return true
-        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .selectedPeerPrewarm:
+        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .selectedPeerPrewarm, .callContext:
             return false
         }
     }
@@ -1980,7 +1981,7 @@ nonisolated struct TurboSignalEnvelope: Codable, Equatable {
             return .candidate(try decodeDirectQuicPayload(TurboDirectQuicCandidatePayload.self, expectedKind: .iceCandidate))
         case .hangup:
             return .hangup(try decodeDirectQuicPayload(TurboDirectQuicHangupPayload.self, expectedKind: .hangup))
-        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .directQuicUpgradeRequest, .selectedPeerPrewarm:
+        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .directQuicUpgradeRequest, .selectedPeerPrewarm, .callContext:
             throw TurboDirectQuicPayloadError.notDirectQuicSignal(type)
         }
     }

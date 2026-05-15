@@ -101,6 +101,20 @@
       "status": "active"
     },
     {
+      "id": "direct_quic.stale_attempt_blocks_reprobe",
+      "scope": "local",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/PTTViewModel+DirectQuicIdentityAndProbe.swift",
+      "predicate": "A Direct QUIC attempt remains active after the surfaced media path has fallen back to relay or Fast Relay and no Direct QUIC probe controller is alive.",
+      "evidenceFields": ["contactId", "channelId", "attemptId", "isDirectActive", "transportPath", "staleAgeMilliseconds", "trigger"],
+      "detectors": ["Turbo/PTTViewModel+DirectQuicIdentityAndProbe.swift"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "local repair",
+      "repairAction": "Clear the stale Direct QUIC attempt without retry backoff so the normal selected-contact or automatic reprobe can start.",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
       "id": "channel.no_membership_projection_while_durable_membership_exists",
       "scope": "backend",
       "owner": "backend",

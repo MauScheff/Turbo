@@ -736,6 +736,7 @@ enum SelectedPeerDetail: Equatable {
     case waitingForPeer(reason: SelectedPeerWaitingReason)
     case localJoinFailed(recoveryMessage: String)
     case ready
+    case readyHoldToTalkDisabled
     case startingTransmit(stage: StartingTransmitStage)
     case transmitting
     case receiving
@@ -758,7 +759,7 @@ enum SelectedPeerDetail: Equatable {
             return .waitingForPeer
         case .localJoinFailed:
             return .localJoinFailed
-        case .ready:
+        case .ready, .readyHoldToTalkDisabled:
             return .ready
         case .startingTransmit:
             return .startingTransmit
@@ -821,7 +822,10 @@ struct SelectedPeerState: Equatable {
     }
 
     var allowsHoldToTalk: Bool {
-        canTransmitNow
+        if case .readyHoldToTalkDisabled = detail {
+            return false
+        }
+        return canTransmitNow
             || phase == .ready
             || phase == .wakeReady
             || phase == .transmitting
@@ -863,7 +867,7 @@ struct SelectedPeerState: Equatable {
             return .requested(direction: .incoming, requestCount: requestCount)
         case .peerReady:
             return .ready
-        case .wakeReady, .ready, .startingTransmit, .transmitting, .receiving:
+        case .wakeReady, .ready, .readyHoldToTalkDisabled, .startingTransmit, .transmitting, .receiving:
             return .live
         case .waitingForPeer(reason: .peerReadyToConnect):
             return .ready
@@ -1472,6 +1476,7 @@ enum ConnectedControlPlaneProjection: Equatable {
     case wakeReady
     case waiting(reason: SelectedPeerWaitingReason, statusMessage: String)
     case ready
+    case readyHoldToTalkDisabled
     case transmitting
     case receiving
 }
@@ -2046,7 +2051,7 @@ enum ConversationStateMachine {
             return ConversationPrimaryAction(
                 kind: .holdToTalk,
                 label: "Hold To Talk",
-                isEnabled: selectedPeerState.canTransmitNow,
+                isEnabled: selectedPeerState.allowsHoldToTalk,
                 style: .accent
             )
         case .requested:
@@ -2276,6 +2281,8 @@ private extension ConversationStateMachine {
             return (.waitingForPeer(reason: reason), statusMessage)
         case .ready:
             return (.ready, "Connected")
+        case .readyHoldToTalkDisabled:
+            return (.readyHoldToTalkDisabled, "Connected")
         case .transmitting:
             return (.transmitting, "Talking to \(contactName)")
         case .receiving:
@@ -2408,11 +2415,11 @@ private extension ConversationDerivationContext {
             || readinessStatus == .ready
 
         let sessionTransmitReady = effectivePeerDeviceConnected
-        if remotePlaybackDrainBlocksTransmit {
-            return .ready
-        }
         if sessionTransmitReady && peerSignalIsTransmitting {
             return .receiving
+        }
+        if remotePlaybackDrainBlocksTransmit {
+            return .readyHoldToTalkDisabled
         }
         if shouldPreserveReadyAfterObservedRemoteTransmitStop {
             return .ready

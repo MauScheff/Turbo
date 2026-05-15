@@ -706,6 +706,9 @@ extension PTTViewModel {
         guard !shouldBridgePrewarmedDirectMediaDuringSystemTransmit(for: contactID) else {
             return false
         }
+        guard !shouldBridgePrewarmedMediaRelayDuringSystemTransmit(for: contactID) else {
+            return false
+        }
 
         switch mediaConnectionState {
         case .connected, .preparing:
@@ -733,6 +736,22 @@ extension PTTViewModel {
         guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
         guard shouldUseDirectQuicTransport(for: contactID) else { return false }
         return true
+    }
+
+    func shouldBridgePrewarmedMediaRelayDuringSystemTransmit(
+        for contactID: UUID,
+        applicationState: UIApplication.State? = nil
+    ) -> Bool {
+        let applicationState = applicationState ?? currentApplicationState()
+        guard applicationState == .active else { return false }
+        guard foregroundAppManagedInteractiveAudioPrewarmEnabled else { return false }
+        guard mediaServices.hasSession() else { return false }
+        guard mediaSessionContactID == contactID else { return false }
+        guard mediaConnectionState == .connected else { return false }
+        guard pttWakeRuntime.pendingIncomingPush == nil else { return false }
+        guard !shouldUseDirectQuicTransport(for: contactID) else { return false }
+        guard mediaRuntime.hasActiveMediaRelayClient else { return false }
+        return mediaTransportPathState == .fastRelay
     }
 
     func shouldUseForegroundWarmDirectTransmit(
@@ -1713,7 +1732,6 @@ extension PTTViewModel {
             if await reassertBackendJoinAfterWakeIfNeeded(for: request.contactID) {
                 await refreshChannelState(for: request.contactID)
             }
-            try await requestSystemTransmitHandoffIfNeeded(for: request)
             if let target = directQuicBackendLeaseBypassTarget(
                 for: request,
                 reason: "begin-transmit-lease-bypass"
@@ -1771,6 +1789,7 @@ extension PTTViewModel {
                 configureOutgoingAudioRoute(target: target)
                 await transmitCoordinator.handle(.beginSucceeded(target, request))
                 syncTransmitState()
+                try await requestSystemTransmitHandoffIfNeeded(for: request)
                 await completeDeferredSystemTransmitActivationIfReady(
                     request: request,
                     target: target
@@ -1887,6 +1906,7 @@ extension PTTViewModel {
             startRenewingTransmit(usableTarget)
             await transmitCoordinator.handle(.beginSucceeded(usableTarget, request))
             syncTransmitState()
+            try await requestSystemTransmitHandoffIfNeeded(for: request)
             await completeDeferredSystemTransmitActivationIfReady(
                 request: request,
                 target: usableTarget
@@ -1993,6 +2013,7 @@ extension PTTViewModel {
             )
             await transmitCoordinator.handle(.beginSucceeded(usableTarget, request))
             syncTransmitState()
+            try await requestSystemTransmitHandoffIfNeeded(for: request)
             await completeDeferredSystemTransmitActivationIfReady(
                 request: request,
                 target: usableTarget
@@ -2380,6 +2401,8 @@ extension PTTViewModel {
 
         let usesSpeculativeForegroundWarmDirectTransmit =
             shouldUseSpeculativeForegroundWarmDirectTransmit(for: request.contactID)
+        let usesPrewarmedFastRelayTransmitBridge =
+            shouldBridgePrewarmedMediaRelayDuringSystemTransmit(for: request.contactID)
         if usesSpeculativeForegroundWarmDirectTransmit {
             diagnostics.record(
                 .media,
@@ -2494,6 +2517,21 @@ extension PTTViewModel {
                         trigger: "system-handoff-requested"
                     )
                 }
+            } else if usesPrewarmedFastRelayTransmitBridge {
+                diagnostics.record(
+                    .media,
+                    message: "Starting foreground Fast Relay audio after system handoff request",
+                    metadata: [
+                        "contactId": request.contactID.uuidString,
+                        "channelUUID": channelUUID.uuidString,
+                    ]
+                )
+                Task { @MainActor [weak self] in
+                    await self?.startPrewarmedMediaRelaySystemTransmitBridgeIfPossible(
+                        request: request,
+                        trigger: "system-handoff-requested"
+                    )
+                }
             }
         } catch {
             transmitRuntime.clearPendingSystemTransmitBegin(channelUUID: channelUUID)
@@ -2539,6 +2577,79 @@ extension PTTViewModel {
                 }
             }
         )
+    }
+
+    @discardableResult
+    func startPrewarmedMediaRelaySystemTransmitBridgeIfPossible(
+        request: TransmitRequestContext,
+        trigger: String
+    ) async -> Bool {
+        guard !request.usesLocalHTTPBackend else { return false }
+        guard let channelUUID = request.channelUUID else { return false }
+        guard hasActiveTransmitPressIntent() else { return false }
+        guard shouldBridgePrewarmedMediaRelayDuringSystemTransmit(for: request.contactID) else {
+            return false
+        }
+        guard transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-requested") == nil else {
+            return false
+        }
+        guard let target = activeTransmitTarget(for: channelUUID) else {
+            return false
+        }
+        guard shouldContinueSystemTransmitActivation(
+            channelUUID: channelUUID,
+            target: target,
+            stage: "fast-relay-bridge-start"
+        ) else {
+            return false
+        }
+
+        do {
+            configureOutgoingAudioRoute(target: target)
+            diagnostics.record(
+                .media,
+                message: "Starting prewarmed Fast Relay audio bridge before PTT activation",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "channelId": request.backendChannelID,
+                    "channelUUID": channelUUID.uuidString,
+                    "trigger": trigger,
+                ]
+            )
+            recordFirstTransmitStartupTimingStageIfAbsent(
+                "early-audio-capture-start-requested",
+                metadata: ["trigger": "fast-relay-\(trigger)"]
+            )
+            try await mediaServices.session()?.startSendingAudio()
+            guard shouldContinueSystemTransmitActivation(
+                channelUUID: channelUUID,
+                target: target,
+                stage: "fast-relay-bridge-start-completed",
+                recordCompletedSideEffectInvariant: false
+            ) else {
+                await mediaServices.session()?.abortSendingAudio()
+                return false
+            }
+            recordFirstTransmitStartupTimingStageIfAbsent(
+                "early-audio-capture-start-completed",
+                metadata: ["trigger": "fast-relay-\(trigger)"]
+            )
+            return true
+        } catch {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Prewarmed Fast Relay audio bridge failed",
+                metadata: [
+                    "contactId": request.contactID.uuidString,
+                    "channelId": request.backendChannelID,
+                    "channelUUID": channelUUID.uuidString,
+                    "trigger": trigger,
+                    "error": error.localizedDescription,
+                ]
+            )
+            return false
+        }
     }
 
     @discardableResult

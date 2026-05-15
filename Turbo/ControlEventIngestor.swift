@@ -334,7 +334,7 @@ struct ControlEventEnvelope: Equatable {
             return .peerHint
         case .audioChunk, .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest:
             return .transportHint
-        case .selectedPeerPrewarm:
+        case .selectedPeerPrewarm, .callContext:
             return .peerHint
         }
     }
@@ -356,7 +356,7 @@ struct ControlEventEnvelope: Equatable {
                 remoteDeviceID: payload.fromDeviceId,
                 requestID: payload.requestId
             )
-        case .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest, .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady:
+        case .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest, .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .callContext:
             return nil
         }
     }

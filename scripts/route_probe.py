@@ -518,6 +518,53 @@ def run_check(results: list[CheckResult], name: str, fn) -> Any:
         raise
 
 
+def run_eventually_check(
+    results: list[CheckResult],
+    name: str,
+    fn,
+    predicate,
+    *,
+    timeout_seconds: float = 8.0,
+    interval_seconds: float = 0.5,
+    failure_message: str,
+) -> Any:
+    started = time.perf_counter()
+    deadline = started + timeout_seconds
+    attempts = 0
+    last_payload: Any | None = None
+    last_error: Exception | None = None
+    while True:
+        attempts += 1
+        try:
+            payload = fn()
+            last_payload = payload
+            last_error = None
+            if predicate(payload):
+                duration_ms = int((time.perf_counter() - started) * 1000)
+                results.append(
+                    CheckResult(
+                        name=name,
+                        ok=True,
+                        detail=f"ok after {attempts} attempt(s)",
+                        durationMs=duration_ms,
+                        payload=payload,
+                    )
+                )
+                return payload
+        except Exception as exc:
+            last_error = exc
+        if time.perf_counter() >= deadline:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            detail = (
+                f"{failure_message}: {last_error}"
+                if last_error is not None
+                else f"{failure_message}: {last_payload}"
+            )
+            results.append(CheckResult(name=name, ok=False, detail=detail, durationMs=duration_ms, payload=last_payload))
+            raise RouteProbeFailure(detail)
+        time.sleep(interval_seconds)
+
+
 async def run_async_check(results: list[CheckResult], name: str, fn) -> Any:
     started = time.perf_counter()
     try:
@@ -1010,7 +1057,7 @@ async def main() -> int:
                 insecure=args.insecure,
             ),
         )
-        prejoin_state = run_check(
+        prejoin_state = run_eventually_check(
             results,
             "channel-state:prejoin-requested",
             lambda: request(
@@ -1019,6 +1066,8 @@ async def main() -> int:
                 caller["handle"],
                 insecure=args.insecure,
             ),
+            lambda payload: payload.get("status") == "requested",
+            failure_message="prejoin state should converge to requested",
         )
         require(prejoin_state.get("status") == "requested", f"prejoin state should be requested: {prejoin_state}")
         require(prejoin_state.get("selfJoined") is False, f"prejoin state should not show caller joined: {prejoin_state}")
@@ -1027,12 +1076,15 @@ async def main() -> int:
             require_request_relationship_contract(prejoin_state, label="channel-state:prejoin-requested")
             require_membership_contract(prejoin_state, label="channel-state:prejoin-requested")
             require_conversation_status_contract(prejoin_state, label="channel-state:prejoin-requested")
-        run_check(
+        run_eventually_check(
             results,
             "invite-outgoing:list",
             lambda: request(args.base_url, "/v1/invites/outgoing", caller["handle"], insecure=args.insecure),
+            lambda payload: isinstance(payload, list)
+            and any(invite.get("inviteId") == invite_cancel["inviteId"] for invite in payload),
+            failure_message="outgoing invite list should include the pending invite",
         )
-        cancel_payload = run_check(
+        cancel_payload = run_eventually_check(
             results,
             "invite-cancel",
             lambda: request(
@@ -1042,6 +1094,8 @@ async def main() -> int:
                 method="POST",
                 insecure=args.insecure,
             ),
+            lambda payload: payload.get("status") == "cancelled",
+            failure_message="cancel route should see and cancel the pending invite",
         )
         require(cancel_payload.get("status") == "cancelled", f"cancel route returned unexpected payload: {cancel_payload}")
 
@@ -1057,12 +1111,15 @@ async def main() -> int:
                 insecure=args.insecure,
             ),
         )
-        run_check(
+        run_eventually_check(
             results,
             "invite-incoming:list",
             lambda: request(args.base_url, "/v1/invites/incoming", callee["handle"], insecure=args.insecure),
+            lambda payload: isinstance(payload, list)
+            and any(invite.get("inviteId") == invite_decline["inviteId"] for invite in payload),
+            failure_message="incoming invite list should include the pending invite",
         )
-        decline_payload = run_check(
+        decline_payload = run_eventually_check(
             results,
             "invite-decline",
             lambda: request(
@@ -1072,6 +1129,8 @@ async def main() -> int:
                 method="POST",
                 insecure=args.insecure,
             ),
+            lambda payload: payload.get("status") == "declined",
+            failure_message="decline route should see and decline the pending invite",
         )
         require(decline_payload.get("status") == "declined", f"decline route returned unexpected payload: {decline_payload}")
 
@@ -1087,7 +1146,7 @@ async def main() -> int:
                 insecure=args.insecure,
             ),
         )
-        accept_payload = run_check(
+        accept_payload = run_eventually_check(
             results,
             "invite-accept",
             lambda: request(
@@ -1097,6 +1156,8 @@ async def main() -> int:
                 method="POST",
                 insecure=args.insecure,
             ),
+            lambda payload: payload.get("accepted") is True and payload.get("pendingJoin") is True,
+            failure_message="accept route should see and accept the pending invite",
         )
         require(accept_payload.get("accepted") is True, f"accept route did not mark invite accepted: {accept_payload}")
         require(accept_payload.get("pendingJoin") is True, f"accept route did not report pending join: {accept_payload}")
@@ -1114,7 +1175,7 @@ async def main() -> int:
                 insecure=args.insecure,
             ),
         )
-        _ = run_check(
+        _ = run_eventually_check(
             results,
             "invite-cancel:stale-accept-original",
             lambda: request(
@@ -1124,6 +1185,8 @@ async def main() -> int:
                 method="POST",
                 insecure=args.insecure,
             ),
+            lambda payload: payload.get("status") == "cancelled",
+            failure_message="cancel route should see and cancel the stale-original invite",
         )
         stale_replacement = run_check(
             results,
@@ -1137,7 +1200,7 @@ async def main() -> int:
                 insecure=args.insecure,
             ),
         )
-        stale_accept_payload = run_check(
+        stale_accept_payload = run_eventually_check(
             results,
             "invite-accept:stale-id-accepts-replacement",
             lambda: request(
@@ -1147,6 +1210,9 @@ async def main() -> int:
                 method="POST",
                 insecure=args.insecure,
             ),
+            lambda payload: payload.get("inviteId") == stale_replacement["inviteId"]
+            and payload.get("pendingJoin") is True,
+            failure_message="stale accept should converge to the replacement invite",
         )
         require(
             stale_accept_payload.get("inviteId") == stale_replacement["inviteId"],
@@ -1156,15 +1222,21 @@ async def main() -> int:
             stale_accept_payload.get("pendingJoin") is True,
             f"stale accept did not report pending join for replacement invite: {stale_accept_payload}",
         )
-        stale_caller_outgoing = run_check(
+        stale_caller_outgoing = run_eventually_check(
             results,
             "invite-outgoing:stale-accept-cleared-caller",
             lambda: request(args.base_url, "/v1/invites/outgoing", caller["handle"], insecure=args.insecure),
+            lambda payload: isinstance(payload, list)
+            and all(invite.get("inviteId") != stale_replacement["inviteId"] for invite in payload),
+            failure_message="stale accept should clear caller's replacement outgoing invite",
         )
-        stale_callee_incoming = run_check(
+        stale_callee_incoming = run_eventually_check(
             results,
             "invite-incoming:stale-accept-cleared-callee",
             lambda: request(args.base_url, "/v1/invites/incoming", callee["handle"], insecure=args.insecure),
+            lambda payload: isinstance(payload, list)
+            and all(invite.get("inviteId") != stale_replacement["inviteId"] for invite in payload),
+            failure_message="stale accept should clear callee's replacement incoming invite",
         )
         for label, invites in [
             ("caller outgoing", stale_caller_outgoing),
@@ -1212,7 +1284,7 @@ async def main() -> int:
                 )
             )
         else:
-            mutual_accept_payload = run_check(
+            mutual_accept_payload = run_eventually_check(
                 results,
                 "invite-accept:mutual-clears-both-directions",
                 lambda: request(
@@ -1222,6 +1294,8 @@ async def main() -> int:
                     method="POST",
                     insecure=args.insecure,
                 ),
+                lambda payload: payload.get("accepted") is True and payload.get("status") == "connected",
+                failure_message="mutual accept route should converge to connected",
             )
             require(
                 mutual_accept_payload.get("accepted") is True,
@@ -1231,25 +1305,37 @@ async def main() -> int:
             mutual_accept_payload.get("status") == "connected",
             f"mutual request did not converge to connected: {mutual_accept_payload}",
         )
-        caller_outgoing_after_mutual_accept = run_check(
+        caller_outgoing_after_mutual_accept = run_eventually_check(
             results,
             "invite-outgoing:mutual-cleared-caller",
             lambda: request(args.base_url, "/v1/invites/outgoing", caller["handle"], insecure=args.insecure),
+            lambda payload: isinstance(payload, list)
+            and all(invite.get("channelId") != mutual_channel_id for invite in payload),
+            failure_message="mutual accept should clear caller outgoing invites",
         )
-        callee_outgoing_after_mutual_accept = run_check(
+        callee_outgoing_after_mutual_accept = run_eventually_check(
             results,
             "invite-outgoing:mutual-cleared-callee",
             lambda: request(args.base_url, "/v1/invites/outgoing", callee["handle"], insecure=args.insecure),
+            lambda payload: isinstance(payload, list)
+            and all(invite.get("channelId") != mutual_channel_id for invite in payload),
+            failure_message="mutual accept should clear callee outgoing invites",
         )
-        caller_incoming_after_mutual_accept = run_check(
+        caller_incoming_after_mutual_accept = run_eventually_check(
             results,
             "invite-incoming:mutual-cleared-caller",
             lambda: request(args.base_url, "/v1/invites/incoming", caller["handle"], insecure=args.insecure),
+            lambda payload: isinstance(payload, list)
+            and all(invite.get("channelId") != mutual_channel_id for invite in payload),
+            failure_message="mutual accept should clear caller incoming invites",
         )
-        callee_incoming_after_mutual_accept = run_check(
+        callee_incoming_after_mutual_accept = run_eventually_check(
             results,
             "invite-incoming:mutual-cleared-callee",
             lambda: request(args.base_url, "/v1/invites/incoming", callee["handle"], insecure=args.insecure),
+            lambda payload: isinstance(payload, list)
+            and all(invite.get("channelId") != mutual_channel_id for invite in payload),
+            failure_message="mutual accept should clear callee incoming invites",
         )
         for label, invites in [
             ("caller outgoing", caller_outgoing_after_mutual_accept),

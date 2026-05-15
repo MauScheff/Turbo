@@ -758,6 +758,9 @@ enum MediaRelayConnectionStart {
 }
 
 final class MediaRuntimeState {
+    private static let mediaEncryptionReceiveSequenceWindow: UInt64 = 256
+    private static let mediaEncryptionRecentReceiveSequenceLimit = 256
+
     var session: MediaSession?
     var contactID: UUID?
     var connectionState: MediaConnectionState = .idle
@@ -1316,8 +1319,16 @@ final class MediaRuntimeState {
             rememberMediaEncryptionReceiveSequence(sequenceNumber, for: contactID)
             return .accepted
         }
-        guard sequenceNumber > lastSequence else { return .replayOrReordered }
-        mediaEncryptionReceiveSequenceByContactID[contactID] = sequenceNumber
+        if sequenceNumber > lastSequence {
+            mediaEncryptionReceiveSequenceByContactID[contactID] = sequenceNumber
+            rememberMediaEncryptionReceiveSequence(sequenceNumber, for: contactID)
+            return .accepted
+        }
+
+        guard lastSequence - sequenceNumber <= Self.mediaEncryptionReceiveSequenceWindow else {
+            return .replayOrReordered
+        }
+
         rememberMediaEncryptionReceiveSequence(sequenceNumber, for: contactID)
         return .accepted
     }
@@ -1328,7 +1339,7 @@ final class MediaRuntimeState {
     ) {
         var recent = mediaEncryptionRecentReceiveSequencesByContactID[contactID] ?? []
         recent.insert(sequenceNumber)
-        if recent.count > 256,
+        if recent.count > Self.mediaEncryptionRecentReceiveSequenceLimit,
            let minimum = recent.min() {
             recent.remove(minimum)
         }

@@ -1,0 +1,140 @@
+type turbo.domain.SignalKind
+  = Offer
+  | Answer
+  | IceCandidate
+  | Hangup
+  | TransmitStart
+  | TransmitStop
+  | AudioChunk
+  | ReceiverReady
+  | ReceiverNotReady
+  | DirectQuicUpgradeRequest
+  | SelectedPeerPrewarm
+  | CallContext
+
+turbo.domain.SignalKind.fromText : Text -> Optional SignalKind
+turbo.domain.SignalKind.fromText = cases
+  "offer" -> Some Offer
+  "answer" -> Some Answer
+  "ice-candidate" -> Some IceCandidate
+  "hangup" -> Some Hangup
+  "transmit-start" -> Some TransmitStart
+  "transmit-stop" -> Some TransmitStop
+  "audio-chunk" -> Some AudioChunk
+  "receiver-ready" -> Some ReceiverReady
+  "receiver-not-ready" -> Some ReceiverNotReady
+  "direct-quic-upgrade-request" -> Some DirectQuicUpgradeRequest
+  "selected-peer-prewarm" -> Some SelectedPeerPrewarm
+  "call-context" -> Some CallContext
+  _ -> None
+
+turbo.domain.SignalKind.toText : SignalKind -> Text
+turbo.domain.SignalKind.toText = cases
+  Offer -> "offer"
+  Answer -> "answer"
+  IceCandidate -> "ice-candidate"
+  Hangup -> "hangup"
+  TransmitStart -> "transmit-start"
+  TransmitStop -> "transmit-stop"
+  AudioChunk -> "audio-chunk"
+  ReceiverReady -> "receiver-ready"
+  ReceiverNotReady -> "receiver-not-ready"
+  DirectQuicUpgradeRequest -> "direct-quic-upgrade-request"
+  SelectedPeerPrewarm -> "selected-peer-prewarm"
+  CallContext -> "call-context"
+
+turbo.domain.SignalKind.fromText.tests.examples : [Result]
+turbo.domain.SignalKind.fromText.tests.examples = test.verify do
+  use SignalKind fromText
+  labeled "parses known tag" do ensureEqual (fromText "answer") (Some Answer)
+  labeled "parses audio chunk tag" do ensureEqual (fromText "audio-chunk") (Some AudioChunk)
+  labeled "parses receiver ready tag" do ensureEqual (fromText "receiver-ready") (Some ReceiverReady)
+  labeled "parses receiver not ready tag" do ensureEqual (fromText "receiver-not-ready") (Some ReceiverNotReady)
+  labeled "parses direct quic upgrade request tag" do ensureEqual (fromText "direct-quic-upgrade-request") (Some DirectQuicUpgradeRequest)
+  labeled "parses selected peer prewarm tag" do ensureEqual (fromText "selected-peer-prewarm") (Some SelectedPeerPrewarm)
+  labeled "parses call context tag" do ensureEqual (fromText "call-context") (Some CallContext)
+  labeled "rejects unknown tag" do ensureEqual (fromText "bogus") None
+
+turbo.domain.SignalKind.fromText.tests.props : [Result]
+turbo.domain.SignalKind.fromText.tests.props = test.verify do
+  Each.repeat 100
+  n = natIn 0 11
+  kind = match n with
+    0 -> Offer
+    1 -> Answer
+    2 -> IceCandidate
+    3 -> Hangup
+    4 -> TransmitStart
+    5 -> TransmitStop
+    6 -> AudioChunk
+    7 -> ReceiverReady
+    8 -> ReceiverNotReady
+    9 -> DirectQuicUpgradeRequest
+    10 -> SelectedPeerPrewarm
+    _ -> CallContext
+  labeled "fromText inverts toText" do ensureEqual (SignalKind.fromText (SignalKind.toText kind)) (Some kind)
+
+turbo.domain.SignalKind.toText.tests.examples : [Result]
+turbo.domain.SignalKind.toText.tests.examples = test.verify do
+  use SignalKind toText
+  labeled "encodes offer" do ensureEqual (toText Offer) "offer"
+  labeled "encodes transmit stop" do ensureEqual (toText TransmitStop) "transmit-stop"
+  labeled "encodes audio chunk" do ensureEqual (toText AudioChunk) "audio-chunk"
+  labeled "encodes receiver ready" do ensureEqual (toText ReceiverReady) "receiver-ready"
+  labeled "encodes receiver not ready" do ensureEqual (toText ReceiverNotReady) "receiver-not-ready"
+  labeled "encodes direct quic upgrade request" do ensureEqual (toText DirectQuicUpgradeRequest) "direct-quic-upgrade-request"
+  labeled "encodes selected peer prewarm" do ensureEqual (toText SelectedPeerPrewarm) "selected-peer-prewarm"
+  labeled "encodes call context" do ensureEqual (toText CallContext) "call-context"
+
+turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization : SignalKind -> Boolean
+turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization = cases
+  ReceiverReady -> true
+  ReceiverNotReady -> true
+  CallContext -> true
+  _ -> false
+
+turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization.tests.examples : [Result]
+turbo.service.ws.internal.signalAllowsMembershipOnlyAuthorization.tests.examples = test.verify do
+  ensureEqual true (signalAllowsMembershipOnlyAuthorization ReceiverReady)
+  ensureEqual true (signalAllowsMembershipOnlyAuthorization ReceiverNotReady)
+  ensureEqual true (signalAllowsMembershipOnlyAuthorization CallContext)
+  ensureEqual false (signalAllowsMembershipOnlyAuthorization Offer)
+
+turbo.service.ws.internal.signalUsesActiveTransmitTarget : SignalKind -> Boolean
+turbo.service.ws.internal.signalUsesActiveTransmitTarget = cases
+  AudioChunk -> true
+  TransmitStart -> true
+  TransmitStop -> true
+  _ -> false
+
+turbo.service.ws.internal.signalUsesEnvelopeDeviceTarget : SignalKind -> Boolean
+turbo.service.ws.internal.signalUsesEnvelopeDeviceTarget = cases
+  DirectQuicUpgradeRequest -> true
+  Offer -> true
+  Answer -> true
+  IceCandidate -> true
+  Hangup -> true
+  _ -> false
+
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget : SignalKind -> Boolean
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget = cases
+  DirectQuicUpgradeRequest -> true
+  SelectedPeerPrewarm -> true
+  Offer -> true
+  Answer -> true
+  IceCandidate -> true
+  Hangup -> true
+  _ -> false
+
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget.tests.examples : [Result]
+turbo.service.ws.internal.signalUsesPreJoinDirectQuicSetupTarget.tests.examples = test.verify do
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget DirectQuicUpgradeRequest)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget SelectedPeerPrewarm)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget Offer)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget Answer)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget IceCandidate)
+  ensureEqual true (signalUsesPreJoinDirectQuicSetupTarget Hangup)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget AudioChunk)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget TransmitStart)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget ReceiverReady)
+  ensureEqual false (signalUsesPreJoinDirectQuicSetupTarget CallContext)

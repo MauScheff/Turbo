@@ -111,7 +111,25 @@ extension PTTViewModel {
             return .ready
         }
 
+        if shouldKeepForegroundPTTServiceReadyDuringControlPlaneReconnect() {
+            return .ready
+        }
+
         return backendRuntime.isWebSocketConnected ? .ready : .connecting
+    }
+
+    private func shouldKeepForegroundPTTServiceReadyDuringControlPlaneReconnect() -> Bool {
+        guard backendRuntime.isReady else { return false }
+        guard isJoined, pttCoordinator.state.isJoined else { return false }
+
+        if transmitRuntime.isPressingTalk
+            || transmitCoordinator.state.isPressingTalk
+            || pttCoordinator.state.isTransmitting
+            || hasPendingBeginOrActiveTransmit {
+            return true
+        }
+
+        return selectedPeerCoordinator.state.hadConnectedSessionContinuity
     }
 
     func systemDescriptorName(for channelUUID: UUID) -> String {

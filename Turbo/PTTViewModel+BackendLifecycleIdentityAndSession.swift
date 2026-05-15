@@ -256,6 +256,9 @@ extension PTTViewModel {
         pttSystemPolicyCoordinator.send(.reset)
         pttWakeRuntime.clearAll()
         controlPlaneCoordinator.send(.reset)
+        localCallTelemetry = nil
+        lastPublishedCallContextByContactID = [:]
+        callPeerTelemetryByContactID = [:]
         clearTrackedContacts()
         resetTransportFaults()
         contacts = []

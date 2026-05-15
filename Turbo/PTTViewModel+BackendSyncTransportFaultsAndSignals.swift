@@ -1030,6 +1030,16 @@ extension PTTViewModel {
             handleIncomingDirectQuicUpgradeRequest(envelope, contactID: contactID)
         case .selectedPeerPrewarm:
             handleIncomingSelectedPeerPrewarmHint(envelope, contactID: contactID)
+        case .callContext:
+            applyPeerCallContextPayload(
+                envelope.payload,
+                for: contactID,
+                source: envelope.type.rawValue
+            )
+            if selectedContactId == contactID {
+                updateStatusForSelectedContact()
+                captureDiagnosticsState("backend-signal:\(envelope.type.rawValue)")
+            }
         case .offer, .answer, .iceCandidate, .hangup:
             handleIncomingDirectQuicControlSignal(envelope, contactID: contactID)
         }

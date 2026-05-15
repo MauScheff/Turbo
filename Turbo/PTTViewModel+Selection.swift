@@ -1193,6 +1193,7 @@ extension PTTViewModel {
                 startedAt: startedAt
             )
         )
+        captureDiagnosticsState("selected-contact-prewarm:start")
 
         await runSelectedContactPrewarmStage(
             "media-shell",
@@ -1261,6 +1262,7 @@ extension PTTViewModel {
                 startedAt: startedAt
             )
         )
+        captureDiagnosticsState("selected-contact-prewarm:completed")
         if selectedContactId == contactID {
             selectedContactPrewarmedSelectionContactID = contactID
         }
@@ -1561,8 +1563,9 @@ extension PTTViewModel {
              .waitingForPeer(reason: .peerReadyToConnect):
             return true
         case .idle, .requested, .incomingRequest, .peerReady, .wakeReady,
-             .waitingForPeer, .localJoinFailed, .ready, .startingTransmit,
-             .transmitting, .receiving, .blockedByOtherSession, .systemMismatch:
+             .waitingForPeer, .localJoinFailed, .ready, .readyHoldToTalkDisabled,
+             .startingTransmit, .transmitting, .receiving, .blockedByOtherSession,
+             .systemMismatch:
             return false
         }
     }
