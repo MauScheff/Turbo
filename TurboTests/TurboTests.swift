@@ -6542,6 +6542,55 @@ struct TurboTests {
         #expect(state.canTransmitNow == false)
     }
 
+    @Test func selectedPeerStateShowsWakeReadyWhenJoinRecoveryRefreshDropsSelfMembershipButPeerIsWakeCapable() {
+        let contactID = UUID()
+        let projection = ConversationStateMachine.projection(
+            for: ConversationDerivationContext(
+                contactID: contactID,
+                selectedContactID: contactID,
+                baseState: .waitingForPeer,
+                contactName: "Blake",
+                contactIsOnline: true,
+                isJoined: true,
+                activeChannelID: contactID,
+                systemSessionMatchesContact: true,
+                systemSessionState: .active(contactID: contactID, channelUUID: UUID()),
+                pendingAction: .none,
+                localJoinFailure: nil,
+                mediaState: .connected,
+                localMediaWarmupState: .ready,
+                localRelayTransportReady: true,
+                backendSignalingJoinRecoveryActive: true,
+                hadConnectedSessionContinuity: true,
+                channel: ChannelReadinessSnapshot(
+                    channelState: makeChannelState(
+                        status: .waitingForPeer,
+                        canTransmit: false,
+                        selfJoined: false,
+                        peerJoined: true,
+                        peerDeviceConnected: false
+                    ),
+                    readiness: makeChannelReadiness(
+                        status: .inactive,
+                        selfHasActiveDevice: false,
+                        peerHasActiveDevice: false,
+                        remoteAudioReadiness: .wakeCapable,
+                        remoteWakeCapability: .wakeCapable(targetDeviceId: "peer-device")
+                    )
+                )
+            ),
+            relationship: .none
+        )
+
+        #expect(projection.durableSession == .connected)
+        #expect(projection.connectedControlPlane == .wakeReady)
+        #expect(projection.selectedPeerState.phase == .wakeReady)
+        #expect(projection.selectedPeerState.detail == .wakeReady)
+        #expect(projection.selectedPeerState.statusMessage == "Hold to talk to wake Blake")
+        #expect(projection.selectedPeerState.canTransmitNow == false)
+        #expect(projection.reconciliationAction == .none)
+    }
+
     @Test func selectedPeerStateWaitsWhenConnectedContinuityLosesBackendTransmitAuthority() {
         let contactID = UUID()
         let state = ConversationStateMachine.selectedPeerState(

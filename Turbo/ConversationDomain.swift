@@ -1278,7 +1278,15 @@ struct ConversationDerivationContext: Equatable {
         switch channel.membership {
         case .both(let peerDeviceConnected):
             return !peerDeviceConnected
-        case .peerOnly, .selfOnly, .absent:
+        case .peerOnly(let peerDeviceConnected):
+            guard !peerDeviceConnected else { return false }
+            guard localSessionReadiness != .none else { return false }
+            guard !explicitLeaveRequested else { return false }
+            return backendJoinSettling
+                || backendSignalingJoinRecoveryActive
+                || controlPlaneReconnectGraceActive
+                || hadConnectedSessionContinuity
+        case .selfOnly, .absent:
             return false
         }
     }
