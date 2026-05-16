@@ -10,6 +10,10 @@
 		272D3A9D6E6B4A5480FC6903 /* TalkRequestNotificationService.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = F40D3F48524F48FAAAC8BB9A /* TalkRequestNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A59D16E78629434BA1C16216 /* Turbo/BeepBeepLiveActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 259617F2522049AF8CBD4E81 /* Turbo/BeepBeepLiveActivityAttributes.swift */; };
 		AB060FAD779F4C608A998579 /* BeepBeepLiveActivityWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 9127B7BCA23A4A369169AF0F /* BeepBeepLiveActivityWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		B18D8204A1E84C398A56D001 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B18D8203A1E84C398A56D001 /* AppIntents.framework */; };
+		B18D8205A1E84C398A56D001 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B18D8203A1E84C398A56D001 /* AppIntents.framework */; };
+		B18D8207A1E84C398A56D001 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B18D8203A1E84C398A56D001 /* AppIntents.framework */; };
+		B18D8208A1E84C398A56D001 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B18D8203A1E84C398A56D001 /* AppIntents.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -64,6 +68,7 @@
 		5CC93AAF2F6DE60F00DA3003 /* TurboTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TurboTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5CC93AB92F6DE60F00DA3003 /* TurboUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TurboUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9127B7BCA23A4A369169AF0F /* BeepBeepLiveActivityWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BeepBeepLiveActivityWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B18D8203A1E84C398A56D001 /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
 		F40D3F48524F48FAAAC8BB9A /* TalkRequestNotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TalkRequestNotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -133,6 +138,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B18D8204A1E84C398A56D001 /* AppIntents.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -140,6 +146,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B18D8207A1E84C398A56D001 /* AppIntents.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -147,6 +154,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B18D8208A1E84C398A56D001 /* AppIntents.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -154,6 +162,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B18D8205A1E84C398A56D001 /* AppIntents.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -184,8 +193,17 @@
 				5CC93AB22F6DE60F00DA3003 /* TurboTests */,
 				5CC93ABC2F6DE60F00DA3003 /* TurboUITests */,
 				5CC93AA32F6DE60E00DA3003 /* Products */,
+				B18D8206A1E84C398A56D001 /* Frameworks */,
 				5C0C24482FB1FAF900974270 /* Recovered References */,
 			);
+			sourceTree = "<group>";
+		};
+		B18D8206A1E84C398A56D001 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				B18D8203A1E84C398A56D001 /* AppIntents.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		5CC93AA32F6DE60E00DA3003 /* Products */ = {

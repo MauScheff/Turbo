@@ -214,7 +214,7 @@ nonisolated enum TalkRequestSurfaceEvent: Equatable {
         allowsAlreadySurfacedInvite: Bool = false
     )
     case incomingRequestDismissed
-    case contactOpened(contactID: UUID, inviteID: String?)
+    case contactOpened(contactID: UUID, inviteID: String?, requestCount: Int? = nil)
     case pendingForegroundRequestQueued(surface: IncomingTalkRequestSurface, receivedAt: Date)
     case pendingForegroundRequestCleared(contactID: UUID?, inviteID: String?)
     case pendingForegroundRequestExpired(now: Date, lifetime: TimeInterval)
@@ -247,7 +247,11 @@ nonisolated enum TalkRequestSurfaceReducer {
             nextState.surfacedRequestKeys.formIntersection(activeRequestKeys)
 
             if let activeIncomingRequest = nextState.activeIncomingRequest,
-               !activeRequestKeys.contains(activeIncomingRequest.requestKey) {
+               let activeCandidate = canonicalCandidates.first(where: { $0.request.key == activeIncomingRequest.requestKey }),
+               !activeCandidate.surface.contactIsOnline {
+                nextState.activeIncomingRequest = nil
+            } else if let activeIncomingRequest = nextState.activeIncomingRequest,
+                      !activeRequestKeys.contains(activeIncomingRequest.requestKey) {
                 nextState.activeIncomingRequest = nil
             }
 
@@ -266,12 +270,13 @@ nonisolated enum TalkRequestSurfaceReducer {
             }
 
             let candidate = sortedCandidates.first { candidate in
-                    (allowsSelectedContact || candidate.surface.contactID != selectedContactID)
-                        && (
-                            allowsAlreadySurfacedInvite
-                                || !nextState.surfacedRequestKeys.contains(candidate.request.key)
-                        )
-                }
+                candidate.surface.contactIsOnline
+                    && (allowsSelectedContact || candidate.surface.contactID != selectedContactID)
+                    && (
+                        allowsAlreadySurfacedInvite
+                            || !nextState.surfacedRequestKeys.contains(candidate.request.key)
+                    )
+            }
 
             if let candidate {
                 nextState.activeIncomingRequest = candidate.surface
@@ -282,7 +287,7 @@ nonisolated enum TalkRequestSurfaceReducer {
         case .incomingRequestDismissed:
             nextState.activeIncomingRequest = nil
 
-        case .contactOpened(let contactID, let inviteID):
+        case .contactOpened(let contactID, let inviteID, let requestCount):
             if let activeIncomingRequest = nextState.activeIncomingRequest,
                activeIncomingRequest.contactID == contactID {
                 nextState.surfacedRequestKeys.insert(activeIncomingRequest.requestKey)
@@ -290,6 +295,11 @@ nonisolated enum TalkRequestSurfaceReducer {
             }
             if let inviteID {
                 nextState.surfacedInviteIDs.insert(inviteID)
+            }
+            if let requestCount {
+                nextState.surfacedRequestKeys.insert(
+                    TalkRequestKey(contactID: contactID, requestCount: requestCount)
+                )
             }
             if nextState.pendingForegroundRequest?.contactID == contactID,
                inviteID == nil || nextState.pendingForegroundRequest?.inviteID == inviteID {

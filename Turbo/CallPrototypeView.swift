@@ -698,6 +698,9 @@ struct TurboCallPrototypeView: View {
     }
 
     private var peerConnectionStatusText: String? {
+        if selectedPeerState.phase == .wakeReady {
+            return "\(contactShortName)’s connection · Background · Wakeable"
+        }
         let parts = [
             peerTelemetry?.connection?.displayName,
             transportPathLabel
@@ -707,6 +710,9 @@ struct TurboCallPrototypeView: View {
     }
 
     private var peerConnectionStatusAccessibilityLabel: String {
+        if selectedPeerState.phase == .wakeReady {
+            return "\(contact.name)'s connection, background, wakeable"
+        }
         let parts = [
             peerTelemetry?.connection?.displayName,
             transportPathAccessibilityLabel
@@ -952,7 +958,7 @@ struct TurboCallPrototypeView: View {
         case .startingTransmit:
             return readyStatusText
         case .wakeReady:
-            return readyStatusText
+            return selectedPeerState.statusMessage
         case .waitingForPeer(let reason):
             switch reason {
             case .disconnecting:
@@ -997,6 +1003,9 @@ struct TurboCallPrototypeView: View {
         }
         if selectedPeerState.statusMessage == "Connected" {
             return "Ready"
+        }
+        if selectedPeerState.phase == .wakeReady {
+            return selectedPeerState.statusMessage
         }
         if talkButtonIsEnabled {
             return "Ready"

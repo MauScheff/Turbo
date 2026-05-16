@@ -778,6 +778,7 @@ enum SelectedPeerDetail: Equatable {
 struct SelectedPeerState: Equatable {
     let contactID: UUID?
     let contactName: String?
+    let contactPresence: ContactPresencePresentation?
     let relationship: PairRelationshipState
     let detail: SelectedPeerDetail
     let statusMessage: String
@@ -786,6 +787,7 @@ struct SelectedPeerState: Equatable {
     init(
         contactID: UUID? = nil,
         contactName: String? = nil,
+        contactPresence: ContactPresencePresentation? = nil,
         relationship: PairRelationshipState,
         detail: SelectedPeerDetail,
         statusMessage: String,
@@ -793,6 +795,7 @@ struct SelectedPeerState: Equatable {
     ) {
         self.contactID = contactID
         self.contactName = contactName
+        self.contactPresence = contactPresence
         self.relationship = relationship
         self.detail = detail
         self.statusMessage = statusMessage
@@ -802,6 +805,7 @@ struct SelectedPeerState: Equatable {
     init(
         contactID: UUID? = nil,
         contactName: String? = nil,
+        contactPresence: ContactPresencePresentation? = nil,
         relationship: PairRelationshipState,
         phase: SelectedPeerPhase,
         statusMessage: String,
@@ -810,6 +814,7 @@ struct SelectedPeerState: Equatable {
         self.init(
             contactID: contactID,
             contactName: contactName,
+            contactPresence: contactPresence,
             relationship: relationship,
             detail: SelectedPeerState.defaultDetail(for: phase, relationship: relationship, statusMessage: statusMessage),
             statusMessage: statusMessage,
@@ -1263,12 +1268,19 @@ struct ConversationDerivationContext: Equatable {
 
     var backendShowsWakeCapablePeerRecovery: Bool {
         guard let channel else { return false }
-        guard !channel.membership.hasPeerMembership else { return false }
         guard !channel.canTransmit else { return false }
-        if case .wakeCapable = channel.remoteWakeCapability {
-            return true
+        guard case .wakeCapable = channel.remoteWakeCapability else { return false }
+        guard !peerSignalIsTransmitting else { return false }
+        if channel.readinessStatus?.isTransmitActive == true {
+            return false
         }
-        return false
+
+        switch channel.membership {
+        case .both(let peerDeviceConnected):
+            return !peerDeviceConnected
+        case .peerOnly, .selfOnly, .absent:
+            return false
+        }
     }
 
     var backendExplicitlyInactiveWithoutMembership: Bool {
@@ -1547,6 +1559,7 @@ enum ConversationStateMachine {
             SelectedPeerState(
                 contactID: context.contactID,
                 contactName: context.contactName,
+                contactPresence: context.contactPresence,
                 relationship: relationship,
                 detail: detail,
                 statusMessage: statusMessage,
@@ -1655,6 +1668,14 @@ enum ConversationStateMachine {
                 case .idle, .requested, .incomingRequest:
                     break
                 }
+            }
+
+            if localSessionActive, context.backendShowsWakeCapablePeerRecovery {
+                return makeState(
+                    .wakeReady,
+                    "Hold to talk to wake \(context.contactName)",
+                    false
+                )
             }
 
             if localSessionActive {
@@ -1972,7 +1993,7 @@ enum ConversationStateMachine {
         case .wakeReady:
             return ConversationPrimaryAction(
                 kind: .holdToTalk,
-                label: "Hold To Talk",
+                label: selectedPeerState.contactName.map { "Hold to wake \($0)" } ?? "Hold to wake",
                 isEnabled: selectedPeerState.allowsHoldToTalk,
                 style: .accent
             )
@@ -2066,6 +2087,15 @@ enum ConversationStateMachine {
                 style: .muted
             )
         case .idle, .incomingRequest, .startingTransmit, .transmitting, .receiving:
+            if selectedPeerState.phase == .incomingRequest,
+               selectedPeerState.contactPresence == .offline {
+                return ConversationPrimaryAction(
+                    kind: .connect,
+                    label: "Ask Back",
+                    isEnabled: requestCooldownRemaining == nil,
+                    style: requestCooldownRemaining == nil ? .accent : .muted
+                )
+            }
             return primaryAction(
                 conversationState: selectedPeerState.conversationState,
                 isSelectedChannelJoined: isSelectedChannelJoined,
@@ -2168,6 +2198,9 @@ enum ConversationStateMachine {
         case .absent:
             if localSessionActive,
                !context.backendJoinSettling,
+               !context.controlPlaneReconnectGraceActive,
+               !context.wakeRecoveryInFlight,
+               !context.backendShowsWakeCapablePeerRecovery,
                !context.systemMismatchChannelMatchesContact,
                !context.unattributedJoinedSystemMismatch,
                !context.channelHasRequestRelationship,
@@ -2187,6 +2220,9 @@ enum ConversationStateMachine {
             if localSessionActive,
                context.channel != nil,
                !context.backendJoinSettling,
+               !context.controlPlaneReconnectGraceActive,
+               !context.wakeRecoveryInFlight,
+               !context.backendShowsWakeCapablePeerRecovery,
                !context.systemMismatchChannelMatchesContact,
                !context.unattributedJoinedSystemMismatch,
                !context.channelHasRequestRelationship,
@@ -2324,6 +2360,9 @@ private extension ConversationDerivationContext {
         }
 
         if backendExplicitlyInactiveWithoutMembership,
+           !controlPlaneReconnectGraceActive,
+           !wakeRecoveryInFlight,
+           !backendShowsWakeCapablePeerRecovery,
            localSessionReadiness != .none {
             return .disconnecting
         }
@@ -2379,8 +2418,18 @@ private extension ConversationDerivationContext {
     }
 
     var connectedControlPlaneProjection: ConnectedControlPlaneProjection {
-        guard durableSessionProjection == .connected,
-              case .both(let peerDeviceConnected, let canTransmit, let readinessStatus) = backendChannelReadiness,
+        guard durableSessionProjection == .connected else {
+            return .unavailable
+        }
+
+        if backendShowsWakeCapablePeerRecovery {
+            guard directMediaPathActive || localRelayTransportReady else {
+                return .waiting(reason: .localTransportWarmup, statusMessage: "Connecting...")
+            }
+            return .wakeReady
+        }
+
+        guard case .both(let peerDeviceConnected, let canTransmit, let readinessStatus) = backendChannelReadiness,
               let readinessStatus else {
             return .unavailable
         }
@@ -2555,7 +2604,14 @@ private extension ConversationDerivationContext {
                 return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
             }
             guard !remoteTransmitStopObserved else {
-                return .ready
+                if canTransmit {
+                    return .ready
+                }
+                if remoteAudioReadinessState == .wakeCapable,
+                   case .wakeCapable = remoteWakeCapabilityState {
+                    return .wakeReady
+                }
+                return .waiting(reason: .backendSessionTransition, statusMessage: "Connecting...")
             }
             return .receiving
         case .selfTransmitting:
@@ -2730,7 +2786,8 @@ private extension ConversationDerivationContext {
               !peerSignalIsTransmitting,
               !remotePlaybackDrainBlocksTransmit,
               directMediaPathActive || localRelayTransportReady,
-              case .both(_, _, let readinessStatus) = backendChannelReadiness,
+              case .both(_, let canTransmit, let readinessStatus) = backendChannelReadiness,
+              canTransmit,
               let readinessStatus else {
             return false
         }

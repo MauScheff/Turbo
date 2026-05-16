@@ -25,6 +25,9 @@ extension PTTViewModel {
         for contactID: UUID,
         fallback: String? = nil
     ) -> String? {
+        if let evidence = recentPeerDeviceEvidence(for: contactID) {
+            return evidence.deviceId
+        }
         if let readiness = channelReadinessByContactID[contactID] {
             if let peerTargetDeviceId = readiness.peerTargetDeviceId,
                !peerTargetDeviceId.isEmpty {
@@ -35,16 +38,16 @@ extension PTTViewModel {
                 return targetDeviceId
             }
         }
-        if let evidence = recentPeerDeviceEvidenceByContactID[contactID] {
-            let channelID =
-                contacts.first(where: { $0.id == contactID })?.backendChannelId
-                ?? channelStateByContactID[contactID]?.channelId
-                ?? contactSummaryByContactID[contactID]?.channelId
-            if evidence.isFresh(for: channelID) {
-                return evidence.deviceId
-            }
-        }
         return fallback
+    }
+
+    func recentPeerDeviceEvidence(for contactID: UUID) -> RecentPeerDeviceEvidence? {
+        guard let evidence = recentPeerDeviceEvidenceByContactID[contactID] else { return nil }
+        let channelID =
+            contacts.first(where: { $0.id == contactID })?.backendChannelId
+            ?? channelStateByContactID[contactID]?.channelId
+            ?? contactSummaryByContactID[contactID]?.channelId
+        return evidence.isFresh(for: channelID) ? evidence : nil
     }
 
     func applyChannelReadiness(
@@ -110,23 +113,40 @@ extension PTTViewModel {
         }()
         guard let peerDeviceID else { return }
 
+        recordRecentPeerDeviceEvidence(
+            contactID: contactID,
+            channelID: readiness.channelId,
+            peerDeviceID: peerDeviceID,
+            reason: reason,
+            diagnosticSubsystem: .backend
+        )
+    }
+
+    func recordRecentPeerDeviceEvidence(
+        contactID: UUID,
+        channelID: String,
+        peerDeviceID: String,
+        reason: String,
+        diagnosticSubsystem: DiagnosticsSubsystem
+    ) {
+        guard !peerDeviceID.isEmpty else { return }
         let existing = recentPeerDeviceEvidenceByContactID[contactID]
         recentPeerDeviceEvidenceByContactID[contactID] = RecentPeerDeviceEvidence(
             deviceId: peerDeviceID,
-            channelId: readiness.channelId,
+            channelId: channelID,
             reason: reason,
             observedAt: Date()
         )
 
-        guard existing?.deviceId != peerDeviceID || existing?.channelId != readiness.channelId else {
+        guard existing?.deviceId != peerDeviceID || existing?.channelId != channelID else {
             return
         }
         diagnostics.record(
-            .backend,
-            message: "Recorded recent peer device evidence from channel readiness",
+            diagnosticSubsystem,
+            message: "Recorded recent peer device evidence",
             metadata: [
                 "contactId": contactID.uuidString,
-                "channelId": readiness.channelId,
+                "channelId": channelID,
                 "peerDeviceId": peerDeviceID,
                 "reason": reason,
             ]
@@ -645,6 +665,13 @@ extension PTTViewModel {
         guard normalizedSignaled == backendFingerprint else {
             return "backend-peer-fingerprint-mismatch"
         }
+        recordRecentPeerDeviceEvidence(
+            contactID: contactID,
+            channelID: envelope.channelId,
+            peerDeviceID: envelope.fromDeviceId,
+            reason: "direct-quic-\(envelope.type.rawValue)",
+            diagnosticSubsystem: .websocket
+        )
         guard envelope.fromDeviceId == directQuicPeerDeviceID(for: contactID, fallback: envelope.fromDeviceId) else {
             return "peer-device-id-mismatch"
         }

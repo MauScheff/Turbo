@@ -80,11 +80,20 @@ extension PTTViewModel {
         )
     }
 
-    func markTalkRequestSurfaceOpened(for contactID: UUID, inviteID: String?) {
+    func markTalkRequestSurfaceOpened(
+        for contactID: UUID,
+        inviteID: String?,
+        requestCount: Int? = nil
+    ) {
         clearPendingForegroundTalkRequestSurface(contactID: contactID, inviteID: inviteID)
+        let resolvedRequestCount = requestCount ?? relationshipState(for: contactID).requestCount
         talkRequestSurfaceState = TalkRequestSurfaceReducer.reduce(
             state: talkRequestSurfaceState,
-            event: .contactOpened(contactID: contactID, inviteID: inviteID)
+            event: .contactOpened(
+                contactID: contactID,
+                inviteID: inviteID,
+                requestCount: resolvedRequestCount
+            )
         )
     }
 

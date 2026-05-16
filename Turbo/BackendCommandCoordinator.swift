@@ -25,6 +25,7 @@ struct BackendJoinRequest: Equatable {
     let outgoingInvite: TurboInviteResponse?
     let requestCooldownRemaining: Int?
     let usesLocalHTTPBackend: Bool
+    let contactIsOnline: Bool
 
     init(
         contactID: UUID,
@@ -38,7 +39,8 @@ struct BackendJoinRequest: Equatable {
         incomingInvite: TurboInviteResponse?,
         outgoingInvite: TurboInviteResponse?,
         requestCooldownRemaining: Int?,
-        usesLocalHTTPBackend: Bool
+        usesLocalHTTPBackend: Bool,
+        contactIsOnline: Bool = true
     ) {
         self.contactID = contactID
         self.handle = handle
@@ -52,6 +54,7 @@ struct BackendJoinRequest: Equatable {
         self.outgoingInvite = outgoingInvite
         self.requestCooldownRemaining = requestCooldownRemaining
         self.usesLocalHTTPBackend = usesLocalHTTPBackend
+        self.contactIsOnline = contactIsOnline
     }
 
     static func == (lhs: BackendJoinRequest, rhs: BackendJoinRequest) -> Bool {
@@ -65,6 +68,7 @@ struct BackendJoinRequest: Equatable {
             && lhs.outgoingInvite == rhs.outgoingInvite
             && lhs.requestCooldownRemaining == rhs.requestCooldownRemaining
             && lhs.usesLocalHTTPBackend == rhs.usesLocalHTTPBackend
+            && lhs.contactIsOnline == rhs.contactIsOnline
     }
 }
 

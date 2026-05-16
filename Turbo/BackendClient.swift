@@ -7,6 +7,11 @@ struct TurboBackendCriticalHTTPClient: Sendable {
     let transportConfig: TurboBackendHTTPTransportConfig
     let session: URLSession
 
+#if DEBUG
+    nonisolated(unsafe) static var beginTransmitOverride:
+        (@Sendable (String) async throws -> TurboBeginTransmitResponse)?
+#endif
+
     init(config: TurboBackendConfig) {
         baseURL = config.baseURL
         devUserHandle = config.devUserHandle
@@ -16,11 +21,17 @@ struct TurboBackendCriticalHTTPClient: Sendable {
     }
 
     func beginTransmit(channelId: String) async throws -> TurboBeginTransmitResponse {
-        try await request(
+#if DEBUG
+        if let beginTransmitOverride = Self.beginTransmitOverride {
+            return try await beginTransmitOverride(channelId)
+        }
+#endif
+        let response: TurboBeginTransmitResponse = try await request(
             path: "/v1/channels/\(channelId)/begin-transmit",
             method: "POST",
             body: TurboChannelDeviceRequest(deviceId: deviceID)
         )
+        return response
     }
 
     private func request<Response: Decodable, Body: Encodable>(

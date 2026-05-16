@@ -994,22 +994,32 @@ enum TurboDirectPathDebugOverride {
     static let transmitStartupPolicyLaunchArgument = "-TurboDebugDirectQuicTransmitStartupPolicy"
     static let transmitStartupPolicyEnvironmentKey = "TURBO_DEBUG_DIRECT_QUIC_TRANSMIT_STARTUP_POLICY"
     private static let transmitStartupPolicyStorageVersion = 3
+    static var allowsStoredDebugOverridesByDefault: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }
 
     static func isRelayOnlyForced(
         processInfo: ProcessInfo = .processInfo,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        allowStoredDebugOverride: Bool = allowsStoredDebugOverridesByDefault
     ) -> Bool {
         isRelayOnlyForced(
             arguments: processInfo.arguments,
             environment: processInfo.environment,
-            defaults: defaults
+            defaults: defaults,
+            allowStoredDebugOverride: allowStoredDebugOverride
         )
     }
 
     static func isRelayOnlyForced(
         arguments: [String],
         environment: [String: String],
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        allowStoredDebugOverride: Bool = allowsStoredDebugOverridesByDefault
     ) -> Bool {
         if let launchArgumentValue = launchArgumentValue(arguments),
            let parsed = parseBoolean(launchArgumentValue) {
@@ -1022,6 +1032,7 @@ enum TurboDirectPathDebugOverride {
            let parsed = parseBoolean(environmentValue) {
             return parsed
         }
+        guard allowStoredDebugOverride else { return false }
         return defaults.bool(forKey: storageKey)
     }
 
@@ -1031,19 +1042,22 @@ enum TurboDirectPathDebugOverride {
 
     static func isAutoUpgradeDisabled(
         processInfo: ProcessInfo = .processInfo,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        allowStoredDebugOverride: Bool = allowsStoredDebugOverridesByDefault
     ) -> Bool {
         isAutoUpgradeDisabled(
             arguments: processInfo.arguments,
             environment: processInfo.environment,
-            defaults: defaults
+            defaults: defaults,
+            allowStoredDebugOverride: allowStoredDebugOverride
         )
     }
 
     static func isAutoUpgradeDisabled(
         arguments: [String],
         environment: [String: String],
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        allowStoredDebugOverride: Bool = allowsStoredDebugOverridesByDefault
     ) -> Bool {
         if let launchArgumentValue = launchArgumentValue(autoUpgradeDisabledLaunchArgument, in: arguments),
            let parsed = parseBoolean(launchArgumentValue) {
@@ -1056,6 +1070,7 @@ enum TurboDirectPathDebugOverride {
            let parsed = parseBoolean(environmentValue) {
             return parsed
         }
+        guard allowStoredDebugOverride else { return false }
         return defaults.bool(forKey: autoUpgradeDisabledStorageKey)
     }
 
@@ -1153,17 +1168,26 @@ enum TurboMediaRelayDebugOverride {
     static let tcpPortEnvironmentKey = "TURBO_MEDIA_RELAY_TCP_PORT"
     static let tokenStorageKey = "TurboDebugMediaRelayToken"
     static let tokenEnvironmentKey = "TURBO_MEDIA_RELAY_TOKEN"
+    static var allowsStoredDebugOverridesByDefault: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }
 
     static func isEnabled(
         processInfo: ProcessInfo = .processInfo,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        allowStoredDebugOverride: Bool = allowsStoredDebugOverridesByDefault
     ) -> Bool {
         if let override = explicitBooleanValue(
             storageKey: enabledStorageKey,
             launchArgument: enabledLaunchArgument,
             environmentKey: enabledEnvironmentKey,
             processInfo: processInfo,
-            defaults: defaults
+            defaults: defaults,
+            allowStoredDebugOverride: allowStoredDebugOverride
         ) {
             return override
         }
@@ -1172,14 +1196,16 @@ enum TurboMediaRelayDebugOverride {
 
     static func isExplicitlyEnabled(
         processInfo: ProcessInfo = .processInfo,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        allowStoredDebugOverride: Bool = allowsStoredDebugOverridesByDefault
     ) -> Bool {
         booleanValue(
             storageKey: enabledStorageKey,
             launchArgument: enabledLaunchArgument,
             environmentKey: enabledEnvironmentKey,
             processInfo: processInfo,
-            defaults: defaults
+            defaults: defaults,
+            allowStoredDebugOverride: allowStoredDebugOverride
         )
     }
 
@@ -1189,14 +1215,16 @@ enum TurboMediaRelayDebugOverride {
 
     static func isForced(
         processInfo: ProcessInfo = .processInfo,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        allowStoredDebugOverride: Bool = allowsStoredDebugOverridesByDefault
     ) -> Bool {
         booleanValue(
             storageKey: forceStorageKey,
             launchArgument: forceLaunchArgument,
             environmentKey: forceEnvironmentKey,
             processInfo: processInfo,
-            defaults: defaults
+            defaults: defaults,
+            allowStoredDebugOverride: allowStoredDebugOverride
         )
     }
 
@@ -1259,14 +1287,16 @@ enum TurboMediaRelayDebugOverride {
         launchArgument: String,
         environmentKey: String,
         processInfo: ProcessInfo,
-        defaults: UserDefaults
+        defaults: UserDefaults,
+        allowStoredDebugOverride: Bool
     ) -> Bool {
         explicitBooleanValue(
             storageKey: storageKey,
             launchArgument: launchArgument,
             environmentKey: environmentKey,
             processInfo: processInfo,
-            defaults: defaults
+            defaults: defaults,
+            allowStoredDebugOverride: allowStoredDebugOverride
         ) ?? false
     }
 
@@ -1275,7 +1305,8 @@ enum TurboMediaRelayDebugOverride {
         launchArgument: String,
         environmentKey: String,
         processInfo: ProcessInfo,
-        defaults: UserDefaults
+        defaults: UserDefaults,
+        allowStoredDebugOverride: Bool
     ) -> Bool? {
         let arguments = processInfo.arguments
         if let launchArgumentValue = launchArgumentValue(launchArgument, in: arguments),
@@ -1289,6 +1320,7 @@ enum TurboMediaRelayDebugOverride {
            let parsed = parseBoolean(environmentValue) {
             return parsed
         }
+        guard allowStoredDebugOverride else { return nil }
         guard defaults.object(forKey: storageKey) != nil else { return nil }
         return defaults.bool(forKey: storageKey)
     }

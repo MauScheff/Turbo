@@ -294,7 +294,7 @@ Foreground + Direct QUIC active + startup policy allows it
   +-- on release: [WS] transmit-stop payload "ptt-end"
   +-- on failure/path lost: fall back to relay path
 ```
-
+ly1
 ## Image Model Prompt
 
 Use this prompt to generate a polished visual diagram from the architecture above.

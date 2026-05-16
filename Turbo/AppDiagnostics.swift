@@ -703,6 +703,9 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
            isJoined == true,
            hadConnectedSessionContinuity == true,
            systemSessionValue.hasPrefix("active("),
+           !controlPlaneReconnectGraceActive,
+           remoteWakeCapabilityKindValue != "wake-capable",
+           incomingWakeActivationState == nil,
            backendReadinessValue == "inactive",
            backendSelfJoined == false,
            backendPeerJoined == false {
@@ -728,6 +731,12 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
         let disconnectingTeardownInFlight =
             phaseDetail.contains("disconnecting")
             || pendingAction.contains("reconciledTeardown(")
+        let wakeRecoveryEvidencePresent =
+            remoteWakeCapabilityKindValue == "wake-capable"
+            || incomingWakeActivationState != nil
+        let reconnectOrWakeRecoveryInFlight =
+            controlPlaneReconnectGraceActive
+            || wakeRecoveryEvidencePresent
 
         if phase == "waitingForPeer",
            isJoined == true,
@@ -735,6 +744,7 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
            systemSessionValue.hasPrefix("active("),
            !reconciliationAction.hasPrefix("teardownSelectedSession("),
            !disconnectingTeardownInFlight,
+           !reconnectOrWakeRecoveryInFlight,
            backendSelfJoined == false,
            backendPeerJoined == false {
             violations.append(
@@ -766,6 +776,7 @@ struct LocalSessionDiagnosticsProjection: Codable, Equatable {
            localSessionEvidenceStillLive,
            !reconciliationAction.hasPrefix("teardownSelectedSession("),
            !disconnectingTeardownInFlight,
+           !reconnectOrWakeRecoveryInFlight,
            backendChannelStatusValue == "idle",
            backendSelfJoined == false,
            backendPeerJoined == false {

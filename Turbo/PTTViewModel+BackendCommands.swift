@@ -126,7 +126,7 @@ extension PTTViewModel {
         currentChannel: ChannelReadinessSnapshot?
     ) -> BackendJoinExecutionPlan {
         if request.relationship.isIncomingRequest {
-            return .joinSession
+            return request.contactIsOnline ? .joinSession : .requestOnly
         }
         if createdInvite?.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "connected" {
             return .joinSession
@@ -296,7 +296,8 @@ extension PTTViewModel {
             incomingInvite: incomingInvite,
             outgoingInvite: outgoingInviteByContactID[contact.id],
             requestCooldownRemaining: requestCooldownRemaining(for: contact.id),
-            usesLocalHTTPBackend: usesLocalHTTPBackend
+            usesLocalHTTPBackend: usesLocalHTTPBackend,
+            contactIsOnline: contact.isOnline
         )
         if intent == .requestConnection,
            !relationship.isIncomingRequest,
@@ -347,7 +348,8 @@ extension PTTViewModel {
             incomingInvite: incomingInviteByContactID[contact.id],
             outgoingInvite: outgoingInviteByContactID[contact.id],
             requestCooldownRemaining: requestCooldownRemaining(for: contact.id),
-            usesLocalHTTPBackend: usesLocalHTTPBackend
+            usesLocalHTTPBackend: usesLocalHTTPBackend,
+            contactIsOnline: contact.isOnline
         )
         if case .join(let activeRequest) = backendCommandCoordinator.state.activeOperation,
            activeRequest.contactID == contact.id {
@@ -1039,18 +1041,26 @@ extension PTTViewModel {
             }
         }
 
-        if let invite = try await acceptIncomingInviteForJoinRequest(request, backend: backend) {
+        let shouldAcceptIncomingInvite = request.relationship.isIncomingRequest && request.contactIsOnline
+        if shouldAcceptIncomingInvite,
+           let invite = try await acceptIncomingInviteForJoinRequest(request, backend: backend) {
             applyInviteMetadata(invite, to: &contact)
-        } else if request.relationship.isIncomingRequest {
+        } else if request.relationship.isIncomingRequest && request.contactIsOnline {
             diagnostics.record(
                 .backend,
                 message: "Proceeding without incoming invite metadata",
                 metadata: ["contactId": request.contactID.uuidString, "handle": request.handle]
             )
+        } else if request.relationship.isIncomingRequest {
+            diagnostics.record(
+                .backend,
+                message: "Treating offline incoming request as ask-back",
+                metadata: ["contactId": request.contactID.uuidString, "handle": request.handle]
+            )
         }
 
         if !shouldCreateOutgoingInviteWithoutMetadataPrefetch,
-           contact.backendChannelId == nil || request.relationship.isIncomingRequest {
+           contact.backendChannelId == nil || shouldAcceptIncomingInvite {
             let identityQuery = backendPeerIdentityQuery(
                 handle: request.handle,
                 remoteUserId: contact.remoteUserId ?? request.existingRemoteUserID
@@ -1070,8 +1080,8 @@ extension PTTViewModel {
            shouldResolveOutgoingInviteBeforeJoin(for: request, contact: contact),
            let invite = try await resolveOutgoingInvite(for: request, backend: backend) {
             applyInviteMetadata(invite, to: &contact)
-        } else if !request.relationship.isIncomingRequest,
-                  request.intent == .requestConnection,
+        } else if request.intent == .requestConnection,
+                  (!request.relationship.isIncomingRequest || !request.contactIsOnline),
                   request.requestCooldownRemaining == nil {
             let identityQuery = backendPeerIdentityQuery(
                 handle: request.handle,
@@ -1209,7 +1219,8 @@ extension PTTViewModel {
             incomingInvite: incomingInviteByContactID[refreshedContact.id],
             outgoingInvite: outgoingInviteByContactID[refreshedContact.id],
             requestCooldownRemaining: requestCooldownRemaining(for: refreshedContact.id),
-            usesLocalHTTPBackend: request.usesLocalHTTPBackend
+            usesLocalHTTPBackend: request.usesLocalHTTPBackend,
+            contactIsOnline: refreshedContact.isOnline
         )
     }
 

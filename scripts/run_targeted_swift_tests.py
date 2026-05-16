@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -52,13 +53,18 @@ def parse_runtime_version(runtime: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split(".") if part.isdigit())
 
 
+def native_simulator_arch() -> str:
+    return "arm64" if platform.machine() == "arm64" else "x86_64"
+
+
 def resolve_simulator_destination(destination: str) -> tuple[str, str | None]:
     fields = parse_destination(destination)
     if fields.get("platform") != "iOS Simulator":
         return destination, None
 
+    arch = fields.get("arch", native_simulator_arch())
     if "id" in fields:
-        return f"platform=iOS Simulator,id={fields['id']}", fields["id"]
+        return f"platform=iOS Simulator,id={fields['id']},arch={arch}", fields["id"]
 
     name = fields.get("name")
     if not name:
@@ -96,7 +102,7 @@ def resolve_simulator_destination(destination: str) -> tuple[str, str | None]:
         key=lambda candidate: (-candidate[0][0],) + tuple(-part for part in candidate[0][1:]) + (candidate[1],),
     )[0]
     version_text = ".".join(str(part) for part in runtime_version)
-    return f"platform=iOS Simulator,id={udid},OS={version_text}", udid
+    return f"platform=iOS Simulator,id={udid},OS={version_text},arch={arch}", udid
 
 
 def run_simctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:

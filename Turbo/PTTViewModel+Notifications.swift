@@ -367,6 +367,13 @@ extension PTTViewModel {
                 )
             } == true
         await refreshRequestStateAfterTalkRequestNotification(userInfo: userInfo, reason: reason)
+        if let openedContact = contactMatchingNormalizedHandle(handle) ?? immediateContact {
+            markTalkRequestSurfaceOpened(
+                for: openedContact.id,
+                inviteID: userInfo["inviteId"] as? String,
+                requestCount: relationshipState(for: openedContact.id).requestCount
+            )
+        }
         if joinedFromCachedIncomingRequest {
             return
         }

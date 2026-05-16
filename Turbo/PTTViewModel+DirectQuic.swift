@@ -629,7 +629,7 @@ extension PTTViewModel {
             } catch {
                 diagnostics.record(
                     .media,
-                    level: .error,
+                    level: directQuicPrewarmFailureDiagnosticsLevel(),
                     message: "Direct QUIC receiver prewarm ack failed",
                     metadata: [
                         "contactId": contactID.uuidString,
@@ -640,6 +640,20 @@ extension PTTViewModel {
                     ]
                 )
             }
+        }
+    }
+
+    func directQuicPrewarmFailureDiagnosticsLevel(
+        explicitDirectQuicTestMode: Bool = false
+    ) -> DiagnosticsLevel {
+        if explicitDirectQuicTestMode {
+            return .error
+        }
+        switch mediaTransportPathState {
+        case .relay, .fastRelay:
+            return .notice
+        case .promoting, .direct, .recovering:
+            return .error
         }
     }
 
@@ -1447,6 +1461,26 @@ extension PTTViewModel {
                 )
                 return
             }
+
+            if let contact = contacts.first(where: { $0.id == contactID }),
+               let remoteUserID = contact.remoteUserId,
+               remoteUserID != envelope.fromUserId {
+                metadata["expectedRemoteUserId"] = remoteUserID
+                diagnostics.record(
+                    .websocket,
+                    level: .error,
+                    message: "Rejected Direct QUIC upgrade request from unexpected peer user",
+                    metadata: metadata
+                )
+                return
+            }
+            recordRecentPeerDeviceEvidence(
+                contactID: contactID,
+                channelID: envelope.channelId,
+                peerDeviceID: envelope.fromDeviceId,
+                reason: "direct-quic-upgrade-request:\(payload.reason)",
+                diagnosticSubsystem: .websocket
+            )
 
             let peerDeviceID = directQuicPeerDeviceID(for: contactID, fallback: envelope.fromDeviceId)
             guard peerDeviceID == envelope.fromDeviceId else {

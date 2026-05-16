@@ -20,6 +20,15 @@ struct ShakeReportPresentation: Equatable {
     var state: State
 }
 
+struct ShakeReportSensitivityPolicy: Equatable {
+    var minimumShakeDuration: TimeInterval = 0.55
+
+    func acceptsShake(startedAt: Date?, endedAt: Date) -> Bool {
+        guard let startedAt else { return false }
+        return endedAt.timeIntervalSince(startedAt) >= minimumShakeDuration
+    }
+}
+
 struct TurboShakeReportSheet: View {
     let presentation: ShakeReportPresentation
     let onDone: () -> Void
@@ -177,6 +186,9 @@ struct ShakeReportDetector: UIViewRepresentable {
 
 final class ShakeReportDetectorView: UIView {
     var onShake: (() -> Void)?
+    var sensitivityPolicy = ShakeReportSensitivityPolicy()
+
+    private var shakeStartedAt: Date?
 
     override var canBecomeFirstResponder: Bool {
         true
@@ -190,8 +202,22 @@ final class ShakeReportDetectorView: UIView {
         }
     }
 
+    override func motionBegan(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        guard motion == .motionShake else { return }
+        shakeStartedAt = Date()
+    }
+
+    override func motionCancelled(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        guard motion == .motionShake else { return }
+        shakeStartedAt = nil
+    }
+
     override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
         guard motion == .motionShake else { return }
+        defer { shakeStartedAt = nil }
+        guard sensitivityPolicy.acceptsShake(startedAt: shakeStartedAt, endedAt: Date()) else {
+            return
+        }
         onShake?()
     }
 }

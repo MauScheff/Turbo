@@ -800,11 +800,13 @@ extension PTTViewModel {
         let relationship = relationshipState(for: contact.id)
         let connectOrigin: PendingConnectOrigin =
             relationship.isIncomingRequest ? .acceptingIncomingRequest : .neutral
+        let incomingRequestIsLiveConnectable =
+            !relationship.isIncomingRequest || contact.isOnline
         let readyPeerJoinIsAuthoritative =
             intent == .joinReadyPeer && canQueueReadyPeerLocalConnect(for: contact.id)
         let shouldQueueLocalConnect =
             backendServices == nil
-            || relationship.isIncomingRequest
+            || (relationship.isIncomingRequest && incomingRequestIsLiveConnectable)
             || readyPeerJoinIsAuthoritative
 
         if backendServices != nil,

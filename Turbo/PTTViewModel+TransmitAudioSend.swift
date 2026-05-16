@@ -312,6 +312,7 @@ extension PTTViewModel {
                     if deliveredTransports.isEmpty {
                         throw error
                     }
+                    let deliveredTransportNames = deliveredTransports.joined(separator: ",")
                     await MainActor.run {
                         self.diagnostics.record(
                             .media,
@@ -321,13 +322,15 @@ extension PTTViewModel {
                                 "contactId": target.contactID.uuidString,
                                 "channelId": target.channelID,
                                 "error": error.localizedDescription,
-                                "deliveredTransports": deliveredTransports.joined(separator: ","),
+                                "deliveredTransports": deliveredTransportNames,
                             ]
                         )
                     }
                 }
 
                 if deliveredTransports.count > 1 {
+                    let deliveredTransportNames = deliveredTransports.joined(separator: ",")
+                    let deliveryFailureCount = deliveryFailures.count
                     await MainActor.run {
                         self.diagnostics.record(
                             .media,
@@ -335,8 +338,8 @@ extension PTTViewModel {
                             metadata: [
                                 "contactId": target.contactID.uuidString,
                                 "channelId": target.channelID,
-                                "transports": deliveredTransports.joined(separator: ","),
-                                "failureCount": String(deliveryFailures.count),
+                                "transports": deliveredTransportNames,
+                                "failureCount": String(deliveryFailureCount),
                             ]
                         )
                     }
@@ -375,12 +378,6 @@ extension PTTViewModel {
             && !transmitRuntime.isPressingTalk
             && transmitCoordinator.state.activeTarget != target
             && transmitRuntime.activeTarget != target
-        if isIdlePrewarm {
-            clearMediaRelayAudioSendSuppressionIfPresent(
-                target: target,
-                reason: "idle-prewarm"
-            )
-        }
         let shouldAttempt =
             !isDirectPathRelayOnlyForced
             && (TurboMediaRelayDebugOverride.isEnabled()
@@ -400,7 +397,10 @@ extension PTTViewModel {
         )
         Task { [weak self] in
             guard let self else { return }
-            _ = await self.mediaRelayClientForAudioSend(target: target)
+            _ = await self.mediaRelayClientForAudioSend(
+                target: target,
+                bypassAudioSendSuppression: isIdlePrewarm
+            )
         }
     }
 
@@ -420,11 +420,14 @@ extension PTTViewModel {
         return "relay-websocket"
     }
 
-    func mediaRelayClientForAudioSend(target: TransmitTarget) async -> TurboMediaRelayClient? {
+    func mediaRelayClientForAudioSend(
+        target: TransmitTarget,
+        bypassAudioSendSuppression: Bool = false
+    ) async -> TurboMediaRelayClient? {
         let localDeviceID = await MainActor.run {
             backendServices?.deviceID ?? backendConfig?.deviceID ?? ""
         }
-        if !localDeviceID.isEmpty {
+        if !localDeviceID.isEmpty, !bypassAudioSendSuppression {
             let key = MediaRelayConnectionKey(
                 sessionID: target.channelID,
                 localDeviceID: localDeviceID,
@@ -663,7 +666,26 @@ extension PTTViewModel {
         do {
             let transport = try await client.connect()
             let accepted = await MainActor.run {
-                mediaRuntime.finishMediaRelayConnectionAttempt(attempt, client: client)
+                let key = MediaRelayConnectionKey(
+                    sessionID: channelID,
+                    localDeviceID: localDeviceID,
+                    peerDeviceID: peerDeviceID
+                )
+                let hadSuppression = mediaRuntime.isMediaRelayAudioSendSuppressed(for: key)
+                let accepted = mediaRuntime.finishMediaRelayConnectionAttempt(attempt, client: client)
+                if accepted && hadSuppression {
+                    diagnostics.record(
+                        .media,
+                        message: "Cleared media relay send suppression",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "channelId": channelID,
+                            "peerDeviceId": peerDeviceID,
+                            "reason": "fresh-prewarm-succeeded",
+                        ]
+                    )
+                }
+                return accepted
             }
             guard accepted else { return nil }
             await MainActor.run {
@@ -780,8 +802,22 @@ extension PTTViewModel {
                 && (TurboMediaRelayDebugOverride.isEnabled() || TurboMediaRelayDebugOverride.isForced())
         }
         guard shouldAttempt else { return }
-        guard let channelReadiness,
-              let peerDeviceID = channelReadiness.peerTargetDeviceId,
+        guard let channelReadiness else {
+            await MainActor.run {
+                diagnostics.record(
+                    .media,
+                    message: "Media relay ready-channel prejoin skipped because peer target device is missing",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": "none",
+                    ]
+                )
+            }
+            return
+        }
+        let peerDeviceID = channelReadiness.peerTargetDeviceId
+            ?? recentPeerDeviceEvidence(for: contactID)?.deviceId
+        guard let peerDeviceID,
               !peerDeviceID.isEmpty else {
             await MainActor.run {
                 diagnostics.record(
@@ -789,7 +825,7 @@ extension PTTViewModel {
                     message: "Media relay ready-channel prejoin skipped because peer target device is missing",
                     metadata: [
                         "contactId": contactID.uuidString,
-                        "channelId": channelReadiness?.channelId ?? "none",
+                        "channelId": channelReadiness.channelId,
                     ]
                 )
             }

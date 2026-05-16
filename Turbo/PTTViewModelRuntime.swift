@@ -1153,6 +1153,7 @@ final class MediaRuntimeState {
         }
         mediaRelayClient = client
         mediaRelayConnectionKey = attempt.key
+        suppressedMediaRelayAudioSendKeys.remove(attempt.key)
         attempt.finish(client)
         return true
     }
