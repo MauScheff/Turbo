@@ -1106,7 +1106,7 @@ enum TurboDirectPathDebugOverride {
             return parsed
         }
         guard allowStoredDebugOverride else {
-            return .speculativeForeground
+            return .appleGated
         }
         if let stored = defaults.string(forKey: transmitStartupPolicyStorageKey),
            let parsed = DirectQuicTransmitStartupPolicy(rawValue: stored) {
@@ -1124,7 +1124,7 @@ enum TurboDirectPathDebugOverride {
             }
             return parsed
         }
-        return .speculativeForeground
+        return .appleGated
     }
 
     static func setTransmitStartupPolicy(

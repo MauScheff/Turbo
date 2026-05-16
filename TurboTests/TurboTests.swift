@@ -1639,7 +1639,7 @@ struct TurboTests {
                 environment: [:],
                 defaults: defaults,
                 allowStoredDebugOverride: false
-            ) == .speculativeForeground
+            ) == .appleGated
         )
         #expect(
             TurboDirectPathDebugOverride.transmitStartupPolicy(
@@ -1754,7 +1754,7 @@ struct TurboTests {
                 arguments: [],
                 environment: [:],
                 defaults: defaults
-            ) == .speculativeForeground
+            ) == .appleGated
         )
 
         defaults.set(
