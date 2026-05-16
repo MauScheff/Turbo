@@ -30642,6 +30642,52 @@ struct TurboTests {
         #expect(duplicate.ignoredReason == .duplicateEvent(mediaRelayEnvelope.eventID!))
     }
 
+    @Test func controlEventIngestorDeduplicatesAudioPlaybackAckAcrossLanes() {
+        let contactID = UUID()
+        let timestamp = Date(timeIntervalSince1970: 1_000)
+        let payload = TurboAudioPlaybackStartedPayload(
+            ackId: "ack-1",
+            channelId: "channel-1",
+            senderDeviceId: "sender-device",
+            receiverDeviceId: "receiver-device",
+            transport: "direct-quic",
+            transportDigest: "digest-1",
+            encryptedSequenceNumber: nil,
+            acceptedAtMilliseconds: 1_000
+        )
+        let mediaRelayEnvelope = ControlEventEnvelope.audioPlaybackStarted(
+            payload,
+            contactID: contactID,
+            source: .mediaRelay,
+            localDeviceID: "sender-device",
+            remoteDeviceID: "receiver-device",
+            timestamp: timestamp
+        )
+        let directQuicEnvelope = ControlEventEnvelope.audioPlaybackStarted(
+            payload,
+            contactID: contactID,
+            source: .directQuicDataChannel,
+            localDeviceID: "sender-device",
+            remoteDeviceID: "receiver-device",
+            attemptID: "attempt-1",
+            timestamp: timestamp
+        )
+
+        let first = ControlEventIngestorReducer.reduce(
+            state: .initial,
+            event: .ingest(mediaRelayEnvelope)
+        )
+        let duplicate = ControlEventIngestorReducer.reduce(
+            state: first.state,
+            event: .ingest(directQuicEnvelope)
+        )
+
+        #expect(mediaRelayEnvelope.eventID == directQuicEnvelope.eventID)
+        #expect(first.effects == [.dispatch(mediaRelayEnvelope)])
+        #expect(duplicate.effects.isEmpty)
+        #expect(duplicate.ignoredReason == .duplicateEvent(mediaRelayEnvelope.eventID!))
+    }
+
     @Test func controlEventIngestorRejectsStaleDirectQuicAttempt() {
         let contactID = UUID()
         let payload = DirectQuicPathClosingPayload(

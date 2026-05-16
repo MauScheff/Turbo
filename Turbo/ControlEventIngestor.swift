@@ -27,6 +27,7 @@ enum ControlEventPayload: Equatable {
     case directQuicReceiverPrewarmAck(DirectQuicReceiverPrewarmPayload)
     case directQuicPathClosing(DirectQuicPathClosingPayload)
     case directQuicWarmPong(String?)
+    case audioPlaybackStarted(TurboAudioPlaybackStartedPayload)
 
     var kind: String {
         switch self {
@@ -57,6 +58,8 @@ enum ControlEventPayload: Equatable {
             return "direct-quic:path-closing"
         case .directQuicWarmPong:
             return "direct-quic:warm-pong"
+        case .audioPlaybackStarted:
+            return "peer-hint:audio-playback-started"
         }
     }
 
@@ -68,7 +71,10 @@ enum ControlEventPayload: Equatable {
              .directQuicPathClosing,
              .directQuicWarmPong:
             return true
-        case .backendWebSocketSignal, .backendCommand, .selectedDirectQuicPrewarmRequested:
+        case .backendWebSocketSignal,
+             .backendCommand,
+             .selectedDirectQuicPrewarmRequested,
+             .audioPlaybackStarted:
             return false
         }
     }
@@ -328,6 +334,37 @@ struct ControlEventEnvelope: Equatable {
         )
     }
 
+    static func audioPlaybackStarted(
+        _ payload: TurboAudioPlaybackStartedPayload,
+        contactID: UUID,
+        source: ControlEventSource,
+        localDeviceID: String?,
+        remoteDeviceID: String?,
+        attemptID: String? = nil,
+        timestamp: Date = Date()
+    ) -> ControlEventEnvelope {
+        ControlEventEnvelope(
+            source: source,
+            authority: .peerHint,
+            channelID: payload.channelId,
+            contactID: contactID,
+            localDeviceID: localDeviceID,
+            remoteDeviceID: remoteDeviceID ?? payload.receiverDeviceId,
+            sessionEpochID: nil,
+            attemptID: attemptID,
+            operationID: payload.ackId,
+            eventID: audioPlaybackStartedEventID(
+                contactID: contactID,
+                channelID: payload.channelId,
+                senderDeviceID: payload.senderDeviceId,
+                receiverDeviceID: payload.receiverDeviceId,
+                ackID: payload.ackId
+            ),
+            timestamp: timestamp,
+            payload: .audioPlaybackStarted(payload)
+        )
+    }
+
     private static func authority(for signalKind: TurboSignalKind) -> ControlEventAuthority {
         switch signalKind {
         case .receiverReady, .receiverNotReady, .transmitStart, .transmitStop, .audioPlaybackStarted:
@@ -356,7 +393,17 @@ struct ControlEventEnvelope: Equatable {
                 remoteDeviceID: payload.fromDeviceId,
                 requestID: payload.requestId
             )
-        case .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest, .transmitStart, .transmitStop, .audioChunk, .audioPlaybackStarted, .receiverReady, .receiverNotReady, .callContext:
+        case .audioPlaybackStarted:
+            guard let payload = try? envelope.decodeAudioPlaybackStartedPayload(),
+                  let contactID else { return nil }
+            return audioPlaybackStartedEventID(
+                contactID: contactID,
+                channelID: payload.channelId,
+                senderDeviceID: payload.senderDeviceId,
+                receiverDeviceID: payload.receiverDeviceId,
+                ackID: payload.ackId
+            )
+        case .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest, .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .callContext:
             return nil
         }
     }
@@ -379,6 +426,16 @@ struct ControlEventEnvelope: Equatable {
     ) -> String {
         let contactKey = contactID?.uuidString ?? "unknown-contact"
         return "peer-hint:selected-peer-prewarm:\(contactKey):\(channelID):\(remoteDeviceID):\(requestID)"
+    }
+
+    private static func audioPlaybackStartedEventID(
+        contactID: UUID,
+        channelID: String,
+        senderDeviceID: String,
+        receiverDeviceID: String,
+        ackID: String
+    ) -> String {
+        "peer-hint:audio-playback-started:\(contactID.uuidString):\(channelID):\(senderDeviceID):\(receiverDeviceID):\(ackID)"
     }
 }
 

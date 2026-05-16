@@ -127,6 +127,25 @@ extension PTTViewModel {
         )
     }
 
+    func ingestAudioPlaybackStartedAck(
+        _ payload: TurboAudioPlaybackStartedPayload,
+        contactID: UUID,
+        source: ControlEventSource,
+        remoteDeviceID: String?,
+        attemptID: String? = nil
+    ) async {
+        await ingestControlEvent(
+            .audioPlaybackStarted(
+                payload,
+                contactID: contactID,
+                source: source,
+                localDeviceID: backendServices?.deviceID,
+                remoteDeviceID: remoteDeviceID,
+                attemptID: attemptID
+            )
+        )
+    }
+
     func ingestControlEvent(_ envelope: ControlEventEnvelope) async {
         refreshControlEventAttemptContext(for: envelope.contactID)
         await controlEventIngestor.handle(.ingest(envelope))
@@ -151,7 +170,8 @@ extension PTTViewModel {
             case .directQuicReceiverPrewarmRequest,
                  .directQuicReceiverPrewarmAck,
                  .directQuicPathClosing,
-                 .directQuicWarmPong:
+                 .directQuicWarmPong,
+                 .audioPlaybackStarted:
                 recordIgnoredControlEvent(envelope, reason: .missingContact)
             }
             return
@@ -204,6 +224,12 @@ extension PTTViewModel {
                 pingID,
                 contactID: contactID,
                 attemptID: attemptID
+            )
+        case .audioPlaybackStarted(let payload):
+            handleAudioPlaybackStartedAck(
+                payload,
+                contactID: contactID,
+                source: envelope.source
             )
         }
     }

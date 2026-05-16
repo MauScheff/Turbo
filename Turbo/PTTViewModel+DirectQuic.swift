@@ -184,10 +184,12 @@ extension PTTViewModel {
                 onAudioPlaybackStarted: { [weak self] payload in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        self.handleAudioPlaybackStartedAck(
+                        await self.ingestAudioPlaybackStartedAck(
                             payload,
                             contactID: contactID,
-                            source: .directQuicDataChannel
+                            source: .directQuicDataChannel,
+                            remoteDeviceID: payload.receiverDeviceId,
+                            attemptID: attemptID
                         )
                     }
                 },

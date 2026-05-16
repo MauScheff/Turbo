@@ -1158,12 +1158,13 @@ extension PTTViewModel {
                             "ackId": ackPayload.ackId,
                         ]
                     )
-                    handleAudioPlaybackStartedAck(
-                        ackPayload,
-                        contactID: contactID,
-                        source: .mediaRelay
-                    )
                 }
+                await ingestAudioPlaybackStartedAck(
+                    ackPayload,
+                    contactID: contactID,
+                    source: .mediaRelay,
+                    remoteDeviceID: ackPayload.receiverDeviceId
+                )
             }
         } catch {
             await MainActor.run {
