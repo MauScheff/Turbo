@@ -3069,6 +3069,36 @@ extension PTTViewModel {
         )
     }
 
+    func continueSpeculativeForegroundDirectQuicTransmitAfterSystemBeganIfNeeded(
+        channelUUID: UUID,
+        source: String
+    ) async {
+        guard directQuicTransmitStartupPolicy == .speculativeForeground else { return }
+        guard let target = activeTransmitTarget(for: channelUUID) else { return }
+        guard shouldUseForegroundDirectQuicControlPath(for: target.contactID) else { return }
+        guard hasActiveTransmitPressIntent() else { return }
+        guard transmitStartupTiming.elapsedMilliseconds(for: "startup-completed") == nil else { return }
+
+        diagnostics.record(
+            .media,
+            message: "Continuing foreground Direct QUIC transmit activation after system transmit began",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "channelUUID": channelUUID.uuidString,
+                "source": source,
+                "startupPolicy": directQuicTransmitStartupPolicy.rawValue,
+                "isPTTAudioSessionActive": String(isPTTAudioSessionActive),
+                "earlyCaptureCompleted": String(
+                    transmitStartupTiming.elapsedMilliseconds(
+                        for: "early-audio-capture-start-completed"
+                    ) != nil
+                ),
+            ]
+        )
+        await completeSystemTransmitActivation(channelUUID: channelUUID)
+    }
+
     func activeTransmitTarget(for systemChannelUUID: UUID) -> TransmitTarget? {
         transmitProjection.activeTarget(
             for: systemChannelUUID,

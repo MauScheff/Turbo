@@ -1000,6 +1000,10 @@ extension PTTViewModel {
                 channelUUID: channelUUID,
                 source: source
             )
+            await continueSpeculativeForegroundDirectQuicTransmitAfterSystemBeganIfNeeded(
+                channelUUID: channelUUID,
+                source: source
+            )
             captureDiagnosticsState("ptt-callback:transmit-began")
         }
     }

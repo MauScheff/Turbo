@@ -17487,7 +17487,7 @@ struct TurboTests {
         }
 
         viewModel.beginTransmit()
-        try await Task.sleep(nanoseconds: 200_000_000)
+        try await Task.sleep(nanoseconds: 400_000_000)
 
         #expect(pttClient.beginTransmitRequests == [channelUUID])
         #expect(viewModel.foregroundDirectTransmitDelegationsByContactID[contactID] != nil)
@@ -17520,6 +17520,113 @@ struct TurboTests {
         )
         #expect(viewModel.localTransmitProjection(for: contactID) == .transmitting)
         #expect(viewModel.selectedPeerState(for: contactID).statusMessage == "Talking to Blake")
+    }
+
+    @MainActor
+    @Test func speculativeDirectQuicSystemBeginStartsCaptureWhenPrewarmWasNotConnected() async throws {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let pttClient = RecordingPTTSystemClient()
+        let viewModel = PTTViewModel(pttSystemClient: pttClient)
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let mediaSession = RecordingMediaSession()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applicationStateOverride = .active
+        viewModel.foregroundAppManagedInteractiveAudioPrewarmEnabled = false
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "self-user", mode: "cloud")
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.syncPTTState()
+        viewModel.backendSyncCoordinator.send(
+            .channelStateUpdated(
+                contactID: contactID,
+                channelState: makeChannelState(status: .ready, canTransmit: true)
+            )
+        )
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        viewModel.mediaRuntime.connectionState = .idle
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-123",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        if let direct = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        ) {
+            viewModel.applyDirectQuicUpgradeTransition(direct, for: contactID)
+        }
+        viewModel.mediaRuntime.connectionState = .idle
+
+        viewModel.beginTransmit()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(pttClient.beginTransmitRequests == [channelUUID])
+        #expect(viewModel.foregroundDirectTransmitDelegationsByContactID[contactID] != nil)
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "early-audio-capture-start-completed"
+            ) == nil
+        )
+        #expect(mediaSession.startSendingAudioCallCount == 0)
+
+        viewModel.handleDidBeginTransmitting(channelUUID, source: "test")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(mediaSession.startSendingAudioCallCount == 1)
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "audio-capture-start-completed"
+            ) != nil
+        )
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Continuing foreground Direct QUIC transmit activation after system transmit began"
+            )
+        )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "startup-completed"
+            ) != nil
+        )
     }
 
     @MainActor
