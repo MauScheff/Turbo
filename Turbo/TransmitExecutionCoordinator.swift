@@ -86,6 +86,43 @@ enum InitialOutboundAudioSendGateState: Equatable {
     }
 }
 
+enum TransmitAudioCaptureStartIntent: Equatable {
+    case initial
+    case systemActivationRefresh
+}
+
+enum TransmitAudioCaptureStartState: Equatable {
+    case idle
+    case starting(channelUUID: UUID)
+    case started(channelUUID: UUID)
+    case refreshing(channelUUID: UUID)
+    case refreshed(channelUUID: UUID)
+
+    var channelUUID: UUID? {
+        switch self {
+        case .idle:
+            return nil
+        case .starting(let channelUUID),
+             .started(let channelUUID),
+             .refreshing(let channelUUID),
+             .refreshed(let channelUUID):
+            return channelUUID
+        }
+    }
+}
+
+enum TransmitAudioCaptureStartDecision: Equatable {
+    case begin
+    case waitForInFlight
+    case alreadyCompleted
+}
+
+enum TransmitAudioCaptureStartReservation: Equatable {
+    case reserved
+    case alreadyCompleted
+    case cancelled
+}
+
 struct TransmitExecutionSessionState: Equatable {
     var latchedTarget: TransmitTarget?
     var pressState: TransmitPressState = .idle
@@ -93,6 +130,7 @@ struct TransmitExecutionSessionState: Equatable {
     var systemTransmitState: SystemTransmitExecutionState = .idle
     var systemTransmitActivationState: SystemTransmitActivationExecutionState = .idle
     var initialOutboundAudioSendGateState: InitialOutboundAudioSendGateState = .idle
+    var audioCaptureStartState: TransmitAudioCaptureStartState = .idle
 
     static let initial = TransmitExecutionSessionState()
 

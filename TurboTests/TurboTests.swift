@@ -16554,6 +16554,117 @@ struct TurboTests {
     }
 
     @MainActor
+    @Test func systemAudioActivationWaitsForInFlightDirectQuicPrewarmBeforeRefreshingCapture() async throws {
+        let previousPolicy = UserDefaults.standard.string(
+            forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.speculativeForeground)
+        defer {
+            if let previousPolicy {
+                UserDefaults.standard.set(
+                    previousPolicy,
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            } else {
+                UserDefaults.standard.removeObject(
+                    forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey
+                )
+            }
+        }
+
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let channelUUID = UUID()
+        let mediaSession = RecordingMediaSession()
+        let request = TransmitRequestContext(
+            contactID: contactID,
+            contactHandle: "@blake",
+            backendChannelID: "channel-123",
+            remoteUserID: "peer-user",
+            channelUUID: channelUUID,
+            usesLocalHTTPBackend: false,
+            backendSupportsWebSocket: true
+        )
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+
+        viewModel.applicationStateOverride = .active
+        viewModel.applyAuthenticatedBackendSession(client: client, userID: "self-user", mode: "cloud")
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: channelUUID,
+                backendChannelId: "channel-123",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        viewModel.mediaRuntime.connectionState = .connected
+        viewModel.mediaRuntime.directQuicProbeController = DirectQuicProbeController()
+        _ = viewModel.mediaRuntime.directQuicUpgrade.beginLocalAttempt(
+            contactID: contactID,
+            channelID: "channel-123",
+            attemptID: "attempt-1",
+            peerDeviceID: "peer-device"
+        )
+        if let direct = viewModel.mediaRuntime.directQuicUpgrade.markDirectPathActivated(
+            for: contactID,
+            attemptID: "attempt-1",
+            nominatedPath: makeDirectQuicNominatedPath()
+        ) {
+            viewModel.applyDirectQuicUpgradeTransition(direct, for: contactID)
+        }
+        viewModel.transmitCoordinator.effectHandler = nil
+        viewModel.startTransmitStartupTiming(for: request, source: "test")
+        viewModel.pttCoordinator.send(
+            .didJoinChannel(channelUUID: channelUUID, contactID: contactID, reason: "test")
+        )
+        viewModel.transmitCoordinator.effectHandler = nil
+        await viewModel.transmitCoordinator.handle(.pressRequested(request))
+        viewModel.transmitRuntime.markPressBegan()
+        mediaSession.startSendingAudioDelayNanoseconds = 100_000_000
+
+        let prewarmTask = Task { @MainActor in
+            await viewModel.startPrewarmedDirectSystemTransmitBridgeIfPossible(
+                request: request,
+                trigger: "test-pre-backend"
+            )
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        viewModel.isPTTAudioSessionActive = true
+
+        await viewModel.startPendingSystemTransmitAudioCaptureIfPossible(
+            channelUUID: channelUUID,
+            trigger: "audio-session-activated"
+        )
+        let didStartBridge = await prewarmTask.value
+
+        #expect(didStartBridge)
+        #expect(mediaSession.startSendingAudioCallCount == 2)
+        #expect(
+            viewModel.diagnosticsTranscript.contains(
+                "Waiting for in-flight transmit audio capture start"
+            )
+        )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "early-audio-capture-start-completed"
+            ) != nil
+        )
+        #expect(
+            viewModel.transmitStartupTiming.elapsedMilliseconds(
+                for: "audio-capture-refreshed-after-system-activation"
+            ) != nil
+        )
+    }
+
+    @MainActor
     @Test func systemAudioActivationRefreshAbortPreventsCaptureStartAfterRelease() async {
         let previousPolicy = UserDefaults.standard.string(
             forKey: TurboDirectPathDebugOverride.transmitStartupPolicyStorageKey

@@ -409,12 +409,17 @@ struct TransmitRuntimeState {
         executionState.initialOutboundAudioSendGateState.shouldAwaitInitialRemoteReady
     }
 
+    var audioCaptureStartState: TransmitAudioCaptureStartState {
+        executionState.audioCaptureStartState
+    }
+
     mutating func syncActiveTarget(_ activeTarget: TransmitTarget?) {
         reduce(.syncActiveTarget(activeTarget))
     }
 
     mutating func markPressBegan() {
         reduce(.markPressBegan)
+        executionState.audioCaptureStartState = .idle
     }
 
     mutating func markPressEnded() {
@@ -431,6 +436,7 @@ struct TransmitRuntimeState {
 
     mutating func noteSystemTransmitEnded() {
         reduce(.noteSystemTransmitEnded)
+        executionState.audioCaptureStartState = .idle
     }
 
     mutating func noteSystemTransmitBeginRequested(channelUUID: UUID) {
@@ -476,6 +482,7 @@ struct TransmitRuntimeState {
 
     mutating func reconcileIdleState() {
         reduce(.reconcileIdleState)
+        executionState.audioCaptureStartState = .idle
     }
 
     mutating func markExplicitStopRequested() {
@@ -491,6 +498,7 @@ struct TransmitRuntimeState {
 
     mutating func reset() {
         reduce(.reset)
+        executionState.audioCaptureStartState = .idle
     }
 
     mutating func handleSystemTransmitEnded(
@@ -506,7 +514,85 @@ struct TransmitRuntimeState {
         guard case .handledSystemTransmitEnded(let disposition)? = effects.last else {
             return .none
         }
+        executionState.audioCaptureStartState = .idle
         return disposition
+    }
+
+    mutating func beginAudioCaptureStartIfNeeded(
+        channelUUID: UUID,
+        intent: TransmitAudioCaptureStartIntent
+    ) -> TransmitAudioCaptureStartDecision {
+        switch (executionState.audioCaptureStartState, intent) {
+        case (.idle, .initial):
+            executionState.audioCaptureStartState = .starting(channelUUID: channelUUID)
+            return .begin
+        case (.idle, .systemActivationRefresh):
+            executionState.audioCaptureStartState = .refreshing(channelUUID: channelUUID)
+            return .begin
+        case (.starting(let existing), _) where existing == channelUUID:
+            return .waitForInFlight
+        case (.refreshing(let existing), _) where existing == channelUUID:
+            return .waitForInFlight
+        case (.started(let existing), .initial) where existing == channelUUID:
+            return .alreadyCompleted
+        case (.started(let existing), .systemActivationRefresh) where existing == channelUUID:
+            executionState.audioCaptureStartState = .refreshing(channelUUID: channelUUID)
+            return .begin
+        case (.refreshed(let existing), _) where existing == channelUUID:
+            return .alreadyCompleted
+        case (.started, .initial):
+            executionState.audioCaptureStartState = .starting(channelUUID: channelUUID)
+            return .begin
+        case (.started, .systemActivationRefresh):
+            executionState.audioCaptureStartState = .refreshing(channelUUID: channelUUID)
+            return .begin
+        case (.starting, .initial):
+            executionState.audioCaptureStartState = .starting(channelUUID: channelUUID)
+            return .begin
+        case (.starting, .systemActivationRefresh):
+            executionState.audioCaptureStartState = .refreshing(channelUUID: channelUUID)
+            return .begin
+        case (.refreshing, .initial):
+            executionState.audioCaptureStartState = .starting(channelUUID: channelUUID)
+            return .begin
+        case (.refreshing, .systemActivationRefresh):
+            executionState.audioCaptureStartState = .refreshing(channelUUID: channelUUID)
+            return .begin
+        case (.refreshed, .initial):
+            executionState.audioCaptureStartState = .starting(channelUUID: channelUUID)
+            return .begin
+        case (.refreshed, .systemActivationRefresh):
+            executionState.audioCaptureStartState = .refreshing(channelUUID: channelUUID)
+            return .begin
+        }
+    }
+
+    mutating func noteAudioCaptureStartCompleted(
+        channelUUID: UUID,
+        intent: TransmitAudioCaptureStartIntent
+    ) {
+        switch (executionState.audioCaptureStartState, intent) {
+        case (.starting(let existing), .initial) where existing == channelUUID:
+            executionState.audioCaptureStartState = .started(channelUUID: channelUUID)
+        case (.refreshing(let existing), .systemActivationRefresh) where existing == channelUUID:
+            executionState.audioCaptureStartState = .refreshed(channelUUID: channelUUID)
+        default:
+            break
+        }
+    }
+
+    mutating func clearAudioCaptureStartIfInFlight(
+        channelUUID: UUID,
+        intent: TransmitAudioCaptureStartIntent
+    ) {
+        switch (executionState.audioCaptureStartState, intent) {
+        case (.starting(let existing), .initial) where existing == channelUUID:
+            executionState.audioCaptureStartState = .idle
+        case (.refreshing(let existing), .systemActivationRefresh) where existing == channelUUID:
+            executionState.audioCaptureStartState = .started(channelUUID: channelUUID)
+        default:
+            break
+        }
     }
 
     @discardableResult

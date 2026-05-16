@@ -2590,9 +2590,6 @@ extension PTTViewModel {
         guard shouldBridgePrewarmedMediaRelayDuringSystemTransmit(for: request.contactID) else {
             return false
         }
-        guard transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-requested") == nil else {
-            return false
-        }
         guard let target = activeTransmitTarget(for: channelUUID) else {
             return false
         }
@@ -2601,6 +2598,26 @@ extension PTTViewModel {
             target: target,
             stage: "fast-relay-bridge-start"
         ) else {
+            return false
+        }
+        let reservation = await reserveTransmitAudioCaptureStart(
+            channelUUID: channelUUID,
+            contactID: request.contactID,
+            channelID: request.backendChannelID,
+            intent: .initial,
+            trigger: "fast-relay-\(trigger)",
+            shouldContinue: {
+                shouldContinueSystemTransmitActivation(
+                    channelUUID: channelUUID,
+                    target: target,
+                    stage: "fast-relay-bridge-reservation"
+                )
+            }
+        )
+        switch reservation {
+        case .reserved:
+            break
+        case .alreadyCompleted, .cancelled:
             return false
         }
 
@@ -2627,9 +2644,11 @@ extension PTTViewModel {
                 stage: "fast-relay-bridge-start-completed",
                 recordCompletedSideEffectInvariant: false
             ) else {
+                clearTransmitAudioCaptureStartIfInFlight(channelUUID: channelUUID, intent: .initial)
                 await mediaServices.session()?.abortSendingAudio()
                 return false
             }
+            noteTransmitAudioCaptureStartCompleted(channelUUID: channelUUID, intent: .initial)
             recordFirstTransmitStartupTimingStageIfAbsent(
                 "early-audio-capture-start-completed",
                 metadata: ["trigger": "fast-relay-\(trigger)"]
@@ -2648,6 +2667,7 @@ extension PTTViewModel {
                     "error": error.localizedDescription,
                 ]
             )
+            clearTransmitAudioCaptureStartIfInFlight(channelUUID: channelUUID, intent: .initial)
             return false
         }
     }
@@ -2913,12 +2933,9 @@ extension PTTViewModel {
         trigger: String
     ) async -> Bool {
         guard !request.usesLocalHTTPBackend else { return false }
-        guard request.channelUUID != nil else { return false }
+        guard let channelUUID = request.channelUUID else { return false }
         guard hasActiveTransmitPressIntent() else { return false }
         guard shouldBridgePrewarmedDirectMediaDuringSystemTransmit(for: request.contactID) else {
-            return false
-        }
-        guard transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-requested") == nil else {
             return false
         }
         guard directQuicTransmitStartupPolicy != .appleGated
@@ -2929,6 +2946,26 @@ extension PTTViewModel {
                 trigger: trigger,
                 reason: "waiting-for-apple-audio-session"
             )
+            return false
+        }
+        let reservation = await reserveTransmitAudioCaptureStart(
+            channelUUID: channelUUID,
+            contactID: request.contactID,
+            channelID: request.backendChannelID,
+            intent: .initial,
+            trigger: trigger,
+            shouldContinue: {
+                shouldContinuePrewarmedDirectSystemTransmitBridge(
+                    request: request,
+                    target: target,
+                    stage: "capture-reservation"
+                )
+            }
+        )
+        switch reservation {
+        case .reserved:
+            break
+        case .alreadyCompleted, .cancelled:
             return false
         }
 
@@ -2957,9 +2994,11 @@ extension PTTViewModel {
                 stage: "early-audio-capture-start-completed",
                 recordCompletedSideEffectInvariant: false
             ) else {
+                clearTransmitAudioCaptureStartIfInFlight(channelUUID: channelUUID, intent: .initial)
                 await mediaServices.session()?.abortSendingAudio()
                 return false
             }
+            noteTransmitAudioCaptureStartCompleted(channelUUID: channelUUID, intent: .initial)
             recordFirstTransmitStartupTimingStageIfAbsent(
                 "early-audio-capture-start-completed",
                 metadata: ["trigger": trigger, "bridge": "prewarmed-direct"]
@@ -2977,6 +3016,7 @@ extension PTTViewModel {
                     "error": error.localizedDescription,
                 ]
             )
+            clearTransmitAudioCaptureStartIfInFlight(channelUUID: channelUUID, intent: .initial)
             return false
         }
     }
@@ -3256,16 +3296,232 @@ extension PTTViewModel {
         return false
     }
 
-    func shouldRefreshPrewarmedAudioCaptureAfterSystemActivation(for contactID: UUID) -> Bool {
-        guard transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") != nil else {
+    func hasPreActivationTransmitAudioCaptureEvidence(channelUUID: UUID) -> Bool {
+        switch transmitRuntime.audioCaptureStartState {
+        case .starting(let existingChannelUUID),
+             .started(let existingChannelUUID):
+            if existingChannelUUID == channelUUID {
+                return true
+            }
+        case .idle, .refreshing, .refreshed:
+            break
+        }
+        return transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-requested") != nil
+            || transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") != nil
+    }
+
+    func reserveTransmitAudioCaptureStart(
+        channelUUID: UUID,
+        contactID: UUID,
+        channelID: String,
+        intent: TransmitAudioCaptureStartIntent,
+        trigger: String,
+        shouldContinue: () -> Bool
+    ) async -> TransmitAudioCaptureStartReservation {
+        var loggedWait = false
+        while true {
+            switch transmitRuntime.beginAudioCaptureStartIfNeeded(
+                channelUUID: channelUUID,
+                intent: intent
+            ) {
+            case .begin:
+                return .reserved
+            case .alreadyCompleted:
+                return .alreadyCompleted
+            case .waitForInFlight:
+                guard shouldContinue() else { return .cancelled }
+                if !loggedWait {
+                    loggedWait = true
+                    diagnostics.record(
+                        .media,
+                        message: "Waiting for in-flight transmit audio capture start",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "channelId": channelID,
+                            "channelUUID": channelUUID.uuidString,
+                            "intent": String(describing: intent),
+                            "trigger": trigger,
+                        ]
+                    )
+                }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+    }
+
+    func noteTransmitAudioCaptureStartCompleted(
+        channelUUID: UUID,
+        intent: TransmitAudioCaptureStartIntent
+    ) {
+        transmitRuntime.noteAudioCaptureStartCompleted(
+            channelUUID: channelUUID,
+            intent: intent
+        )
+    }
+
+    func clearTransmitAudioCaptureStartIfInFlight(
+        channelUUID: UUID,
+        intent: TransmitAudioCaptureStartIntent
+    ) {
+        transmitRuntime.clearAudioCaptureStartIfInFlight(
+            channelUUID: channelUUID,
+            intent: intent
+        )
+    }
+
+    func startOrRefreshTransmitAudioCaptureForSystemActivation(
+        channelUUID: UUID,
+        target: TransmitTarget,
+        trigger: String,
+        refreshMessage: String,
+        duplicateMessage: String,
+        metadata extraMetadata: [String: String] = [:]
+    ) async throws -> Bool {
+        let shouldRefreshAfterSystemActivation =
+            isPTTAudioSessionActive
+            && hasPreActivationTransmitAudioCaptureEvidence(channelUUID: channelUUID)
+        let intent: TransmitAudioCaptureStartIntent = shouldRefreshAfterSystemActivation
+            ? .systemActivationRefresh
+            : .initial
+        let reservation = await reserveTransmitAudioCaptureStart(
+            channelUUID: channelUUID,
+            contactID: target.contactID,
+            channelID: target.channelID,
+            intent: intent,
+            trigger: trigger,
+            shouldContinue: {
+                shouldContinueSystemTransmitActivation(
+                    channelUUID: channelUUID,
+                    target: target,
+                    stage: "audio-capture-reservation"
+                )
+            }
+        )
+        switch reservation {
+        case .reserved:
+            break
+        case .cancelled:
+            return false
+        case .alreadyCompleted:
+            var metadata = extraMetadata
+            metadata["contactId"] = target.contactID.uuidString
+            metadata["channelId"] = target.channelID
+            metadata["channelUUID"] = channelUUID.uuidString
+            diagnostics.record(
+                .media,
+                message: duplicateMessage,
+                metadata: metadata
+            )
+            recordTransmitStartupTiming(
+                stage: "audio-capture-already-started",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID,
+                metadata: extraMetadata
+            )
+            return true
+        }
+
+        if intent == .systemActivationRefresh {
+            guard shouldContinueSystemTransmitActivation(
+                channelUUID: channelUUID,
+                target: target,
+                stage: "audio-capture-refresh-after-system-activation-requested"
+            ) else {
+                clearTransmitAudioCaptureStartIfInFlight(
+                    channelUUID: channelUUID,
+                    intent: .systemActivationRefresh
+                )
+                return false
+            }
+            var metadata = extraMetadata
+            metadata["contactId"] = target.contactID.uuidString
+            metadata["channelId"] = target.channelID
+            metadata["channelUUID"] = channelUUID.uuidString
+            metadata["trigger"] = trigger
+            diagnostics.record(.media, message: refreshMessage, metadata: metadata)
+            recordTransmitStartupTiming(
+                stage: "audio-capture-refresh-after-system-activation-requested",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID,
+                metadata: extraMetadata
+            )
+            do {
+                try await mediaServices.session()?.startSendingAudio()
+            } catch {
+                clearTransmitAudioCaptureStartIfInFlight(
+                    channelUUID: channelUUID,
+                    intent: .systemActivationRefresh
+                )
+                throw error
+            }
+            guard shouldContinueSystemTransmitActivation(
+                channelUUID: channelUUID,
+                target: target,
+                stage: "audio-capture-refresh-after-system-activation-start-returned",
+                recordCompletedSideEffectInvariant: false
+            ) else {
+                clearTransmitAudioCaptureStartIfInFlight(
+                    channelUUID: channelUUID,
+                    intent: .systemActivationRefresh
+                )
+                await mediaServices.session()?.abortSendingAudio()
+                return false
+            }
+            noteTransmitAudioCaptureStartCompleted(
+                channelUUID: channelUUID,
+                intent: .systemActivationRefresh
+            )
+            recordTransmitStartupTiming(
+                stage: "audio-capture-refreshed-after-system-activation",
+                contactID: target.contactID,
+                channelUUID: channelUUID,
+                channelID: target.channelID,
+                metadata: extraMetadata
+            )
+            return true
+        }
+
+        guard shouldContinueSystemTransmitActivation(
+            channelUUID: channelUUID,
+            target: target,
+            stage: "audio-capture-start-requested"
+        ) else {
+            clearTransmitAudioCaptureStartIfInFlight(channelUUID: channelUUID, intent: .initial)
             return false
         }
-        guard isPTTAudioSessionActive else { return false }
-        guard transmitStartupTiming.elapsedMilliseconds(
-            for: "audio-capture-refreshed-after-system-activation"
-        ) == nil else {
+        recordTransmitStartupTiming(
+            stage: "audio-capture-start-requested",
+            contactID: target.contactID,
+            channelUUID: channelUUID,
+            channelID: target.channelID,
+            metadata: extraMetadata
+        )
+        do {
+            try await mediaServices.session()?.startSendingAudio()
+        } catch {
+            clearTransmitAudioCaptureStartIfInFlight(channelUUID: channelUUID, intent: .initial)
+            throw error
+        }
+        guard shouldContinueSystemTransmitActivation(
+            channelUUID: channelUUID,
+            target: target,
+            stage: "audio-capture-start-completed",
+            recordCompletedSideEffectInvariant: false
+        ) else {
+            clearTransmitAudioCaptureStartIfInFlight(channelUUID: channelUUID, intent: .initial)
+            await mediaServices.session()?.abortSendingAudio()
             return false
         }
+        noteTransmitAudioCaptureStartCompleted(channelUUID: channelUUID, intent: .initial)
+        recordTransmitStartupTiming(
+            stage: "audio-capture-start-completed",
+            contactID: target.contactID,
+            channelUUID: channelUUID,
+            channelID: target.channelID,
+            metadata: extraMetadata
+        )
         return true
     }
 
@@ -3429,94 +3685,14 @@ extension PTTViewModel {
                 channelID: target.channelID
             )
             configureOutgoingAudioRoute(target: target)
-            if transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") != nil {
-                if shouldRefreshPrewarmedAudioCaptureAfterSystemActivation(for: target.contactID) {
-                    guard shouldContinueSystemTransmitActivation(
-                        channelUUID: channelUUID,
-                        target: target,
-                        stage: "audio-capture-refresh-after-system-activation-requested"
-                    ) else {
-                        return
-                    }
-                    diagnostics.record(
-                        .media,
-                        message: "Refreshing prewarmed audio capture after system audio activation",
-                        metadata: [
-                            "contactId": target.contactID.uuidString,
-                            "channelId": target.channelID,
-                            "channelUUID": channelUUID.uuidString,
-                            "trigger": "system-activation",
-                        ]
-                    )
-                    recordTransmitStartupTiming(
-                        stage: "audio-capture-refresh-after-system-activation-requested",
-                        contactID: target.contactID,
-                        channelUUID: channelUUID,
-                        channelID: target.channelID
-                    )
-                    try await mediaServices.session()?.startSendingAudio()
-                    guard shouldContinueSystemTransmitActivation(
-                        channelUUID: channelUUID,
-                        target: target,
-                        stage: "audio-capture-refresh-after-system-activation-start-returned",
-                        recordCompletedSideEffectInvariant: false
-                    ) else {
-                        await mediaServices.session()?.abortSendingAudio()
-                        return
-                    }
-                    recordTransmitStartupTiming(
-                        stage: "audio-capture-refreshed-after-system-activation",
-                        contactID: target.contactID,
-                        channelUUID: channelUUID,
-                        channelID: target.channelID
-                    )
-                } else {
-                    diagnostics.record(
-                        .media,
-                        message: "Skipping duplicate system audio capture start because prewarmed Direct QUIC bridge is already sending",
-                        metadata: [
-                            "contactId": target.contactID.uuidString,
-                            "channelId": target.channelID,
-                            "channelUUID": channelUUID.uuidString,
-                        ]
-                    )
-                    recordTransmitStartupTiming(
-                        stage: "audio-capture-already-started",
-                        contactID: target.contactID,
-                        channelUUID: channelUUID,
-                        channelID: target.channelID
-                    )
-                }
-            } else {
-                guard shouldContinueSystemTransmitActivation(
-                    channelUUID: channelUUID,
-                    target: target,
-                    stage: "audio-capture-start-requested"
-                ) else {
-                    return
-                }
-                recordTransmitStartupTiming(
-                    stage: "audio-capture-start-requested",
-                    contactID: target.contactID,
-                    channelUUID: channelUUID,
-                    channelID: target.channelID
-                )
-                try await mediaServices.session()?.startSendingAudio()
-                guard shouldContinueSystemTransmitActivation(
-                    channelUUID: channelUUID,
-                    target: target,
-                    stage: "audio-capture-start-completed",
-                    recordCompletedSideEffectInvariant: false
-                ) else {
-                    await mediaServices.session()?.abortSendingAudio()
-                    return
-                }
-                recordTransmitStartupTiming(
-                    stage: "audio-capture-start-completed",
-                    contactID: target.contactID,
-                    channelUUID: channelUUID,
-                    channelID: target.channelID
-                )
+            guard try await startOrRefreshTransmitAudioCaptureForSystemActivation(
+                channelUUID: channelUUID,
+                target: target,
+                trigger: "system-activation",
+                refreshMessage: "Refreshing prewarmed audio capture after system audio activation",
+                duplicateMessage: "Skipping duplicate system audio capture start because prewarmed bridge is already sending"
+            ) else {
+                return
             }
             guard shouldContinueSystemTransmitActivation(
                 channelUUID: channelUUID,
@@ -3615,111 +3791,16 @@ extension PTTViewModel {
                 channelUUID: channelUUID,
                 channelID: target.channelID
             )
-            if transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") != nil {
-                if shouldRefreshPrewarmedAudioCaptureAfterSystemActivation(for: target.contactID) {
-                    guard shouldContinueSystemTransmitActivation(
-                        channelUUID: channelUUID,
-                        target: target,
-                        stage: "audio-capture-refresh-after-system-activation-requested"
-                    ) else {
-                        return false
-                    }
-                    diagnostics.record(
-                        .media,
-                        message: "Refreshing prewarmed Direct QUIC capture after system audio activation",
-                        metadata: [
-                            "contactId": target.contactID.uuidString,
-                            "channelId": target.channelID,
-                            "channelUUID": channelUUID.uuidString,
-                            "backendLease": "bypassed-direct-quic",
-                        ]
-                    )
-                    recordTransmitStartupTiming(
-                        stage: "audio-capture-refresh-after-system-activation-requested",
-                        contactID: target.contactID,
-                        channelUUID: channelUUID,
-                        channelID: target.channelID,
-                        metadata: ["backendLease": "bypassed-direct-quic"]
-                    )
-                    try await mediaServices.session()?.startSendingAudio()
-                    guard shouldContinueSystemTransmitActivation(
-                        channelUUID: channelUUID,
-                        target: target,
-                        stage: "audio-capture-refresh-after-system-activation-start-returned",
-                        recordCompletedSideEffectInvariant: false
-                    ) else {
-                        await mediaServices.session()?.abortSendingAudio()
-                        return false
-                    }
-                    recordTransmitStartupTiming(
-                        stage: "audio-capture-refreshed-after-system-activation",
-                        contactID: target.contactID,
-                        channelUUID: channelUUID,
-                        channelID: target.channelID,
-                        metadata: ["backendLease": "bypassed-direct-quic"]
-                    )
-                } else {
-                    diagnostics.record(
-                        .media,
-                        message: "Skipping duplicate Direct QUIC audio capture refresh after system audio activation",
-                        metadata: [
-                            "contactId": target.contactID.uuidString,
-                            "channelId": target.channelID,
-                            "channelUUID": channelUUID.uuidString,
-                            "backendLease": "bypassed-direct-quic",
-                        ]
-                    )
-                    recordTransmitStartupTiming(
-                        stage: "audio-capture-already-started",
-                        contactID: target.contactID,
-                        channelUUID: channelUUID,
-                        channelID: target.channelID,
-                        metadata: ["backendLease": "bypassed-direct-quic"]
-                    )
-                }
-                await sendDirectQuicLeaseBypassedTransmitStartSignalIfPossible(
-                    target: target,
-                    channelUUID: channelUUID
-                )
-                transmitRuntime.noteSystemTransmitActivationCompleted(channelUUID: channelUUID)
-                recordTransmitStartupTiming(
-                    stage: "startup-completed",
-                    contactID: target.contactID,
-                    channelUUID: channelUUID,
-                    channelID: target.channelID
-                )
-                recordTransmitStartupTimingSummary(
-                    reason: "startup-completed",
-                    contactID: target.contactID,
-                    channelUUID: channelUUID,
-                    channelID: target.channelID,
-                    metadata: ["backendLease": "bypassed-direct-quic"]
-                )
-                await refreshChannelState(for: target.contactID)
-                return true
-            }
-            recordTransmitStartupTiming(
-                stage: "audio-capture-start-requested",
-                contactID: target.contactID,
-                channelUUID: channelUUID,
-                channelID: target.channelID
-            )
-            try await mediaServices.session()?.startSendingAudio()
-            guard shouldContinueSystemTransmitActivation(
+            guard try await startOrRefreshTransmitAudioCaptureForSystemActivation(
                 channelUUID: channelUUID,
                 target: target,
-                stage: "audio-capture-start-completed",
-                recordCompletedSideEffectInvariant: false
+                trigger: "direct-quic-system-activation",
+                refreshMessage: "Refreshing prewarmed Direct QUIC capture after system audio activation",
+                duplicateMessage: "Skipping duplicate Direct QUIC audio capture refresh after system audio activation",
+                metadata: ["backendLease": "bypassed-direct-quic"]
             ) else {
-                await mediaServices.session()?.abortSendingAudio()
                 return false
             }
-            recordTransmitStartupTiming(
-                stage: "audio-capture-start-completed",
-                contactID: target.contactID,
-                channelUUID: channelUUID,
-                channelID: target.channelID
-            )
             await sendDirectQuicLeaseBypassedTransmitStartSignalIfPossible(
                 target: target,
                 channelUUID: channelUUID
@@ -3880,44 +3961,32 @@ extension PTTViewModel {
             return
         }
         do {
-            guard transmitStartupTiming.elapsedMilliseconds(for: "early-audio-capture-start-completed") == nil else {
-                if trigger == "audio-session-activated",
-                   shouldRefreshPrewarmedAudioCaptureAfterSystemActivation(for: request.contactID) {
-                    guard shouldContinuePendingSystemTransmitAudioCapture(
+            let shouldRefreshAfterSystemActivation =
+                trigger == "audio-session-activated"
+                && isPTTAudioSessionActive
+                && hasPreActivationTransmitAudioCaptureEvidence(channelUUID: channelUUID)
+            let intent: TransmitAudioCaptureStartIntent = shouldRefreshAfterSystemActivation
+                ? .systemActivationRefresh
+                : .initial
+            let reservation = await reserveTransmitAudioCaptureStart(
+                channelUUID: channelUUID,
+                contactID: request.contactID,
+                channelID: request.backendChannelID,
+                intent: intent,
+                trigger: trigger,
+                shouldContinue: {
+                    shouldContinuePendingSystemTransmitAudioCapture(
                         request: request,
-                        stage: "audio-capture-refresh-after-system-activation-requested"
-                    ) else {
-                        return
-                    }
-                    diagnostics.record(
-                        .media,
-                        message: "Refreshing prewarmed audio capture after system audio activation",
-                        metadata: [
-                            "contactId": request.contactID.uuidString,
-                            "channelId": request.backendChannelID,
-                            "channelUUID": channelUUID.uuidString,
-                            "trigger": trigger,
-                        ]
+                        stage: "audio-capture-reservation"
                     )
-                    recordFirstTransmitStartupTimingStageIfAbsent(
-                        "audio-capture-refresh-after-system-activation-requested",
-                        metadata: ["trigger": trigger]
-                    )
-                    try await mediaServices.session()?.startSendingAudio()
-                    guard shouldContinuePendingSystemTransmitAudioCapture(
-                        request: request,
-                        stage: "audio-capture-refresh-after-system-activation-start-returned",
-                        recordCompletedSideEffectInvariant: false
-                    ) else {
-                        await mediaServices.session()?.abortSendingAudio()
-                        return
-                    }
-                    recordFirstTransmitStartupTimingStageIfAbsent(
-                        "audio-capture-refreshed-after-system-activation",
-                        metadata: ["trigger": trigger]
-                    )
-                    return
                 }
+            )
+            switch reservation {
+            case .reserved:
+                break
+            case .cancelled:
+                return
+            case .alreadyCompleted:
                 diagnostics.record(
                     .media,
                     message: "Skipping duplicate pending system audio capture start because audio capture is already active",
@@ -3930,6 +3999,56 @@ extension PTTViewModel {
                 )
                 return
             }
+
+            if intent == .systemActivationRefresh {
+                guard shouldContinuePendingSystemTransmitAudioCapture(
+                    request: request,
+                    stage: "audio-capture-refresh-after-system-activation-requested"
+                ) else {
+                    clearTransmitAudioCaptureStartIfInFlight(
+                        channelUUID: channelUUID,
+                        intent: .systemActivationRefresh
+                    )
+                    return
+                }
+                diagnostics.record(
+                    .media,
+                    message: "Refreshing prewarmed audio capture after system audio activation",
+                    metadata: [
+                        "contactId": request.contactID.uuidString,
+                        "channelId": request.backendChannelID,
+                        "channelUUID": channelUUID.uuidString,
+                        "trigger": trigger,
+                    ]
+                )
+                recordFirstTransmitStartupTimingStageIfAbsent(
+                    "audio-capture-refresh-after-system-activation-requested",
+                    metadata: ["trigger": trigger]
+                )
+                try await mediaServices.session()?.startSendingAudio()
+                guard shouldContinuePendingSystemTransmitAudioCapture(
+                    request: request,
+                    stage: "audio-capture-refresh-after-system-activation-start-returned",
+                    recordCompletedSideEffectInvariant: false
+                ) else {
+                    clearTransmitAudioCaptureStartIfInFlight(
+                        channelUUID: channelUUID,
+                        intent: .systemActivationRefresh
+                    )
+                    await mediaServices.session()?.abortSendingAudio()
+                    return
+                }
+                noteTransmitAudioCaptureStartCompleted(
+                    channelUUID: channelUUID,
+                    intent: .systemActivationRefresh
+                )
+                recordFirstTransmitStartupTimingStageIfAbsent(
+                    "audio-capture-refreshed-after-system-activation",
+                    metadata: ["trigger": trigger]
+                )
+                return
+            }
+
             recordFirstTransmitStartupTimingStageIfAbsent(
                 "early-audio-capture-start-requested",
                 metadata: ["trigger": trigger]
@@ -3940,14 +4059,21 @@ extension PTTViewModel {
                 stage: "audio-capture-start-completed",
                 recordCompletedSideEffectInvariant: false
             ) else {
+                clearTransmitAudioCaptureStartIfInFlight(channelUUID: channelUUID, intent: .initial)
                 await mediaServices.session()?.abortSendingAudio()
                 return
             }
+            noteTransmitAudioCaptureStartCompleted(channelUUID: channelUUID, intent: .initial)
             recordFirstTransmitStartupTimingStageIfAbsent(
                 "early-audio-capture-start-completed",
                 metadata: ["trigger": trigger]
             )
         } catch {
+            clearTransmitAudioCaptureStartIfInFlight(channelUUID: channelUUID, intent: .initial)
+            clearTransmitAudioCaptureStartIfInFlight(
+                channelUUID: channelUUID,
+                intent: .systemActivationRefresh
+            )
             diagnostics.record(
                 .media,
                 level: .error,
