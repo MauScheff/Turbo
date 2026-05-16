@@ -40,6 +40,323 @@ extension PTTViewModel {
         )
     }
 
+    func clearFirstAudioPlaybackAckExpectations() {
+        firstAudioPlaybackAckTimeoutTasksByContactID.values.forEach { $0.cancel() }
+        firstAudioPlaybackAckTimeoutTasksByContactID.removeAll()
+        firstAudioPlaybackAckExpectationsByContactID.removeAll()
+        firstAudioPlaybackAckSentKeys.removeAll()
+    }
+
+    func clearFirstAudioPlaybackAckState(
+        contactID: UUID,
+        channelID: String? = nil,
+        senderDeviceID: String? = nil
+    ) {
+        if let expectation = firstAudioPlaybackAckExpectationsByContactID[contactID],
+           channelID == nil || expectation.channelID == channelID {
+            firstAudioPlaybackAckTimeoutTasksByContactID[contactID]?.cancel()
+            firstAudioPlaybackAckTimeoutTasksByContactID[contactID] = nil
+            firstAudioPlaybackAckExpectationsByContactID[contactID] = nil
+        }
+        firstAudioPlaybackAckSentKeys = firstAudioPlaybackAckSentKeys.filter { key in
+            if key.contactID != contactID { return true }
+            if let channelID, key.channelID != channelID { return true }
+            if let senderDeviceID, key.senderDeviceID != senderDeviceID { return true }
+            return false
+        }
+    }
+
+    func clearFirstAudioPlaybackAckSentState(
+        contactID: UUID,
+        channelID: String? = nil,
+        senderDeviceID: String? = nil
+    ) {
+        firstAudioPlaybackAckSentKeys = firstAudioPlaybackAckSentKeys.filter { key in
+            if key.contactID != contactID { return true }
+            if let channelID, key.channelID != channelID { return true }
+            if let senderDeviceID, key.senderDeviceID != senderDeviceID { return true }
+            return false
+        }
+    }
+
+    func audioPlaybackAckTransportLabel(_ transport: IncomingAudioPayloadTransport) -> String {
+        switch transport {
+        case .relayWebSocket:
+            return "relay-websocket"
+        case .mediaRelay:
+            return "media-relay"
+        case .directQuic:
+            return "direct-quic"
+        }
+    }
+
+    func audioPayloadIdentity(_ payload: String) -> (transportDigest: String, encryptedSequenceNumber: UInt64?) {
+        let sequenceNumber: UInt64?
+        if MediaEncryptedAudioPacket.isEncodedPacket(payload) {
+            sequenceNumber = try? MediaEndToEndEncryption.decodePacket(payload).sequenceNumber
+        } else {
+            sequenceNumber = nil
+        }
+        return (AudioChunkPayloadCodec.transportDigest(payload), sequenceNumber)
+    }
+
+    func noteFirstOutboundAudioPayloadQueuedIfNeeded(
+        _ payload: String,
+        target: TransmitTarget,
+        deliveredTransports: [String]
+    ) {
+        guard firstAudioPlaybackAckExpectationsByContactID[target.contactID] == nil else { return }
+        let identity = audioPayloadIdentity(payload)
+        let ackID = UUID().uuidString
+        let expectation = FirstAudioPlaybackAckExpectation(
+            ackID: ackID,
+            contactID: target.contactID,
+            channelID: target.channelID,
+            senderDeviceID: backendServices?.deviceID ?? backendConfig?.deviceID ?? "",
+            receiverDeviceID: target.deviceID,
+            transportDigest: identity.transportDigest,
+            encryptedSequenceNumber: identity.encryptedSequenceNumber,
+            queuedAt: Date(),
+            deliveredTransports: deliveredTransports
+        )
+        firstAudioPlaybackAckExpectationsByContactID[target.contactID] = expectation
+        let timeoutNanoseconds = firstAudioPlaybackAckTimeoutNanoseconds
+        firstAudioPlaybackAckTimeoutTasksByContactID[target.contactID]?.cancel()
+        firstAudioPlaybackAckTimeoutTasksByContactID[target.contactID] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+            await MainActor.run {
+                self?.handleFirstAudioPlaybackAckTimeout(
+                    contactID: target.contactID,
+                    ackID: ackID
+                )
+            }
+        }
+        diagnostics.record(
+            .media,
+            message: "Awaiting first audio playback ACK",
+            metadata: [
+                "contactId": target.contactID.uuidString,
+                "channelId": target.channelID,
+                "senderDeviceId": expectation.senderDeviceID,
+                "receiverDeviceId": target.deviceID,
+                "transportDigest": identity.transportDigest,
+                "encryptedSequenceNumber": identity.encryptedSequenceNumber.map(String.init) ?? "none",
+                "deliveredTransports": deliveredTransports.joined(separator: ","),
+                "ackId": ackID,
+            ]
+        )
+    }
+
+    func handleFirstAudioPlaybackAckTimeout(contactID: UUID, ackID: String) {
+        guard let expectation = firstAudioPlaybackAckExpectationsByContactID[contactID],
+              expectation.ackID == ackID else {
+            return
+        }
+        firstAudioPlaybackAckTimeoutTasksByContactID[contactID] = nil
+        let timeoutMilliseconds = firstAudioPlaybackAckTimeoutNanoseconds / 1_000_000
+        diagnostics.recordInvariantViolation(
+            invariantID: "transmit.first_audio_playback_ack_missing",
+            scope: .pair,
+            message: "first outbound audio was queued but receiver playback ACK did not arrive",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": expectation.channelID,
+                "senderDeviceId": expectation.senderDeviceID,
+                "receiverDeviceId": expectation.receiverDeviceID,
+                "transportDigest": expectation.transportDigest,
+                "encryptedSequenceNumber": expectation.encryptedSequenceNumber.map(String.init) ?? "none",
+                "deliveredTransports": expectation.deliveredTransports.joined(separator: ","),
+                "timeoutMs": String(timeoutMilliseconds),
+                "ackId": expectation.ackID,
+            ]
+        )
+        diagnostics.record(
+            .media,
+            level: .error,
+            message: "Timed out waiting for first audio playback ACK",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": expectation.channelID,
+                "receiverDeviceId": expectation.receiverDeviceID,
+                "transportDigest": expectation.transportDigest,
+                "ackId": expectation.ackID,
+            ]
+        )
+    }
+
+    func handleAudioPlaybackStartedAck(
+        _ payload: TurboAudioPlaybackStartedPayload,
+        contactID: UUID,
+        source: ControlEventSource
+    ) {
+        guard let expectation = firstAudioPlaybackAckExpectationsByContactID[contactID] else {
+            diagnostics.record(
+                .media,
+                message: "Ignored audio playback ACK without pending expectation",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": payload.channelId,
+                    "senderDeviceId": payload.senderDeviceId,
+                    "receiverDeviceId": payload.receiverDeviceId,
+                    "transportDigest": payload.transportDigest,
+                    "ackId": payload.ackId,
+                    "source": source.rawValue,
+                ]
+            )
+            return
+        }
+
+        let expectedSequenceNumber = expectation.encryptedSequenceNumber
+        let matches =
+            payload.channelId == expectation.channelID
+            && payload.senderDeviceId == expectation.senderDeviceID
+            && payload.receiverDeviceId == expectation.receiverDeviceID
+            && payload.transportDigest == expectation.transportDigest
+            && (expectedSequenceNumber == nil || payload.encryptedSequenceNumber == expectedSequenceNumber)
+        guard matches else {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Ignored mismatched audio playback ACK",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "expectedChannelId": expectation.channelID,
+                    "receivedChannelId": payload.channelId,
+                    "expectedSenderDeviceId": expectation.senderDeviceID,
+                    "receivedSenderDeviceId": payload.senderDeviceId,
+                    "expectedReceiverDeviceId": expectation.receiverDeviceID,
+                    "receivedReceiverDeviceId": payload.receiverDeviceId,
+                    "expectedTransportDigest": expectation.transportDigest,
+                    "receivedTransportDigest": payload.transportDigest,
+                    "expectedEncryptedSequenceNumber": expectedSequenceNumber.map(String.init) ?? "none",
+                    "receivedEncryptedSequenceNumber": payload.encryptedSequenceNumber.map(String.init) ?? "none",
+                    "ackId": payload.ackId,
+                    "source": source.rawValue,
+                ]
+            )
+            return
+        }
+
+        firstAudioPlaybackAckTimeoutTasksByContactID[contactID]?.cancel()
+        firstAudioPlaybackAckTimeoutTasksByContactID[contactID] = nil
+        firstAudioPlaybackAckExpectationsByContactID[contactID] = nil
+        diagnostics.record(
+            .media,
+            message: "First audio playback ACK received",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": payload.channelId,
+                "senderDeviceId": payload.senderDeviceId,
+                "receiverDeviceId": payload.receiverDeviceId,
+                "transport": payload.transport,
+                "transportDigest": payload.transportDigest,
+                "encryptedSequenceNumber": payload.encryptedSequenceNumber.map(String.init) ?? "none",
+                "source": source.rawValue,
+                "ackId": payload.ackId,
+                "waitedMs": String(Int(Date().timeIntervalSince(expectation.queuedAt) * 1000)),
+            ]
+        )
+    }
+
+    func sendFirstAudioPlaybackStartedAckIfNeeded(
+        originalPayload: String,
+        channelID: String,
+        fromUserID: String,
+        fromDeviceID: String,
+        contactID: UUID,
+        incomingAudioTransport: IncomingAudioPayloadTransport
+    ) async {
+        guard let backend = backendServices else { return }
+        let sentKey = FirstAudioPlaybackAckSentKey(
+            contactID: contactID,
+            channelID: channelID,
+            senderDeviceID: fromDeviceID,
+            receiverDeviceID: backend.deviceID
+        )
+        guard !firstAudioPlaybackAckSentKeys.contains(sentKey) else { return }
+
+        let identity = audioPayloadIdentity(originalPayload)
+        let payload = TurboAudioPlaybackStartedPayload(
+            ackId: UUID().uuidString,
+            channelId: channelID,
+            senderDeviceId: fromDeviceID,
+            receiverDeviceId: backend.deviceID,
+            transport: audioPlaybackAckTransportLabel(incomingAudioTransport),
+            transportDigest: identity.transportDigest,
+            encryptedSequenceNumber: identity.encryptedSequenceNumber
+        )
+        var sentTransports: [String] = []
+        var failures: [String] = []
+
+        do {
+            let envelope = try TurboSignalEnvelope.audioPlaybackStarted(
+                channelId: channelID,
+                fromUserId: backend.currentUserID ?? "",
+                fromDeviceId: backend.deviceID,
+                toUserId: fromUserID,
+                toDeviceId: fromDeviceID,
+                payload: payload
+            )
+            try await backend.client.sendSignal(envelope)
+            sentTransports.append("relay-websocket")
+        } catch {
+            failures.append("relay-websocket:\(error.localizedDescription)")
+        }
+
+        if let controller = mediaRuntime.directQuicProbeController {
+            do {
+                try await controller.sendAudioPlaybackStarted(payload)
+                sentTransports.append("direct-quic")
+            } catch {
+                failures.append("direct-quic:\(error.localizedDescription)")
+            }
+        }
+
+        if let relayClient = mediaRuntime.mediaRelayClient {
+            do {
+                try await relayClient.sendAudioPlaybackStarted(payload)
+                sentTransports.append("media-relay")
+            } catch {
+                failures.append("media-relay:\(error.localizedDescription)")
+            }
+        }
+
+        guard !sentTransports.isEmpty else {
+            diagnostics.record(
+                .media,
+                level: .error,
+                message: "Failed to send first audio playback ACK",
+                metadata: [
+                    "contactId": contactID.uuidString,
+                    "channelId": channelID,
+                    "senderDeviceId": fromDeviceID,
+                    "receiverDeviceId": backend.deviceID,
+                    "transportDigest": identity.transportDigest,
+                    "failures": failures.joined(separator: ","),
+                    "ackId": payload.ackId,
+                ]
+            )
+            return
+        }
+
+        firstAudioPlaybackAckSentKeys.insert(sentKey)
+        diagnostics.record(
+            .media,
+            message: "Sent first audio playback ACK",
+            metadata: [
+                "contactId": contactID.uuidString,
+                "channelId": channelID,
+                "senderDeviceId": fromDeviceID,
+                "receiverDeviceId": backend.deviceID,
+                "incomingTransport": payload.transport,
+                "sentTransports": sentTransports.joined(separator: ","),
+                "transportDigest": identity.transportDigest,
+                "encryptedSequenceNumber": identity.encryptedSequenceNumber.map(String.init) ?? "none",
+                "ackId": payload.ackId,
+            ]
+        )
+    }
+
     func clearStaleMediaRelayClient(
         localDeviceID: String,
         channelID: String,
@@ -177,6 +494,13 @@ extension PTTViewModel {
             if let self {
                 if await MainActor.run(body: { self.isDirectPathRelayOnlyForced }) {
                     try await relaySend()
+                    await MainActor.run {
+                        self.noteFirstOutboundAudioPayloadQueuedIfNeeded(
+                            transportPayload,
+                            target: target,
+                            deliveredTransports: ["relay-websocket"]
+                        )
+                    }
                     return
                 }
 
@@ -184,6 +508,13 @@ extension PTTViewModel {
                     if let relayClient = await self.mediaRelayClientForAudioSend(target: target) {
                         do {
                             try await relayClient.sendAudioPayload(transportPayload)
+                            await MainActor.run {
+                                self.noteFirstOutboundAudioPayloadQueuedIfNeeded(
+                                    transportPayload,
+                                    target: target,
+                                    deliveredTransports: ["media-relay"]
+                                )
+                            }
                             return
                         } catch {
                             await MainActor.run {
@@ -224,6 +555,13 @@ extension PTTViewModel {
                         }
                     }
                     try await relaySend()
+                    await MainActor.run {
+                        self.noteFirstOutboundAudioPayloadQueuedIfNeeded(
+                            transportPayload,
+                            target: target,
+                            deliveredTransports: ["relay-websocket"]
+                        )
+                    }
                     return
                 }
 
@@ -346,6 +684,16 @@ extension PTTViewModel {
                 }
                 if deliveredTransports.isEmpty, let firstFailure = deliveryFailures.first {
                     throw firstFailure.error
+                }
+                if !deliveredTransports.isEmpty {
+                    let deliveredTransportsSnapshot = deliveredTransports
+                    await MainActor.run {
+                        self.noteFirstOutboundAudioPayloadQueuedIfNeeded(
+                            transportPayload,
+                            target: target,
+                            deliveredTransports: deliveredTransportsSnapshot
+                        )
+                    }
                 }
                 return
             }
@@ -734,46 +1082,88 @@ extension PTTViewModel {
         peerDeviceID: String
     ) async {
         do {
-            let payload = try DirectQuicReceiverPrewarmPayloadCodec.decode(frame.payload)
-            guard payload.channelId == channelID,
-                  payload.fromDeviceId == peerDeviceID else {
+            switch frame.kind {
+            case .receiverPrewarmRequest, .receiverPrewarmAck:
+                let payload = try DirectQuicReceiverPrewarmPayloadCodec.decode(frame.payload)
+                guard payload.channelId == channelID,
+                      payload.fromDeviceId == peerDeviceID else {
+                    await MainActor.run {
+                        diagnostics.record(
+                            .media,
+                            message: "Ignored stale media relay control frame",
+                            metadata: [
+                                "contactId": contactID.uuidString,
+                                "expectedChannelId": channelID,
+                                "receivedChannelId": payload.channelId,
+                                "expectedPeerDeviceId": peerDeviceID,
+                                "receivedPeerDeviceId": payload.fromDeviceId,
+                                "kind": frame.kind.rawValue,
+                                "requestId": payload.requestId,
+                            ]
+                        )
+                    }
+                    return
+                }
+
                 await MainActor.run {
                     diagnostics.record(
                         .media,
-                        message: "Ignored stale media relay control frame",
+                        message: "Media relay control frame received",
                         metadata: [
                             "contactId": contactID.uuidString,
-                            "expectedChannelId": channelID,
-                            "receivedChannelId": payload.channelId,
-                            "expectedPeerDeviceId": peerDeviceID,
-                            "receivedPeerDeviceId": payload.fromDeviceId,
+                            "channelId": channelID,
+                            "peerDeviceId": peerDeviceID,
                             "kind": frame.kind.rawValue,
                             "requestId": payload.requestId,
                         ]
                     )
                 }
-                return
-            }
 
-            await MainActor.run {
-                diagnostics.record(
-                    .media,
-                    message: "Media relay control frame received",
-                    metadata: [
-                        "contactId": contactID.uuidString,
-                        "channelId": channelID,
-                        "peerDeviceId": peerDeviceID,
-                        "kind": frame.kind.rawValue,
-                        "requestId": payload.requestId,
-                    ]
-                )
-            }
-
-            switch frame.kind {
-            case .receiverPrewarmRequest:
-                await ingestMediaRelayReceiverPrewarmRequest(payload, contactID: contactID)
-            case .receiverPrewarmAck:
-                await ingestMediaRelayReceiverPrewarmAck(payload, contactID: contactID)
+                switch frame.kind {
+                case .receiverPrewarmRequest:
+                    await ingestMediaRelayReceiverPrewarmRequest(payload, contactID: contactID)
+                case .receiverPrewarmAck:
+                    await ingestMediaRelayReceiverPrewarmAck(payload, contactID: contactID)
+                case .audioPlaybackStarted:
+                    break
+                }
+            case .audioPlaybackStarted:
+                let ackPayload = try TurboAudioPlaybackStartedPayloadCodec.decode(frame.payload)
+                guard ackPayload.channelId == channelID,
+                      ackPayload.receiverDeviceId == peerDeviceID else {
+                    await MainActor.run {
+                        diagnostics.record(
+                            .media,
+                            message: "Ignored stale media relay audio playback ACK",
+                            metadata: [
+                                "contactId": contactID.uuidString,
+                                "expectedChannelId": channelID,
+                                "receivedChannelId": ackPayload.channelId,
+                                "expectedPeerDeviceId": peerDeviceID,
+                                "receivedReceiverDeviceId": ackPayload.receiverDeviceId,
+                                "ackId": ackPayload.ackId,
+                            ]
+                        )
+                    }
+                    return
+                }
+                await MainActor.run {
+                    diagnostics.record(
+                        .media,
+                        message: "Media relay audio playback ACK received",
+                        metadata: [
+                            "contactId": contactID.uuidString,
+                            "channelId": channelID,
+                            "peerDeviceId": peerDeviceID,
+                            "ackId": ackPayload.ackId,
+                        ]
+                    )
+                    handleAudioPlaybackStartedAck(
+                        ackPayload,
+                        contactID: contactID,
+                        source: .mediaRelay
+                    )
+                }
             }
         } catch {
             await MainActor.run {

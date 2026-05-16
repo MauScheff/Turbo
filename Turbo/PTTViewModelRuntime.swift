@@ -759,6 +759,25 @@ struct PendingEncryptedAudioPayload: Equatable {
     let receivedAt: Date
 }
 
+struct FirstAudioPlaybackAckExpectation: Equatable {
+    let ackID: String
+    let contactID: UUID
+    let channelID: String
+    let senderDeviceID: String
+    let receiverDeviceID: String
+    let transportDigest: String
+    let encryptedSequenceNumber: UInt64?
+    let queuedAt: Date
+    let deliveredTransports: [String]
+}
+
+struct FirstAudioPlaybackAckSentKey: Hashable {
+    let contactID: UUID
+    let channelID: String
+    let senderDeviceID: String
+    let receiverDeviceID: String
+}
+
 private struct RecentIncomingPlaintextAudioPayloadKey: Hashable {
     let contactID: UUID
     let channelID: String

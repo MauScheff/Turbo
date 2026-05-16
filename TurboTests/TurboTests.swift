@@ -447,6 +447,197 @@ struct TurboTests {
         )
     }
 
+    @MainActor
+    @Test func firstAcceptedAudioPayloadSendsOnePlaybackAckAcrossStandbyDuplicates() async throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let mediaSession = RecordingMediaSession()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+        client.enableSentSignalCaptureForTesting()
+        viewModel.applyAuthenticatedBackendSession(
+            client: client,
+            userID: "receiver-user",
+            mode: "cloud"
+        )
+        viewModel.applicationStateOverride = .active
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: "channel-1",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        viewModel.mediaRuntime.updateConnectionState(.connected)
+
+        await viewModel.handleIncomingAudioPayload(
+            "pcm-audio",
+            channelID: "channel-1",
+            fromUserID: "peer-user",
+            fromDeviceID: "peer-device",
+            contactID: contactID,
+            incomingAudioTransport: .directQuic
+        )
+        await viewModel.handleIncomingAudioPayload(
+            "pcm-audio",
+            channelID: "channel-1",
+            fromUserID: "peer-user",
+            fromDeviceID: "peer-device",
+            contactID: contactID,
+            incomingAudioTransport: .mediaRelay
+        )
+        await viewModel.handleIncomingAudioPayload(
+            "pcm-audio",
+            channelID: "channel-1",
+            fromUserID: "peer-user",
+            fromDeviceID: "peer-device",
+            contactID: contactID,
+            incomingAudioTransport: .relayWebSocket
+        )
+
+        #expect(mediaSession.receivedRemoteAudioChunks == ["pcm-audio"])
+        let playbackAcks = client.sentSignalsForTesting().filter { $0.type == .audioPlaybackStarted }
+        #expect(playbackAcks.count == 1)
+        let envelope = try #require(playbackAcks.first)
+        let payload = try envelope.decodeAudioPlaybackStartedPayload()
+        #expect(envelope.fromUserId == "receiver-user")
+        #expect(envelope.fromDeviceId == client.deviceID)
+        #expect(envelope.toUserId == "peer-user")
+        #expect(envelope.toDeviceId == "peer-device")
+        #expect(payload.channelId == "channel-1")
+        #expect(payload.senderDeviceId == "peer-device")
+        #expect(payload.receiverDeviceId == client.deviceID)
+        #expect(payload.transport == "direct-quic")
+        #expect(payload.transportDigest == AudioChunkPayloadCodec.transportDigest("pcm-audio"))
+    }
+
+    @MainActor
+    @Test func firstAudioPlaybackAckClearsSenderExpectation() async throws {
+        let previousRelayOnlyForced = TurboDirectPathDebugOverride.isRelayOnlyForced()
+        TurboDirectPathDebugOverride.setRelayOnlyForced(true)
+        defer {
+            TurboDirectPathDebugOverride.setRelayOnlyForced(previousRelayOnlyForced)
+        }
+
+        let viewModel = PTTViewModel()
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+        client.enableSentSignalCaptureForTesting()
+        viewModel.applyAuthenticatedBackendSession(
+            client: client,
+            userID: "sender-user",
+            mode: "cloud"
+        )
+        let contactID = UUID()
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: "channel-1",
+                remoteUserId: "peer-user"
+            )
+        ]
+        let target = TransmitTarget(
+            contactID: contactID,
+            userID: "peer-user",
+            deviceID: "peer-device",
+            channelID: "channel-1"
+        )
+
+        viewModel.configureOutgoingAudioRoute(target: target)
+        let sendAudioChunk = try #require(viewModel.mediaRuntime.sendAudioChunk)
+        try await sendAudioChunk("payload-1")
+
+        #expect(viewModel.firstAudioPlaybackAckExpectationsByContactID[contactID] != nil)
+        let ackPayload = TurboAudioPlaybackStartedPayload(
+            ackId: "ack-1",
+            channelId: "channel-1",
+            senderDeviceId: client.deviceID,
+            receiverDeviceId: "peer-device",
+            transport: "relay-websocket",
+            transportDigest: AudioChunkPayloadCodec.transportDigest("payload-1"),
+            encryptedSequenceNumber: nil
+        )
+        let envelope = try TurboSignalEnvelope.audioPlaybackStarted(
+            channelId: "channel-1",
+            fromUserId: "peer-user",
+            fromDeviceId: "peer-device",
+            toUserId: "sender-user",
+            toDeviceId: client.deviceID,
+            payload: ackPayload
+        )
+        viewModel.handleIncomingSignal(envelope)
+
+        #expect(viewModel.firstAudioPlaybackAckExpectationsByContactID[contactID] == nil)
+        #expect(
+            viewModel.diagnosticsTranscript.contains("First audio playback ACK received")
+        )
+        #expect(
+            !viewModel.diagnostics.invariantViolations.contains {
+                $0.invariantID == "transmit.first_audio_playback_ack_missing"
+            }
+        )
+    }
+
+    @MainActor
+    @Test func missingFirstAudioPlaybackAckRecordsInvariant() async throws {
+        let previousRelayOnlyForced = TurboDirectPathDebugOverride.isRelayOnlyForced()
+        TurboDirectPathDebugOverride.setRelayOnlyForced(true)
+        defer {
+            TurboDirectPathDebugOverride.setRelayOnlyForced(previousRelayOnlyForced)
+        }
+
+        let viewModel = PTTViewModel()
+        viewModel.firstAudioPlaybackAckTimeoutNanoseconds = 20_000_000
+        let client = TurboBackendClient(config: makeUnreachableBackendConfig())
+        client.setRuntimeConfigForTesting(
+            TurboBackendRuntimeConfig(mode: "cloud", supportsWebSocket: true)
+        )
+        client.enableSentSignalCaptureForTesting()
+        viewModel.applyAuthenticatedBackendSession(
+            client: client,
+            userID: "sender-user",
+            mode: "cloud"
+        )
+        let contactID = UUID()
+        let target = TransmitTarget(
+            contactID: contactID,
+            userID: "peer-user",
+            deviceID: "peer-device",
+            channelID: "channel-1"
+        )
+
+        viewModel.configureOutgoingAudioRoute(target: target)
+        let sendAudioChunk = try #require(viewModel.mediaRuntime.sendAudioChunk)
+        try await sendAudioChunk("payload-1")
+
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        #expect(
+            viewModel.diagnostics.invariantViolations.contains {
+                $0.invariantID == "transmit.first_audio_playback_ack_missing"
+                    && $0.metadata["receiverDeviceId"] == "peer-device"
+                    && $0.metadata["transportDigest"] == AudioChunkPayloadCodec.transportDigest("payload-1")
+            }
+        )
+        viewModel.clearFirstAudioPlaybackAckExpectations()
+    }
+
     @Test func mediaEncryptionReceiveSequenceAcceptsBoundedOutOfOrderAuthenticatedPacket() {
         let runtime = MediaRuntimeState()
         let contactID = UUID()

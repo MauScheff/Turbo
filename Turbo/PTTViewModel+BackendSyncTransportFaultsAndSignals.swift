@@ -563,6 +563,14 @@ extension PTTViewModel {
         }
         if mediaSessionContactID == contactID, mediaConnectionState == .preparing {
             await receiveRemoteAudioChunk(audioPayload, incomingAudioTransport: incomingAudioTransport)
+            await sendFirstAudioPlaybackStartedAckIfNeeded(
+                originalPayload: payload,
+                channelID: channelID,
+                fromUserID: fromUserID,
+                fromDeviceID: fromDeviceID,
+                contactID: contactID,
+                incomingAudioTransport: incomingAudioTransport
+            )
             return
         }
         let receiveActivationMode: MediaSessionActivationMode =
@@ -577,6 +585,14 @@ extension PTTViewModel {
             startupMode: .playbackOnly
         )
         await receiveRemoteAudioChunk(audioPayload, incomingAudioTransport: incomingAudioTransport)
+        await sendFirstAudioPlaybackStartedAckIfNeeded(
+            originalPayload: payload,
+            channelID: channelID,
+            fromUserID: fromUserID,
+            fromDeviceID: fromDeviceID,
+            contactID: contactID,
+            incomingAudioTransport: incomingAudioTransport
+        )
     }
 
     func deferIncomingEncryptedAudioPayloadUntilMediaEncryptionReady(
@@ -757,6 +773,11 @@ extension PTTViewModel {
             pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
             mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
             mediaRuntime.resetMediaEncryptionReceiveSequence(for: contactID)
+            clearFirstAudioPlaybackAckSentState(
+                contactID: contactID,
+                channelID: envelope.channelId,
+                senderDeviceID: envelope.fromDeviceId
+            )
             markRemoteAudioActivity(for: contactID, source: .transmitPrepareSignal)
             if shouldTreatIncomingControlSignalAsWakeCandidate(
                 for: contactID,
@@ -816,6 +837,11 @@ extension PTTViewModel {
                 pttWakeRuntime.clearProvisionalWakeCandidateSuppression(for: contactID)
                 mediaRuntime.resetIncomingRelayAudioDiagnostics(for: contactID)
                 mediaRuntime.resetMediaEncryptionReceiveSequence(for: contactID)
+                clearFirstAudioPlaybackAckSentState(
+                    contactID: contactID,
+                    channelID: envelope.channelId,
+                    senderDeviceID: envelope.fromDeviceId
+                )
                 let shouldArmWakeCandidate = shouldTreatIncomingControlSignalAsWakeCandidate(
                     for: contactID,
                     applicationState: applicationState
@@ -849,6 +875,11 @@ extension PTTViewModel {
                     ifAbsent: true
                 )
             } else {
+                clearFirstAudioPlaybackAckSentState(
+                    contactID: contactID,
+                    channelID: envelope.channelId,
+                    senderDeviceID: envelope.fromDeviceId
+                )
                 pttWakeRuntime.suppressProvisionalWakeCandidate(for: contactID)
                 if let activationState = pttWakeRuntime.incomingWakeActivationState(for: contactID),
                    activationState == .signalBuffered
@@ -1049,6 +1080,39 @@ extension PTTViewModel {
                     fromUserID: envelope.fromUserId,
                     fromDeviceID: envelope.fromDeviceId,
                     contactID: contactID
+                )
+            }
+        case .audioPlaybackStarted:
+            do {
+                let payload = try envelope.decodeAudioPlaybackStartedPayload()
+                diagnostics.record(
+                    .websocket,
+                    message: "Audio playback ACK signal received",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": envelope.channelId,
+                        "fromDeviceId": envelope.fromDeviceId,
+                        "toDeviceId": envelope.toDeviceId,
+                        "transportDigest": payload.transportDigest,
+                        "ackId": payload.ackId,
+                    ]
+                )
+                handleAudioPlaybackStartedAck(
+                    payload,
+                    contactID: contactID,
+                    source: .backendWebSocket
+                )
+            } catch {
+                diagnostics.record(
+                    .websocket,
+                    level: .error,
+                    message: "Rejected audio playback ACK signal because payload was invalid",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": envelope.channelId,
+                        "fromDeviceId": envelope.fromDeviceId,
+                        "error": error.localizedDescription,
+                    ]
                 )
             }
         case .directQuicUpgradeRequest:

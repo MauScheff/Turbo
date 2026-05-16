@@ -1001,6 +1001,20 @@
       "status": "active"
     },
     {
+      "id": "transmit.first_audio_playback_ack_missing",
+      "scope": "pair",
+      "owner": "app",
+      "authoritativeSeam": "Turbo/PTTViewModel+TransmitAudioSend.swift",
+      "predicate": "The first outbound audio payload was queued to at least one transport but no receiver playback ACK arrived before timeout.",
+      "evidenceFields": ["contactId", "channelId", "senderDeviceId", "receiverDeviceId", "transportDigest", "encryptedSequenceNumber", "deliveredTransports", "timeoutMs"],
+      "detectors": ["Turbo/PTTViewModel+TransmitAudioSend.swift"],
+      "regressions": ["TurboTests/TurboTests.swift"],
+      "repairPolicy": "app repair",
+      "repairAction": "The sender records missing receiver playback proof so diagnostics can distinguish queued media from heard media and escalate fallback policy.",
+      "alertPolicy": "diagnostics",
+      "status": "active"
+    },
+    {
       "id": "transmit.live_projection_after_lease_expiry",
       "scope": "convergence",
       "owner": "mixed",

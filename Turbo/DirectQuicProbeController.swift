@@ -509,6 +509,7 @@ nonisolated enum DirectQuicWireMessageKind: String, Codable, Equatable {
     case pathClosing = "path-closing"
     case warmPing = "warm-ping"
     case warmPong = "warm-pong"
+    case audioPlaybackStarted = "audio-playback-started"
     case audioChunk = "audio-chunk"
 }
 
@@ -602,6 +603,13 @@ nonisolated struct DirectQuicWireMessage: Codable, Equatable {
         DirectQuicWireMessage(kind: .warmPong, payload: id)
     }
 
+    static func audioPlaybackStarted(_ payload: TurboAudioPlaybackStartedPayload) throws -> DirectQuicWireMessage {
+        DirectQuicWireMessage(
+            kind: .audioPlaybackStarted,
+            payload: try TurboAudioPlaybackStartedPayloadCodec.encode(payload)
+        )
+    }
+
     static func audioChunk(_ payload: String) -> DirectQuicWireMessage {
         DirectQuicWireMessage(kind: .audioChunk, payload: payload)
     }
@@ -649,6 +657,7 @@ nonisolated enum TurboMediaRelayTransport: String, Codable, Equatable, Sendable 
 nonisolated enum TurboMediaRelayControlKind: String, Codable, Equatable, Sendable {
     case receiverPrewarmRequest = "receiver-prewarm-request"
     case receiverPrewarmAck = "receiver-prewarm-ack"
+    case audioPlaybackStarted = "audio-playback-started"
 }
 
 nonisolated struct TurboMediaRelayControlFrame: Codable, Equatable, Sendable {
@@ -670,6 +679,15 @@ nonisolated struct TurboMediaRelayControlFrame: Codable, Equatable, Sendable {
         TurboMediaRelayControlFrame(
             kind: .receiverPrewarmAck,
             payload: try DirectQuicReceiverPrewarmPayloadCodec.encode(payload)
+        )
+    }
+
+    static func audioPlaybackStarted(
+        _ payload: TurboAudioPlaybackStartedPayload
+    ) throws -> TurboMediaRelayControlFrame {
+        TurboMediaRelayControlFrame(
+            kind: .audioPlaybackStarted,
+            payload: try TurboAudioPlaybackStartedPayloadCodec.encode(payload)
         )
     }
 }
@@ -909,6 +927,10 @@ nonisolated final class TurboMediaRelayClient: @unchecked Sendable {
 
     func sendReceiverPrewarmAck(_ payload: DirectQuicReceiverPrewarmPayload) async throws {
         try await sendControlFrame(.receiverPrewarmAck(payload))
+    }
+
+    func sendAudioPlaybackStarted(_ payload: TurboAudioPlaybackStartedPayload) async throws {
+        try await sendControlFrame(.audioPlaybackStarted(payload))
     }
 
     private func sendControlFrame(_ frame: TurboMediaRelayControlFrame) async throws {
@@ -1375,6 +1397,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
     private var onReceiverPrewarmAck: (@Sendable (DirectQuicReceiverPrewarmPayload) async -> Void)?
     private var onPathClosing: (@Sendable (DirectQuicPathClosingPayload) async -> Void)?
     private var onWarmPong: (@Sendable (String?) async -> Void)?
+    private var onAudioPlaybackStarted: (@Sendable (TurboAudioPlaybackStartedPayload) async -> Void)?
     private var onPathLost: (@Sendable (String) async -> Void)?
     private var suppressPathLostCallback = false
     private var remoteCandidateKeysAttempted: Set<String> = []
@@ -1618,6 +1641,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
         onReceiverPrewarmAck: (@Sendable (DirectQuicReceiverPrewarmPayload) async -> Void)? = nil,
         onPathClosing: (@Sendable (DirectQuicPathClosingPayload) async -> Void)? = nil,
         onWarmPong: (@Sendable (String?) async -> Void)? = nil,
+        onAudioPlaybackStarted: (@Sendable (TurboAudioPlaybackStartedPayload) async -> Void)? = nil,
         onPathLost: @escaping @Sendable (String) async -> Void
     ) async throws {
         let connection = withLockedState { outboundConnection ?? inboundConnection }
@@ -1632,6 +1656,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
             self.onReceiverPrewarmAck = onReceiverPrewarmAck
             self.onPathClosing = onPathClosing
             self.onWarmPong = onWarmPong
+            self.onAudioPlaybackStarted = onAudioPlaybackStarted
             self.onPathLost = onPathLost
             activeMediaConnection = connection
             activeReceiveBuffer.removeAll(keepingCapacity: false)
@@ -1666,6 +1691,11 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
     func sendReceiverPrewarmAck(_ payload: DirectQuicReceiverPrewarmPayload) async throws {
         let connection = try activeControlConnection()
         try await send(message: .receiverPrewarmAck(payload), on: connection)
+    }
+
+    func sendAudioPlaybackStarted(_ payload: TurboAudioPlaybackStartedPayload) async throws {
+        let connection = try activeControlConnection()
+        try await send(message: .audioPlaybackStarted(payload), on: connection)
     }
 
     func sendPathClosing(_ payload: DirectQuicPathClosingPayload) async throws {
@@ -1733,6 +1763,7 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
             onReceiverPrewarmAck = nil
             onPathClosing = nil
             onWarmPong = nil
+            onAudioPlaybackStarted = nil
             onPathLost = nil
             activeMediaConnection = nil
             activeReceiveBuffer.removeAll(keepingCapacity: false)
@@ -2508,6 +2539,24 @@ nonisolated final class DirectQuicProbeController: @unchecked Sendable {
                             let onWarmPong = self.withLockedState { self.onWarmPong }
                             Task {
                                 await onWarmPong?(decodedMessage.payload)
+                            }
+                        case .audioPlaybackStarted:
+                            do {
+                                guard let encodedPayload = decodedMessage.payload else {
+                                    throw TurboAudioPlaybackStartedPayloadError.invalidJSON("missing payload")
+                                }
+                                let payload = try TurboAudioPlaybackStartedPayloadCodec.decode(encodedPayload)
+                                let onAudioPlaybackStarted = self.withLockedState { self.onAudioPlaybackStarted }
+                                Task {
+                                    await onAudioPlaybackStarted?(payload)
+                                }
+                            } catch {
+                                Task {
+                                    await self.report(
+                                        "Direct QUIC audio playback ACK decode failed",
+                                        metadata: ["error": error.localizedDescription]
+                                    )
+                                }
                             }
                         }
                     }

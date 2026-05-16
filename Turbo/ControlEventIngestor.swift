@@ -330,7 +330,7 @@ struct ControlEventEnvelope: Equatable {
 
     private static func authority(for signalKind: TurboSignalKind) -> ControlEventAuthority {
         switch signalKind {
-        case .receiverReady, .receiverNotReady, .transmitStart, .transmitStop:
+        case .receiverReady, .receiverNotReady, .transmitStart, .transmitStop, .audioPlaybackStarted:
             return .peerHint
         case .audioChunk, .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest:
             return .transportHint
@@ -356,7 +356,7 @@ struct ControlEventEnvelope: Equatable {
                 remoteDeviceID: payload.fromDeviceId,
                 requestID: payload.requestId
             )
-        case .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest, .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .callContext:
+        case .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest, .transmitStart, .transmitStop, .audioChunk, .audioPlaybackStarted, .receiverReady, .receiverNotReady, .callContext:
             return nil
         }
     }

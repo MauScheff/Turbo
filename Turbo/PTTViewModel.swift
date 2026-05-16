@@ -199,6 +199,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var remoteAudioNonAuthoritativePlaybackDrainPollNanoseconds: UInt64 = 150_000_000
     var remoteTransmitStopProjectionGraceNanoseconds: UInt64 = 8_000_000_000
     var localTransmitStopProjectionGraceNanoseconds: UInt64 = 3_000_000_000
+    var firstAudioPlaybackAckTimeoutNanoseconds: UInt64 = 2_000_000_000
     var presenceHeartbeatHTTPFallbackIntervalSeconds: TimeInterval = 4
     var presenceHeartbeatWebSocketIntervalSeconds: TimeInterval = 1.5
     var foregroundAppManagedInteractiveAudioPrewarmEnabled = true
@@ -225,6 +226,9 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
     var selectedContactPrewarmedSelectionContactID: UUID?
     var selectedContactPrewarmPipelineEnabled: Bool = true
     var localTransmitStopProjectionGraceStartedAtNanosecondsByContactID: [UUID: UInt64] = [:]
+    var firstAudioPlaybackAckExpectationsByContactID: [UUID: FirstAudioPlaybackAckExpectation] = [:]
+    var firstAudioPlaybackAckTimeoutTasksByContactID: [UUID: Task<Void, Never>] = [:]
+    var firstAudioPlaybackAckSentKeys: Set<FirstAudioPlaybackAckSentKey> = []
     var pendingBeginTransmitAfterSettlingTask: Task<Void, Never>?
     private var diagnosticsAutoPublishTask: Task<Void, Never>?
     private var diagnosticsAutoPublishPendingTrigger: String?
@@ -748,6 +752,7 @@ final class PTTViewModel: NSObject, MediaSessionDelegate {
         transmitTaskCoordinator.send(.reset)
         transmitRuntime.reset()
         localTransmitStopProjectionGraceStartedAtNanosecondsByContactID.removeAll()
+        clearFirstAudioPlaybackAckExpectations()
         pendingBeginTransmitAfterSettlingTask?.cancel()
         pendingBeginTransmitAfterSettlingTask = nil
         foregroundDirectTransmitDelegationsByContactID.removeAll()

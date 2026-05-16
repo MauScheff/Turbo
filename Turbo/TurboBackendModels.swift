@@ -1395,6 +1395,7 @@ enum TurboSignalKind: String, Codable {
     case audioChunk = "audio-chunk"
     case receiverReady = "receiver-ready"
     case receiverNotReady = "receiver-not-ready"
+    case audioPlaybackStarted = "audio-playback-started"
     case directQuicUpgradeRequest = "direct-quic-upgrade-request"
     case selectedPeerPrewarm = "selected-peer-prewarm"
     case callContext = "call-context"
@@ -1403,7 +1404,8 @@ enum TurboSignalKind: String, Codable {
         switch self {
         case .offer, .answer, .iceCandidate, .hangup, .directQuicUpgradeRequest:
             return true
-        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .selectedPeerPrewarm, .callContext:
+        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady,
+             .audioPlaybackStarted, .selectedPeerPrewarm, .callContext:
             return false
         }
     }
@@ -1732,6 +1734,103 @@ nonisolated struct TurboSelectedPeerPrewarmPayload: Codable, Equatable {
     }
 }
 
+nonisolated struct TurboAudioPlaybackStartedPayload: Codable, Equatable, Sendable {
+    static let expectedProtocolVersion = "audio-playback-started-v1"
+
+    let protocolVersion: String
+    let ackId: String
+    let channelId: String
+    let senderDeviceId: String
+    let receiverDeviceId: String
+    let transport: String
+    let transportDigest: String
+    let encryptedSequenceNumber: UInt64?
+    let playbackStage: String
+    let acceptedAtMilliseconds: Int64
+
+    init(
+        protocolVersion: String = Self.expectedProtocolVersion,
+        ackId: String,
+        channelId: String,
+        senderDeviceId: String,
+        receiverDeviceId: String,
+        transport: String,
+        transportDigest: String,
+        encryptedSequenceNumber: UInt64?,
+        playbackStage: String = "scheduled",
+        acceptedAtMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)
+    ) {
+        self.protocolVersion = protocolVersion
+        self.ackId = ackId
+        self.channelId = channelId
+        self.senderDeviceId = senderDeviceId
+        self.receiverDeviceId = receiverDeviceId
+        self.transport = transport
+        self.transportDigest = transportDigest
+        self.encryptedSequenceNumber = encryptedSequenceNumber
+        self.playbackStage = playbackStage
+        self.acceptedAtMilliseconds = acceptedAtMilliseconds
+    }
+
+    var usesExpectedProtocolVersion: Bool {
+        protocolVersion == Self.expectedProtocolVersion
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion = "protocol"
+        case ackId
+        case channelId
+        case senderDeviceId
+        case receiverDeviceId
+        case transport
+        case transportDigest
+        case encryptedSequenceNumber
+        case playbackStage
+        case acceptedAtMilliseconds
+    }
+}
+
+enum TurboAudioPlaybackStartedPayloadError: Error, LocalizedError, Equatable {
+    case wrongSignalKind(expected: TurboSignalKind, actual: TurboSignalKind)
+    case unsupportedProtocolVersion(String)
+    case invalidJSON(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .wrongSignalKind(let expected, let actual):
+            return "Expected \(expected.rawValue) audio playback ACK but received \(actual.rawValue)"
+        case .unsupportedProtocolVersion(let version):
+            return "Unsupported audio playback ACK protocol version \(version)"
+        case .invalidJSON(let message):
+            return "Invalid audio playback ACK payload JSON: \(message)"
+        }
+    }
+}
+
+nonisolated enum TurboAudioPlaybackStartedPayloadCodec {
+    static func encode(_ payload: TurboAudioPlaybackStartedPayload) throws -> String {
+        let data = try JSONEncoder().encode(payload)
+        guard let encoded = String(data: data, encoding: .utf8) else {
+            throw TurboAudioPlaybackStartedPayloadError.invalidJSON("payload encoding failed")
+        }
+        return encoded
+    }
+
+    static func decode(_ payload: String) throws -> TurboAudioPlaybackStartedPayload {
+        let data = Data(payload.utf8)
+        let decodedPayload: TurboAudioPlaybackStartedPayload
+        do {
+            decodedPayload = try JSONDecoder().decode(TurboAudioPlaybackStartedPayload.self, from: data)
+        } catch {
+            throw TurboAudioPlaybackStartedPayloadError.invalidJSON(error.localizedDescription)
+        }
+        guard decodedPayload.usesExpectedProtocolVersion else {
+            throw TurboAudioPlaybackStartedPayloadError.unsupportedProtocolVersion(decodedPayload.protocolVersion)
+        }
+        return decodedPayload
+    }
+}
+
 enum TurboDirectQuicSignalPayload: Equatable {
     case offer(TurboDirectQuicOfferPayload)
     case answer(TurboDirectQuicAnswerPayload)
@@ -2019,7 +2118,8 @@ nonisolated struct TurboSignalEnvelope: Codable, Equatable {
             return .candidate(try decodeDirectQuicPayload(TurboDirectQuicCandidatePayload.self, expectedKind: .iceCandidate))
         case .hangup:
             return .hangup(try decodeDirectQuicPayload(TurboDirectQuicHangupPayload.self, expectedKind: .hangup))
-        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady, .directQuicUpgradeRequest, .selectedPeerPrewarm, .callContext:
+        case .transmitStart, .transmitStop, .audioChunk, .receiverReady, .receiverNotReady,
+             .audioPlaybackStarted, .directQuicUpgradeRequest, .selectedPeerPrewarm, .callContext:
             throw TurboDirectQuicPayloadError.notDirectQuicSignal(type)
         }
     }
@@ -2049,6 +2149,35 @@ nonisolated struct TurboSignalEnvelope: Codable, Equatable {
             throw TurboSelectedPeerPrewarmPayloadError.unsupportedProtocolVersion(decodedPayload.protocolVersion)
         }
         return decodedPayload
+    }
+
+    static func audioPlaybackStarted(
+        channelId: String,
+        fromUserId: String,
+        fromDeviceId: String,
+        toUserId: String,
+        toDeviceId: String,
+        payload: TurboAudioPlaybackStartedPayload
+    ) throws -> TurboSignalEnvelope {
+        TurboSignalEnvelope(
+            type: .audioPlaybackStarted,
+            channelId: channelId,
+            fromUserId: fromUserId,
+            fromDeviceId: fromDeviceId,
+            toUserId: toUserId,
+            toDeviceId: toDeviceId,
+            payload: try TurboAudioPlaybackStartedPayloadCodec.encode(payload)
+        )
+    }
+
+    func decodeAudioPlaybackStartedPayload() throws -> TurboAudioPlaybackStartedPayload {
+        guard type == .audioPlaybackStarted else {
+            throw TurboAudioPlaybackStartedPayloadError.wrongSignalKind(
+                expected: .audioPlaybackStarted,
+                actual: type
+            )
+        }
+        return try TurboAudioPlaybackStartedPayloadCodec.decode(payload)
     }
 
     private static func makeDirectQuicEnvelope<Payload: TurboDirectQuicSignalingPayload>(

@@ -283,6 +283,7 @@ extension PTTViewModel {
              .directQuicUpgradeRequest,
              .selectedPeerPrewarm,
              .callContext,
+             .audioPlaybackStarted,
              .audioChunk,
              .receiverReady,
              .receiverNotReady:

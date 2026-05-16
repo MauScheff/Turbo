@@ -181,6 +181,16 @@ extension PTTViewModel {
                         )
                     }
                 },
+                onAudioPlaybackStarted: { [weak self] payload in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.handleAudioPlaybackStartedAck(
+                            payload,
+                            contactID: contactID,
+                            source: .directQuicDataChannel
+                        )
+                    }
+                },
                 onPathLost: { [weak self] reason in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
