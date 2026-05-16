@@ -288,6 +288,47 @@ struct TurboTests {
         )
     }
 
+    @Test func callAudioEncryptionStatusCopyReflectsCurrentGuarantee() {
+        #expect(CallAudioEncryptionStatus.endToEndEncrypted.text == "End-to-end encrypted")
+        #expect(CallAudioEncryptionStatus.endToEndEncrypted.accessibilityLabel == "Audio is end-to-end encrypted")
+        #expect(CallAudioEncryptionStatus.unavailable.text == "End-to-end encryption unavailable")
+        #expect(CallAudioEncryptionStatus.unavailable.accessibilityLabel == "Audio is not end-to-end encrypted")
+    }
+
+    @MainActor
+    @Test func mediaEndToEndEncryptionActiveRequiresMatchingChannel() throws {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let localPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        let peerPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        let localRegistration = MediaEncryptionIdentityRegistrationMetadata(
+            publicKeyBase64: localPrivateKey.publicKey.rawRepresentation.base64EncodedString(),
+            fingerprint: MediaEncryptionIdentityManager.fingerprint(
+                forPublicKey: localPrivateKey.publicKey.rawRepresentation
+            )
+        )
+        let peerRegistration = MediaEncryptionIdentityRegistrationMetadata(
+            publicKeyBase64: peerPrivateKey.publicKey.rawRepresentation.base64EncodedString(),
+            fingerprint: MediaEncryptionIdentityManager.fingerprint(
+                forPublicKey: peerPrivateKey.publicKey.rawRepresentation
+            )
+        )
+        let session = MediaEncryptionSession(
+            channelID: "channel-1",
+            localDeviceID: "device-a",
+            peerDeviceID: "device-b",
+            localFingerprint: localRegistration.fingerprint,
+            peerFingerprint: peerRegistration.fingerprint,
+            localPrivateKey: localPrivateKey,
+            peerIdentity: peerRegistration
+        )
+        viewModel.mediaRuntime.setMediaEncryptionSession(session, for: contactID)
+
+        #expect(viewModel.mediaEndToEndEncryptionIsActive(contactID: contactID, channelID: "channel-1"))
+        #expect(!viewModel.mediaEndToEndEncryptionIsActive(contactID: contactID, channelID: "channel-2"))
+        #expect(viewModel.mediaEndToEndEncryptionIsActive(contactID: contactID, channelID: nil))
+    }
+
     @MainActor
     @Test func duplicateEncryptedAudioPacketIsDroppedWithoutReplayViolation() throws {
         let viewModel = PTTViewModel()
@@ -348,6 +389,62 @@ struct TurboTests {
         )
         #expect(viewModel.diagnosticsTranscript.contains("Ignored duplicate encrypted audio packet"))
         #expect(!viewModel.diagnosticsTranscript.contains("media.e2ee_replayed_audio_packet"))
+    }
+
+    @MainActor
+    @Test func duplicatePlaintextAudioAcrossStandbyTransportsIsDropped() async {
+        let viewModel = PTTViewModel()
+        let contactID = UUID()
+        let mediaSession = RecordingMediaSession()
+        viewModel.applicationStateOverride = .active
+        viewModel.contacts = [
+            Contact(
+                id: contactID,
+                name: "Blake",
+                handle: "@blake",
+                isOnline: true,
+                channelId: UUID(),
+                backendChannelId: "channel-1",
+                remoteUserId: "peer-user"
+            )
+        ]
+        viewModel.selectedContactId = contactID
+        viewModel.activeChannelId = contactID
+        viewModel.isJoined = true
+        viewModel.mediaRuntime.attach(session: mediaSession, contactID: contactID)
+        viewModel.mediaRuntime.updateConnectionState(.connected)
+
+        await viewModel.handleIncomingAudioPayload(
+            "pcm-audio",
+            channelID: "channel-1",
+            fromUserID: "peer-user",
+            fromDeviceID: "peer-device",
+            contactID: contactID,
+            incomingAudioTransport: .directQuic
+        )
+        await viewModel.handleIncomingAudioPayload(
+            "pcm-audio",
+            channelID: "channel-1",
+            fromUserID: "peer-user",
+            fromDeviceID: "peer-device",
+            contactID: contactID,
+            incomingAudioTransport: .mediaRelay
+        )
+        await viewModel.handleIncomingAudioPayload(
+            "pcm-audio",
+            channelID: "channel-1",
+            fromUserID: "peer-user",
+            fromDeviceID: "peer-device",
+            contactID: contactID,
+            incomingAudioTransport: .relayWebSocket
+        )
+
+        #expect(mediaSession.receivedRemoteAudioChunks == ["pcm-audio"])
+        #expect(
+            viewModel.diagnostics.entries.filter {
+                $0.message == "Ignored duplicate plaintext audio payload from standby transport"
+            }.count == 2
+        )
     }
 
     @Test func mediaEncryptionReceiveSequenceAcceptsBoundedOutOfOrderAuthenticatedPacket() {
@@ -1343,6 +1440,37 @@ struct TurboTests {
                 defaults: defaults,
                 allowStoredDebugOverride: false
             )
+        )
+        TurboDirectPathDebugOverride.setTransmitStartupPolicy(.appleGated, defaults: defaults)
+        #expect(
+            TurboDirectPathDebugOverride.transmitStartupPolicy(
+                arguments: [],
+                environment: [:],
+                defaults: defaults,
+                allowStoredDebugOverride: false
+            ) == .speculativeForeground
+        )
+        #expect(
+            TurboDirectPathDebugOverride.transmitStartupPolicy(
+                arguments: [
+                    TurboDirectPathDebugOverride.transmitStartupPolicyLaunchArgument,
+                    DirectQuicTransmitStartupPolicy.appleGated.rawValue,
+                ],
+                environment: [:],
+                defaults: defaults,
+                allowStoredDebugOverride: false
+            ) == .appleGated
+        )
+        #expect(
+            TurboDirectPathDebugOverride.transmitStartupPolicy(
+                arguments: [],
+                environment: [
+                    TurboDirectPathDebugOverride.transmitStartupPolicyEnvironmentKey:
+                        DirectQuicTransmitStartupPolicy.appleGated.rawValue,
+                ],
+                defaults: defaults,
+                allowStoredDebugOverride: false
+            ) == .appleGated
         )
     }
 

@@ -688,6 +688,10 @@ struct ContentView: View {
             mediaConnectionState: viewModel.mediaConnectionState,
             mediaSessionContactID: viewModel.mediaSessionContactID,
             transportPathState: viewModel.transportPathBadgeState,
+            audioEncryptionStatus: viewModel.mediaEndToEndEncryptionIsActive(
+                contactID: contact.id,
+                channelID: contact.backendChannelId
+            ) ? .endToEndEncrypted : .unavailable,
             localAudioLevel: viewModel.localAudioLevel,
             localTelemetry: viewModel.localCallTelemetry,
             peerTelemetry: viewModel.callPeerTelemetry(for: contact.id),

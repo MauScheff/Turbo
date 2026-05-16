@@ -673,6 +673,18 @@ struct PendingEncryptedAudioPayload: Equatable {
     let receivedAt: Date
 }
 
+private struct RecentIncomingPlaintextAudioPayloadKey: Hashable {
+    let contactID: UUID
+    let channelID: String
+    let fromDeviceID: String
+    let digest: String
+}
+
+private struct RecentIncomingPlaintextAudioPayload {
+    let transport: IncomingAudioPayloadTransport
+    let receivedAt: Date
+}
+
 struct FirstTalkDirectQuicGrace: Equatable {
     let channelID: String
     let startedAt: Date
@@ -793,6 +805,7 @@ final class MediaRuntimeState {
     private var mediaEncryptionReceiveSequenceByContactID: [UUID: UInt64] = [:]
     private var mediaEncryptionRecentReceiveSequencesByContactID: [UUID: Set<UInt64>] = [:]
     private var mediaEncryptionPlaintextFallbackLogKeys: Set<String> = []
+    private var recentIncomingPlaintextAudioPayloads: [RecentIncomingPlaintextAudioPayloadKey: RecentIncomingPlaintextAudioPayload] = [:]
     private var pendingEncryptedAudioPayloadsByContactID: [UUID: [PendingEncryptedAudioPayload]] = [:]
     private var encryptedAudioRecoveryTasksByContactID: [UUID: Task<Void, Never>] = [:]
 
@@ -925,6 +938,7 @@ final class MediaRuntimeState {
         firstTalkDirectQuicGraceEntries = []
         incomingRelayAudioDetailedReportsRemainingByContactID = [:]
         incomingRelayAudioSuppressionReportedContactIDs = []
+        recentIncomingPlaintextAudioPayloads = [:]
         sendAudioChunk = nil
         startupState = .idle
         pendingEncryptedAudioPayloadsByContactID = [:]
@@ -1279,6 +1293,7 @@ final class MediaRuntimeState {
         mediaEncryptionReceiveSequenceByContactID = [:]
         mediaEncryptionRecentReceiveSequencesByContactID = [:]
         mediaEncryptionPlaintextFallbackLogKeys = []
+        recentIncomingPlaintextAudioPayloads = [:]
         pendingEncryptedAudioPayloadsByContactID = [:]
         encryptedAudioRecoveryTasksByContactID.values.forEach { $0.cancel() }
         encryptedAudioRecoveryTasksByContactID = [:]
@@ -1345,6 +1360,45 @@ final class MediaRuntimeState {
             recent.remove(minimum)
         }
         mediaEncryptionRecentReceiveSequencesByContactID[contactID] = recent
+    }
+
+    struct PlaintextAudioDuplicateDecision: Equatable {
+        let shouldAccept: Bool
+        let previousTransport: IncomingAudioPayloadTransport?
+    }
+
+    func acceptIncomingPlaintextAudioPayload(
+        contactID: UUID,
+        channelID: String,
+        fromDeviceID: String,
+        transport: IncomingAudioPayloadTransport,
+        digest: String,
+        now: Date = Date(),
+        duplicateWindow: TimeInterval = 1.0
+    ) -> PlaintextAudioDuplicateDecision {
+        let cutoff = now.addingTimeInterval(-duplicateWindow)
+        recentIncomingPlaintextAudioPayloads = recentIncomingPlaintextAudioPayloads.filter {
+            $0.value.receivedAt >= cutoff
+        }
+        let key = RecentIncomingPlaintextAudioPayloadKey(
+            contactID: contactID,
+            channelID: channelID,
+            fromDeviceID: fromDeviceID,
+            digest: digest
+        )
+        if let existing = recentIncomingPlaintextAudioPayloads[key],
+           existing.transport != transport,
+           now.timeIntervalSince(existing.receivedAt) <= duplicateWindow {
+            return PlaintextAudioDuplicateDecision(
+                shouldAccept: false,
+                previousTransport: existing.transport
+            )
+        }
+        recentIncomingPlaintextAudioPayloads[key] = RecentIncomingPlaintextAudioPayload(
+            transport: transport,
+            receivedAt: now
+        )
+        return PlaintextAudioDuplicateDecision(shouldAccept: true, previousTransport: nil)
     }
 
     func enqueuePendingEncryptedAudioPayload(

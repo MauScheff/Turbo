@@ -205,7 +205,7 @@ struct TurboTransportPathInfoModal: View {
                 )
             }
 
-            Text("Your audio is end-to-end encrypted on both paths, so not even BeepBeep can listen. We use the fastest connection available automatically.")
+            Text("The call shows when end-to-end encryption is active. We use the fastest connection available automatically.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

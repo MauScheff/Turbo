@@ -1080,19 +1080,22 @@ enum TurboDirectPathDebugOverride {
 
     static func transmitStartupPolicy(
         processInfo: ProcessInfo = .processInfo,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        allowStoredDebugOverride: Bool = allowsStoredDebugOverridesByDefault
     ) -> DirectQuicTransmitStartupPolicy {
         transmitStartupPolicy(
             arguments: processInfo.arguments,
             environment: processInfo.environment,
-            defaults: defaults
+            defaults: defaults,
+            allowStoredDebugOverride: allowStoredDebugOverride
         )
     }
 
     static func transmitStartupPolicy(
         arguments: [String],
         environment: [String: String],
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        allowStoredDebugOverride: Bool = allowsStoredDebugOverridesByDefault
     ) -> DirectQuicTransmitStartupPolicy {
         if let launchArgumentValue = launchArgumentValue(transmitStartupPolicyLaunchArgument, in: arguments),
            let parsed = DirectQuicTransmitStartupPolicy(rawValue: launchArgumentValue) {
@@ -1101,6 +1104,9 @@ enum TurboDirectPathDebugOverride {
         if let environmentValue = environment[transmitStartupPolicyEnvironmentKey],
            let parsed = DirectQuicTransmitStartupPolicy(rawValue: environmentValue) {
             return parsed
+        }
+        guard allowStoredDebugOverride else {
+            return .speculativeForeground
         }
         if let stored = defaults.string(forKey: transmitStartupPolicyStorageKey),
            let parsed = DirectQuicTransmitStartupPolicy(rawValue: stored) {

@@ -289,6 +289,19 @@ extension PTTViewModel {
         channelReadinessByContactID[contactID]?.peerMediaEncryptionRegistration != nil
     }
 
+    func mediaEndToEndEncryptionIsActive(
+        contactID: UUID,
+        channelID: String?
+    ) -> Bool {
+        guard let session = mediaRuntime.mediaEncryptionSession(for: contactID) else {
+            return false
+        }
+        guard let channelID else {
+            return true
+        }
+        return session.channelID == channelID
+    }
+
     func localReceiverMediaEncryptionReadyForLiveMedia(
         contactID: UUID,
         channelID: String?,

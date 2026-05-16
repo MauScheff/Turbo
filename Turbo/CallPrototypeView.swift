@@ -74,6 +74,38 @@ private enum TurboCallCloudAnimationMode: String, CaseIterable {
     }
 }
 
+nonisolated enum CallAudioEncryptionStatus: Equatable {
+    case endToEndEncrypted
+    case unavailable
+
+    var symbolName: String {
+        switch self {
+        case .endToEndEncrypted:
+            return "lock.fill"
+        case .unavailable:
+            return "lock.open.fill"
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .endToEndEncrypted:
+            return "End-to-end encrypted"
+        case .unavailable:
+            return "End-to-end encryption unavailable"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .endToEndEncrypted:
+            return "Audio is end-to-end encrypted"
+        case .unavailable:
+            return "Audio is not end-to-end encrypted"
+        }
+    }
+}
+
 private struct TurboCallCloudMotion: Equatable {
     enum Phase: String {
         case connecting
@@ -279,6 +311,7 @@ struct TurboCallPrototypeView: View {
     let mediaConnectionState: MediaConnectionState
     let mediaSessionContactID: UUID?
     let transportPathState: MediaTransportPathState?
+    let audioEncryptionStatus: CallAudioEncryptionStatus
     let localAudioLevel: Double
     let localTelemetry: CallPeerTelemetry?
     let peerTelemetry: CallPeerTelemetry?
@@ -660,11 +693,11 @@ struct TurboCallPrototypeView: View {
             }
 
             callContextRow(
-                symbolName: "lock.fill",
-                text: "Audio is end-to-end encrypted",
+                symbolName: audioEncryptionStatus.symbolName,
+                text: audioEncryptionStatus.text,
                 iconFontSize: 10,
                 iconWeight: .semibold,
-                accessibilityLabel: "Audio is end-to-end encrypted"
+                accessibilityLabel: audioEncryptionStatus.accessibilityLabel
             )
         }
     }
@@ -2182,6 +2215,7 @@ private struct HatTilingBackground: View {
         mediaConnectionState: .connected,
         mediaSessionContactID: nil,
         transportPathState: .direct,
+        audioEncryptionStatus: .endToEndEncrypted,
         localAudioLevel: 0,
         localTelemetry: CallPeerTelemetry(
             audio: .init(routeName: "Speaker", volumePercent: 45),

@@ -421,6 +421,31 @@ extension PTTViewModel {
             )
             return
         }
+        if !MediaEncryptedAudioPacket.isEncodedPacket(payload) {
+            let digest = AudioChunkPayloadCodec.transportDigest(audioPayload)
+            let duplicateDecision = mediaRuntime.acceptIncomingPlaintextAudioPayload(
+                contactID: contactID,
+                channelID: channelID,
+                fromDeviceID: fromDeviceID,
+                transport: incomingAudioTransport,
+                digest: digest
+            )
+            guard duplicateDecision.shouldAccept else {
+                diagnostics.record(
+                    .media,
+                    message: "Ignored duplicate plaintext audio payload from standby transport",
+                    metadata: [
+                        "contactId": contactID.uuidString,
+                        "channelId": channelID,
+                        "fromDeviceId": fromDeviceID,
+                        "transport": String(describing: incomingAudioTransport),
+                        "previousTransport": duplicateDecision.previousTransport.map(String.init(describing:)) ?? "unknown",
+                        "transportDigest": digest,
+                    ]
+                )
+                return
+            }
+        }
         let alreadyHasPendingWake = pttWakeRuntime.hasPendingWake(for: contactID)
         let shouldArmDeferredBackgroundAudioWakeCandidate =
             !alreadyHasPendingWake
